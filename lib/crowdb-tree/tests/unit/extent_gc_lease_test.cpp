@@ -17,7 +17,7 @@ ExtentLedgerResult claim(LedgerFixture &test, uint64_t address, uint64_t length)
 
 TEST(ExtentGcLease, RequiresActivatedFreeRangeAndNeverBorrowsDataOwners)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 32768, .address_limit = 32768});
+    LedgerFixture test({.page_store_id = 1, .file_size = 32768, .address_limit = 32768});
     auto          live = test.recover(16384, 4096);
     ASSERT_TRUE(live.status.ok());
     EXPECT_EQ(claim(test, 8192, 4096).status.code(), Code::kUnavailable);
@@ -47,7 +47,7 @@ TEST(ExtentGcLease, RequiresActivatedFreeRangeAndNeverBorrowsDataOwners)
 
 TEST(ExtentGcLease, OldReaderPreventsDeletionUntilItsFinalOwnerReleases)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 16384, .address_limit = 16384});
+    LedgerFixture test({.page_store_id = 1, .file_size = 16384, .address_limit = 16384});
     auto          anchor = test.recover(8192, 8192);
     ASSERT_TRUE(anchor.status.ok());
     auto reader = anchor.extent.owner;
@@ -67,7 +67,7 @@ TEST(ExtentGcLease, OldReaderPreventsDeletionUntilItsFinalOwnerReleases)
 
 TEST(ExtentGcLease, ExhaustedMetadataLeavesFreeIndexAndFrontierUnchanged)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 32768, .address_limit = 32768});
+    LedgerFixture test({.page_store_id = 1, .file_size = 32768, .address_limit = 32768});
     ASSERT_TRUE(test.activate().status.ok());
     test.credits.seal();
     auto denied = claim(test, 12288, 8192);

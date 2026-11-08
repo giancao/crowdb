@@ -16,7 +16,7 @@ void CheckpointOperation::State::begin_structure(uint64_t pid)
     const auto current = publisher.capture();
     if (current->l1_seq != view->l1_seq || current->generation != view->generation ||
         current->coverage != view->coverage || current->pending_handoff || current->flush_admission_owner != 0 ||
-        current->checkpoint_inflight || backend_needs_recovery()) {
+        current->checkpoint_inflight || page_store_needs_recovery()) {
         finish(Status::unavailable("checkpoint split input changed"));
         return;
     }

@@ -68,14 +68,14 @@ class PublicationReconcile : public ::testing::Test
             leaf->content_id       = pid;
             leaf->route_generation = 1;
             leaf->right_sibling    = pid == 1 ? 2 : UINT64_MAX;
-            auto page              = std::make_shared<PublishedPage>();
+            auto page              = std::make_shared<PageEntry>();
             page->leaf             = leaf;
             transaction.pages.push_back({.page_id = pid, .expected = {}, .replacement = page});
         }
         auto inner           = std::make_shared<InnerPageState>();
         inner->children      = {1, 2};
         inner->separators    = {OwnedKey("m")};
-        auto parent          = std::make_shared<PublishedPage>();
+        auto parent          = std::make_shared<PageEntry>();
         parent->level        = 1;
         parent->inner        = inner;
         parent->metrics.leaf = false;
@@ -97,7 +97,7 @@ TEST_F(PublicationReconcile, PendingMembershipTracksCaptureLaterChangesCommitAnd
     const auto before = publisher.capture()->mapping.get(1);
     auto       leaf   = std::make_shared<PageState>(*before->leaf);
     ++leaf->content_id;
-    auto after  = std::make_shared<PublishedPage>(*before);
+    auto after  = std::make_shared<PageEntry>(*before);
     after->leaf = leaf;
     ASSERT_TRUE(publish({.pages = {{.page_id = 1, .expected = before, .replacement = after}}}).status.ok());
     reconcile();
@@ -153,7 +153,7 @@ TEST_F(PublicationReconcile, ConcurrentPublicationRejectsTheOldAuditWithoutMutat
     const auto old   = publisher.capture();
     auto       audit = std::make_shared<TreeStateReconciliation>(old);
     ASSERT_TRUE(advance(audit).ok());
-    auto page = std::make_shared<PublishedPage>(*old->mapping.get(1));
+    auto page = std::make_shared<PageEntry>(*old->mapping.get(1));
     auto leaf = std::make_shared<PageState>(*page->leaf);
     ++leaf->content_id;
     page->leaf = leaf;

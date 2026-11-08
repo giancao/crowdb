@@ -170,10 +170,10 @@ TEST(TreeWorkCounters, PhysicalDeletionCountsTheObservedMirrorCapacityOnlyOnce)
     ++wrong.created_ms;
     EXPECT_EQ(registry->deleted(Host::stage, Host::chunk, wrong, credit).code(), Code::kCorruption);
     auto work = test.binding->work_metrics();
-    EXPECT_EQ(quantity(work, TreeWorkCounter::BackingDeletedBytes, TreeWorkCause::GarbageCollection), 0U);
+    EXPECT_EQ(quantity(work, TreeWorkCounter::PageBlockDeletedBytes, TreeWorkCause::GarbageCollection), 0U);
     ASSERT_TRUE(registry->deleted(Host::stage, Host::chunk, Host::receipt, credit).ok());
     ASSERT_TRUE(registry->deleted(Host::stage, Host::chunk, Host::receipt, credit).ok());
-    EXPECT_EQ(quantity(work, TreeWorkCounter::BackingDeletedBytes, TreeWorkCause::GarbageCollection),
+    EXPECT_EQ(quantity(work, TreeWorkCounter::PageBlockDeletedBytes, TreeWorkCause::GarbageCollection),
               Host::receipt.physical_bytes);
 }
 

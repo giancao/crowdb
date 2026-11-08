@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/range_rebuild.h"
 #include "crowdb-tree/btree/scan_packed.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "snapshot/published_snapshot_entries.h"
 
 #include <gtest/gtest.h>
@@ -14,7 +14,7 @@ namespace
 {
 struct TestSnapshotDomain
 {
-    std::shared_ptr<MemPageStore> store = std::make_shared<MemPageStore>(1);
+    std::shared_ptr<PageMemStore> store = std::make_shared<PageMemStore>(1);
     Config                        config;
     std::unique_ptr<Crowdbtree>   tree;
 
@@ -24,9 +24,9 @@ struct TestSnapshotDomain
         if (!status.ok()) {
             return status;
         }
-        config.page_store    = store.get();
-        config.backend_owner = store;
-        status               = Crowdbtree::open(config, &tree);
+        config.page_store       = store.get();
+        config.page_store_owner = store;
+        status                  = Crowdbtree::open(config, &tree);
         if (!status.ok()) {
             return status;
         }
@@ -94,7 +94,7 @@ TEST(PublishedSnapshotDomain, UnboundedRebuildCannotWidenABoundedRecoveredSource
     TestSnapshotDomain test;
     auto               status = test.open();
     ASSERT_TRUE(status.ok()) << status.to_string();
-    MemPageStore target(1);
+    PageMemStore target(1);
     Config       config;
     config.page_store = &target;
     std::unique_ptr<Crowdbtree> destination;

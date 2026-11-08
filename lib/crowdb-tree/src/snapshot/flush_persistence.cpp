@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/flush_persistence.h"
 
-#include "backend/checkpoint_backend.h"
 #include "btree/allocation_bound.h"
-#include "snapshot/primary_backing.h"
+#include "page_store/checkpoint_page_store.h"
+#include "snapshot/primary_page_block.h"
 
 #include <algorithm>
 

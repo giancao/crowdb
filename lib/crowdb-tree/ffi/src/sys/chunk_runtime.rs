@@ -15,7 +15,7 @@ pub struct ct_chunk_runtime_options {
 }
 
 extern "C" {
-    pub fn ct_chunk_runtime_page_store_open(
+    pub fn ct_page_chunk_store_open(
         runtime: *mut ct_runtime,
         options: *const ct_chunk_runtime_options,
         catalog: *mut ct_root_catalog,

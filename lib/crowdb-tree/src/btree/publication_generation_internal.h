@@ -3,7 +3,7 @@
 #pragma once
 
 #include "page_cache_residency.h"
-#include "published_state.h"
+#include "tree_root.h"
 
 namespace crowdb::tree
 {
@@ -38,7 +38,7 @@ class PublicationCoordinator::Replacement
 
   private:
     friend class PublicationCoordinator;
-    std::shared_ptr<PublishedTreeState>         state;
+    std::shared_ptr<TreeRoot>                   state;
     std::shared_ptr<CheckpointLedger>           checkpoint;
     std::shared_ptr<PageCacheResidency::Update> residency;
     Root                                       *root = nullptr;

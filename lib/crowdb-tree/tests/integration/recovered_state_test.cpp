@@ -33,12 +33,12 @@ TEST(RecoveredState, BuildsColdMappingAndExactLeafMetricsThroughBoundedSteps)
     EXPECT_EQ(result.state->stats.dirty_pages, 0U);
     EXPECT_EQ(result.state->mapping.get(0)->level, 1U);
     EXPECT_FALSE(result.state->mapping.get(0)->inner);
-    EXPECT_TRUE(result.state->mapping.get(0)->inner_backing);
+    EXPECT_TRUE(result.state->mapping.get(0)->inner_page_block);
     for (uint64_t pid : {1, 2}) {
         const auto &base = result.state->mapping.get(pid)->leaf->bases.front();
         EXPECT_FALSE(base.resident);
         EXPECT_EQ(base.max_slot, 10U);
-        EXPECT_EQ(base.backing, test.pages->frames.at(pid).backing);
+        EXPECT_EQ(base.page_block, test.pages->frames.at(pid).page_block);
     }
     std::shared_ptr<PublishedGet> request;
     ASSERT_TRUE(PublishedGet::create(result.state, test.loader, "z", {}, &request).ok());
@@ -152,34 +152,6 @@ TEST(RecoveredState, RejectsMissingStoredDependencyProofAndEnforcesBounds)
         EXPECT_EQ(done.errors.load(), 1U);
         EXPECT_EQ(done.status.code(), scenario == 0 ? Code::kCorruption : Code::kResourceExhausted);
     }
-}
-
-TEST(RecoveredState, PreservesStoredOverflowHistoryHiddenByAnInlineDelta)
-{
-    TestRecoveredGraph   test;
-    std::vector<uint8_t> raw(4096);
-    LeafFrameBuilder     builder(raw.data(), raw.size());
-    const auto           overflow = encode_overflow_cell_buf(2, 1, 3);
-    ASSERT_TRUE(builder.try_append_sorted("a", Slice(overflow)));
-    builder.finish(0, kInvalidPageId);
-    std::vector<leaf_entry> delta;
-    delta.push_back({.key = "a", .cell = encode_cell_buf(3, OpKind::kPut, "new")});
-    std::vector<uint8_t> appended(raw.size());
-    ASSERT_TRUE(leaf_frame_append_deltas(raw.data(), raw.size(), delta, appended.data()));
-    test.add(0, appended);
-    overflow_frame_build(raw.data(), raw.size(), 1, kInvalidPageId, Slice("old").bytes(), 3);
-    test.add(1, raw);
-    ASSERT_TRUE(test.prepare().ok());
-    Completion done;
-    test.run(&done);
-    ASSERT_EQ(done.values.load(), 1U) << done.status.to_string();
-    EXPECT_EQ(test.operation->result().state->stats.kv_known_count, 1U);
-    EXPECT_EQ(test.operation->result().state->stats.kv_known_bytes, 4U);
-    EXPECT_FALSE(test.operation->result().state->mapping.get(1));
-    std::shared_ptr<PublishedGet> request;
-    ASSERT_TRUE(PublishedGet::create(test.operation->result().state, test.loader, "a", {}, &request).ok());
-    test.complete(request->sender());
-    EXPECT_EQ(request->result().cell.value, Slice("new"));
 }
 
 TEST(RecoveredState, RejectsDuplicateAndEscapingSeparators)

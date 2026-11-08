@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -53,9 +53,9 @@ std::shared_ptr<InstallRecord> pending_record(uint64_t sequence)
     return std::make_shared<InstallRecord>(InstallToken{.generation = 1, .batch = 1, .range = 0, .sequence = sequence});
 }
 
-std::shared_ptr<PublishedPage> pending_leaf()
+std::shared_ptr<PageEntry> pending_leaf()
 {
-    auto page  = std::make_shared<PublishedPage>();
+    auto page  = std::make_shared<PageEntry>();
     page->leaf = std::make_shared<PageState>();
     return page;
 }

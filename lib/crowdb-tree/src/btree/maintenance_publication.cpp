@@ -193,9 +193,8 @@ Status merge(MaintenanceBuilder &builder, uint64_t left_pid, uint64_t right_pid,
 }
 } // namespace
 
-MaintenancePublicationResult build_coalesce_publication(std::shared_ptr<const PublishedTreeState> view,
-                                                        uint64_t leaf_pid, std::shared_ptr<InstallRecord> record,
-                                                        uint64_t                             first_run_id,
+MaintenancePublicationResult build_coalesce_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
+                                                        std::shared_ptr<InstallRecord> record, uint64_t first_run_id,
                                                         const MaintenancePublicationOptions &options)
 {
     return prepare(options, [&](auto *result) {
@@ -205,7 +204,7 @@ MaintenancePublicationResult build_coalesce_publication(std::shared_ptr<const Pu
     });
 }
 
-MaintenancePublicationResult build_split_publication(std::shared_ptr<const PublishedTreeState> view, uint64_t leaf_pid,
+MaintenancePublicationResult build_split_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
                                                      std::shared_ptr<InstallRecord>       record,
                                                      const MaintenancePublicationOptions &options)
 {
@@ -216,7 +215,7 @@ MaintenancePublicationResult build_split_publication(std::shared_ptr<const Publi
     });
 }
 
-MaintenancePublicationResult build_merge_publication(std::shared_ptr<const PublishedTreeState> view, uint64_t left_pid,
+MaintenancePublicationResult build_merge_publication(std::shared_ptr<const TreeRoot> view, uint64_t left_pid,
                                                      uint64_t right_pid, std::shared_ptr<InstallRecord> record,
                                                      uint64_t                             first_run_id,
                                                      const MaintenancePublicationOptions &options)
@@ -228,8 +227,8 @@ MaintenancePublicationResult build_merge_publication(std::shared_ptr<const Publi
     });
 }
 
-MaintenancePublicationResult build_inner_merge_publication(std::shared_ptr<const PublishedTreeState> view,
-                                                           uint64_t leaf_pid, std::shared_ptr<InstallRecord> record,
+MaintenancePublicationResult build_inner_merge_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
+                                                           std::shared_ptr<InstallRecord>       record,
                                                            const MaintenancePublicationOptions &options)
 {
     return prepare(options, [&](auto *result) {

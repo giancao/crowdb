@@ -45,14 +45,15 @@ Status prepare_readable_graph(TreeCore &core, const std::shared_ptr<const Readab
     for (const auto &[pid, frame] : catalog->frames) {
         (void)pid;
         max_frame_bytes = std::max<size_t>(max_frame_bytes, frame.frame_bytes);
-        all_resident    = all_resident && frame.backing && frame.backing->storage == BackingStorage::kResidentFrame;
+        all_resident =
+            all_resident && frame.page_block && frame.page_block->storage == PageBlockStorage::kResidentFrame;
     }
     auto loads  = all_resident ? resident_import_load_limits(
                                      core.load_limits(), std::max<size_t>(max_frame_bytes, core.config().frame_bytes))
                                : core.load_limits();
     auto loader = detail::reserved_shared<AsyncStorePageLoader>(
-        credit, ticket->backend(core.async_backend()), core.binding()->cpu(), core.binding()->lane(), loads,
-        OverflowBackingResolver{}, PageLoadBudget{.bytes = credit, .io = io.credit});
+        credit, ticket->page_store(core.async_page_store()), core.binding()->cpu(), core.binding()->lane(), loads,
+        OverflowPageBlockResolver{}, PageLoadBudget{.bytes = credit, .io = io.credit});
     return RecoveredStateOperation::create_readable(catalog, std::move(loader), core.binding()->cpu(),
                                                     core.binding()->lane(), {}, credit, operation);
 }
@@ -111,7 +112,7 @@ struct ReadableInstall : std::enable_shared_from_this<ReadableInstall>
 
     void install() noexcept
     try {
-        std::shared_ptr<const PublishedTreeState> candidate;
+        std::shared_ptr<const TreeRoot> candidate;
         if (graph_status.ok()) {
             candidate = validation->result().state;
         }
@@ -203,8 +204,8 @@ catch (const std::bad_alloc &) {
 Status TreeCore::install_readable(std::shared_ptr<const ReadablePageCatalog>            catalog,
                                   const std::shared_ptr<detail::AllocationReservation> &credit)
 {
-    std::shared_ptr<const PublishedTreeState> candidate;
-    auto                                      status = prepare_readable(std::move(catalog), credit, &candidate);
+    std::shared_ptr<const TreeRoot> candidate;
+    auto                            status = prepare_readable(std::move(catalog), credit, &candidate);
     return status.ok() ? install_generation(std::move(candidate)) : status;
 }
 
@@ -243,13 +244,13 @@ catch (const std::bad_alloc &) {
 
 Status TreeCore::prepare_readable(std::shared_ptr<const ReadablePageCatalog>            catalog,
                                   const std::shared_ptr<detail::AllocationReservation> &credit,
-                                  std::shared_ptr<const PublishedTreeState>            *out)
+                                  std::shared_ptr<const TreeRoot>                      *out)
 try {
     SealImport seal{credit};
     if (!catalog || !credit || credit->account() != binding()->account() || out == nullptr || *out) {
         return Status::invalid_argument();
     }
-    std::shared_ptr<const PublishedTreeState> candidate;
+    std::shared_ptr<const TreeRoot> candidate;
     {
         State::Ingress ingress(*state_);
         if (ingress.owner == nullptr) {

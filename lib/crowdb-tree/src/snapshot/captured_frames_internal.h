@@ -10,12 +10,12 @@ struct CapturedFrameStream::State : std::enable_shared_from_this<State>
 {
     struct Path
     {
-        uint64_t                             pid;
-        std::shared_ptr<const PublishedPage> page;
-        PageKeyRange                         range;
-        size_t                               child = 0;
-        InnerEncodeFences                    fences;
-        bool                                 validated = false;
+        uint64_t                         pid;
+        std::shared_ptr<const PageEntry> page;
+        PageKeyRange                     range;
+        size_t                           child = 0;
+        InnerEncodeFences                fences;
+        bool                             validated = false;
     };
 
     struct Load
@@ -29,7 +29,7 @@ struct CapturedFrameStream::State : std::enable_shared_from_this<State>
         std::shared_ptr<const InnerPageState> inner;
     };
 
-    State(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> transport,
+    State(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> transport,
           std::shared_ptr<detail::FlushRuntime> cpu, std::shared_ptr<detail::FlushRuntime::Lane> queue,
           CapturedFrameLimits bounds, ReserveOverflow reserve);
     void        start(detail::CallbackComplete callback, void *receiver) noexcept;
@@ -51,7 +51,7 @@ struct CapturedFrameStream::State : std::enable_shared_from_this<State>
     void        loaded();
     void        finish(Status status, bool fatal = false) noexcept;
 
-    std::shared_ptr<const PublishedTreeState>   view;
+    std::shared_ptr<const TreeRoot>             view;
     std::optional<PageEncodeInput>              single_page;
     std::shared_ptr<PageLoader>                 loader;
     std::shared_ptr<detail::FlushRuntime>       runtime;

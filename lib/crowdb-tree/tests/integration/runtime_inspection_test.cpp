@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
-#include "crowdb-tree/backend/page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "local_checkpoint_test_support.h"
 
 #include <gtest/gtest.h>
@@ -15,7 +15,7 @@ namespace
 struct TestInspection
 {
     Config                        config;
-    std::shared_ptr<MemPageStore> store = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore> store = std::make_shared<PageMemStore>(4096);
     std::unique_ptr<Crowdbtree>   tree;
     uint64_t                      runtime_bytes = 0;
 
@@ -24,7 +24,7 @@ struct TestInspection
         EXPECT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
         runtime_bytes                               = config.runtime->snapshot().allocated.routing_bytes;
         config.page_store                           = store.get();
-        config.backend_owner                        = store;
+        config.page_store_owner                     = store;
         config.frame_bytes                          = 4096;
         config.leaf_split_bytes                     = 3000;
         config.runtime_binding.limits.io_operations = 1;
@@ -104,7 +104,7 @@ TEST(RuntimeInspection, ColdReadLetsTheOnlyBackendWorkerRunAndKeepsItsOriginalRe
     auto backend                 = std::make_shared<test_write::TestCheckpointStore>();
     backend->device              = test.store;
     test.config.async_page_store = backend.get();
-    test.config.backend_owner    = backend;
+    test.config.page_store_owner = backend;
     ASSERT_TRUE(Crowdbtree::open(test.config, &test.tree).ok());
     auto *core = TreeCoreAccess::get(*test.tree);
 

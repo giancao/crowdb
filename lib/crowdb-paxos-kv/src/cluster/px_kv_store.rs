@@ -47,7 +47,7 @@ pub struct PxKvStore {
     /// Defaults to `ServerConfig::DEFAULT.scan_byte_budget`; overridden via
     /// `set_scan_byte_budget` from the loaded `PaxosKvConfig` before `start()`.
     pub(crate) scan_byte_budget: usize,
-    /// Number of crowdb-rpc I/O worker threads for the server's `RpcServer`.
+    /// Number of crowdb-rpc socket I/O workers for each listener.
     /// Set from `--rpc-workers` CLI before `start()`. Default: 2.
     pub rpc_workers: u32,
     /// Number of crowdb-rpc connections per peer endpoint for inter-server

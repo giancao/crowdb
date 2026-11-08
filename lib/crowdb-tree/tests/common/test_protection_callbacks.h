@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #pragma once
-#include "backend/chunk/chunk_root_catalog.h"
+#include "page_store/chunk/chunk_root_catalog.h"
 
 namespace crowdb::tree::detail::test_protection
 {

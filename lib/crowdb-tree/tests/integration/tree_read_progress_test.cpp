@@ -101,9 +101,9 @@ TEST(TreeReadProgress, AdmittedAsyncReadsWaitForBusyCpu)
     host.workers = 1;
     ASSERT_TRUE(TreeRuntime::create(host, &config.runtime).ok());
     config.runtime_binding.cpu_queue_limit = 8;
-    auto store                             = std::make_shared<MemPageStore>(4096);
+    auto store                             = std::make_shared<PageMemStore>(4096);
     config.page_store                      = store.get();
-    config.backend_owner                   = store;
+    config.page_store_owner                = store;
     config.frame_bytes                     = 4096;
     config.leaf_split_bytes                = 3000;
     std::shared_ptr<TreeCore> core;
@@ -144,7 +144,7 @@ TEST(TreeReadProgress, AdmittedAsyncReadsWaitForBusyCpu)
 TEST(TreeReadProgress, ColdDecodeContinuesWithReadyQueueBacklog)
 {
     auto store          = std::make_shared<TestProgressReadStore>();
-    store->store.device = std::make_shared<MemPageStore>(4096);
+    store->store.device = std::make_shared<PageMemStore>(4096);
     Config             config;
     TreeRuntimeOptions host;
     host.workers = 1;
@@ -152,7 +152,7 @@ TEST(TreeReadProgress, ColdDecodeContinuesWithReadyQueueBacklog)
     config.runtime_binding.cpu_queue_limit = 8;
     config.page_store                      = store->store.device.get();
     config.async_page_store                = store.get();
-    config.backend_owner                   = store;
+    config.page_store_owner                = store;
     config.frame_bytes                     = 4096;
     config.leaf_split_bytes                = 3000;
     std::shared_ptr<TreeCore> core;
@@ -187,9 +187,9 @@ TEST(TreeReadProgress, DetachedScanContinuesWithReadyQueueBacklog)
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .cpu_queue_limit = 8}, &config.runtime).ok());
     config.runtime_binding.cpu_queue_limit = 8;
-    auto store                             = std::make_shared<MemPageStore>(4096);
+    auto store                             = std::make_shared<PageMemStore>(4096);
     config.page_store                      = store.get();
-    config.backend_owner                   = store;
+    config.page_store_owner                = store;
     config.frame_bytes                     = 4096;
     config.leaf_split_bytes                = 3000;
     std::shared_ptr<TreeCore> core;

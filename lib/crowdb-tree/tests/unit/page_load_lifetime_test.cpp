@@ -84,15 +84,15 @@ class UncertainReadStore final : public AsyncPageStore
 
 struct Reads
 {
-    LoadCredits                                           credits;
-    std::shared_ptr<TreeWorkMetrics>                      metrics = std::make_shared<TreeWorkMetrics>();
-    std::shared_ptr<detail::FlushRuntime>                 runtime = std::make_shared<detail::FlushRuntime>(1, 8);
-    std::shared_ptr<detail::FlushRuntime::Lane>           lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
-    std::shared_ptr<UncertainReadStore>                   store   = std::make_shared<UncertainReadStore>();
-    std::map<uint64_t, std::shared_ptr<const BackingRef>> backings;
-    std::shared_ptr<AsyncStorePageLoader>                 loader;
-    size_t                                                calls = 0;
-    Code                                                  last  = Code::kOk;
+    LoadCredits                                             credits;
+    std::shared_ptr<TreeWorkMetrics>                        metrics = std::make_shared<TreeWorkMetrics>();
+    std::shared_ptr<detail::FlushRuntime>                   runtime = std::make_shared<detail::FlushRuntime>(1, 8);
+    std::shared_ptr<detail::FlushRuntime::Lane>             lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
+    std::shared_ptr<UncertainReadStore>                     store   = std::make_shared<UncertainReadStore>();
+    std::map<uint64_t, std::shared_ptr<const PageBlockRef>> page_blocks;
+    std::shared_ptr<AsyncStorePageLoader>                   loader;
+    size_t                                                  calls = 0;
+    Code                                                    last  = Code::kOk;
 
     explicit Reads(Kind kind, bool chain = false)
     {
@@ -118,7 +118,7 @@ struct Reads
         }
         loader = std::make_shared<AsyncStorePageLoader>(
             store, runtime, lane, PageLoadLimits{},
-            [captured = backings](uint64_t id, std::shared_ptr<const BackingRef> *out) {
+            [captured = page_blocks](uint64_t id, std::shared_ptr<const PageBlockRef> *out) {
                 *out = captured.at(id);
                 return Status::Ok();
             },
@@ -132,11 +132,11 @@ struct Reads
         frame_restamp_crc(raw.data(), raw.size());
         auto &blob = store->blobs[id];
         encode_durable_page(raw.data(), raw.size(), compress_algo::kNone, &blob);
-        auto backing     = std::make_shared<BackingRef>();
-        backing->address = id;
-        backing->length  = blob.size();
-        backing->owner   = std::make_shared<int>(1);
-        backings[id]     = std::move(backing);
+        auto page_block     = std::make_shared<PageBlockRef>();
+        page_block->address = id;
+        page_block->length  = blob.size();
+        page_block->owner   = std::make_shared<int>(1);
+        page_blocks[id]     = std::move(page_block);
     }
 
     void start(Kind kind, uint64_t length = 1)
@@ -147,10 +147,10 @@ struct Reads
             EXPECT_EQ(status.ok(), static_cast<bool>(result));
         };
         if (kind == Kind::kLeaf) {
-            loader->load_leaf({.identity = 11, .backing = backings.at(11)}, complete);
+            loader->load_leaf({.identity = 11, .page_block = page_blocks.at(11)}, complete);
         }
         else if (kind == Kind::kInner) {
-            loader->load_inner(backings.at(11), complete);
+            loader->load_inner(page_blocks.at(11), complete);
         }
         else {
             loader->load_overflow(11, length, complete);
@@ -211,8 +211,8 @@ TEST(PageLoadLifetime, TreeShutdownWaitsForUnknownTransportOwnershipAfterLogical
         std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
         ASSERT_TRUE(lifetime.acquire(test.credits.credits.reservation(), &ticket).ok());
         test.loader =
-            std::make_shared<AsyncStorePageLoader>(ticket->backend(test.store.get()), test.runtime, test.lane,
-                                                   PageLoadLimits{}, OverflowBackingResolver{}, test.credits.credits);
+            std::make_shared<AsyncStorePageLoader>(ticket->page_store(test.store.get()), test.runtime, test.lane,
+                                                   PageLoadLimits{}, OverflowPageBlockResolver{}, test.credits.credits);
         test.start(Kind::kLeaf);
         ASSERT_EQ(test.calls, 1U);
         EXPECT_EQ(test.last, Code::kIoError);

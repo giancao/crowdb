@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_stage_gc.h"
 #include "common/test_chunk_physical.h"
-#include "common/test_chunk_stage_backend.h"
+#include "common/test_page_chunk_store_stage.h"
+#include "page_store/chunk/chunk_stage_gc.h"
 
 namespace crowdb::tree
 {
@@ -43,14 +43,14 @@ TEST(ChunkPhysicalGc, LostDeleteReplyKeepsPhysicalChargeUntilDeletingNotFoundRet
         return;
     }
     EXPECT_EQ(catalog->record->state, ChunkStageState::Deleting);
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 8192U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 8192U);
     transport.unknown_delete = false;
     result = reclaim_retired_stage(*catalog, transport, 17, 1, TestPhysicalHost::stage, host.budget, host.registry);
     ASSERT_TRUE(result.status.ok()) << result.status.to_string();
     EXPECT_TRUE(result.stage_removed);
     EXPECT_TRUE(result.deletion_acknowledged);
     EXPECT_EQ(transport.deletions, 2U);
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 0U);
 }
 
 TEST(ChunkPhysicalGc, ReusedChunkEpochCannotAuthorizeDeleteOrRemoveItsPhysicalCharge)
@@ -71,7 +71,7 @@ TEST(ChunkPhysicalGc, ReusedChunkEpochCannotAuthorizeDeleteOrRemoveItsPhysicalCh
         reclaim_retired_stage(*catalog, transport, 17, 2, TestPhysicalHost::stage, host.budget, host.registry);
     EXPECT_EQ(result.status.code(), Code::kUnavailable);
     EXPECT_EQ(transport.deletions, 0U);
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 8192U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 8192U);
 }
 
 TEST(ChunkPhysicalGc, UnknownAllocateReplyAlreadyAccountsTheExactMirrorsWhileStageRemainsReserved)
@@ -94,7 +94,7 @@ TEST(ChunkPhysicalGc, UnknownAllocateReplyAlreadyAccountsTheExactMirrorsWhileSta
     EXPECT_EQ(catalog->record->state, ChunkStageState::Reserved);
     EXPECT_EQ(transport->allocations, 1U);
     EXPECT_NE(catalog->record->capacity, 8192U);
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 8192U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 8192U);
     EXPECT_EQ(output.length, 0U);
 }
 
@@ -140,7 +140,7 @@ TEST(ChunkPhysicalGc, AdvertisedWriteBoundPaysCanonicalOwnersAtTheHardLimit)
                                     credit, &output, &physical);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_LE(credit->claimed.load(), *bound);
-    EXPECT_EQ(host.registry->backing_stats().allocated_bytes, 8192U);
+    EXPECT_EQ(host.registry->page_block_stats().allocated_bytes, 8192U);
     ASSERT_TRUE(host.registry->deleted(TestPhysicalHost::stage, TestPhysicalHost::chunk, {}, credit).ok());
     physical.reset();
     catalog->record.reset();
@@ -188,6 +188,6 @@ TEST(ChunkPhysicalGc, DurableReclaimedReceiptEndsObservationBeforeInterruptedMet
     ASSERT_TRUE(result.status.ok()) << result.status.to_string();
     EXPECT_TRUE(result.stage_removed);
     EXPECT_EQ(transport.deletions, 0U);
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 0U);
 }
 } // namespace crowdb::tree

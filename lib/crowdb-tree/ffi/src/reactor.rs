@@ -14,7 +14,7 @@ use crate::tree::Crowdbtree;
 // Native reads, scans, admission and maintenance operations use completion
 // polling with eventfd notifications. CPU work runs on the shared native runtime;
 // even resident reads may be pending on their first poll. An already completed
-// operation returns immediately. Pending CPU work and backend I/O both wake the
+// operation returns immediately. Pending CPU work and page store I/O both wake the
 // eventfd pump when completion becomes observable.
 //
 // Fan-out note: this deliberately does *not* have every pending future call
@@ -219,7 +219,7 @@ impl PinnedValue {
     }
 }
 
-/// Owner backing a `Bytes` created from `PinnedValue::into_bytes`. Holds the
+/// Owner page block a `Bytes` created from `PinnedValue::into_bytes`. Holds the
 /// `PinnedValue` so its `Drop` (calling `ct_future_free`) runs when the
 /// `Bytes`'s refcount hits zero. `Send` because `PinnedValue` is `Send` (R6).
 struct PinnedBytesOwner {
@@ -325,7 +325,7 @@ pub(crate) async fn drive_completion<T>(
             None => {
                 // Without an available notification pump, yield before
                 // polling again. Native CPU work can still be pending even
-                // when no backend I/O is needed.
+                // when no page store I/O is needed.
                 tokio::task::yield_now().await;
             }
         }

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use crate::error::{check, CtError};
 use crate::sys;
 
-/// Owning handle for a backend injected into [`Config`]. The C++ tree retains
-/// the underlying backend independently when opened, so this handle may be
+/// Owning handle for a page store injected into [`Config`]. The C++ tree retains
+/// the underlying page store independently when opened, so this handle may be
 /// dropped immediately after `Crowdbtree::open` returns.
 pub struct PageStore {
     pub(crate) ptr: NonNull<sys::ct_page_store>,
@@ -21,7 +21,7 @@ pub struct PageStore {
 }
 
 impl PageStore {
-    /// Create an in-memory injected backend. Chunk-backed construction is
+    /// Create an in-memory injected page store. Chunk-backed construction is
     /// provided by the chunk-KV integration crate so local binaries do not
     /// reference its archive member.
     pub fn open_mem(iu_size: u32) -> Result<Self, CtError> {
@@ -65,18 +65,18 @@ pub enum Compression {
     Lz4,
 }
 
-/// Durable backend selection, mirrors `ct_options::backend`.
+/// Durable page store selection, mirrors `ct_options::page_store_kind`.
 /// Ignored when `Config::path` is `None` (in-memory).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PageStoreBackend {
+pub enum PageStoreKind {
     /// File-based page store, no alignment.
     #[default]
-    File,
+    DiskText,
     /// Block device: 4K aligned, `O_DIRECT` for a real SSD/SCM
     /// deployment target.
-    Block,
+    Disk,
     /// Mem block device: in-memory, no alignment.
-    MemBlock,
+    Mem,
 }
 
 /// Durability barrier policy, mirrors `ct_sync_mode`.
@@ -124,7 +124,7 @@ pub struct Config {
     pub runtime_binding: crate::TreeBindingOptions,
     /// Source, handoff, maintenance and cache work windows.
     pub tuning: crate::TreeTuningOptions,
-    /// Optional injected durable backend. When set, `path` and `backend` are
+    /// Optional injected durable page store. When set, `path` and `page_store_kind` are
     /// ignored by the C++ constructor.
     pub page_store: Option<Arc<PageStore>>,
     pub key_range: KeyRange,
@@ -134,7 +134,7 @@ pub struct Config {
     pub buffer_pool_bytes: u64,
     pub compression_lz4: bool,
     pub max_inline_value: u64,
-    pub backend: PageStoreBackend,
+    pub page_store_kind: PageStoreKind,
     /// Block size for array-of-blocks mode (0 = default 64 MiB).
     pub block_size: u64,
     /// Store ID for block file naming.

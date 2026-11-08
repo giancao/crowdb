@@ -2,10 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "published_state.h"
+#include "tree_root.h"
 
 namespace crowdb::tree
 {
-[[nodiscard]] Status validate_flush_admission(const PublishedTreeState     &current,
-                                              const PublicationTransaction &transaction);
+[[nodiscard]] Status validate_flush_admission(const TreeRoot &current, const PublicationTransaction &transaction);
 } // namespace crowdb::tree

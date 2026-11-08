@@ -2,10 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crowdb_chunk_kv::{CrowdbPartitionTree, MutationOperation, PartitionTree};
-use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
+use crowdb_tree_ffi::chunk::test_util::TestPageChunkStore;
 
 async fn check_native_checkpoint(frame_bytes: u32, reclaim_bytes: usize) {
-    let mut backend = TestChunkBackend::new(91, 1).unwrap();
+    let mut backend = TestPageChunkStore::new(91, 1).unwrap();
     let store = backend.page_store(0).unwrap();
     let mut config = backend.config();
     config.page_store = Some(store.clone());
@@ -32,7 +32,7 @@ async fn check_native_checkpoint(frame_bytes: u32, reclaim_bytes: usize) {
         backend.runtime.snapshot().unwrap().backend.completed > completed_before,
         "native checkpoints must drive the asynchronous chunk IO completion path"
     );
-    assert!(tree.backing_stats().unwrap().unwrap().allocated_bytes >= 2 * 1024 * 1024);
+    assert!(tree.page_block_stats().unwrap().unwrap().allocated_bytes >= 2 * 1024 * 1024);
     drop(tree);
     drop(config);
     drop(store);

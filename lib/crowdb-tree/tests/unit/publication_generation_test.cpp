@@ -11,7 +11,7 @@ using namespace test_cache_residency;
 
 std::shared_ptr<PublicationCoordinator::Replacement> replacement(TestCache &fixture, size_t pages, const BaseRef &base)
 {
-    auto candidate          = std::make_shared<PublishedTreeState>();
+    auto candidate          = std::make_shared<TreeRoot>();
     candidate->generation   = fixture.publisher.capture()->generation + 1;
     candidate->root_page_id = 0;
     candidate->next_page_id = pages;
@@ -19,7 +19,7 @@ std::shared_ptr<PublicationCoordinator::Replacement> replacement(TestCache &fixt
     for (size_t i = 0; i < pages; ++i) {
         edits.push_back({.page_id = i, .expected = {}, .replacement = published({base})});
     }
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     candidate->mapping = candidate->mapping.replace(edits, copied);
     SourceAdmission                                      sources(0, candidate->generation);
     std::shared_ptr<PublicationCoordinator::Replacement> result;

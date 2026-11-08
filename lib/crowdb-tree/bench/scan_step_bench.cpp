@@ -16,8 +16,8 @@
 //   pixi run -- cmake -S lib/crowdb-tree -B lib/crowdb-tree/build-bench -DCROWDB_TREE_BENCH=ON
 //   pixi run -- cmake --build lib/crowdb-tree/build-bench -j
 //   ./lib/crowdb-tree/build-bench/scan_step_profile
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <atomic>
 #include <chrono>
@@ -51,7 +51,7 @@ std::string make_value(int value_size, int i)
 struct Setup
 {
     std::unique_ptr<Crowdbtree>   tree;
-    std::shared_ptr<MemPageStore> store;
+    std::shared_ptr<PageMemStore> store;
 };
 
 // Build a tree with `n` keys at `value_size`. If `flush`, drain everything
@@ -65,7 +65,7 @@ struct Setup
 Setup build_tree(int n, int value_size, bool flush, bool flush_only = false, int flush_every = 0)
 {
     Setup s;
-    s.store = std::make_shared<MemPageStore>(1);
+    s.store = std::make_shared<PageMemStore>(1);
     Config opt;
     opt.page_store       = s.store.get();
     opt.frame_bytes      = 64 * 1024;
@@ -145,7 +145,7 @@ void run_concurrent(const char *label, int n_prepop, int value_size, size_t limi
                     int flush_every_ms, uint32_t max_memtable_count, int prefill_l0)
 {
     Setup s;
-    s.store = std::make_shared<MemPageStore>(1);
+    s.store = std::make_shared<PageMemStore>(1);
     Config opt;
     opt.page_store         = s.store.get();
     opt.frame_bytes        = 64 * 1024;

@@ -10,7 +10,7 @@ namespace crowdb::tree
 {
 namespace
 {
-SnapshotPageIdentity page_identity(const std::shared_ptr<const PublishedPage> &page)
+SnapshotPageIdentity page_identity(const std::shared_ptr<const PageEntry> &page)
 {
     if (!page) {
         return {};
@@ -26,7 +26,7 @@ SnapshotPageIdentity page_identity(const std::shared_ptr<const PublishedPage> &p
 }
 } // namespace
 
-Status validate_snapshot_publication(const PublicationTransaction &transaction, const PublishedTreeState &current)
+Status validate_snapshot_publication(const PublicationTransaction &transaction, const TreeRoot &current)
 {
     switch (transaction.snapshot_effect) {
     case SnapshotChangeEffect::FullContent:
@@ -62,19 +62,19 @@ Status validate_snapshot_publication(const PublicationTransaction &transaction, 
         base.generation != current.generation || !base.pages || base.pages->generation != base.generation ||
         base.pages->coverage != base.coverage || base.coverage != current.checkpoint_capture_coverage ||
         base.gc_floor != current.checkpoint_capture_floor || base.gc_floor > base.coverage ||
-        base.snapshot_sequence == 0 || base.backend_id == 0 ||
-        (!base.pages->frames.empty() && base.pages->backend_id != base.backend_id) ||
+        base.snapshot_sequence == 0 || base.page_store_id == 0 ||
+        (!base.pages->frames.empty() && base.pages->page_store_id != base.page_store_id) ||
         (current.snapshot_baseline &&
          (base.coverage < current.snapshot_baseline->coverage ||
           base.snapshot_sequence < current.snapshot_baseline->snapshot_sequence ||
           (base.snapshot_sequence == current.snapshot_baseline->snapshot_sequence && !reused) ||
-          base.backend_id != current.snapshot_baseline->backend_id))) {
+          base.page_store_id != current.snapshot_baseline->page_store_id))) {
         return Status::invalid_argument("snapshot baseline differs from its committed capture");
     }
     return Status::Ok();
 }
 
-void initialize_snapshot_changes(PublishedTreeState &state, const std::shared_ptr<AllocationBudget> &metadata)
+void initialize_snapshot_changes(TreeRoot &state, const std::shared_ptr<AllocationBudget> &metadata)
 {
     state.snapshot_changes               = {};
     state.snapshot_changes_since_capture = {};
@@ -109,16 +109,16 @@ bool logical_page_change(const PageReplacement &page)
                before.right_sibling != after.right_sibling;
     }
     if (!page.expected->inner || !page.replacement->inner) {
-        return !page.expected->inner_backing || page.expected->inner_backing != page.replacement->inner_backing;
+        return !page.expected->inner_page_block ||
+               page.expected->inner_page_block != page.replacement->inner_page_block;
     }
     return page.expected->inner->children != page.replacement->inner->children ||
            page.expected->inner->separators != page.replacement->inner->separators;
 }
 
-void prepare_snapshot_changes(const PublicationTransaction &transaction, const PublishedTreeState &current,
-                              PublishedTreeState &next)
+void prepare_snapshot_changes(const PublicationTransaction &transaction, const TreeRoot &current, TreeRoot &next)
 {
-    static_assert(SnapshotChanges::kPageLimit == MappingView::kPageLimit);
+    static_assert(SnapshotChanges::kPageLimit == MappingTable::kPageLimit);
     const auto &metadata = transaction.snapshot_metadata ? transaction.snapshot_metadata : transaction.metadata;
     for (const auto &page : transaction.pages) {
         if (!logical_page_change(page)) {

@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "inner_load_test_support.h"
 #include "load_budget_test_support.h"
 #include "native_import_test_support.h"
@@ -24,19 +24,19 @@ class NativeImport : public testing::Test
     std::shared_ptr<detail::FlushRuntime::Lane> lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
     std::shared_ptr<test_read::TestInnerStore>  store   = std::make_shared<test_read::TestInnerStore>();
     std::shared_ptr<AsyncStorePageLoader>       loader  = std::make_shared<AsyncStorePageLoader>(
-        store, runtime, lane, PageLoadLimits{}, OverflowBackingResolver{}, credits.credits);
+        store, runtime, lane, PageLoadLimits{}, OverflowPageBlockResolver{}, credits.credits);
 };
 
 TEST_F(NativeImport, ResidentLeafAndOverflowUseOwnedFramesWithoutBackendIo)
 {
-    loader = std::make_shared<AsyncStorePageLoader>(nullptr, runtime, lane, PageLoadLimits{}, OverflowBackingResolver{},
-                                                    credits.credits);
+    loader = std::make_shared<AsyncStorePageLoader>(nullptr, runtime, lane, PageLoadLimits{},
+                                                    OverflowPageBlockResolver{}, credits.credits);
     const std::string                    value(9000, 'v');
     auto                                 frames = test_import::overflow_tree(value);
     std::shared_ptr<ReadablePageCatalog> pages;
     auto                                 status = catalog(frames, &pages);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    auto primary = pages->frames.at(0).backing;
+    auto primary = pages->frames.at(0).page_block;
     EXPECT_TRUE(primary->readable());
     EXPECT_FALSE(primary->reloadable());
     EXPECT_EQ(primary->address, 0U);
@@ -44,7 +44,7 @@ TEST_F(NativeImport, ResidentLeafAndOverflowUseOwnedFramesWithoutBackendIo)
     frames.clear();
     pages.reset();
     std::shared_ptr<const LeafBase> leaf;
-    loader->load_leaf({.identity = 1, .max_slot = 7, .backing = primary}, [&](Status result, auto loaded) {
+    loader->load_leaf({.identity = 1, .max_slot = 7, .page_block = primary}, [&](Status result, auto loaded) {
         EXPECT_TRUE(result.ok()) << result.to_string();
         leaf = std::move(loaded);
     });
@@ -70,10 +70,11 @@ TEST_F(NativeImport, ResidentLeafAndOverflowUseOwnedFramesWithoutBackendIo)
 
 TEST_F(NativeImport, ReadableGraphLoadsResidentIndexButDurableGraphRejectsIt)
 {
-    loader = std::make_shared<AsyncStorePageLoader>(nullptr, runtime, lane, PageLoadLimits{}, OverflowBackingResolver{},
-                                                    credits.credits);
+    loader = std::make_shared<AsyncStorePageLoader>(nullptr, runtime, lane, PageLoadLimits{},
+                                                    OverflowPageBlockResolver{}, credits.credits);
     NativeFrame index{.page_id = 0, .frame = std::vector<uint8_t>(4096)};
     ASSERT_TRUE(inner_frame_build(index.frame.data(), index.frame.size(), 0, {1, 2}, {Slice("m")}));
+    frame_set_inner_fence_pages(index.frame.data(), index.frame.size(), 1, 2);
     const auto               cell = encode_cell_buf(7, OpKind::kPut, "left");
     std::vector<NativeFrame> frames;
     frames.push_back(std::move(index));
@@ -103,11 +104,11 @@ TEST_F(NativeImport, ReadableGraphLoadsResidentIndexButDurableGraphRejectsIt)
 
 TEST_F(NativeImport, DurableReadsStillRequireABackend)
 {
-    auto backing                    = std::make_shared<BackingRef>();
-    backing->length                 = 4096;
-    backing->owner                  = std::make_shared<int>(0);
-    OverflowBackingResolver resolve = [backing](uint64_t, std::shared_ptr<const BackingRef> *out) {
-        *out = backing;
+    auto page_block                   = std::make_shared<PageBlockRef>();
+    page_block->length                = 4096;
+    page_block->owner                 = std::make_shared<int>(0);
+    OverflowPageBlockResolver resolve = [page_block](uint64_t, std::shared_ptr<const PageBlockRef> *out) {
+        *out = page_block;
         return Status::Ok();
     };
     AsyncStorePageLoader missing(nullptr, runtime, lane, {}, std::move(resolve), credits.credits);
@@ -117,48 +118,36 @@ TEST_F(NativeImport, DurableReadsStillRequireABackend)
         EXPECT_FALSE(result);
         ++completed;
     };
-    missing.load_leaf({.identity = 1, .max_slot = 7, .backing = backing}, failed);
-    missing.load_inner(backing, failed);
+    missing.load_leaf({.identity = 1, .max_slot = 7, .page_block = page_block}, failed);
+    missing.load_inner(page_block, failed);
     missing.load_overflow(1, 10, failed);
     runtime->drain();
     EXPECT_EQ(completed, 3U);
     EXPECT_EQ(store->reads.load(), 0U);
 }
 
-TEST_F(NativeImport, OverwrittenOverflowCellStillRetainsItsPhysicalDependency)
+TEST_F(NativeImport, RejectsLeafWithAnInFrameDeltaCount)
 {
-    auto                    frames = test_import::overflow_tree("old-overflow");
-    std::vector<uint8_t>    updated(4096);
-    std::vector<leaf_entry> delta;
-    delta.push_back({.key = "key", .cell = encode_cell_buf(7, OpKind::kPut, "latest")});
-    ASSERT_TRUE(leaf_frame_append_deltas(frames[0].frame.data(), 4096, delta, updated.data()));
-    frames[0].frame = std::move(updated);
+    auto  frames = test_import::overflow_tree("overflow");
+    auto &raw    = frames.front().frame;
+    frame_put_u32(raw.data(), fh::kReservedLeaf, 1);
+    frame_restamp_crc(raw.data(), raw.size());
     std::shared_ptr<ReadablePageCatalog> pages;
-    auto                                 status = catalog(frames, &pages);
-    ASSERT_TRUE(status.ok()) << status.to_string();
-    ASSERT_EQ(pages->frames.at(0).stored_overflow->size(), 1U);
-    std::shared_ptr<RecoveredStateOperation> operation;
-    ASSERT_TRUE(RecoveredStateOperation::create_readable(pages, loader, runtime, lane, {},
-                                                         credits.credits.reservation(), &operation)
-                    .ok());
-    status = detail::wait_snapshot_operation(operation);
-    ASSERT_TRUE(status.ok()) << status.to_string();
-    const auto leaf = operation->result().state->mapping.get(0)->leaf;
-    EXPECT_EQ(leaf->bases.front().backing->overflow->pages.size(), 1U);
-    EXPECT_EQ(store->reads.load(), 0U);
+    EXPECT_EQ(catalog(frames, &pages).code(), Code::kCorruption);
+    EXPECT_FALSE(pages);
 }
 
 TEST_F(NativeImport, ResidentLoaderValidatesCrcAndRetainsNoChargeAfterFailure)
 {
     auto raw = std::make_shared<std::vector<uint8_t>>(test_import::inline_leaf().frame);
     raw->back() ^= 1;
-    auto backing            = std::make_shared<BackingRef>();
-    backing->storage        = BackingStorage::kResidentFrame;
-    backing->durability     = BackingDurability::kResident;
-    backing->resident_frame = *raw;
-    backing->owner          = raw;
-    size_t completed        = 0;
-    loader->load_leaf({.identity = 1, .max_slot = 7, .backing = backing}, [&](Status status, auto result) {
+    auto page_block            = std::make_shared<PageBlockRef>();
+    page_block->storage        = PageBlockStorage::kResidentFrame;
+    page_block->durability     = PageBlockDurability::kResident;
+    page_block->resident_frame = *raw;
+    page_block->owner          = raw;
+    size_t completed           = 0;
+    loader->load_leaf({.identity = 1, .max_slot = 7, .page_block = page_block}, [&](Status status, auto result) {
         EXPECT_EQ(status.code(), Code::kCorruption);
         EXPECT_FALSE(result);
         ++completed;

@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_c_api_internal.h"
 #include "c_api_internal.h"
 #include "common/test_chunk_root.h"
 #include "crowdb-tree/chunk_runtime_c_api.h"
+#include "page_store/chunk/chunk_c_api_internal.h"
 #include "runtime/tree_runtime_c_api.h"
 
 #include <chrono>
@@ -28,8 +28,8 @@ ct_chunk_runtime_options runtime_options()
 
 TEST(ChunkRuntimeCAbi, VersionedFactoryChargesAndReleasesItsActualOwners)
 {
-    test_chunk::TestRootBackend backend;
-    ct_runtime                 *raw_runtime = nullptr;
+    test_chunk::TestRootPageStore backend;
+    ct_runtime                   *raw_runtime = nullptr;
     ASSERT_EQ(ct_runtime_create(nullptr, &raw_runtime), 0);
     std::unique_ptr<ct_runtime, decltype(&ct_runtime_free)> runtime(raw_runtime, &ct_runtime_free);
     Config                                                  config;
@@ -40,12 +40,12 @@ TEST(ChunkRuntimeCAbi, VersionedFactoryChargesAndReleasesItsActualOwners)
     auto               options   = runtime_options();
     ct_page_store     *raw_store = nullptr;
     --options.struct_bytes;
-    EXPECT_EQ(ct_chunk_runtime_page_store_open(runtime.get(), &options, &catalog, &transport, &raw_store),
+    EXPECT_EQ(ct_page_chunk_store_open(runtime.get(), &options, &catalog, &transport, &raw_store),
               static_cast<ct_status>(Code::kInvalidArgument));
     EXPECT_EQ(raw_store, nullptr);
     EXPECT_EQ(config.runtime->snapshot().allocated.routing_bytes, baseline);
     ++options.struct_bytes;
-    ASSERT_EQ(ct_chunk_runtime_page_store_open(runtime.get(), &options, &catalog, &transport, &raw_store), 0);
+    ASSERT_EQ(ct_page_chunk_store_open(runtime.get(), &options, &catalog, &transport, &raw_store), 0);
     EXPECT_GT(config.runtime->snapshot().allocated.routing_bytes, baseline);
     EXPECT_EQ(backend.catalog->writer_releases, 0U);
     ct_page_store_free(raw_store);
@@ -57,7 +57,7 @@ TEST(ChunkRuntimeCAbi, VersionedFactoryChargesAndReleasesItsActualOwners)
 
 TEST(ChunkRuntimeCAbi, PublicTreeUsesSameHostAndCommitsWalWithTheRoot)
 {
-    test_chunk::TestRootBackend backend;
+    test_chunk::TestRootPageStore backend;
     backend.catalog->current_generation = 0;
     ct_runtime *raw_runtime             = nullptr;
     ASSERT_EQ(ct_runtime_create(nullptr, &raw_runtime), 0);
@@ -66,7 +66,7 @@ TEST(ChunkRuntimeCAbi, PublicTreeUsesSameHostAndCommitsWalWithTheRoot)
     ct_chunk_transport transport{.transport = backend.transport};
     const auto         chunk_options = runtime_options();
     ct_page_store     *raw_store     = nullptr;
-    ASSERT_EQ(ct_chunk_runtime_page_store_open(runtime.get(), &chunk_options, &catalog, &transport, &raw_store), 0);
+    ASSERT_EQ(ct_page_chunk_store_open(runtime.get(), &chunk_options, &catalog, &transport, &raw_store), 0);
     std::unique_ptr<ct_page_store, decltype(&ct_page_store_free)> store(raw_store, &ct_page_store_free);
     ct_options                                                    options{};
     options.page_store       = store.get();

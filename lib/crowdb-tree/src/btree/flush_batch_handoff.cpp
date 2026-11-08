@@ -8,17 +8,17 @@ namespace crowdb::tree
 {
 namespace
 {
-std::shared_ptr<const PublishedPage> append_runs(const PublishedPage                                 &old,
-                                                 std::span<const std::shared_ptr<const OverlayBatch>> runs,
-                                                 size_t installed, uint64_t entries, uint64_t bytes,
-                                                 const std::shared_ptr<AllocationBudget> &metadata)
+std::shared_ptr<const PageEntry> append_runs(const PageEntry                                     &old,
+                                             std::span<const std::shared_ptr<const OverlayBatch>> runs,
+                                             size_t installed, uint64_t entries, uint64_t bytes,
+                                             const std::shared_ptr<AllocationBudget> &metadata)
 {
     auto logical = detail::reserved_shared<PageState>(metadata, *old.leaf, metadata);
     logical->overlays.insert(logical->overlays.begin() + static_cast<std::ptrdiff_t>(installed), runs.begin(),
                              runs.end());
     ++logical->content_id;
     ++logical->representation_id;
-    auto page  = detail::reserved_shared<PublishedPage>(metadata, old);
+    auto page  = detail::reserved_shared<PageEntry>(metadata, old);
     page->leaf = std::move(logical);
     page->merge_outgoing.reset();
     ++page->revision;
@@ -152,7 +152,7 @@ void FlushBatch::State::install(Range &range, RangeComplete done, bool inline_pr
             ++token.sequence;
             following = detail::reserved_shared<InstallRecord>(metadata, token);
         }
-        std::shared_ptr<const PublishedPage> replacement;
+        std::shared_ptr<const PageEntry> replacement;
         if (range.runs.size() != range.installed_runs) {
             const auto runs =
                 std::span<const std::shared_ptr<const OverlayBatch>>(range.runs).subspan(range.installed_runs);

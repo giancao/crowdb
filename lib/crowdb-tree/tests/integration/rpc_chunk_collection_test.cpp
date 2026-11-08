@@ -1,11 +1,11 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_stage_gc.h"
-#include "backend/chunk/rpc_chunk_transport.h"
 #include "common/test_chunk_physical.h"
 #include "common/test_chunk_route_service.h"
-#include "common/test_chunk_stage_backend.h"
+#include "common/test_page_chunk_store_stage.h"
 #include "diskio_generated.h"
+#include "page_store/chunk/chunk_stage_gc.h"
+#include "page_store/chunk/rpc_chunk_transport.h"
 
 namespace crowdb::tree::detail
 {
@@ -205,7 +205,7 @@ TEST_F(RpcChunkCollection, PhysicalAllocationRemainsCountedUntilActualDeleteAckn
     test_chunk::TestPhysicalHost           host;
     std::shared_ptr<ChunkPhysicalRegistry> registry;
     ASSERT_TRUE(transport->physical_registry(19, host.budget, &registry).ok());
-    const auto              initial_scope = registry->backing_stats().scope_id;
+    const auto              initial_scope = registry->page_block_stats().scope_id;
     ChunkAllocationIdentity receipt;
     ASSERT_TRUE(
         await_chunk_rpc<&RpcChunkTransport::submit_inspect_fixed_allocation>(*transport, id, 17, &receipt).ok());
@@ -215,16 +215,16 @@ TEST_F(RpcChunkCollection, PhysicalAllocationRemainsCountedUntilActualDeleteAckn
     service.lose_delete.store(true);
     auto result = reclaim(17, host.budget, registry);
     EXPECT_EQ(result.status.code(), Code::kUnavailable);
-    EXPECT_EQ(registry->backing_metrics()->snapshot().allocated_backing_bytes, receipt.physical_bytes);
+    EXPECT_EQ(registry->page_block_metrics()->snapshot().allocated_page_block_bytes, receipt.physical_bytes);
     result = reclaim(17, host.budget, registry);
     ASSERT_TRUE(result.status.ok()) << result.status.to_string();
     EXPECT_TRUE(result.deletion_acknowledged);
     EXPECT_EQ(service.physical_deletes.load(), 1U);
     host.cpu.drain();
-    EXPECT_EQ(registry->backing_metrics()->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 0U);
     registry.reset();
     ASSERT_TRUE(transport->physical_registry(19, host.budget, &registry).ok());
-    EXPECT_EQ(registry->backing_stats().scope_id, initial_scope);
-    EXPECT_EQ(registry->backing_stats().allocated_bytes, 0U);
+    EXPECT_EQ(registry->page_block_stats().scope_id, initial_scope);
+    EXPECT_EQ(registry->page_block_stats().allocated_bytes, 0U);
 }
 } // namespace crowdb::tree::detail

@@ -9,7 +9,7 @@ namespace crowdb::tree
 {
 namespace
 {
-Status reserve_generation(const std::shared_ptr<TreeRuntimeBinding> &binding, const MappingView &mapping, bool empty,
+Status reserve_generation(const std::shared_ptr<TreeRuntimeBinding> &binding, const MappingTable &mapping, bool empty,
                           TreeGenerationPreparation &out, size_t source_count)
 {
     const auto publication = PublicationCoordinator::replacement_allocation_bound(mapping, source_count);
@@ -17,12 +17,12 @@ Status reserve_generation(const std::shared_ptr<TreeRuntimeBinding> &binding, co
                                  .add(sizeof(TreeGenerationPreparation))
                                  .add(detail::shared_allocation_bound<TreeGenerationLease>())
                                  .add(detail::shared_allocation_bound<detail::AllocationReservation>())
-                                 .add(detail::shared_allocation_bound<PublishedTreeState>());
+                                 .add(detail::shared_allocation_bound<TreeRoot>());
     if (empty) {
-        bytes.add(MappingView::path_copy_bound())
+        bytes.add(MappingTable::path_copy_bound())
             .add(PageState::allocation_bound())
-            .add(detail::shared_allocation_bound<PublishedPage>())
-            .add(2 * detail::shared_allocation_bound<PublishedTreeState>())
+            .add(detail::shared_allocation_bound<PageEntry>())
+            .add(2 * detail::shared_allocation_bound<TreeRoot>())
             .add(PublishedSources::allocation_bound())
             .add(PageCacheResidency::page_allocation_bound(0) + 256);
     }
@@ -51,7 +51,7 @@ Status reserve_generation(const std::shared_ptr<TreeRuntimeBinding> &binding, co
 
 } // namespace
 
-Status TreeGenerationLease::prepare(TreeCore &owner, std::shared_ptr<const PublishedTreeState> candidate,
+Status TreeGenerationLease::prepare(TreeCore &owner, std::shared_ptr<const TreeRoot> candidate,
                                     const SplitGeneration *split, std::shared_ptr<TreeGenerationLease> *out)
 try {
     if (out == nullptr || *out) {
@@ -86,14 +86,13 @@ try {
         prepared.previous_generation = current->generation;
         prepared.expected            = split != nullptr ? split->expected : nullptr;
         auto status                  = reserve_generation(
-            owner.binding(), candidate ? candidate->mapping : MappingView{}, !candidate || empty_candidate, prepared,
+            owner.binding(), candidate ? candidate->mapping : MappingTable{}, !candidate || empty_candidate, prepared,
             1 + (split != nullptr && split->inherited ? split->inherited->tables.size() : 0));
         if (!status.ok()) {
             return status;
         }
-        auto next = candidate && !empty_candidate
-                      ? detail::reserved_shared<PublishedTreeState>(prepared.metadata, *candidate)
-                      : TreeCore::State::empty_state(prepared.metadata);
+        auto next = candidate && !empty_candidate ? detail::reserved_shared<TreeRoot>(prepared.metadata, *candidate)
+                                                  : TreeCore::State::empty_state(prepared.metadata);
         if (empty_candidate) {
             next->coverage = candidate->coverage;
         }

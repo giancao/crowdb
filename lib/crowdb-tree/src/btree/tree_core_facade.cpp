@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/local_backend_state.h"
 #include "btree/tree_core.h"
+#include "page_store/local/local_page_store_state.h"
 
 #include <stdexcept>
 
@@ -47,9 +47,9 @@ uint64_t Crowdbtree::durable_coverage() const
     return core_->durable_coverage();
 }
 
-BackingStatsSnapshot Crowdbtree::backing_stats() const noexcept
+PageBlockStatsSnapshot Crowdbtree::page_block_stats() const noexcept
 {
-    return core_->backing_stats();
+    return core_->page_block_stats();
 }
 
 TreeStatsSnapshot Crowdbtree::tree_state_stats() const

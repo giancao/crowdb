@@ -2,26 +2,26 @@
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/captured_rebase_internal.h"
 #include "snapshot/graph_summary.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 namespace crowdb::tree
 {
 namespace
 {
-bool matches_frame(const PublishedTreeState &view, const ReadablePageFrame &frame)
+bool matches_frame(const TreeRoot &view, const ReadablePageFrame &frame)
 {
     if (frame.type == page_type::kOverflowFrame) {
         return true;
     }
     const auto page = view.mapping.get(frame.page_id);
-    if (!page || page->metrics.dirty || !page->primary || page->primary->frame.backing != frame.backing) {
+    if (!page || page->metrics.dirty || !page->primary || page->primary->frame.page_block != frame.page_block) {
         return false;
     }
     if (frame.type == page_type::kLeafBase) {
         return page->leaf && page->leaf->overlays.empty() && page->leaf->bases.size() == 1 &&
-               page->leaf->bases.front().backing == frame.backing;
+               page->leaf->bases.front().page_block == frame.page_block;
     }
-    return frame.type == page_type::kInnerBase && page->level != 0 && page->inner_backing == frame.backing;
+    return frame.type == page_type::kInnerBase && page->level != 0 && page->inner_page_block == frame.page_block;
 }
 } // namespace
 

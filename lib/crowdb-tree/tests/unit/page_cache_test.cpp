@@ -173,14 +173,14 @@ TEST(SharedPageCache, IdentityIncludesGenerationAndBackendProtection)
     ++input.generation;
     read(input);
     EXPECT_EQ(upstream->calls, 2U);
-    auto backing   = std::make_shared<BackingRef>(*input.backing);
-    backing->owner = std::make_shared<int>(2);
-    input.backing  = backing;
+    auto page_block   = std::make_shared<PageBlockRef>(*input.page_block);
+    page_block->owner = std::make_shared<int>(2);
+    input.page_block  = page_block;
     read(input);
     EXPECT_EQ(upstream->calls, 3U);
-    auto newer = std::make_shared<BackingRef>(*backing);
+    auto newer = std::make_shared<PageBlockRef>(*page_block);
     ++newer->generation;
-    input.backing = newer;
+    input.page_block = newer;
     read(input);
     EXPECT_EQ(upstream->calls, 4U);
 }
@@ -281,17 +281,17 @@ TEST(SharedPageCache, EvictionReturnsCacheReferenceButPinnedFrameRemainsCharged)
     });
     auto       &blob    = store->blobs[0];
     encode_durable_page(frame->frame(), frame->page_bytes(), compress_algo::kNone, &blob);
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = blob.size();
-    backing->owner  = store;
-    auto upstream   = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
-                                                             OverflowBackingResolver{}, credits.credits);
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = blob.size();
+    page_block->owner  = store;
+    auto upstream      = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
+                                                                OverflowPageBlockResolver{}, credits.credits);
     {
         SharedPageCache                 cache({.max_pages = 2, .max_waiters = 8}, credits.credits.reservation());
         auto                            loader         = cache.bind(upstream, credits.credits.reservation());
         const auto                      infrastructure = credits.budget.snapshot().allocated[LoadCredits::kBytes];
         std::shared_ptr<const LeafBase> pinned;
-        loader->load_leaf({.identity = 1, .backing = backing}, [&](Status status, auto leaf) {
+        loader->load_leaf({.identity = 1, .page_block = page_block}, [&](Status status, auto leaf) {
             EXPECT_TRUE(status.ok());
             pinned = std::move(leaf);
         });
@@ -301,7 +301,7 @@ TEST(SharedPageCache, EvictionReturnsCacheReferenceButPinnedFrameRemainsCharged)
         const auto allocated = credits.budget.snapshot().allocated[LoadCredits::kBytes];
         EXPECT_GT(allocated, infrastructure);
         EXPECT_EQ(cache.snapshot().resident_pages, 1U);
-        loader->load_leaf({.identity = 1, .backing = backing}, [&](Status status, auto leaf) {
+        loader->load_leaf({.identity = 1, .page_block = page_block}, [&](Status status, auto leaf) {
             EXPECT_TRUE(status.ok());
             EXPECT_EQ(leaf, pinned);
         });

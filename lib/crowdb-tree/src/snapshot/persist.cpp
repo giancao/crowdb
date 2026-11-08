@@ -3,7 +3,7 @@
 #include "btree/tree_core_access.h"
 #include "btree/tree_options.h"
 #include "crowdb-common/log.h"
-#include "crowdb-tree/backend/page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 namespace crowdb::tree
 {
@@ -38,7 +38,7 @@ void TreeCoreAccess::finish_open(const std::shared_ptr<TreeCore> &core, std::uni
     out->reset(new Crowdbtree(options, core));
     auto &tree = **out;
     tree.init_metrics("s." + std::to_string(options.store_id) + ".g." + std::to_string(options.group_id) + ".tree",
-                      options.backend_label);
+                      options.page_store_label);
     CRB_LOG_INFO("[{}] open: frame_bytes={}", tree.name_, options.frame_bytes);
 }
 

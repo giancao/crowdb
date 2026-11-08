@@ -4,7 +4,7 @@
 use arc_swap::ArcSwap;
 use crowdb_paxos_kv::cluster::px_kv_store::PxKvStore;
 use crowdb_paxos_kv::common::config::PaxosKvConfig;
-use crowdb_paxos_kv::kv::CrowdbTreeBackend;
+use crowdb_paxos_kv::kv::CrowdbTreeStoreKind;
 use crowdb_paxos_kv::metrics::MetricsRegistry;
 use crowdb_paxos_kv::wal::IoBackend;
 use std::collections::HashMap;
@@ -31,8 +31,8 @@ pub struct PaxosKvStoreRegistry {
     pub config: PaxosKvConfig,
     /// Parsed WAL I/O backend (derived from `config.wal_backend`).
     pub wal_backend: Arc<IoBackend>,
-    /// Parsed crowdb-tree storage backend (derived from `config.crowtree_backend`).
-    pub crowtree_backend: CrowdbTreeBackend,
+    /// Parsed crowdb-tree page store (derived from `config.crowtree_store_kind`).
+    pub crowtree_store_kind: CrowdbTreeStoreKind,
     /// Shared by normal startup, restore, management creation and recreation.
     pub tree_runtime: Arc<crowdb_tree_ffi::TreeRuntime>,
     /// Port pool for KV server listeners, populated from `--ports` CLI arg.
@@ -84,7 +84,7 @@ impl PaxosKvStoreRegistry {
         Self::try_with_config(config).expect("server storage backends must initialize")
     }
 
-    /// Construct a registry with the selected Tree and WAL backends.
+    /// Construct a registry with the selected Tree page store and WAL backend.
     ///
     /// # Errors
     /// Returns an error for unsupported Tree settings or a backend initialization failure.
@@ -92,9 +92,9 @@ impl PaxosKvStoreRegistry {
         config
             .validate_tree_config()
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-        let crowtree_backend = match config.crowtree_backend.as_str() {
-            "block" => CrowdbTreeBackend::Block,
-            "mem-block" => CrowdbTreeBackend::MemBlock,
+        let crowtree_store_kind = match config.crowtree_store_kind.as_str() {
+            "block" => CrowdbTreeStoreKind::Disk,
+            "mem-block" => CrowdbTreeStoreKind::Mem,
             backend => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -118,7 +118,7 @@ impl PaxosKvStoreRegistry {
             bootstrap_executing: std::sync::atomic::AtomicBool::new(false),
             bootstrap_idle: tokio::sync::Notify::new(),
             wal_backend,
-            crowtree_backend,
+            crowtree_store_kind,
             tree_runtime,
             config,
             port_pool: Mutex::new(Vec::new()),

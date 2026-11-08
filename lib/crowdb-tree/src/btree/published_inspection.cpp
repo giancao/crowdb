@@ -89,7 +89,7 @@ struct Inspection : std::enable_shared_from_this<Inspection>
             });
         }
         else {
-            prepared.loader->load_inner(page->inner_backing, [self = shared_from_this()](Status status, auto inner) {
+            prepared.loader->load_inner(page->inner_page_block, [self = shared_from_this()](Status status, auto inner) {
                 self->inner       = std::move(inner);
                 self->load_status = std::move(status);
                 self->schedule();
@@ -104,7 +104,7 @@ struct Inspection : std::enable_shared_from_this<Inspection>
             return;
         }
         const auto old  = view->mapping.get(load_pid);
-        auto       page = detail::reserved_shared<PublishedPage>(prepared.credit, *old);
+        auto       page = detail::reserved_shared<PageEntry>(prepared.credit, *old);
         if (load_base) {
             if (!leaf) {
                 finish(Status::corruption("inspection loader returned no leaf"));
@@ -130,9 +130,9 @@ struct Inspection : std::enable_shared_from_this<Inspection>
             }
             page->inner = std::move(inner);
         }
-        auto                   copied_view = detail::reserved_shared<PublishedTreeState>(prepared.credit, *view);
-        const PageReplacement  change{.page_id = load_pid, .expected = old, .replacement = std::move(page)};
-        MappingView::CopyStats copied;
+        auto                    copied_view = detail::reserved_shared<TreeRoot>(prepared.credit, *view);
+        const PageReplacement   change{.page_id = load_pid, .expected = old, .replacement = std::move(page)};
+        MappingTable::CopyStats copied;
         copied_view->mapping = copied_view->mapping.replace({&change, 1}, copied, prepared.credit);
         view                 = std::move(copied_view);
         (this->*resume)();
@@ -252,7 +252,7 @@ struct Inspection : std::enable_shared_from_this<Inspection>
         result.page_id = target;
         result.frame.resize(kInspectionBytes);
         auto owner = detail::reserved_shared<CopiedFrame>(prepared.credit, prepared.credit, result.frame.capacity());
-        // Only reused overflow addresses still depend on captured backing.
+        // Only reused overflow addresses still depend on captured page block.
         if (!encoded.encoder->reused_overflow().empty()) {
             owner->dependencies = encoded.encoder->dependency_owner();
         }
@@ -285,29 +285,29 @@ struct Inspection : std::enable_shared_from_this<Inspection>
         }
     }
 
-    core_read_detail::ReadPreparation         prepared;
-    TreeCore                                 &core;
-    std::shared_ptr<const PublishedTreeState> view;
-    TreeCore::InspectComplete                 complete;
-    std::array<uint32_t, kPathDepth>          steps{};
-    size_t                                    path_size;
-    size_t                                    depth = 0;
-    uint64_t                                  target;
-    uint64_t                                  edge_pid   = 0;
-    uint64_t                                  lower_edge = 0;
-    size_t                                    edge_depth = 0;
-    bool                                      right_edge = false;
-    size_t                                    attempts   = 0;
-    CapturedEncodeContext                     encode_context;
-    PageEncodeLimits                          frames;
-    uint64_t                                  load_pid = 0;
-    std::optional<size_t>                     load_base;
-    std::shared_ptr<const LeafBase>           leaf;
-    std::shared_ptr<const InnerPageState>     inner;
-    Status                                    load_status;
-    Step                                      next   = &Inspection::route;
-    Step                                      resume = nullptr;
-    ApplyDispatcher::Node                     ready{&Inspection::run, this};
+    core_read_detail::ReadPreparation     prepared;
+    TreeCore                             &core;
+    std::shared_ptr<const TreeRoot>       view;
+    TreeCore::InspectComplete             complete;
+    std::array<uint32_t, kPathDepth>      steps{};
+    size_t                                path_size;
+    size_t                                depth = 0;
+    uint64_t                              target;
+    uint64_t                              edge_pid   = 0;
+    uint64_t                              lower_edge = 0;
+    size_t                                edge_depth = 0;
+    bool                                  right_edge = false;
+    size_t                                attempts   = 0;
+    CapturedEncodeContext                 encode_context;
+    PageEncodeLimits                      frames;
+    uint64_t                              load_pid = 0;
+    std::optional<size_t>                 load_base;
+    std::shared_ptr<const LeafBase>       leaf;
+    std::shared_ptr<const InnerPageState> inner;
+    Status                                load_status;
+    Step                                  next   = &Inspection::route;
+    Step                                  resume = nullptr;
+    ApplyDispatcher::Node                 ready{&Inspection::run, this};
 };
 } // namespace
 

@@ -207,7 +207,7 @@ class EpochManager
     friend class MemTable;
     void seal_source() noexcept;
     friend class BlockDirectory;
-    // Exclusive backend teardown: no remaining guards or accepted operations.
+    // Exclusive page store teardown: no remaining guards or accepted operations.
     bool         retire_backend_step() noexcept;
     Participant *participant_for_this_thread(const std::shared_ptr<AllocationBudget> &budget);
     static void  destroy_participant(Participant *participant) noexcept;

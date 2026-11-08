@@ -286,13 +286,13 @@ TEST_F(TreeCoreSplit, BaselineQuotaFailureLeavesTheDestinationUnchangedAndCanRet
 
 TEST_F(TreeCoreSplit, ColdOverflowBaselineBecomesIndependentOfTheParentBackend)
 {
-    auto device              = std::make_shared<MemPageStore>(4096);
+    auto device              = std::make_shared<PageMemStore>(4096);
     auto backend             = std::make_shared<test_write::TestCheckpointStore>();
     backend->device          = device;
     auto options             = config;
     options.page_store       = device.get();
     options.async_page_store = backend.get();
-    options.backend_owner    = backend;
+    options.page_store_owner = backend;
     options.max_inline_value = 64;
     parent.reset();
     ASSERT_TRUE(Crowdbtree::open(options, &parent).ok());
@@ -305,8 +305,8 @@ TEST_F(TreeCoreSplit, ColdOverflowBaselineBecomesIndependentOfTheParentBackend)
         const auto leaf = view->mapping.get(view->root_page_id)->leaf;
         ASSERT_EQ(leaf->bases.size(), 1U);
         EXPECT_FALSE(leaf->bases.front().resident);
-        ASSERT_TRUE(leaf->bases.front().backing);
-        EXPECT_TRUE(leaf->bases.front().backing->reloadable());
+        ASSERT_TRUE(leaf->bases.front().page_block);
+        EXPECT_TRUE(leaf->bases.front().page_block->reloadable());
     }
     uint64_t generation = 0;
     uint64_t frontier   = 0;
@@ -317,7 +317,7 @@ TEST_F(TreeCoreSplit, ColdOverflowBaselineBecomesIndependentOfTheParentBackend)
     ASSERT_TRUE(parent->release_split_memtable_view(generation).ok());
     parent.reset();
     std::weak_ptr<test_write::TestCheckpointStore> old_backend = backend;
-    options.backend_owner.reset();
+    options.page_store_owner.reset();
     backend.reset();
     device.reset();
     EXPECT_TRUE(old_backend.expired());

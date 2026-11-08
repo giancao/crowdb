@@ -25,7 +25,7 @@ Status publish(PublicationCoordinator &publisher, PublicationTransaction transac
     return status;
 }
 
-std::shared_ptr<PublishedPage> seed(PublicationCoordinator &publisher, size_t count)
+std::shared_ptr<PageEntry> seed(PublicationCoordinator &publisher, size_t count)
 {
     OverlayBuilder builder({});
     for (size_t i = 0; i < count; ++i) {
@@ -37,7 +37,7 @@ std::shared_ptr<PublishedPage> seed(PublicationCoordinator &publisher, size_t co
     EXPECT_TRUE(builder.finish(1, &run).ok());
     auto logical = std::make_shared<PageState>();
     logical->overlays.push_back(run);
-    auto page                     = std::make_shared<PublishedPage>();
+    auto page                     = std::make_shared<PageEntry>();
     page->leaf                    = logical;
     page->metrics.dirty           = true;
     page->metrics.overlay_entries = count;
@@ -120,13 +120,13 @@ TEST(MaintenanceSplitStep, ColdInputRequestsLoadAndTinyTransactionBudgetLeavesRo
     EXPECT_FALSE(denied.changed());
     EXPECT_EQ(publisher.capture(), before);
 
-    auto old        = before->mapping.get(0);
-    auto logical    = std::make_shared<PageState>(*old->leaf);
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = 4096;
-    backing->owner  = std::make_shared<int>(1);
-    logical->bases.push_back({.identity = 1, .backing = backing});
-    auto proxy  = std::make_shared<PublishedPage>(*old);
+    auto old           = before->mapping.get(0);
+    auto logical       = std::make_shared<PageState>(*old->leaf);
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = 4096;
+    page_block->owner  = std::make_shared<int>(1);
+    logical->bases.push_back({.identity = 1, .page_block = page_block});
+    auto proxy  = std::make_shared<PageEntry>(*old);
     proxy->leaf = logical;
     ASSERT_TRUE(
         publish(publisher, {.record = record(2), .pages = {{.page_id = 0, .expected = old, .replacement = proxy}}})

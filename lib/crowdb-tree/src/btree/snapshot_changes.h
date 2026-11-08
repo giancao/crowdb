@@ -43,7 +43,7 @@ class SnapshotChangeEffects
     return SnapshotChangeEffects(left) | SnapshotChangeEffects(right);
 }
 
-// Compact logical identities never own a PublishedPage, source or value buffer.
+// Compact logical identities never own a PageEntry, source or value buffer.
 struct SnapshotPageIdentity
 {
     PageKeyRange range{};

@@ -2,14 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/local/local_backend_state.h"
 #include "btree/flush_operation.h"
 #include "btree/page_split_operation.h"
+#include "page_store/local/local_page_store_state.h"
 #include "snapshot/captured_plan.h"
 
 namespace crowdb::tree
 {
-class CheckpointBackend;
+class CheckpointPageStore;
 
 enum class CheckpointMode : uint8_t { Durable, Writeback };
 
@@ -77,27 +77,26 @@ class CheckpointOperation
     using PrepareHandoff = detail::InlineFunction<Status(std::shared_ptr<FlushOperation> *)>;
     // Called after handoff for a read/layout window, then after that window
     // drains for the observed materialization bound. A null plan means preflight.
-    using PrepareWork =
-        detail::InlineFunction<Status(const PublishedTreeState &, const CapturedWritePlan *, CheckpointWork *)>;
+    using PrepareWork = detail::InlineFunction<Status(const TreeRoot &, const CapturedWritePlan *, CheckpointWork *)>;
 
     // The sender owns one complete phase grant and writes the output before terminal.
     // The captured view, plan and output stay stable through that terminal.
-    using PrepareWorkAsync = detail::InlineFunction<detail::CallbackSender(
-        const PublishedTreeState &, const CapturedWritePlan *, CheckpointWork *)>;
+    using PrepareWorkAsync =
+        detail::InlineFunction<detail::CallbackSender(const TreeRoot &, const CapturedWritePlan *, CheckpointWork *)>;
     using PrepareCleanup   = detail::InlineFunction<void()>;
     using AfterFlush       = detail::InlineFunction<std::optional<CheckpointResult>()>;
-    using PrepareStructure = detail::InlineFunction<Status(std::shared_ptr<const PublishedTreeState>, uint64_t,
+    using PrepareStructure = detail::InlineFunction<Status(std::shared_ptr<const TreeRoot>, uint64_t,
                                                            std::shared_ptr<PageSplitOperation> *)>;
 
     static Status create(std::shared_ptr<const void> owner, PublicationCoordinator &publisher,
-                         std::shared_ptr<LocalBackendState> backend, std::shared_ptr<AsyncPageStore> operation_store,
-                         std::shared_ptr<detail::FlushRuntime>       runtime,
+                         std::shared_ptr<LocalPageStoreState> local_page_store,
+                         std::shared_ptr<AsyncPageStore> operation_store, std::shared_ptr<detail::FlushRuntime> runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, CheckpointOptions options,
                          PageLoadBudget budget, std::shared_ptr<AllocationBudget> finish_metadata,
                          std::shared_ptr<PageLoader> loader, PrepareHandoff prepare_handoff, PrepareWork prepare_work,
                          std::shared_ptr<CheckpointOperation> *out, PrepareCleanup prepare_cleanup = {},
                          PrepareWorkAsync prepare_work_async = {}, PrepareCleanup on_terminal = {},
-                         PrepareCleanup cancel_work = {}, std::shared_ptr<CheckpointBackend> chunk = {},
+                         PrepareCleanup cancel_work = {}, std::shared_ptr<CheckpointPageStore> chunk = {},
                          PrepareStructure prepare_structure = {}, AfterFlush flush_result = {});
     [[nodiscard]] static size_t           control_allocation_bound() noexcept;
     [[nodiscard]] static size_t           finish_allocation_bound() noexcept;

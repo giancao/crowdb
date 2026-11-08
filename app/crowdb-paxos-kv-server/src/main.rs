@@ -139,7 +139,7 @@ async fn main() {
 
     // CLI tunable overrides.
     config.wal_backend = args.wal_backend.clone();
-    config.crowtree_backend = args.kv_backend.clone();
+    config.crowtree_store_kind = args.kv_backend.clone();
     config.wal_skip_fsync = args.no_fsync;
     args.apply_config_overrides(&mut config)
         .unwrap_or_else(|e| panic!("invalid config after CLI overrides: {e}"));
@@ -567,7 +567,7 @@ async fn create_and_start_stores(
                 PxLocalReplicaRole::Follower,
                 &registry.config,
                 registry.wal_backend.clone(),
-                registry.crowtree_backend,
+                registry.crowtree_store_kind,
                 registry.tree_runtime.clone(),
             )
             .await
@@ -644,7 +644,7 @@ async fn graceful_shutdown(
         return;
     }
 
-    // Tree and backend completions have returned. Stop the native loggers.
+    // Tree and page store completions have returned. Stop the native loggers.
     crowdb_tree_ffi::ct_flush_logging();
     crowdb_tree_ffi::ct_shutdown_logging();
     crowdb_rpc_ffi::flush_logging();

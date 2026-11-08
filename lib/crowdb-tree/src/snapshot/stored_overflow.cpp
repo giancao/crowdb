@@ -8,14 +8,9 @@ Status capture_stored_overflow(const LeafFrameView &leaf, size_t max_references,
                                const std::shared_ptr<AllocationBudget>         &metadata,
                                std::shared_ptr<const StoredOverflowReferences> *out)
 {
-    const size_t count   = static_cast<size_t>(leaf.count()) + leaf.delta_count();
-    auto         cell_at = [&leaf](size_t index) {
-        return index < leaf.count() ? leaf.cell(static_cast<uint32_t>(index))
-                                    : leaf.delta_cell(static_cast<uint32_t>(index - leaf.count()));
-    };
     size_t references = 0;
-    for (size_t i = 0; i < count; ++i) {
-        const Slice    raw = cell_at(i);
+    for (uint32_t i = 0; i < leaf.count(); ++i) {
+        const Slice    raw = leaf.cell(i);
         const CellView cell(raw);
         if (!cell.valid()) {
             return Status::corruption();
@@ -33,8 +28,8 @@ Status capture_stored_overflow(const LeafFrameView &leaf, size_t max_references,
     auto result = detail::reserved_shared<StoredOverflowReferences>(
         metadata, detail::ReservationAllocator<StoredOverflowReference>(metadata));
     result->reserve(references);
-    for (size_t i = 0; i < count; ++i) {
-        const CellView cell(cell_at(i));
+    for (uint32_t i = 0; i < leaf.count(); ++i) {
+        const CellView cell(leaf.cell(i));
         if (cell.is_overflow()) {
             result->push_back({.head = cell.overflow_head(), .bytes = cell.overflow_len()});
         }

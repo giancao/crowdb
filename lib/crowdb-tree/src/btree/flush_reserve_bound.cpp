@@ -8,9 +8,9 @@
 
 namespace crowdb::tree::detail
 {
-Status flush_reserve_bounds(PublicationCoordinator &publisher, const PublishedTreeState &view,
-                            const SourceCatalog &sources, const FlushPreparationOptions &preparation,
-                            size_t control_bytes, const FlushBatchOptions &batch, FlushReserveBounds *out,
+Status flush_reserve_bounds(PublicationCoordinator &publisher, const TreeRoot &view, const SourceCatalog &sources,
+                            const FlushPreparationOptions &preparation, size_t control_bytes,
+                            const FlushBatchOptions &batch, FlushReserveBounds *out,
                             std::optional<WriteFootprint> stable_active, bool add_successor)
 {
     if (!preparation.runtime || !preparation.store || !sources.active_budget || out == nullptr || batch.loader ||

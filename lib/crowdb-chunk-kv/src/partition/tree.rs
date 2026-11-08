@@ -141,7 +141,7 @@ pub trait PartitionTree: Send + Sync {
     fn runtime_stats(&self) -> Option<crowdb_tree_ffi::Stats> {
         None
     }
-    /// Samples admission resources without page traversal or backend I/O.
+    /// Samples admission resources without page traversal or page store I/O.
     /// Non-runtime trees have no admission resource ledger.
     /// # Errors
     /// Returns a Tree diagnostic error when its resource ledger is unavailable.
@@ -179,12 +179,12 @@ pub trait PartitionTree: Send + Sync {
     fn approximate_split_key(&self) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
-    /// Samples the physical backing ledger, or `None` for another backend.
+    /// Samples the physical page block ledger, or `None` for another page store.
     ///
     /// # Errors
     ///
     /// Returns a storage error when native counters cannot be read.
-    fn backing_stats(&self) -> Result<Option<crowdb_tree_ffi::BackingStatsSnapshot>> {
+    fn page_block_stats(&self) -> Result<Option<crowdb_tree_ffi::PageBlockStatsSnapshot>> {
         Ok(None)
     }
 
@@ -214,10 +214,10 @@ pub trait PartitionTree: Send + Sync {
         Ok(())
     }
     /// Continue one finite physical tree-storage collection pass, without
-    /// advancing root or WAL retention. Non-staged backends have no work here.
+    /// advancing root or WAL retention. Page stores without staging have no work here.
     ///
     /// # Errors
-    /// Returns a catalog authority or backend maintenance failure.
+    /// Returns a catalog authority or page store maintenance failure.
     async fn collect_storage(&self) -> Result<bool> {
         Ok(false)
     }
@@ -654,7 +654,7 @@ impl PartitionTree for CrowdbPartitionTree {
         let tree = crowdb_tree_ffi::AsyncCrowdbtree::from_handle(std::sync::Arc::clone(&self.tree));
         let report = match tree.collect_chunk_storage().await {
             Ok(report) => report,
-            // Non-Chunk backends have no Chunk storage to collect.
+            // Page stores other than page chunk stores have no Chunk storage to collect.
             Err(crowdb_tree_ffi::CtError::NotSupported) => return Ok(false),
             Err(error) => return Err(map_tree_read_error(error)),
         };
@@ -725,17 +725,17 @@ impl PartitionTree for CrowdbPartitionTree {
             )
     }
 
-    fn backing_stats(&self) -> Result<Option<crowdb_tree_ffi::BackingStatsSnapshot>> {
+    fn page_block_stats(&self) -> Result<Option<crowdb_tree_ffi::PageBlockStatsSnapshot>> {
         self.config
             .as_ref()
             .and_then(|config| config.page_store.as_ref())
             .filter(|store| store.is_chunk_backed())
-            .map(|_| self.tree.backing_stats().map_err(map_tree_read_error))
+            .map(|_| self.tree.page_block_stats().map_err(map_tree_read_error))
             .transpose()
     }
 
     fn estimated_bytes(&self) -> Result<u64> {
-        self.backing_stats()
+        self.page_block_stats()
             .map(|snapshot| snapshot.map_or(0, |stats| stats.allocated_bytes))
     }
 

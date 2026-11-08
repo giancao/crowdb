@@ -6,7 +6,7 @@
 #include "btree/inline_function.h"
 #include "btree/logical_page.h"
 #include "btree/tree_work_counters.h"
-#include "crowdb-tree/backend/async_page_store.h"
+#include "crowdb-tree/page_store/async_page_store.h"
 
 #include <functional>
 
@@ -33,9 +33,9 @@ class PageLoader
     // The caller keeps the private base alive through completion and decode.
     // A loader that supplies an already decoded base may return no decode work.
     virtual void read_leaf(BaseRef &base, LeafReadComplete complete);
-    virtual void load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete);
+    virtual void load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete);
     virtual void load_overflow(uint64_t head, uint64_t length, ValueComplete complete);
-    virtual void load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
+    virtual void load_overflow(std::shared_ptr<const PageBlockRef> primary, uint64_t head, uint64_t length,
                                ValueComplete complete);
 };
 
@@ -77,9 +77,9 @@ struct PageLoadBudget
     }
 };
 
-// The resolver must be bound to the caller's captured backing/mapping view and
+// The resolver must be bound to the caller's captured page block/mapping view and
 // return independently owned extents. The loader never consults a mutable root.
-using OverflowBackingResolver = detail::InlineFunction<Status(uint64_t, std::shared_ptr<const BackingRef> *)>;
+using OverflowPageBlockResolver = detail::InlineFunction<Status(uint64_t, std::shared_ptr<const PageBlockRef> *)>;
 
 class AsyncStorePageLoader final : public PageLoader
 {
@@ -90,15 +90,15 @@ class AsyncStorePageLoader final : public PageLoader
     // or schedules a CPU decode. It never decodes on the transport thread.
     AsyncStorePageLoader(std::shared_ptr<AsyncPageStore> store, std::shared_ptr<detail::FlushRuntime> runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadLimits limits = {},
-                         OverflowBackingResolver overflow = {}, PageLoadBudget budget = {});
+                         OverflowPageBlockResolver overflow = {}, PageLoadBudget budget = {});
     void                  load_leaf(BaseRef base, LeafComplete complete) override;
     void                  read_leaf(BaseRef &base, LeafReadComplete complete) override;
     std::optional<Status> try_load_leaf_bases(PageState &leaf);
-    void                  load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete) override;
-    std::optional<Status> read_inner(std::shared_ptr<const BackingRef>      backing,
+    void                  load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete) override;
+    std::optional<Status> read_inner(std::shared_ptr<const PageBlockRef>    page_block,
                                      std::shared_ptr<const InnerPageState> *out, InnerReadComplete complete);
     void                  load_overflow(uint64_t head, uint64_t length, ValueComplete complete) override;
-    void                  load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
+    void                  load_overflow(std::shared_ptr<const PageBlockRef> primary, uint64_t head, uint64_t length,
                                         ValueComplete complete) override;
     // Serial routing can retain one path plus completed decoder steps that
     // have handed their result to a continuation but not yet returned.

@@ -29,7 +29,7 @@ void clip_bases(PageState &page)
     });
 }
 
-void count_runs(PublishedPage &page)
+void count_runs(PageEntry &page)
 {
     page.metrics.overlay_runs    = page.leaf->overlays.size();
     page.metrics.overlay_entries = 0;
@@ -41,7 +41,7 @@ void count_runs(PublishedPage &page)
     }
 }
 
-Status prepare_outputs(detail::MaintenanceBuilder &builder, const std::shared_ptr<const PublishedPage> &old,
+Status prepare_outputs(detail::MaintenanceBuilder &builder, const std::shared_ptr<const PageEntry> &old,
                        const detail::MaintenanceChildren &children, const detail::SplitWindowLayout &layout,
                        const PageState &source, PageVersion version)
 {
@@ -64,7 +64,7 @@ Status prepare_outputs(detail::MaintenanceBuilder &builder, const std::shared_pt
         }
         else {
             // This suffix was not traversed; its size/count remain unknown.
-            auto tail      = detail::reserved_shared<PublishedPage>(builder.options.metadata, *old);
+            auto tail      = detail::reserved_shared<PageEntry>(builder.options.metadata, *old);
             tail->revision = 1;
             tail->leaf     = std::move(logical);
             tail->primary.reset();
@@ -162,8 +162,8 @@ Status prepare_step(detail::MaintenanceBuilder &builder, uint64_t pid, Maintenan
 }
 } // namespace
 
-MaintenancePublicationResult build_split_step_publication(std::shared_ptr<const PublishedTreeState> view,
-                                                          uint64_t leaf_pid, std::shared_ptr<InstallRecord> record,
+MaintenancePublicationResult build_split_step_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
+                                                          std::shared_ptr<InstallRecord>       record,
                                                           const MaintenancePublicationOptions &options)
 {
     MaintenancePublicationResult result(options.metadata);
@@ -185,9 +185,8 @@ MaintenancePublicationResult build_split_step_publication(std::shared_ptr<const 
 
 namespace crowdb::tree::detail
 {
-Status build_flush_leaf_outputs(MaintenanceBuilder &builder, uint64_t pid,
-                                const std::shared_ptr<const PublishedPage> &old, const SplitWindowLayout &layout,
-                                bool keep_loaded_bases, MaintenanceChildren *children)
+Status build_flush_leaf_outputs(MaintenanceBuilder &builder, uint64_t pid, const std::shared_ptr<const PageEntry> &old,
+                                const SplitWindowLayout &layout, bool keep_loaded_bases, MaintenanceChildren *children)
 {
     if (!layout.source || layout.source->content_id != old->leaf->content_id ||
         layout.source->representation_id != old->leaf->representation_id ||
@@ -213,8 +212,8 @@ Status build_flush_leaf_outputs(MaintenanceBuilder &builder, uint64_t pid,
     return status.ok() ? prepare_outputs(builder, old, *children, layout, source, version) : status;
 }
 
-MaintenancePublicationResult build_split_layout_publication(std::shared_ptr<const PublishedTreeState> view,
-                                                            uint64_t leaf_pid, std::shared_ptr<InstallRecord> record,
+MaintenancePublicationResult build_split_layout_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
+                                                            std::shared_ptr<InstallRecord>       record,
                                                             const MaintenancePublicationOptions &options,
                                                             const SplitWindowLayout             &layout)
 {

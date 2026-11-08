@@ -79,7 +79,7 @@ pub struct Cli {
     #[arg(long, value_parser = ["default", "test", "e2e"])]
     pub election_profile: Option<String>,
 
-    /// Tree storage backend. `block` (default) uses aligned direct I/O in the
+    /// Tree page store. `block` (default) uses aligned direct I/O in the
     /// per-group data directory. `mem-block` uses an in-memory block device.
     #[arg(long, default_value = "block", value_parser = ["block", "mem-block"])]
     pub kv_backend: String,

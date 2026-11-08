@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_bound.h"
 #include "page_cache_residency_internal.h"
-#include "published_state.h"
+#include "tree_root.h"
 
 #include <algorithm>
 #include <cassert>

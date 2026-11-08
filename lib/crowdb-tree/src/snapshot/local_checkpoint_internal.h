@@ -19,6 +19,8 @@ struct LocalCheckpointOperation::State : std::enable_shared_from_this<State>
         DirectoryReserved,
         DirectoryWrite,
         DirectoryWritten,
+        SummariesReserved,
+        SummariesWritten,
         BeforeAnchor,
         AnchorWritten,
         Commit
@@ -60,6 +62,8 @@ struct LocalCheckpointOperation::State : std::enable_shared_from_this<State>
     void        finish_segments();
     Status      pack_frame(const DurableCapturedFrame &frame, uint64_t *word);
     void        directory_window();
+    void        prepare_summaries();
+    void        summaries_window();
     void        anchor();
     void        reserve(uint64_t length, Stage next);
     void        io(bool barrier, uint64_t address, size_t bytes, Stage next, bool anchor = false);
@@ -83,6 +87,8 @@ struct LocalCheckpointOperation::State : std::enable_shared_from_this<State>
     ProtectedExtent                              reserved;
     uint64_t                                     directory_address = 0;
     uint64_t                                     directory_offset  = 0;
+    uint32_t                                     summary_pid       = 0;
+    uint64_t                                     summary_offset    = 0;
     size_t                                       segment_bytes     = 0;
     uint32_t                                     iu                = 0;
     Stage                                        stage             = Stage::Begin;

@@ -57,9 +57,9 @@ class TestOverflowStore final : public AsyncPageStore
     }
 };
 
-using TestBackingMap = std::map<uint64_t, std::shared_ptr<const BackingRef>>;
+using TestPageBlockMap = std::map<uint64_t, std::shared_ptr<const PageBlockRef>>;
 
-inline void add_overflow(const std::shared_ptr<TestOverflowStore> &store, TestBackingMap *captured, uint64_t id,
+inline void add_overflow(const std::shared_ptr<TestOverflowStore> &store, TestPageBlockMap *captured, uint64_t id,
                          uint64_t next, Slice value)
 {
     const std::unique_ptr<OverflowBase> frame(OverflowBase::build(next, value.bytes(), value.size()));
@@ -68,16 +68,16 @@ inline void add_overflow(const std::shared_ptr<TestOverflowStore> &store, TestBa
     frame_restamp_crc(raw.data(), raw.size());
     auto &blob = store->blobs[id];
     encode_durable_page(raw.data(), raw.size(), compress_algo::kNone, &blob);
-    auto backing     = std::make_shared<BackingRef>();
-    backing->address = id;
-    backing->length  = blob.size();
-    backing->owner   = std::make_shared<int>(1);
-    captured->emplace(id, std::move(backing));
+    auto page_block     = std::make_shared<PageBlockRef>();
+    page_block->address = id;
+    page_block->length  = blob.size();
+    page_block->owner   = std::make_shared<int>(1);
+    captured->emplace(id, std::move(page_block));
 }
 
-inline OverflowBackingResolver resolver(std::shared_ptr<const TestBackingMap> captured)
+inline OverflowPageBlockResolver resolver(std::shared_ptr<const TestPageBlockMap> captured)
 {
-    return [captured = std::move(captured)](uint64_t id, std::shared_ptr<const BackingRef> *out) {
+    return [captured = std::move(captured)](uint64_t id, std::shared_ptr<const PageBlockRef> *out) {
         const auto at = captured->find(id);
         if (at == captured->end()) {
             return Status::not_found("captured overflow PID absent");

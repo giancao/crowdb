@@ -8,12 +8,12 @@ namespace crowdb::tree
 {
 namespace
 {
-struct TestRangeBackend
+struct TestRangePageStore
 {
-    std::shared_ptr<MemPageStore>   device = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore>   device = std::make_shared<PageMemStore>(4096);
     test_write::TestCheckpointStore store;
 
-    TestRangeBackend()
+    TestRangePageStore()
     {
         store.device = device;
     }
@@ -37,9 +37,9 @@ class RuntimeRangeRebuild : public testing::Test
     void SetUp() override
     {
         ASSERT_TRUE(TreeRuntime::create({}, &runtime).ok());
-        source_config               = source_backend->config(runtime);
-        source_config.backend_owner = source_backend;
-        auto status                 = Crowdbtree::open(source_config, &source);
+        source_config                  = source_backend->config(runtime);
+        source_config.page_store_owner = source_backend;
+        auto status                    = Crowdbtree::open(source_config, &source);
         ASSERT_TRUE(status.ok()) << status.to_string();
         Batch batch;
         for (size_t i = 0; i != 100; ++i) {
@@ -53,17 +53,17 @@ class RuntimeRangeRebuild : public testing::Test
 
     Config target_options(bool explicit_runtime = true)
     {
-        auto config          = target_backend->config(explicit_runtime ? runtime : nullptr);
-        config.backend_owner = target_backend;
+        auto config             = target_backend->config(explicit_runtime ? runtime : nullptr);
+        config.page_store_owner = target_backend;
         return config;
     }
 
-    std::shared_ptr<TreeRuntime>      runtime;
-    std::shared_ptr<TestRangeBackend> source_backend = std::make_shared<TestRangeBackend>();
-    std::shared_ptr<TestRangeBackend> target_backend = std::make_shared<TestRangeBackend>();
-    Config                            source_config;
-    std::unique_ptr<Crowdbtree>       source;
-    const std::string                 value = std::string(9000, 'r');
+    std::shared_ptr<TreeRuntime>        runtime;
+    std::shared_ptr<TestRangePageStore> source_backend = std::make_shared<TestRangePageStore>();
+    std::shared_ptr<TestRangePageStore> target_backend = std::make_shared<TestRangePageStore>();
+    Config                              source_config;
+    std::unique_ptr<Crowdbtree>         source;
+    const std::string                   value = std::string(9000, 'r');
 };
 
 TEST_F(RuntimeRangeRebuild, BoundedRebuildPersistsOnlyItsRangeAndRemainsIndependentlyMutable)

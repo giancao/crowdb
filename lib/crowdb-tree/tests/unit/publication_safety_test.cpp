@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -24,9 +24,9 @@ std::shared_ptr<InstallRecord> safety_record(uint64_t sequence)
     return std::make_shared<InstallRecord>(InstallToken{.generation = 1, .batch = 1, .range = sequence, .sequence = 0});
 }
 
-std::shared_ptr<PublishedPage> safety_page(uint64_t revision)
+std::shared_ptr<PageEntry> safety_page(uint64_t revision)
 {
-    auto page      = std::make_shared<PublishedPage>();
+    auto page      = std::make_shared<PageEntry>();
     page->revision = revision;
     page->leaf     = std::make_shared<PageState>();
     return page;
@@ -143,12 +143,12 @@ TEST(PublicationSafety, RemovingAnAbsentPageCannotAdvancePidAllocation)
 
 TEST(PublicationSafety, RemovingLastEntriesPrunesRadixPathsAndRetainsOldViews)
 {
-    MappingView                  initial;
+    MappingTable                 initial;
     auto                         a       = safety_page(1);
     auto                         b       = safety_page(2);
     auto                         c       = safety_page(3);
-    const uint64_t               distant = MappingView::kPageLimit - 1;
-    MappingView::CopyStats       copied;
+    const uint64_t               distant = MappingTable::kPageLimit - 1;
+    MappingTable::CopyStats      copied;
     std::vector<PageReplacement> add{
         {.page_id = 1,       .expected = {}, .replacement = a},
         {.page_id = 65,      .expected = {}, .replacement = b},
@@ -177,8 +177,8 @@ TEST(PublicationSafety, RemovingLastEntriesPrunesRadixPathsAndRetainsOldViews)
 
 TEST(PublicationSafety, CapturedRootOutlivesPublisherAndRetiredRootReclamation)
 {
-    std::shared_ptr<const PublishedTreeState> captured;
-    auto                                      old = safety_page(1);
+    std::shared_ptr<const TreeRoot> captured;
+    auto                            old = safety_page(1);
     {
         PublicationCoordinator coordinator;
         ASSERT_TRUE(safety_publish(coordinator, {.record       = safety_record(1),

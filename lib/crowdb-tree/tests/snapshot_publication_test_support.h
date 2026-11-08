@@ -3,7 +3,7 @@
 #pragma once
 
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -11,9 +11,9 @@
 
 namespace crowdb::tree::test_snapshot_publication
 {
-inline std::shared_ptr<PublishedPage> leaf(uint64_t content)
+inline std::shared_ptr<PageEntry> leaf(uint64_t content)
 {
-    auto page                = std::make_shared<PublishedPage>();
+    auto page                = std::make_shared<PageEntry>();
     auto state               = std::make_shared<PageState>();
     state->content_id        = content;
     state->route_generation  = 1;

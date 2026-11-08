@@ -12,7 +12,7 @@ namespace
 {
 uint64_t checkpoint_jobs(size_t entries)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       config;
     config.page_store                            = &store;
     config.frame_bytes                           = 65536;

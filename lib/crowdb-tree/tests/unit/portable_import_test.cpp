@@ -62,7 +62,7 @@ TEST(PortableImport, EmptyKeyAndTombstonePreserveSlotsAndEmptyImportPreservesCov
     ASSERT_TRUE(builder.append("removed", Slice(deleted)).ok());
     std::shared_ptr<ReadablePageCatalog> catalog;
     ASSERT_TRUE(builder.finish(&catalog).ok());
-    const auto         &raw = catalog->frames.at(catalog->root_page_id).backing->resident_frame;
+    const auto         &raw = catalog->frames.at(catalog->root_page_id).page_block->resident_frame;
     const LeafFrameView leaf(raw.data(), raw.size());
     ASSERT_EQ(leaf.count(), 2U);
     EXPECT_TRUE(leaf.key(0).empty());

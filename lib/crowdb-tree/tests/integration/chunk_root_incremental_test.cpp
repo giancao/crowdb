@@ -18,7 +18,7 @@ std::shared_ptr<ChunkRootCommit> finish(std::shared_ptr<ChunkRootCommit> operati
     return operation;
 }
 
-std::shared_ptr<ChunkRootCommit> next(test_chunk::TestRootBackend                       &test,
+std::shared_ptr<ChunkRootCommit> next(test_chunk::TestRootPageStore                     &test,
                                       const std::shared_ptr<const CapturedDurablePages> &pages,
                                       const std::shared_ptr<const CapturedDurablePages> &baseline,
                                       const std::shared_ptr<const ChunkRootManifest> &previous, uint64_t wal = 4096)
@@ -38,26 +38,26 @@ std::shared_ptr<ChunkRootCommit> next(test_chunk::TestRootBackend               
     return status.ok() ? finish(std::move(operation)) : nullptr;
 }
 
-std::shared_ptr<CapturedDurablePages> inherit(test_chunk::TestRootBackend &test, const CapturedDurablePages &source)
+std::shared_ptr<CapturedDurablePages> inherit(test_chunk::TestRootPageStore &test, const CapturedDurablePages &source)
 {
     auto pages = detail::reserved_shared<CapturedDurablePages>(test.credits.credits.reservation(),
                                                                test.credits.credits.reservation());
     pages->frames.inherit(source.frames);
-    pages->backend_id   = source.backend_id;
-    pages->generation   = source.generation;
-    pages->coverage     = source.coverage;
-    pages->root_page_id = source.root_page_id;
-    pages->next_page_id = source.next_page_id;
+    pages->page_store_id = source.page_store_id;
+    pages->generation    = source.generation;
+    pages->coverage      = source.coverage;
+    pages->root_page_id  = source.root_page_id;
+    pages->next_page_id  = source.next_page_id;
     return pages;
 }
 } // namespace
 
 TEST(ChunkRootIncremental, TwoUpdatesInOneSegmentWriteItOnceAndReuseOtherSegments)
 {
-    test_chunk::TestRootBackend test;
-    const auto                  original = test.pages(129);
-    const auto                  first    = finish(test.commit(original));
-    const auto                  prior    = first->manifest();
+    test_chunk::TestRootPageStore test;
+    const auto                    original = test.pages(129);
+    const auto                    first    = finish(test.commit(original));
+    const auto                    prior    = first->manifest();
     ASSERT_TRUE(prior);
     ASSERT_EQ(prior->indexes.size(), 3U);
     auto       pages        = inherit(test, *original);
@@ -81,10 +81,10 @@ TEST(ChunkRootIncremental, TwoUpdatesInOneSegmentWriteItOnceAndReuseOtherSegment
 
 TEST(ChunkRootIncremental, DeletingAWholeSegmentKeepsLaterPackIdentityAndBirthOrdinal)
 {
-    test_chunk::TestRootBackend test;
-    const auto                  original = test.pages(129);
-    const auto                  prior    = finish(test.commit(original))->manifest();
-    auto                        pages    = inherit(test, *original);
+    test_chunk::TestRootPageStore test;
+    const auto                    original = test.pages(129);
+    const auto                    prior    = finish(test.commit(original))->manifest();
+    auto                          pages    = inherit(test, *original);
     for (uint64_t pid = 0; pid < 64; ++pid) {
         pages->frames.erase(pid);
     }
@@ -99,37 +99,37 @@ TEST(ChunkRootIncremental, DeletingAWholeSegmentKeepsLaterPackIdentityAndBirthOr
     detail::ChunkStageId pin;
     detail::ChunkId      unused;
     ASSERT_TRUE(test.ids->next(PagePurpose::kPageIndex, &pin, &unused).ok());
-    std::shared_ptr<const ChunkPackBacking> pack;
+    std::shared_ptr<const ChunkPageBlock> pack;
     ASSERT_TRUE(
-        pin_chunk_backing(test.domain, root->indexes[0].pack, pin, test.credits.credits.reservation(), &pack).ok());
+        pin_chunk_page_block(test.domain, root->indexes[0].pack, pin, test.credits.credits.reservation(), &pack).ok());
     std::vector<uint8_t> bytes(pack->pack.length);
-    ASSERT_TRUE(read_chunk_backing(*pack, bytes, test.credits.credits.reservation()).ok());
+    ASSERT_TRUE(read_chunk_page_block(*pack, bytes, test.credits.credits.reservation()).ok());
     uint64_t count  = 0;
     size_t   offset = 0;
-    ASSERT_TRUE(decode_chunk_index_header(bytes, root->identity, 0, &count, &offset).ok());
+    ASSERT_TRUE(decode_chunk_mapping_segment_header(bytes, root->identity, 0, &count, &offset).ok());
     EXPECT_EQ(count, 64U);
-    ChunkIndexFrame frame;
-    ASSERT_TRUE(decode_chunk_index_frame(bytes, &offset, &frame).ok());
+    ChunkPageEntry frame;
+    ASSERT_TRUE(decode_chunk_page_entry(bytes, &offset, &frame).ok());
     EXPECT_EQ(frame.page_id, 64U);
     auto wrong = root->identity;
     wrong.tree++;
-    EXPECT_EQ(decode_chunk_index_header(bytes, wrong, 0, &count, &offset).code(), Code::kCorruption);
+    EXPECT_EQ(decode_chunk_mapping_segment_header(bytes, wrong, 0, &count, &offset).code(), Code::kCorruption);
     wrong                 = root->identity;
     wrong.root_generation = 6;
-    EXPECT_EQ(decode_chunk_index_header(bytes, wrong, 0, &count, &offset).code(), Code::kCorruption);
+    EXPECT_EQ(decode_chunk_mapping_segment_header(bytes, wrong, 0, &count, &offset).code(), Code::kCorruption);
 }
 
 TEST(ChunkRootIncremental, UnchangedRootIsZeroMutationButWalChangeCommitsWithReusedIndexes)
 {
-    test_chunk::TestRootBackend test;
-    const auto                  pages       = test.pages(65);
-    const auto                  prior       = finish(test.commit(pages))->manifest();
-    const auto                  writes      = test.transport->writes;
-    const auto                  allocations = test.transport->ids.size();
-    const auto                  begins      = test.catalog->begin_calls;
-    const auto                  prepares    = test.catalog->prepare_calls;
-    const auto                  acquires    = test.catalog->acquire_calls;
-    const auto                  unchanged   = next(test, pages, pages, prior);
+    test_chunk::TestRootPageStore test;
+    const auto                    pages       = test.pages(65);
+    const auto                    prior       = finish(test.commit(pages))->manifest();
+    const auto                    writes      = test.transport->writes;
+    const auto                    allocations = test.transport->ids.size();
+    const auto                    begins      = test.catalog->begin_calls;
+    const auto                    prepares    = test.catalog->prepare_calls;
+    const auto                    acquires    = test.catalog->acquire_calls;
+    const auto                    unchanged   = next(test, pages, pages, prior);
     ASSERT_TRUE(unchanged);
     EXPECT_EQ(unchanged->manifest(), prior);
     EXPECT_EQ(unchanged->identity().snapshot_sequence, prior->identity.snapshot_sequence);
@@ -153,14 +153,14 @@ TEST(ChunkRootIncremental, UnchangedRootIsZeroMutationButWalChangeCommitsWithReu
 
 TEST(ChunkRootIncremental, OwnerTakeoverCommitsANewRootWhileReusingOldEpochPacks)
 {
-    test_chunk::TestRootBackend test;
-    const auto                  pages  = test.pages(65);
-    const auto                  prior  = finish(test.commit(pages))->manifest();
-    const auto                  writes = test.transport->writes;
-    test.domain                        = std::make_shared<ChunkBackingDomain>(*test.domain);
-    test.domain->epoch                 = 2;
-    test.ids                           = std::make_shared<detail::ChunkRuntimeIds>(2, 23, uint64_t{46} << 32U);
-    const auto takeover                = next(test, pages, pages, prior);
+    test_chunk::TestRootPageStore test;
+    const auto                    pages  = test.pages(65);
+    const auto                    prior  = finish(test.commit(pages))->manifest();
+    const auto                    writes = test.transport->writes;
+    test.domain                          = std::make_shared<PageChunkStoreDomain>(*test.domain);
+    test.domain->epoch                   = 2;
+    test.ids                             = std::make_shared<detail::ChunkRuntimeIds>(2, 23, uint64_t{46} << 32U);
+    const auto takeover                  = next(test, pages, pages, prior);
     ASSERT_TRUE(takeover);
     EXPECT_EQ(takeover->identity().owner_epoch, 2U);
     EXPECT_EQ(takeover->identity().root_generation, 8U);

@@ -19,6 +19,7 @@ Status accumulate_leaf_stats(Slice key, const LogicalCell &cell, LeafLayoutStats
     }
     ++stats->kv_count;
     stats->kv_bytes += bytes + key.size();
+    stats->key_bytes += key.size();
     return Status::Ok();
 }
 } // namespace crowdb::tree

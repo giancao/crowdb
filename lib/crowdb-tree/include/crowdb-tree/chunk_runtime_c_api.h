@@ -24,8 +24,8 @@ struct ct_chunk_runtime_options
 // using the same host runtime. Catalog and transport require staged protection,
 // exact fixed-pack I/O and a bound host pin-release service. One catalog owner
 // represents one writer incarnation; reopening requires a fresh catalog claim.
-ct_status ct_chunk_runtime_page_store_open(ct_runtime *, const ct_chunk_runtime_options *, ct_root_catalog *,
-                                           ct_chunk_transport *, ct_page_store **);
+ct_status ct_page_chunk_store_open(ct_runtime *, const ct_chunk_runtime_options *, ct_root_catalog *,
+                                   ct_chunk_transport *, ct_page_store **);
 
 struct ct_chunk_collection_result_v1
 {

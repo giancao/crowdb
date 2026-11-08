@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #pragma once
-#include "backend/chunk/chunk_collector.h"
-#include "backend/chunk/chunk_pin_release.h"
-#include "common/test_chunk_stage_backend.h"
+#include "common/test_page_chunk_store_stage.h"
+#include "page_store/chunk/chunk_collector.h"
+#include "page_store/chunk/chunk_pin_release.h"
 
 namespace crowdb::tree::detail
 {

@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_backend_state.h"
 #include "btree/tree_core_access.h"
 #include "common/test_tree_core_chunk.h"
+#include "page_store/chunk/page_chunk_store_state.h"
 #include "snapshot/chunk_root_recovery.h"
 #include "snapshot/operation_wait.h"
 

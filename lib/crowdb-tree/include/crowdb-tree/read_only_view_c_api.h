@@ -7,7 +7,7 @@ extern "C" {
 struct ct_read_only_view;
 
 // Host-thread operations. Capture shares one immutable L1 mapping and exact
-// backing owners; it neither opens a writer nor materializes all entries.
+// page block owners; it neither opens a writer nor materializes all entries.
 // Keep the external runtime host alive until reads and close have drained.
 // expected_sequence=0 permits an in-memory fixed coverage without a checkpoint.
 ct_status ct_read_only_view_capture(ct_tree *tree, uint64_t expected_sequence, uint64_t expected_coverage,

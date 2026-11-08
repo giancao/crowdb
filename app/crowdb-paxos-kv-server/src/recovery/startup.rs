@@ -13,7 +13,7 @@ use crowdb_paxos_kv::cluster::group_election::LeaderElection;
 use crowdb_paxos_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowdb_paxos_kv::cluster::node_config::NodeConfigStore;
 use crowdb_paxos_kv::common::config::PaxosKvConfig;
-use crowdb_paxos_kv::kv::{CrowdbTreeBackend, CrowdbTreeConfig, CrowdbTreeEngine, KVEngine};
+use crowdb_paxos_kv::kv::{CrowdbTreeConfig, CrowdbTreeEngine, CrowdbTreeStoreKind, KVEngine};
 use crowdb_paxos_kv::wal::replay::replay_group;
 use crowdb_paxos_kv::wal::{IoBackend, WalEngine};
 
@@ -98,8 +98,8 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
 }
 
 /// Durable per-group crowdb-tree directory path: `{data_root}/store{store_id}/group{group_id}`.
-/// Both `TextPageStore` and `BlockPageStore` expect a directory path (`TextPageStore` creates a subdirectory
-/// `{path}/{store_id}-{group_id}/`, `BlockPageStore` creates `.blk-*` files
+/// Both `PageDiskTextStore` and `PageDiskStore` expect a directory path (`PageDiskTextStore` creates a subdirectory
+/// `{path}/{store_id}-{group_id}/`, `PageDiskStore` creates `.blk-*` files
 /// directly in `path`).
 #[must_use]
 pub fn store_crowdb_tree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
@@ -120,7 +120,7 @@ async fn open_crowdb_tree_engine(
     data_root: &Path,
     store_id: u64,
     group_id: u64,
-    backend: CrowdbTreeBackend,
+    page_store_kind: CrowdbTreeStoreKind,
     config: &PaxosKvConfig,
     runtime: Arc<crowdb_tree_ffi::TreeRuntime>,
 ) -> io::Result<Box<dyn KVEngine>> {
@@ -131,7 +131,7 @@ async fn open_crowdb_tree_engine(
     tokio::fs::create_dir_all(&path).await?;
     let mut opt = CrowdbTreeConfig {
         path: Some(path.to_string_lossy().into_owned()),
-        backend,
+        page_store_kind,
         store_id: u32::try_from(store_id).unwrap_or(0),
         group_id: u32::try_from(group_id).unwrap_or(0),
         log_dir: config.log_dir.clone(),
@@ -144,11 +144,11 @@ async fn open_crowdb_tree_engine(
     info!(
         store_id,
         group_id,
-        backend = ?backend,
+        page_store_kind = ?page_store_kind,
         path = %path.display(),
         "opening crowdb-tree engine"
     );
-    let opened = if backend == CrowdbTreeBackend::Block {
+    let opened = if page_store_kind == CrowdbTreeStoreKind::Disk {
         let mut directory = tokio::fs::read_dir(&path).await?;
         let mut names = Vec::new();
         while let Some(entry) = directory.next_entry().await? {
@@ -185,7 +185,7 @@ pub async fn create_group_with_wal(
     initial_role: PxLocalReplicaRole,
     config: &PaxosKvConfig,
     wal_backend: Arc<IoBackend>,
-    crowtree_backend: CrowdbTreeBackend,
+    crowtree_store_kind: CrowdbTreeStoreKind,
 ) -> io::Result<PxGroup> {
     config
         .validate_tree_config()
@@ -201,7 +201,7 @@ pub async fn create_group_with_wal(
         initial_role,
         config,
         wal_backend,
-        crowtree_backend,
+        crowtree_store_kind,
         runtime,
     )
     .await
@@ -209,7 +209,7 @@ pub async fn create_group_with_wal(
 
 /// Create or restore a group with its host-owned shared runtime.
 /// # Errors
-/// Returns an error for invalid limits, backend recovery failures or failed
+/// Returns an error for invalid limits, page store recovery failures or failed
 /// accepted-log application.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_group_with_wal_on_runtime(
@@ -219,12 +219,12 @@ pub async fn create_group_with_wal_on_runtime(
     initial_role: PxLocalReplicaRole,
     config: &PaxosKvConfig,
     wal_backend: Arc<IoBackend>,
-    crowtree_backend: CrowdbTreeBackend,
+    crowtree_store_kind: CrowdbTreeStoreKind,
     runtime: Arc<crowdb_tree_ffi::TreeRuntime>,
 ) -> io::Result<PxGroup> {
     if !matches!(
-        crowtree_backend,
-        CrowdbTreeBackend::Block | CrowdbTreeBackend::MemBlock
+        crowtree_store_kind,
+        CrowdbTreeStoreKind::Disk | CrowdbTreeStoreKind::Mem
     ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -260,7 +260,7 @@ pub async fn create_group_with_wal_on_runtime(
             &config.data_root,
             store_id,
             group_id,
-            crowtree_backend,
+            crowtree_store_kind,
             config,
             runtime,
         )

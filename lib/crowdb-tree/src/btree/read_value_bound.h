@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <algorithm>
 
@@ -12,7 +12,7 @@ namespace crowdb::tree
 // unknown live-key counts. Only encoded overflow cells need an assembly window.
 // Bases keep that window unless their exact stored dependencies prove that
 // they contain only inline cells, even when their decoded frames are absent.
-inline size_t overflow_value_bytes_bound(const PublishedTreeState &view, size_t maximum) noexcept
+inline size_t overflow_value_bytes_bound(const TreeRoot &view, size_t maximum) noexcept
 {
     if (!view.mapping.copy_bounds().may_have_overflow_values) {
         return 0;

@@ -6,7 +6,7 @@
 
 namespace crowdb::tree
 {
-Status validate_checkpoint(const PublicationTransaction &transaction, const PublishedTreeState &current,
+Status validate_checkpoint(const PublicationTransaction &transaction, const TreeRoot &current,
                            const CheckpointPendingMetrics &pending)
 {
     if (!transaction.checkpoint) {

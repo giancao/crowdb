@@ -38,7 +38,7 @@ Status PublishedRouteCursor::validate_index(const InnerPageState &index, const P
         return Status::corruption("captured index exceeds bounded routing layout");
     }
     for (const auto id : index.children) {
-        if (id >= MappingView::kPageLimit) {
+        if (id >= MappingTable::kPageLimit) {
             return Status::corruption("captured index has an invalid child PID");
         }
     }
@@ -77,8 +77,8 @@ Status PublishedRouteCursor::descend(uint64_t id, PageKeyRange bounds, std::opti
             inner = page->inner;
         }
         if (!inner) {
-            if (!page->inner_backing || !page->inner_backing->readable()) {
-                return Status::corruption("captured index has neither resident state nor owned backing");
+            if (!page->inner_page_block || !page->inner_page_block->readable()) {
+                return Status::corruption("captured index has neither resident state nor owned page_block");
             }
             pending_ =
                 Pending{.id     = id,

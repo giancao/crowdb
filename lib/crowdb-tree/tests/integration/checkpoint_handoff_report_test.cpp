@@ -11,10 +11,10 @@ using namespace test_write;
 
 struct TestHandoffCheckpoint
 {
-    TestCheckpoint                            local;
-    SourceAdmission                           sources{10};
-    std::shared_ptr<LocalBackendState>        backend = std::make_shared<LocalBackendState>();
-    std::shared_ptr<const PublishedTreeState> initial = [this] {
+    TestCheckpoint                       local;
+    SourceAdmission                      sources{10};
+    std::shared_ptr<LocalPageStoreState> backend = std::make_shared<LocalPageStoreState>();
+    std::shared_ptr<const TreeRoot>      initial = [this] {
         auto state = captured_leaf(page({
             {.key = "a", .value = "old"}
         }));

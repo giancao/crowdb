@@ -3,7 +3,7 @@
 #pragma once
 
 #include "btree/allocation_bound.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <algorithm>
 
@@ -11,7 +11,7 @@ namespace crowdb::tree
 {
 // A range source retains its current frame while result cells can keep earlier
 // frames alive. A point lookup needs only one physical frame per logical base.
-inline std::optional<size_t> snapshot_leaf_window(const PublishedTreeState &view, size_t entries) noexcept
+inline std::optional<size_t> snapshot_leaf_window(const TreeRoot &view, size_t entries) noexcept
 {
     const auto shape = view.mapping.copy_bounds();
     if (entries == 0) {

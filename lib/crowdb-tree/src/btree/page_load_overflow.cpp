@@ -1,10 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/allocation_bound.h"
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "btree/page_load_internal.h"
 #include "btree/page_load_lifetime.h"
-#include "btree/recovered_frame_identity.h"
 #include "crowdb-tree/maptable/compressor.h"
 
 #include <limits>
@@ -41,10 +40,10 @@ struct OverflowLoad : PageLoadProgress, std::enable_shared_from_this<OverflowLoa
     std::shared_ptr<detail::FlushRuntime>                                   runtime;
     std::shared_ptr<detail::FlushRuntime::Lane>                             lane;
     PageLoadLimits                                                          limits;
-    OverflowBackingResolver                                                 resolve;
+    OverflowPageBlockResolver                                               resolve;
     PageLoader::ValueComplete                                               complete;
     std::shared_ptr<OverflowLoad>                                           queued_owner;
-    std::shared_ptr<const BackingRef>                                       backing;
+    std::shared_ptr<const PageBlockRef>                                     page_block;
     std::shared_ptr<buffer>                                                 value;
     AlignedLoadBytes                                                        blob;
     std::set<uint64_t, std::less<>, detail::ReservationAllocator<uint64_t>> visited;
@@ -70,7 +69,7 @@ struct OverflowLoad : PageLoadProgress, std::enable_shared_from_this<OverflowLoa
     void read_next()
     {
         if (visited.contains(next)) {
-            finish(Status::corruption("overflow backing chain contains a cycle"));
+            finish(Status::corruption("overflow page_block chain contains a cycle"));
             return;
         }
         if (visited.size() >= limits.max_overflow_pages) {
@@ -78,21 +77,21 @@ struct OverflowLoad : PageLoadProgress, std::enable_shared_from_this<OverflowLoa
             return;
         }
         visited.insert(next);
-        backing.reset();
-        auto status = resolve(next, &backing);
+        page_block.reset();
+        auto status = resolve(next, &page_block);
         if (!status.ok()) {
             finish(std::move(status));
             return;
         }
-        if (!backing || !backing->readable() || backing->encoding != 0) {
-            finish(Status::corruption("overflow backing has no independent supported extent"));
+        if (!page_block || !page_block->readable() || page_block->encoding != 0) {
+            finish(Status::corruption("overflow page_block has no independent supported extent"));
             return;
         }
-        if (backing->length > limits.max_blob_bytes || !chunk_load_allowed(*backing, limits)) {
+        if (page_block->length > limits.max_blob_bytes || !chunk_load_allowed(*page_block, limits)) {
             finish(Status::resource_exhausted("overflow blob exceeds load budget"));
             return;
         }
-        if (backing->storage == BackingStorage::kResidentFrame) {
+        if (page_block->storage == PageBlockStorage::kResidentFrame) {
             queue_page_load(shared_from_this(), &OverflowLoad::decode);
         }
         else {
@@ -100,8 +99,8 @@ struct OverflowLoad : PageLoadProgress, std::enable_shared_from_this<OverflowLoa
                 finish(Status::invalid_argument("durable overflow read requires a backend"));
                 return;
             }
-            blob.resize(backing->length);
-            submit_page_read(shared_from_this(), backing, blob.data(), blob.size());
+            blob.resize(page_block->length);
+            submit_page_read(shared_from_this(), page_block, blob.data(), blob.size());
         }
     }
 
@@ -109,16 +108,15 @@ struct OverflowLoad : PageLoadProgress, std::enable_shared_from_this<OverflowLoa
     {
         LoadBytes                scratch{LoadBytes::allocator_type(metadata)};
         std::span<const uint8_t> frame;
-        auto       status      = decode_backing_frame({blob.data(), blob.size()}, *backing, limits, scratch, &frame);
+        auto       status = decode_page_block_frame({blob.data(), blob.size()}, *page_block, limits, scratch, &frame);
         const auto frame_bytes = static_cast<uint32_t>(frame.size());
         if (!status.ok()) {
             finish(std::move(status));
             return;
         }
         if (!frame_validate(frame.data(), frame_bytes) || frame_page_type(frame.data()) != page_type::kOverflowFrame ||
-            !recovered_frame_identity_matches(*backing, page_type::kOverflowFrame,
-                                              frame_u64(frame.data(), fh::kSelfpage_id), next)) {
-            finish(Status::corruption("loaded backing is not a valid overflow frame"));
+            frame_u64(frame.data(), fh::kSelfpage_id) != next) {
+            finish(Status::corruption("loaded page_block is not a valid overflow frame"));
             return;
         }
         const OverflowFrameView decoded(frame.data(), frame_bytes);
@@ -208,7 +206,7 @@ void AsyncStorePageLoader::load_overflow(uint64_t head, uint64_t length, ValueCo
     load_overflow({}, head, length, std::move(complete));
 }
 
-void AsyncStorePageLoader::load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
+void AsyncStorePageLoader::load_overflow(std::shared_ptr<const PageBlockRef> primary, uint64_t head, uint64_t length,
                                          ValueComplete complete)
 {
     const auto started_at = tree_metrics_now_ns();
@@ -216,21 +214,21 @@ void AsyncStorePageLoader::load_overflow(std::shared_ptr<const BackingRef> prima
         record_page_load_terminal(state_->budget, started_at, status);
         complete(std::move(status), {});
     };
-    OverflowBackingResolver resolver = state_->overflow;
+    OverflowPageBlockResolver resolver = state_->overflow;
     if (primary && primary->overflow) {
-        resolver = [primary](uint64_t pid, std::shared_ptr<const BackingRef> *out) {
+        resolver = [primary](uint64_t pid, std::shared_ptr<const PageBlockRef> *out) {
             const auto found = primary->overflow->pages.find(pid);
-            if (found == primary->overflow->pages.end() || !found->second.backing ||
-                found->second.backing->backend_id != primary->backend_id ||
-                found->second.backing->generation != primary->generation) {
-                return Status::corruption("overflow is outside the captured primary backing");
+            if (found == primary->overflow->pages.end() || !found->second.page_block ||
+                found->second.page_block->page_store_id != primary->page_store_id ||
+                found->second.page_block->generation != primary->generation) {
+                return Status::corruption("overflow is outside the captured primary page_block");
             }
-            *out = found->second.backing;
+            *out = found->second.page_block;
             return Status::Ok();
         };
     }
     if (!resolver) {
-        reject(Status::not_supported("captured overflow backing resolver is unavailable"));
+        reject(Status::not_supported("captured overflow page_block resolver is unavailable"));
         return;
     }
     if (!state_->runtime || !state_->lane || head == kInvalidPageId || length == 0) {

@@ -3,7 +3,7 @@
 #pragma once
 
 #include "btree/page_maintenance.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 namespace crowdb::tree
 {
@@ -48,28 +48,27 @@ struct MaintenancePublicationResult
 // Preparation only. All expected pages, ancestor route guards and the root
 // precondition publish as one transaction. A stale result must be replanned;
 // it cannot be split into child transactions. Cold data is returned as loads.
-MaintenancePublicationResult build_coalesce_publication(std::shared_ptr<const PublishedTreeState> view,
-                                                        uint64_t leaf_pid, std::shared_ptr<InstallRecord> record,
-                                                        uint64_t                             first_run_id,
+MaintenancePublicationResult build_coalesce_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
+                                                        std::shared_ptr<InstallRecord> record, uint64_t first_run_id,
                                                         const MaintenancePublicationOptions &options = {});
-MaintenancePublicationResult build_split_publication(std::shared_ptr<const PublishedTreeState> view, uint64_t leaf_pid,
+MaintenancePublicationResult build_split_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
                                                      std::shared_ptr<InstallRecord>       record,
                                                      const MaintenancePublicationOptions &options = {});
 
 // A bounded window becomes legal primary-page ranges in one transaction. An
 // unvisited suffix keeps unknown size and remains a split candidate. Planning
 // shares payloads and does not encode a frame or collect the complete large leaf.
-MaintenancePublicationResult build_split_step_publication(std::shared_ptr<const PublishedTreeState> view,
-                                                          uint64_t leaf_pid, std::shared_ptr<InstallRecord> record,
+MaintenancePublicationResult build_split_step_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
+                                                          std::shared_ptr<InstallRecord>       record,
                                                           const MaintenancePublicationOptions &options = {});
-MaintenancePublicationResult build_merge_publication(std::shared_ptr<const PublishedTreeState> view, uint64_t left_pid,
+MaintenancePublicationResult build_merge_publication(std::shared_ptr<const TreeRoot> view, uint64_t left_pid,
                                                      uint64_t right_pid, std::shared_ptr<InstallRecord> record,
                                                      uint64_t                             first_run_id,
                                                      const MaintenancePublicationOptions &options = {});
 
 // Repair underfull routing pages on one bounded leaf route. Adjacent siblings,
 // ancestor updates and root contraction are guarded by the same publication.
-MaintenancePublicationResult build_inner_merge_publication(std::shared_ptr<const PublishedTreeState> view,
-                                                           uint64_t leaf_pid, std::shared_ptr<InstallRecord> record,
+MaintenancePublicationResult build_inner_merge_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
+                                                           std::shared_ptr<InstallRecord>       record,
                                                            const MaintenancePublicationOptions &options = {});
 } // namespace crowdb::tree

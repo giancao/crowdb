@@ -10,10 +10,10 @@ using namespace test_read;
 
 namespace
 {
-std::shared_ptr<const PublishedTreeState> test_branch()
+std::shared_ptr<const TreeRoot> test_branch()
 {
-    auto result                                 = std::make_shared<PublishedTreeState>();
-    auto root                                   = std::make_shared<PublishedPage>();
+    auto result                                 = std::make_shared<TreeRoot>();
+    auto root                                   = std::make_shared<PageEntry>();
     auto index                                  = std::make_shared<InnerPageState>();
     index->separators                           = {"m", "t"};
     index->children                             = {1, 2, 3};
@@ -46,7 +46,7 @@ std::shared_ptr<const PublishedTreeState> test_branch()
          {.page_id = 3, .expected = {}, .replacement = right},
          }
     };
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     result->mapping      = result->mapping.replace(changes, copied);
     result->root_page_id = 0;
     result->sources      = std::make_shared<PublishedSources>();

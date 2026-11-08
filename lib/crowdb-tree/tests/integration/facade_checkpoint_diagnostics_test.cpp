@@ -11,7 +11,7 @@ namespace
 {
 struct TestFacadeCheckpoint
 {
-    std::shared_ptr<MemPageStore>   device = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore>   device = std::make_shared<PageMemStore>(4096);
     test_write::TestCheckpointStore store;
     Config                          config;
     std::unique_ptr<Crowdbtree>     tree;

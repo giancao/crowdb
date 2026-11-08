@@ -8,7 +8,7 @@ namespace crowdb::tree::test_chunk
 {
 TEST(ChunkFixedPackAsync, MirrorFailureJoinsEveryAcceptedWriteBeforeTerminatingAndKeepsTheStage)
 {
-    TestRootBackend                                                backend;
+    TestRootPageStore                                              backend;
     std::array<std::optional<detail::ChunkTransportCompletion>, 2> pending;
     backend.transport->after_write_async = [&](uint32_t mirror, auto completion) {
         pending[mirror] = std::move(completion);

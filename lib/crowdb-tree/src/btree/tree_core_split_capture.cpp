@@ -25,7 +25,7 @@ Status prepare_split_capture(TreeCore &core, FlushController &controller, FlushP
     if (!status.ok()) {
         return status;
     }
-    preparation.store = ticket->backend(core.async_backend());
+    preparation.store = ticket->page_store(core.async_page_store());
     for (;;) {
         const auto observed = progress.sequence();
         bool       blocked  = false;

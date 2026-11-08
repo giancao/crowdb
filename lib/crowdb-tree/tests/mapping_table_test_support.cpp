@@ -5,7 +5,7 @@
 
 #include "mapping_table_test_support.h"
 
-#include "crowdb-tree/backend/page_store.h" // round_up_to_iu
+#include "crowdb-tree/page_store/page_store.h" // round_up_to_iu
 
 #include <cassert>
 
@@ -100,7 +100,7 @@ void TestMappingTable::store(uint64_t page_id, PageBase *page)
         return;
     }
     // store(page_id, nullptr) clears a slot, same as store_word/clear -- keep
-    // segment recycling consistent across every path that empties a slot.
+    // mapping segment recycling consistent across every path that empties a slot.
     uint32_t prev_live = seg->live_count.fetch_sub(1, std::memory_order_acq_rel);
     if (prev_live == 1) {
         recycle_segment_if_empty(seg_idx, seg);
@@ -128,7 +128,7 @@ void TestMappingTable::store_word(uint64_t page_id, uint64_t word)
         seg->live_count.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // Transitioning to not-live. If this was the segment's last live slot,
+    // Transitioning to not-live. If this was the mapping segment's last live slot,
     // it becomes recyclable.
     uint32_t prev_live = seg->live_count.fetch_sub(1, std::memory_order_acq_rel);
     if (prev_live == 1) {
@@ -246,7 +246,7 @@ void TestMappingTable::install_recovered_segment(uint64_t seg_idx, uint64_t gene
     seg->image_addr = image_addr;
     seg->image_len  = image_len;
     seg->image_crc  = image_crc;
-    // A just-recovered segment matches its durable image exactly -- not dirty.
+    // A just-recovered mapping segment matches its durable image exactly -- not dirty.
     seg->write_seq.store(0, std::memory_order_relaxed);
     seg->persisted_seq.store(0, std::memory_order_relaxed);
 }

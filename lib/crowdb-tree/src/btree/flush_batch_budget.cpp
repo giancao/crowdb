@@ -8,7 +8,7 @@
 
 namespace crowdb::tree
 {
-std::optional<size_t> FlushBatch::metadata_reserve_bound(const MappingView &mapping, size_t sources, size_t entries,
+std::optional<size_t> FlushBatch::metadata_reserve_bound(const MappingTable &mapping, size_t sources, size_t entries,
                                                          size_t key_bytes, size_t workers,
                                                          const FlushBatchOptions &options, bool track_residency,
                                                          size_t max_inner_children)
@@ -46,7 +46,7 @@ std::optional<size_t> FlushBatch::metadata_reserve_bound(const MappingView &mapp
     // A cold index has no resident child arrays in the captured mapping.
     // Loading it still creates the same fork and ordered-join storage.
     const auto decoded_inner =
-        AllocationBound(shared_allocation_bound<PublishedPage>() + InnerPageState::allocation_bound())
+        AllocationBound(shared_allocation_bound<PageEntry>() + InnerPageState::allocation_bound())
             .add_product(max_inner_children, 3 * (sizeof(uint64_t) + sizeof(OwnedKey)))
             .value();
     if (!decoded_inner) {
@@ -75,7 +75,7 @@ std::optional<size_t> FlushBatch::metadata_reserve_bound(const MappingView &mapp
     // Every accepted range can leave a retired COW root alive. Count all paths,
     // request/record storage, checkpoint membership nodes and the final join
     // proof even when no explicit reclamation runs during this batch.
-    bytes.add_product(*installs, MappingView::path_copy_bound());
+    bytes.add_product(*installs, MappingTable::path_copy_bound());
     bytes.add_product(*installs, PublicationCoordinator::snapshot_change_reserve_bytes());
     bytes.add_product(*installs, PublicationCoordinator::empty_commit_reserve_bytes());
     bytes.add_product(*installs, MergePairMetrics::invalidation_bytes(2));

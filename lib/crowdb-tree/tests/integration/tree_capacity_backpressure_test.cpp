@@ -25,10 +25,10 @@ struct TestCapacityTree
         TreeRuntimeOptions host;
         host.workers = 1;
         EXPECT_TRUE(TreeRuntime::create(host, &config.runtime).ok());
-        store->device                               = std::make_shared<MemPageStore>(4096);
+        store->device                               = std::make_shared<PageMemStore>(4096);
         config.page_store                           = store->device.get();
         config.async_page_store                     = store.get();
-        config.backend_owner                        = store;
+        config.page_store_owner                     = store;
         config.frame_bytes                          = 4096;
         config.max_inline_value                     = 64;
         config.leaf_split_bytes                     = 3000;
@@ -274,9 +274,9 @@ TEST(TreeCapacityBackpressure, PersistentFlushPublishesAllChangesFromEarlierOrdi
                                      .reclaim_bytes    = 512ULL << 20,
                                      .writer_bytes     = 2048ULL << 20,
                                      .gap_repair_bytes = 256ULL << 20};
-    auto store                    = std::make_shared<MemPageStore>(4096);
+    auto store                    = std::make_shared<PageMemStore>(4096);
     config.page_store             = store.get();
-    config.backend_owner          = store;
+    config.page_store_owner       = store;
     config.frame_bytes            = 4096;
     config.leaf_split_bytes       = 3000;
     config.max_inline_value       = 512;

@@ -187,11 +187,11 @@ TEST(PublishedSnapshotEntriesRange, AsyncWindowKeepsTheFixedViewUntilALateReadCo
 {
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
-    auto store           = std::make_shared<test_write::TestCheckpointStore>();
-    store->device        = std::make_shared<MemPageStore>(4096);
-    config.page_store    = store->device.get();
-    config.backend_owner = store;
-    config.frame_bytes   = 4096;
+    auto store              = std::make_shared<test_write::TestCheckpointStore>();
+    store->device           = std::make_shared<PageMemStore>(4096);
+    config.page_store       = store->device.get();
+    config.page_store_owner = store;
+    config.frame_bytes      = 4096;
     std::unique_ptr<Crowdbtree> tree;
     ASSERT_TRUE(Crowdbtree::open(config, &tree).ok());
     ASSERT_TRUE(tree->apply(1, Batch{.ops = {{.key = "b", .kind = OpKind::kDelete, .value = ""}}}).ok());

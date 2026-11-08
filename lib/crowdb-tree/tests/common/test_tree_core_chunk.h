@@ -2,19 +2,19 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/chunk/chunk_backend_state.h"
 #include "btree/tree_core_access.h"
 #include "common/test_chunk_root.h"
+#include "page_store/chunk/page_chunk_store_state.h"
 
 namespace crowdb::tree::test_chunk
 {
 struct TestCoreChunk
 {
-    test_chunk::TestRootBackend                    backend;
-    Config                                         config;
-    std::shared_ptr<detail::ChunkRuntimePageStore> store;
-    std::unique_ptr<Crowdbtree>                    tree;
-    bool                                           attempted_open = false;
+    test_chunk::TestRootPageStore           backend;
+    Config                                  config;
+    std::shared_ptr<detail::PageChunkStore> store;
+    std::unique_ptr<Crowdbtree>             tree;
+    bool                                    attempted_open = false;
 
     explicit TestCoreChunk(size_t pin_capacity = 256) : backend(pin_capacity)
     {
@@ -33,14 +33,14 @@ struct TestCoreChunk
     ~TestCoreChunk()
     {
         tree.reset();
-        config.backend_owner.reset();
+        config.page_store_owner.reset();
         store.reset();
         config.runtime.reset();
     }
 
     void configure_store(uint64_t generation)
     {
-        store = std::make_shared<detail::ChunkRuntimePageStore>(
+        store = std::make_shared<detail::PageChunkStore>(
             detail::ChunkRuntimeOptions{.tree            = 19,
                                         .owner_epoch     = 1,
                                         .open_generation = generation,
@@ -48,8 +48,8 @@ struct TestCoreChunk
                                         .mirrors         = 2,
                                         .max_chunk_bytes = 256 * 1024 * 1024},
             backend.catalog, backend.transport, backend.credits.credits.reservation());
-        config.page_store    = store.get();
-        config.backend_owner = store;
+        config.page_store       = store.get();
+        config.page_store_owner = store;
     }
 
     Status open(uint64_t generation = 0)

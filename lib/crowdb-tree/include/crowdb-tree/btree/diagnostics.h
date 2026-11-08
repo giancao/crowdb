@@ -23,6 +23,7 @@ struct TreeLogicalStats
     uint64_t page_size_max_observed_bytes = 0;
     uint64_t kv_known_count               = 0;
     uint64_t kv_known_bytes               = 0;
+    uint64_t key_known_bytes              = 0;
     uint64_t kv_unknown_pages             = 0;
     uint64_t consolidate_candidate_pages  = 0;
     uint64_t split_candidate_pages        = 0;
@@ -61,16 +62,16 @@ struct TreeResourceStats
     uint64_t read_inflight_bytes        = 0;
     uint64_t write_inflight_bytes       = 0;
     uint64_t materialize_inflight_bytes = 0;
-    // Backing gauges may project a shared backend ledger. Use backing_stats()
+    // PageBlock gauges may project a shared page store ledger. Use page_block_stats()
     // scope_id to deduplicate those views; RAM and admission remain per Tree.
-    uint64_t allocated_backing_bytes = 0;
-    uint64_t maintenance_queued      = 0;
-    uint64_t maintenance_inflight    = 0;
+    uint64_t allocated_page_block_bytes = 0;
+    uint64_t maintenance_queued         = 0;
+    uint64_t maintenance_inflight       = 0;
 };
 
-// Backend-ledger projection. Equal nonzero scope IDs name the same physical
+// Page store-ledger projection. Equal nonzero scope IDs name the same physical
 // accounting domain; observers must deduplicate scopes rather than sum views.
-struct BackingStatsSnapshot
+struct PageBlockStatsSnapshot
 {
     uint64_t scope_id        = 0;
     uint64_t allocated_bytes = 0;
@@ -131,7 +132,7 @@ struct EngineStats
     bool     io_failed                 = false; // latched media fault (see io_failed())
     uint64_t snapshot_pages_written    = 0;     // frames physically written by the last successful durable checkpoint
     uint64_t snapshot_pages_total      = 0;     // cumulative pages written across all snapshots
-    uint64_t snapshot_segments_written = 0;     // deprecated dirty-segment counter; always zero
+    uint64_t snapshot_segments_written = 0;     // deprecated dirty mapping segment counter; always zero
     // Runtime decoded-page cache hits/misses/evictions and resident pages.
     // Dirty counts use the published logical pages; used aliases resident.
     // writebacks and num_frames describe the removed arena and return zero.

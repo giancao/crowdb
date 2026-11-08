@@ -8,19 +8,19 @@ namespace crowdb::tree
 namespace
 {
 template <typename Bytes>
-Status decode_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
+Status decode_frame(std::span<const uint8_t> blob, const PageBlockRef &page_block, const PageLoadLimits &limits,
                     Bytes &scratch, std::span<const uint8_t> *out)
 {
-    if (!backing.readable()) {
-        return Status::corruption("backing has neither an extent nor an owned resident frame");
+    if (!page_block.readable()) {
+        return Status::corruption("page_block has neither an extent nor an owned resident frame");
     }
-    const bool   resident = backing.storage == BackingStorage::kResidentFrame;
-    const size_t length   = resident ? backing.resident_frame.size() : durable_blob_raw_len(blob.data(), blob.size());
+    const bool   resident = page_block.storage == PageBlockStorage::kResidentFrame;
+    const size_t length = resident ? page_block.resident_frame.size() : durable_blob_raw_len(blob.data(), blob.size());
     if (length <= kFrameHeaderSize + kFrameTrailerSize || length > limits.max_frame_bytes || length > UINT32_MAX) {
-        return Status::corruption("backing frame exceeds declared bounds");
+        return Status::corruption("page_block frame exceeds declared bounds");
     }
     if (resident) {
-        *out = backing.resident_frame;
+        *out = page_block.resident_frame;
         return Status::Ok();
     }
     if (blob.front() == static_cast<uint8_t>(compress_algo::kNone)) {
@@ -36,15 +36,15 @@ Status decode_frame(std::span<const uint8_t> blob, const BackingRef &backing, co
 }
 } // namespace
 
-Status decode_backing_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
-                            LoadBytes &scratch, std::span<const uint8_t> *out)
+Status decode_page_block_frame(std::span<const uint8_t> blob, const PageBlockRef &page_block,
+                               const PageLoadLimits &limits, LoadBytes &scratch, std::span<const uint8_t> *out)
 {
-    return decode_frame(blob, backing, limits, scratch, out);
+    return decode_frame(blob, page_block, limits, scratch, out);
 }
 
-Status decode_backing_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
-                            FrameStore::Bytes &scratch, std::span<const uint8_t> *out)
+Status decode_page_block_frame(std::span<const uint8_t> blob, const PageBlockRef &page_block,
+                               const PageLoadLimits &limits, FrameStore::Bytes &scratch, std::span<const uint8_t> *out)
 {
-    return decode_frame(blob, backing, limits, scratch, out);
+    return decode_frame(blob, page_block, limits, scratch, out);
 }
 } // namespace crowdb::tree

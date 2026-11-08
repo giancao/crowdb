@@ -140,14 +140,14 @@ TEST(MaintenanceBudget, CursorScratchUsesCurrentCreditAndSealedCreditCannotAlloc
     EXPECT_THROW((LogicalPageCursor(page, {}, UINT64_MAX, 8, false, budget.reservation)), std::bad_alloc);
 }
 
-TEST(MaintenanceBudget, StructureTransactionAndPublishedPagesRetainCreditUntilLastView)
+TEST(MaintenanceBudget, StructureTransactionAndPageEntriesRetainCreditUntilLastView)
 {
-    ReclaimBudget                             budget;
-    const auto                                baseline = budget.allocated();
-    std::shared_ptr<const PublishedTreeState> retained;
+    ReclaimBudget                   budget;
+    const auto                      baseline = budget.allocated();
+    std::shared_ptr<const TreeRoot> retained;
     {
         PublicationCoordinator publisher;
-        auto                   page = std::make_shared<PublishedPage>();
+        auto                   page = std::make_shared<PageEntry>();
         page->leaf                  = input_page();
         auto seed                   = std::make_shared<PublicationRequest>();
         seed->transaction           = {.record       = std::make_shared<InstallRecord>(InstallToken{}),
@@ -192,11 +192,11 @@ TEST(MaintenanceBudget, EncoderRunsAfterSealAndFrameDependencyKeepsItsCharge)
 {
     ReclaimBudget budget;
     const auto    baseline = budget.allocated();
-    auto          view     = std::make_shared<PublishedTreeState>();
-    auto          page     = std::make_shared<PublishedPage>();
+    auto          view     = std::make_shared<TreeRoot>();
+    auto          page     = std::make_shared<PageEntry>();
     page->leaf             = input_page();
     const std::array<PageReplacement, 1> changes{{{.page_id = 0, .expected = {}, .replacement = page}}};
-    MappingView::CopyStats               copied;
+    MappingTable::CopyStats              copied;
     view->mapping      = view->mapping.replace(changes, copied);
     view->root_page_id = 0;
     view->next_page_id = 1;

@@ -47,6 +47,7 @@ struct MetricsWithRpcTransport {
     #[serde(flatten)]
     metrics: MetricsResponse,
     rpc_transport: std::collections::BTreeMap<u64, serde_json::Value>,
+    client_rpc_transport: std::collections::BTreeMap<u64, serde_json::Value>,
 }
 
 /// `GET /metrics` — structured snapshot of all registry metrics matching
@@ -85,17 +86,25 @@ pub(super) async fn metrics(
         metrics,
     };
     let body = if q.rpc_transport {
-        let rpc_transport = state
-            .stores_snapshot()
+        let stores = state.stores_snapshot();
+        let rpc_transport = stores
             .iter()
             .filter_map(|(&id, store)| {
                 let status = store.rpc_transport_status()?;
                 serde_json::from_slice(&status).ok().map(|status| (id, status))
             })
             .collect();
+        let client_rpc_transport = stores
+            .iter()
+            .filter_map(|(&id, store)| {
+                let status = store.client_rpc_transport_status()?;
+                serde_json::from_slice(&status).ok().map(|status| (id, status))
+            })
+            .collect();
         serde_json::to_string_pretty(&MetricsWithRpcTransport {
             metrics: snapshot,
             rpc_transport,
+            client_rpc_transport,
         })
     } else {
         serde_json::to_string_pretty(&snapshot)

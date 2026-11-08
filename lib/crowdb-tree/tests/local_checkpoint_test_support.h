@@ -3,8 +3,8 @@
 #pragma once
 
 #include "captured_write_test_support.h"
-#include "crowdb-tree/backend/block_page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
 #include "snapshot/local_checkpoint.h"
 
 #include <atomic>
@@ -37,7 +37,7 @@ class TestCheckpointStore final : public AsyncPageStore
         if (defer_read && defer_read(at, out, size, callback)) {
             return 0;
         }
-        auto *block = dynamic_cast<BlockPageStore *>(device.get());
+        auto *block = dynamic_cast<PageDiskStore *>(device.get());
         callback.complete(block != nullptr ? block->read_at(at, static_cast<uint8_t *>(out), size, callback.allocations)
                                            : device->read_at(at, static_cast<uint8_t *>(out), size));
         return 0;
@@ -127,7 +127,7 @@ class TestCheckpointStore final : public AsyncPageStore
     {
         auto status = Status::io_error();
         if (!work.fail) {
-            auto *block = dynamic_cast<BlockPageStore *>(device.get());
+            auto *block = dynamic_cast<PageDiskStore *>(device.get());
             if (block != nullptr) {
                 status = work.barrier ? block->sync(callback.allocations)
                                       : block->write_at(work.address, work.input, work.bytes, callback.allocations);

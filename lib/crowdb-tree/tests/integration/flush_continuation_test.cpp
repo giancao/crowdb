@@ -11,7 +11,7 @@ namespace
 {
 void initialize(PublicationCoordinator &publisher, const std::vector<std::shared_ptr<MemTable>> &tables)
 {
-    auto leaf    = std::make_shared<PublishedPage>();
+    auto leaf    = std::make_shared<PageEntry>();
     leaf->leaf   = std::make_shared<PageState>();
     auto sources = std::make_shared<PublishedSources>();
     sources->tables.assign(tables.begin(), tables.end());

@@ -44,14 +44,14 @@ struct CapturedWriteResult
 // Materializes a captured view into protected, independently readable page
 // references. It does not write a directory/anchor or advance durable coverage.
 // Existing overflow cells retain verified dependencies through their primary
-// backing. The inherited mapping supports older callers without typed backing
+// page block. The inherited mapping supports older callers without typed page block
 // descriptors; missing or mismatched dependencies fail explicitly.
 class CapturedWriteOperation
 {
     struct State;
 
   public:
-    static Status create(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> loader,
+    static Status create(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> loader,
                          std::shared_ptr<AsyncPageStore> store, std::shared_ptr<detail::FlushRuntime> runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, CapturedWriteLimits limits,
                          PageLoadBudget budget, CapturedFrameStream::ReserveOverflow reserve_overflow,

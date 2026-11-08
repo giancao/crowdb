@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "captured_write_test_support.h"
 
 namespace crowdb::tree
@@ -213,7 +213,7 @@ TEST(CapturedWrite, ReusesOnlyTheCapturedOverflowChainAndReleasesTheOldPrimary)
          .generation = 1,
          .max_slot   = 10,
          .resident   = std::shared_ptr<const LeafBase>(LeafBase::from_frame_copy(raw.data(), raw.size())),
-         .backing    = old->frames.at(0).backing});
+         .page_block = old->frames.at(0).page_block});
     auto next          = captured_leaf(leaf);
     next->next_page_id = old->next_page_id;
     test.operation.reset();
@@ -227,11 +227,11 @@ TEST(CapturedWrite, ReusesOnlyTheCapturedOverflowChainAndReleasesTheOldPrimary)
     EXPECT_EQ(result.reused_frames, old->frames.size() - 1);
     for (const auto &[pid, frame] : old->frames) {
         if (pid != 0) {
-            const auto &adopted = result.pages->frames.at(pid).backing;
-            EXPECT_NE(frame.backing, adopted);
-            EXPECT_EQ(frame.backing->physical_owner, adopted->physical_owner);
-            EXPECT_EQ(frame.backing->address, adopted->address);
-            EXPECT_EQ(frame.backing->length, adopted->length);
+            const auto &adopted = result.pages->frames.at(pid).page_block;
+            EXPECT_NE(frame.page_block, adopted);
+            EXPECT_EQ(frame.page_block->physical_owner, adopted->physical_owner);
+            EXPECT_EQ(frame.page_block->address, adopted->address);
+            EXPECT_EQ(frame.page_block->length, adopted->length);
         }
     }
     const auto expected = result.pages->frames.size();
@@ -274,18 +274,18 @@ TEST(CapturedWrite, MissingOrCyclicInheritedOverflowCannotBecomeSuccessfulOutput
             SCOPED_TRACE(::testing::Message() << "typed=" << typed << " cycle=" << cycle);
             auto bad = std::make_shared<CapturedDurablePages>(nullptr);
             bad->frames.insert(old->frames.begin(), old->frames.end());
-            auto backing = std::make_shared<BackingRef>(*old->frames.at(0).backing);
-            backing->overflow.reset();
+            auto page_block = std::make_shared<PageBlockRef>(*old->frames.at(0).page_block);
+            page_block->overflow.reset();
             if (typed) {
-                auto dependencies   = std::make_shared<OverflowBackingSet>(nullptr);
-                dependencies->pages = old->frames.at(0).backing->overflow->pages;
+                auto dependencies   = std::make_shared<OverflowPageBlockSet>(nullptr);
+                dependencies->pages = old->frames.at(0).page_block->overflow->pages;
                 if (cycle) {
                     dependencies->pages.at(cell.overflow_head()).next = cell.overflow_head();
                 }
                 else {
                     dependencies->pages.erase(cell.overflow_head());
                 }
-                backing->overflow = std::move(dependencies);
+                page_block->overflow = std::move(dependencies);
             }
             else if (cycle) {
                 bad->frames.at(cell.overflow_head()).next_overflow = cell.overflow_head();
@@ -295,10 +295,10 @@ TEST(CapturedWrite, MissingOrCyclicInheritedOverflowCannotBecomeSuccessfulOutput
             }
             auto leaf = std::make_shared<PageState>();
             leaf->bases.push_back(
-                {.identity = 1,
-                 .max_slot = 10,
-                 .resident = std::shared_ptr<const LeafBase>(LeafBase::from_frame_copy(raw.data(), raw.size())),
-                 .backing  = std::move(backing)});
+                {.identity   = 1,
+                 .max_slot   = 10,
+                 .resident   = std::shared_ptr<const LeafBase>(LeafBase::from_frame_copy(raw.data(), raw.size())),
+                 .page_block = std::move(page_block)});
             auto next          = captured_leaf(leaf);
             next->next_page_id = old->next_page_id;
             test.operation.reset();
@@ -317,7 +317,7 @@ TEST(CapturedWrite, MissingOrCyclicInheritedOverflowCannotBecomeSuccessfulOutput
 TEST(CapturedWrite, EmptyCaptureCompletesWithoutReservingAnExtent)
 {
     TestCapturedWrite test;
-    ASSERT_TRUE(test.prepare(std::make_shared<PublishedTreeState>()).ok());
+    ASSERT_TRUE(test.prepare(std::make_shared<TreeRoot>()).ok());
     Completion done;
     test.run(&done);
     ASSERT_EQ(done.values.load(), 1U);

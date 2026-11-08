@@ -101,7 +101,7 @@ struct TestRecovery
         anchor           = image->anchor;
         locations.clear();
         for (const auto &[pid, frame] : image->pages->frames) {
-            locations.emplace(pid, std::pair(frame.backing->address, frame.backing->length));
+            locations.emplace(pid, std::pair(frame.page_block->address, frame.page_block->length));
         }
     }
 
@@ -114,7 +114,7 @@ struct TestRecovery
         original.registry.reset();
         original.source.ledger.reset();
         return LocalRecoveryOperation::create(store, original.source.runtime, original.source.lane,
-                                              {.backend_id = 9, .generation = 2, .file_size = store->device->size()},
+                                              {.page_store_id = 9, .generation = 2, .file_size = store->device->size()},
                                               limits, credits.credits, &operation);
     }
 

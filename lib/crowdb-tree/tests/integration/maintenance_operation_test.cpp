@@ -76,7 +76,7 @@ std::shared_ptr<InstallRecord> record()
     return std::make_shared<InstallRecord>(InstallToken{.generation = 1, .batch = 0, .range = 0, .sequence = 0});
 }
 
-std::shared_ptr<PublishedPage> leaf(size_t count, size_t start = 0)
+std::shared_ptr<PageEntry> leaf(size_t count, size_t start = 0)
 {
     OverlayBuilder builder({});
     for (size_t i = start; i < start + count; ++i) {
@@ -87,7 +87,7 @@ std::shared_ptr<PublishedPage> leaf(size_t count, size_t start = 0)
     EXPECT_TRUE(builder.finish(1, &run).ok());
     auto logical = std::make_shared<PageState>();
     logical->overlays.push_back(std::move(run));
-    auto page                     = std::make_shared<PublishedPage>();
+    auto page                     = std::make_shared<PageEntry>();
     page->leaf                    = std::move(logical);
     page->metrics.dirty           = true;
     page->metrics.overlay_runs    = 1;
@@ -104,7 +104,7 @@ std::pair<Status, uint64_t> maintain(FlushBatch::Maintenance &callback, Publicat
     return terminal.get();
 }
 
-std::shared_ptr<const PublishedPage> route(const PublishedTreeState &view, const std::string &key)
+std::shared_ptr<const PageEntry> route(const TreeRoot &view, const std::string &key)
 {
     auto page = view.mapping.get(view.root_page_id);
     for (size_t depth = 0; depth < 64 && page && page->inner; ++depth) {
@@ -131,7 +131,7 @@ TEST(PageMaintenanceOperation, FreshFactoriesContinuePastThePreviousBoundedWindo
     auto inner                         = std::make_shared<InnerPageState>();
     inner->children                    = {0, 1};
     inner->separators.emplace_back("1001");
-    auto root          = std::make_shared<PublishedPage>();
+    auto root          = std::make_shared<PageEntry>();
     root->level        = 1;
     root->inner        = inner;
     root->metrics.leaf = false;
@@ -335,7 +335,7 @@ TEST(PageMaintenanceOperation, SingleWorkerFlushSplitsClipsRunsAndPreservesOldVi
 {
     SourceAdmission        sources;
     PublicationCoordinator publisher;
-    auto                   initial = std::make_shared<PublishedPage>();
+    auto                   initial = std::make_shared<PageEntry>();
     initial->leaf                  = std::make_shared<PageState>();
     auto       catalog             = std::make_shared<PublishedSources>();
     const auto source_view         = sources.catalog();
@@ -404,7 +404,7 @@ TEST(PageMaintenanceOperation, IdleMaintenanceMergesExactSiblingsAndKeepsOldRoot
     auto inner                          = std::make_shared<InnerPageState>();
     inner->children                     = {0, 1};
     inner->separators                   = {"1001"};
-    auto parent                         = std::make_shared<PublishedPage>();
+    auto parent                         = std::make_shared<PageEntry>();
     parent->level                       = 1;
     parent->inner                       = inner;
     parent->metrics.leaf                = false;
@@ -512,12 +512,12 @@ TEST(PageMaintenanceOperation, SmallStepBudgetMakesProgressAcrossIdleInvocations
 TEST(PageMaintenanceOperation, ColdBaseDefersWithoutChangingTheLogicalPage)
 {
     PublicationCoordinator publisher;
-    auto                   page    = leaf(1);
-    auto                   logical = std::make_shared<PageState>(*page->leaf);
-    auto                   backing = std::make_shared<BackingRef>();
-    backing->length                = 4096;
-    backing->owner                 = std::make_shared<int>(1);
-    logical->bases.push_back({.identity = 1, .backing = backing});
+    auto                   page       = leaf(1);
+    auto                   logical    = std::make_shared<PageState>(*page->leaf);
+    auto                   page_block = std::make_shared<PageBlockRef>();
+    page_block->length                = 4096;
+    page_block->owner                 = std::make_shared<int>(1);
+    logical->bases.push_back({.identity = 1, .page_block = page_block});
     page->leaf = logical;
     ASSERT_TRUE(
         publish(publisher,
@@ -544,7 +544,7 @@ TEST(PageMaintenanceOperation, EmptyTreeAndCorruptRoutingReturnErrors)
     MaintenanceCredits     credits;
     auto                   callback = make_page_maintenance(publisher, runtime, lane, credits.options());
     EXPECT_EQ(maintain(callback, publisher).first.code(), Code::kInvalidArgument);
-    auto invalid          = std::make_shared<PublishedPage>();
+    auto invalid          = std::make_shared<PageEntry>();
     invalid->level        = 1;
     invalid->inner        = std::make_shared<InnerPageState>();
     invalid->metrics.leaf = false;

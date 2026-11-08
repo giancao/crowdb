@@ -16,11 +16,11 @@ struct CapturedFrameLimits
 {
     PageEncodeLimits encode{};
     size_t           max_depth = 64;
-    // Derived from captured MappingView copy bounds before admission. A work
+    // Derived from captured MappingTable copy bounds before admission. A work
     // window limits cursor state, not the source arrays retained by a leaf.
     size_t page_metadata_bytes = 0;
     // Maximum typed range bases in a captured leaf, derived before admission.
-    uint64_t max_pages = MappingView::kPageLimit;
+    uint64_t max_pages = MappingTable::kPageLimit;
     // Traverse and prepare final layouts without copying payload or reserving
     // overflow PIDs. Each result owns the returned dependency descriptors.
     bool                           plan_only               = false;
@@ -29,9 +29,9 @@ struct CapturedFrameLimits
     // Staged writeback can materialize one primary while retaining the complete
     // captured mapping for routing and immutable overflow ownership proofs.
     std::optional<uint64_t> selected_page = std::nullopt;
-    // Checkpoint-only: reuse verified clean primaries in this exact backend.
-    uint64_t                          reuse_backend_id = 0;
-    BackingExclusion                  exclusion{};
+    // Checkpoint-only: reuse verified clean primaries in this exact page store.
+    uint64_t                          reuse_page_store_id = 0;
+    PageBlockExclusion                exclusion{};
     std::shared_ptr<WritebackMetrics> writeback_metrics = nullptr;
 };
 
@@ -125,7 +125,7 @@ class CapturedFrameStream
   public:
     using ReserveOverflow = detail::InlineFunction<Status(uint64_t, ReservedOverflowIds *)>;
 
-    static Status create(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> loader,
+    static Status create(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> loader,
                          std::shared_ptr<detail::FlushRuntime>       runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, CapturedFrameLimits limits,
                          ReserveOverflow reserve_overflow, std::shared_ptr<CapturedFrameStream> *out);

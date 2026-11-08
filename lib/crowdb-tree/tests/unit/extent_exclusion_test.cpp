@@ -17,7 +17,7 @@ ExtentLedgerResult exclude(LedgerFixture &test, uint64_t address, uint64_t lengt
 
 TEST(ExtentExclusion, ExistingReadersRemainProtectedAndNewWritesAvoidTheWholeInterval)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 65536, .address_limit = 65536});
+    LedgerFixture test({.page_store_id = 1, .file_size = 65536, .address_limit = 65536});
     auto          data = test.recover(16384, 4096);
     ASSERT_TRUE(data.status.ok());
     ASSERT_TRUE(test.activate().status.ok());
@@ -47,7 +47,7 @@ TEST(ExtentExclusion, ExistingReadersRemainProtectedAndNewWritesAvoidTheWholeInt
 
 TEST(ExtentExclusion, FreeDeletionLeaseIsAllowedWhileFutureAllocationStaysFenced)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 32768, .address_limit = 32768});
+    LedgerFixture test({.page_store_id = 1, .file_size = 32768, .address_limit = 32768});
     ASSERT_TRUE(test.activate().status.ok());
     auto frozen = exclude(test, 8192, 24576);
     ASSERT_TRUE(frozen.status.ok());
@@ -67,7 +67,7 @@ TEST(ExtentExclusion, FreeDeletionLeaseIsAllowedWhileFutureAllocationStaysFenced
 
 TEST(ExtentExclusion, GeometryAndCreditFailureLeaveTheAllocationIndexesUnchanged)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 32768, .address_limit = 32768});
+    LedgerFixture test({.page_store_id = 1, .file_size = 32768, .address_limit = 32768});
     EXPECT_EQ(exclude(test, 8192, 4096).status.code(), Code::kUnavailable);
     ASSERT_TRUE(test.activate().status.ok());
     EXPECT_EQ(exclude(test, 0, 4096).status.code(), Code::kInvalidArgument);

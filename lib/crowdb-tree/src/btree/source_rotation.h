@@ -27,8 +27,7 @@ class SourceRotation : public std::enable_shared_from_this<SourceRotation>
     SourceRotation(SourceAdmission &sources, PublicationCoordinator &publisher,
                    std::shared_ptr<ApplyDispatcher> dispatcher, std::shared_ptr<ApplyProgress> progress,
                    std::shared_ptr<detail::ResourceBudget::Account> account, SourceRotationOptions options);
-    using CheckRotation =
-        detail::InlineFunction<Status(const PublishedTreeState &, const SourceCatalog &, WriteFootprint)>;
+    using CheckRotation = detail::InlineFunction<Status(const TreeRoot &, const SourceCatalog &, WriteFootprint)>;
     void set_flush(PrepareFlush prepare, CheckRotation check = {});
     using PrepareOptions = detail::InlineFunction<Status(FlushPreparationOptions *)>;
     void set_async_flush(FlushController &controller, PrepareOptions prepare);

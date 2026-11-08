@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
-#include "backend/local/local_backend_state.h"
 #include "btree/allocation_bound.h"
 #include "btree/tree_core.h"
+#include "page_store/checkpoint_page_store.h"
+#include "page_store/local/local_page_store_state.h"
 #include "snapshot/native_frame_read.h"
 #include "snapshot/native_plan.h"
 #include "snapshot/operation_wait.h"
@@ -15,7 +15,7 @@ namespace crowdb::tree
 namespace
 {
 Status plan_native(const std::shared_ptr<PublishedReadViewContext> &snapshot, CapturedFrameLimits frames,
-                   NativeLayoutLimits limits, uint64_t backend_id, uint64_t incarnation, size_t load_bound,
+                   NativeLayoutLimits limits, uint64_t page_store_id, uint64_t incarnation, size_t load_bound,
                    std::shared_ptr<NativeLayoutPlanner> *out)
 {
     frames.plan_only = true;
@@ -33,8 +33,8 @@ Status plan_native(const std::shared_ptr<PublishedReadViewContext> &snapshot, Ca
         return status;
     }
     frames.encode.metadata = window.budget.reservation();
-    auto planner = detail::reserved_shared<NativeLayoutPlanner>(window.budget.reservation(), snapshot->view(), limits,
-                                                                window.budget.reservation(), backend_id, incarnation);
+    auto planner           = detail::reserved_shared<NativeLayoutPlanner>(
+        window.budget.reservation(), snapshot->view(), limits, window.budget.reservation(), page_store_id, incarnation);
     std::shared_ptr<CapturedFrameStream> stream;
     status = CapturedFrameStream::create(snapshot->view(), window.loader, snapshot->binding()->cpu(), snapshot->lane(),
                                          frames, {}, &stream);
@@ -118,18 +118,18 @@ try {
     if (!loads || !controls) {
         return Status::resource_exhausted("native cursor admission bound overflow");
     }
-    uint64_t backend_id  = 0;
-    uint64_t incarnation = 0;
-    if (const auto &local = core->local_backend()) {
-        backend_id  = local->ledger->limits().backend_id;
-        incarnation = local->ledger->limits().generation;
+    uint64_t page_store_id = 0;
+    uint64_t incarnation   = 0;
+    if (const auto &local = core->local_page_store()) {
+        page_store_id = local->ledger->limits().page_store_id;
+        incarnation   = local->ledger->limits().generation;
     }
-    else if (const auto &chunk = core->chunk_backend()) {
-        backend_id  = chunk->backend_identity();
-        incarnation = chunk->incarnation();
+    else if (const auto &chunk = core->page_chunk_store()) {
+        page_store_id = chunk->page_store_identity();
+        incarnation   = chunk->incarnation();
     }
     std::shared_ptr<NativeLayoutPlanner> layout;
-    status = plan_native(snapshot, frames, limits, backend_id, incarnation, *loads, &layout);
+    status = plan_native(snapshot, frames, limits, page_store_id, incarnation, *loads, &layout);
     if (!status.ok()) {
         return status;
     }

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "flush_subtree.h"
 #include "snapshot/flush_persistence.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 #include <algorithm>
 
@@ -63,21 +63,22 @@ struct FlushBatch::State::Subtree::Writes
             }
             self.owner.options.persistence->write(
                 {
-                    .page         = page,
-                    .page_id      = target.pid,
-                    .coverage     = self.owner.report.frontier,
-                    .gc_floor     = writes.gc_floor,
-                    .next_page_id = self.owner.next_pid.load(std::memory_order_relaxed),
-                    .context      = {.range = page->leaf ? page->leaf->range : self.bounds,
-                                     .inner_fences =
-                                         page->level != 0 ? std::optional(self.fences(target.pid)) : std::nullopt},
-                    .children_summary =
-                        page->level != 0 ? std::optional(self.child_summary(target.pid)) : std::nullopt
+                    .page             = page,
+                    .page_id          = target.pid,
+                    .coverage         = self.owner.report.frontier,
+                    .gc_floor         = writes.gc_floor,
+                    .next_page_id     = self.owner.next_pid.load(std::memory_order_relaxed),
+                    .context          = {.range = page->leaf ? page->leaf->range : self.bounds,
+                                         .inner_fences =
+                                             page->level != 0 ? std::optional(self.fences(target.pid)) : std::nullopt},
+                    .children_summary = page->level != 0 ? std::optional(self.child_summary(
+                                                               target.pid, target.task->index_summary(target.pid)))
+                                                         : std::nullopt
             },
                 [&self, lease = self.owner.metadata](uint64_t count, ReservedOverflowIds *out) {
                     auto next = self.owner.next_pid.load(std::memory_order_relaxed);
                     do {
-                        if (count > MappingView::kPageLimit - next) {
+                        if (count > MappingTable::kPageLimit - next) {
                             return Status::resource_exhausted("flush overflow PID space exhausted");
                         }
                     } while (!self.owner.next_pid.compare_exchange_weak(next, next + count, std::memory_order_relaxed));
@@ -184,7 +185,7 @@ void FlushBatch::State::Subtree::persist_next()
             return;
         }
         for (auto &target : completed->pages) {
-            if (target.replacement) {
+            if (target.replacement && target.replacement != target.task->lookup(target.pid)) {
                 target.task->prepare_builder();
                 auto result = target.task->builder->replace(target.pid, std::move(target.replacement));
                 if (!result.ok()) {
@@ -232,7 +233,7 @@ void FlushBatch::State::Subtree::persist_next()
     stdexec::start(writes->joined);
 }
 
-std::shared_ptr<const PublishedPage> FlushBatch::State::Subtree::find_page(uint64_t page_id) const
+std::shared_ptr<const PageEntry> FlushBatch::State::Subtree::find_page(uint64_t page_id) const
 {
     if (builder) {
         auto page = builder->lookup(page_id);
@@ -260,31 +261,24 @@ std::shared_ptr<const PublishedPage> FlushBatch::State::Subtree::find_page(uint6
     return captured;
 }
 
-FinalPageSummary FlushBatch::State::Subtree::child_summary(uint64_t page_id) const
+FinalPageSummary FlushBatch::State::Subtree::child_summary(uint64_t page_id, IndexSummary live) const
 {
     FinalPageSummary result;
     const auto       page = find_page(page_id);
     if (!page || !page->inner) {
         return result;
     }
+    result.live_counts_known = live.exact;
+    result.live_keys         = live.live_kv;
+    result.live_key_bytes    = live.live_key_bytes;
+    result.live_value_bytes  = live.live_value_bytes;
     for (auto child : page->inner->children) {
         const auto output = find_page(child);
-        if (!output || !output->primary || !output->primary->frame.summary ||
-            !output->primary->frame.summary->live_counts_known) {
-            return {};
+        if (output && output->primary && output->primary->frame.summary) {
+            result.oldest_tombstone_slot =
+                std::min(result.oldest_tombstone_slot, output->primary->frame.summary->oldest_tombstone_slot);
         }
-        const auto &part = *output->primary->frame.summary;
-        if (part.live_keys > UINT64_MAX - result.live_keys ||
-            part.live_key_bytes > UINT64_MAX - result.live_key_bytes ||
-            part.live_value_bytes > UINT64_MAX - result.live_value_bytes) {
-            return {};
-        }
-        result.oldest_tombstone_slot = std::min(result.oldest_tombstone_slot, part.oldest_tombstone_slot);
-        result.live_keys += part.live_keys;
-        result.live_key_bytes += part.live_key_bytes;
-        result.live_value_bytes += part.live_value_bytes;
     }
-    result.live_counts_known = true;
     return result;
 }
 
@@ -304,6 +298,14 @@ InnerEncodeFences FlushBatch::State::Subtree::fences(uint64_t page_id) const
                 if (page->primary && page->primary->frame.summary && page->primary->frame.summary->inner_fences) {
                     return upper ? page->primary->frame.summary->inner_fences->upper_leaf
                                  : page->primary->frame.summary->inner_fences->lower_leaf;
+                }
+                // Native import validates the graph before publishing its immutable frames.
+                const auto &page_block = page->inner_page_block;
+                if (page_block && page_block->storage == PageBlockStorage::kResidentFrame) {
+                    const auto *frame = page_block->resident_frame.data();
+                    if (frame_fences_are_page_ids(frame)) {
+                        return upper ? frame_upper_fence_page_id(frame) : frame_lower_fence_page_id(frame);
+                    }
                 }
                 return kInvalidPageId;
             }

@@ -6,9 +6,9 @@ use crate::sys;
 use crate::tree::Crowdbtree;
 use crate::CtError;
 
-mod backing;
+mod page_block;
 mod state;
-pub use backing::BackingStatsSnapshot;
+pub use page_block::PageBlockStatsSnapshot;
 mod work;
 pub use state::{TreeLogicalStats, TreeProgressSnapshot, TreeResourceStats, TreeStatsSnapshot};
 pub use work::{

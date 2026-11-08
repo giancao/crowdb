@@ -1,57 +1,33 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/scheduled_page_store.h"
 #include "btree/allocation_bound.h"
 #include "btree/page_load_internal.h"
 #include "btree/page_load_lifetime.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 #include "crowdb-tree/maptable/compressor.h"
+#include "page_store/local/scheduled_page_store.h"
 
 namespace crowdb::tree
 {
-void PageLoader::load_inner(std::shared_ptr<const BackingRef> /*backing*/, InnerComplete complete)
+void PageLoader::load_inner(std::shared_ptr<const PageBlockRef> /*page block*/, InnerComplete complete)
 {
     complete(Status::not_supported("asynchronous index loader is unavailable"), {});
 }
 
 namespace
 {
-Status read_inner_proof(const uint8_t *frame, uint32_t bytes, const PageLoadLimits &limits,
-                        const std::shared_ptr<AllocationBudget> &metadata, size_t key_bytes, InnerFrameProof *proof)
-{
-    proof->self_page_id   = frame_u64(frame, fh::kSelfpage_id);
-    proof->frame_bytes    = bytes;
-    proof->has_fences     = frame_has_lower_fence(frame);
-    proof->page_id_fences = frame_fences_are_page_ids(frame);
-    if (proof->page_id_fences) {
-        proof->lower_leaf = frame_lower_fence_page_id(frame);
-        proof->upper_leaf = frame_upper_fence_page_id(frame);
-    }
-    else if (proof->has_fences) {
-        for (const auto key : {frame_lower_fence(frame), frame_upper_fence(frame)}) {
-            if (key.size() > limits.max_inner_key_bytes - key_bytes) {
-                return Status::resource_exhausted("loaded index exceeds fence byte budget");
-            }
-            key_bytes += key.size();
-        }
-        proof->lower = OwnedKey(frame_lower_fence(frame), metadata);
-        proof->upper = OwnedKey(frame_upper_fence(frame), metadata);
-    }
-    return Status::Ok();
-}
-
-Status decode_inner(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
+Status decode_inner(std::span<const uint8_t> blob, const PageBlockRef &page_block, const PageLoadLimits &limits,
                     const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<const InnerPageState> *out)
 {
     LoadBytes                scratch{LoadBytes::allocator_type(metadata)};
     std::span<const uint8_t> frame;
-    auto                     status = decode_backing_frame(blob, backing, limits, scratch, &frame);
+    auto                     status = decode_page_block_frame(blob, page_block, limits, scratch, &frame);
     const auto               bytes  = static_cast<uint32_t>(frame.size());
     if (!status.ok()) {
         return status;
     }
     if (!frame_validate(frame.data(), bytes) || frame_page_type(frame.data()) != page_type::kInnerBase) {
-        return Status::corruption("loaded backing is not a valid index frame");
+        return Status::corruption("loaded page_block is not a valid index frame");
     }
     const InnerFrameView index(frame.data(), bytes);
     if (index.num_children() > limits.max_inner_children) {
@@ -66,7 +42,7 @@ Status decode_inner(std::span<const uint8_t> blob, const BackingRef &backing, co
         key_bytes += size;
     }
     for (uint32_t i = 0; i < index.num_children(); ++i) {
-        if (index.child_at(i) >= MappingView::kPageLimit) {
+        if (index.child_at(i) >= MappingTable::kPageLimit) {
             return Status::corruption("loaded index contains an invalid child PID");
         }
     }
@@ -79,9 +55,11 @@ Status decode_inner(std::span<const uint8_t> blob, const BackingRef &backing, co
     for (uint32_t i = 0; i < index.num_separators(); ++i) {
         inner->separators.emplace_back(index.separator_at(i), metadata);
     }
-    status = read_inner_proof(frame.data(), bytes, limits, metadata, key_bytes, &inner->frame_proof.emplace());
-    if (!status.ok()) {
-        return status;
+    const bool has_fences = frame_fences_are_page_ids(frame.data());
+    inner->frame_proof    = {.self_page_id = index.self_page_id(), .frame_bytes = bytes};
+    if (has_fences) {
+        inner->frame_proof->lower_leaf = frame_lower_fence_page_id(frame.data());
+        inner->frame_proof->upper_leaf = frame_upper_fence_page_id(frame.data());
     }
     *out = std::move(inner);
     return Status::Ok();
@@ -111,7 +89,7 @@ struct InnerLoad : PageLoadProgress, std::enable_shared_from_this<InnerLoad>
     std::shared_ptr<detail::FlushRuntime>       runtime;
     std::shared_ptr<detail::FlushRuntime::Lane> lane;
     PageLoadLimits                              limits;
-    std::shared_ptr<const BackingRef>           backing;
+    std::shared_ptr<const PageBlockRef>         page_block;
     AlignedLoadBytes                            blob;
     InnerCompletion                             complete;
     std::shared_ptr<InnerLoad>                  queued_owner;
@@ -121,7 +99,7 @@ struct InnerLoad : PageLoadProgress, std::enable_shared_from_this<InnerLoad>
     {
         Status status;
         try {
-            status = decode_inner({blob.data(), blob.size()}, *backing, limits, metadata, inner);
+            status = decode_inner({blob.data(), blob.size()}, *page_block, limits, metadata, inner);
         }
         catch (const std::bad_alloc &) {
             status = Status::resource_exhausted("index decode allocation failed");
@@ -203,48 +181,48 @@ std::optional<size_t> AsyncStorePageLoader::routing_reserve_bound(const PageLoad
         .value();
 }
 
-void AsyncStorePageLoader::load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete)
+void AsyncStorePageLoader::load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete)
 {
     if (state_->budget.cause == TreeWorkCause::Flush && detail::FlushRuntime::on_worker_thread()) {
         std::shared_ptr<const InnerPageState> inner;
-        if (auto result = state_->try_read_inner_inline(backing, &inner)) {
+        if (auto result = state_->try_read_inner_inline(page_block, &inner)) {
             complete_page_load(complete, std::move(*result), std::move(inner));
             return;
         }
     }
-    state_->start_inner(std::move(backing), std::move(complete), state_);
+    state_->start_inner(std::move(page_block), std::move(complete), state_);
 }
 
-std::optional<Status> AsyncStorePageLoader::read_inner(std::shared_ptr<const BackingRef>      backing,
+std::optional<Status> AsyncStorePageLoader::read_inner(std::shared_ptr<const PageBlockRef>    page_block,
                                                        std::shared_ptr<const InnerPageState> *out,
                                                        InnerReadComplete                      complete)
 {
-    if (auto result = state_->try_read_inner_inline(backing, out)) {
+    if (auto result = state_->try_read_inner_inline(page_block, out)) {
         return result;
     }
-    state_->start_inner(std::move(backing), std::move(complete), state_);
+    state_->start_inner(std::move(page_block), std::move(complete), state_);
     return std::nullopt;
 }
 
 std::optional<Status>
-AsyncStorePageLoader::State::try_read_inner_inline(const std::shared_ptr<const BackingRef> &backing,
-                                                   std::shared_ptr<const InnerPageState>   *out)
+AsyncStorePageLoader::State::try_read_inner_inline(const std::shared_ptr<const PageBlockRef> &page_block,
+                                                   std::shared_ptr<const InnerPageState>     *out)
 {
     const auto *scheduled = dynamic_cast<const ScheduledPageStore *>(store.get());
-    if (backing &&
-        (backing->storage == BackingStorage::kResidentFrame ||
-         (scheduled != nullptr && scheduled->reads_inline() && backing->storage == BackingStorage::kDurableBlob))) {
+    if (page_block && (page_block->storage == PageBlockStorage::kResidentFrame ||
+                       (scheduled != nullptr && scheduled->reads_inline() &&
+                        page_block->storage == PageBlockStorage::kDurableBlob))) {
         const auto started = tree_metrics_now_ns();
-        auto       status  = validate_inner(backing);
+        auto       status  = validate_inner(page_block);
         try {
             OverwriteByteVector<AllocationKind::kIo> blob{
                 OverwriteByteVector<AllocationKind::kIo>::allocator_type(budget.bytes)};
-            if (status.ok() && backing->storage == BackingStorage::kDurableBlob) {
-                blob.resize(backing->length);
-                status = scheduled->read_inline(backing->address, blob.data(), blob.size(), budget.cause);
+            if (status.ok() && page_block->storage == PageBlockStorage::kDurableBlob) {
+                blob.resize(page_block->length);
+                status = scheduled->read_inline(page_block->address, blob.data(), blob.size(), budget.cause);
             }
             if (status.ok()) {
-                status = decode_inner(blob, *backing, limits, budget.bytes, out);
+                status = decode_inner(blob, *page_block, limits, budget.bytes, out);
             }
         }
         catch (const std::bad_alloc &) {
@@ -256,19 +234,19 @@ AsyncStorePageLoader::State::try_read_inner_inline(const std::shared_ptr<const B
     return std::nullopt;
 }
 
-Status AsyncStorePageLoader::State::validate_inner(const std::shared_ptr<const BackingRef> &backing) const
+Status AsyncStorePageLoader::State::validate_inner(const std::shared_ptr<const PageBlockRef> &page_block) const
 {
-    if (!runtime || !lane || !backing || !backing->readable() || backing->encoding != 0 ||
-        (!store && backing->storage != BackingStorage::kResidentFrame)) {
-        return Status::invalid_argument("index load requires a supported independently owned backing and runtime");
+    if (!runtime || !lane || !page_block || !page_block->readable() || page_block->encoding != 0 ||
+        (!store && page_block->storage != PageBlockStorage::kResidentFrame)) {
+        return Status::invalid_argument("index load requires a supported independently owned page_block and runtime");
     }
-    if (backing->length > limits.max_blob_bytes || !chunk_load_allowed(*backing, limits)) {
+    if (page_block->length > limits.max_blob_bytes || !chunk_load_allowed(*page_block, limits)) {
         return Status::resource_exhausted("index blob exceeds load budget");
     }
     return Status::Ok();
 }
 
-void AsyncStorePageLoader::State::start_inner(std::shared_ptr<const BackingRef> backing, InnerCompletion complete,
+void AsyncStorePageLoader::State::start_inner(std::shared_ptr<const PageBlockRef> page_block, InnerCompletion complete,
                                               const std::shared_ptr<State> &owner)
 {
     const auto started_at = tree_metrics_now_ns();
@@ -276,7 +254,7 @@ void AsyncStorePageLoader::State::start_inner(std::shared_ptr<const BackingRef> 
         record_page_load_terminal(budget, started_at, status);
         complete_inner_error(complete, std::move(status));
     };
-    auto status = validate_inner(backing);
+    auto status = validate_inner(page_block);
     if (!status.ok()) {
         reject(std::move(status));
         return;
@@ -289,14 +267,14 @@ void AsyncStorePageLoader::State::start_inner(std::shared_ptr<const BackingRef> 
         operation->lane         = lane;
         operation->loader_owner = owner;
         operation->limits       = limits;
-        operation->backing      = std::move(backing);
+        operation->page_block   = std::move(page_block);
         operation->complete     = std::move(complete);
-        if (operation->backing->storage == BackingStorage::kResidentFrame) {
+        if (operation->page_block->storage == PageBlockStorage::kResidentFrame) {
             queue_page_load(operation, &InnerLoad::decode);
         }
         else {
-            operation->blob.resize(operation->backing->length);
-            submit_page_read(operation, operation->backing, operation->blob.data(), operation->blob.size(),
+            operation->blob.resize(operation->page_block->length);
+            submit_page_read(operation, operation->page_block, operation->blob.data(), operation->blob.size(),
                              std::holds_alternative<InnerReadComplete>(operation->complete)
                                  ? &InnerLoad::read_complete
                                  : &page_read_completed<InnerLoad>);

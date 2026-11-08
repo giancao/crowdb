@@ -1,0 +1,464 @@
+// Copyright 2026-present Gian <crow.db@outlook.com>
+// Licensed under the Apache License, Version 2.0.
+
+// Page store interfaces provide storage access for page data and mapping
+// metadata. Snapshot/recovery code owns their persisted layouts.
+//
+// Storage kinds are page mem store (PageMemStore or MemoryMedium), page disk
+// store (PageDiskStore with file/device media), and page chunk store
+// (PageChunkStore). PageDiskStore also supports memory media.
+//
+// PageStore exposes byte I/O, typed locations and durability barriers.
+// AsyncPageStore and runtime adapters preserve the completion and owner
+// contracts of each page store; completion may be inline or pending.
+#pragma once
+
+#include "crowdb-tree/maptable/mapping_slot.h"
+#include "crowdb-tree/page_store/page_purpose.h"
+#include "crowdb-tree/status.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace crowdb::tree
+{
+
+// Durability barrier policy. Mirrors ct_sync_mode in c_api.h.
+enum class SyncMode : uint8_t {
+    kFull  = 0, // fdatasync after every flush (default, production)
+    kSkip  = 1, // no fsync (tests/CI only)
+    kBatch = 2, // fsync once per snapshot commit
+};
+
+// Round `v` up to a multiple of the indivisible unit `iu` (PT9 alignment). For
+// byte-addressable media (iu <= 1) this is the identity.
+inline uint64_t round_up_to_iu(uint64_t v, uint32_t iu)
+{
+    return iu <= 1 ? v : ((v + iu - 1) / iu) * iu;
+}
+
+struct Config;
+class TreeCore;
+
+class PageStore
+{
+  public:
+    virtual ~PageStore() = default;
+
+    // One runtime allocator/recovery domain per page store object. The caller
+    // retains this lease through all accepted operations and export owners.
+    // Legacy callers must still obey the page store's exclusive-writer contract.
+    [[nodiscard]] bool try_claim_runtime_domain() noexcept
+    {
+        bool unclaimed = false;
+        return runtime_claimed_.compare_exchange_strong(unclaimed, true, std::memory_order_acq_rel);
+    }
+
+    void release_runtime_domain() noexcept
+    {
+        runtime_claimed_.store(false, std::memory_order_release);
+    }
+
+    // Write/read `len` bytes at byte offset `off`. The store grows on write as
+    // needed (up to capacity for fixed-size page stores).
+    // Unwritten ranges may return not_found. Other read failures must remain
+    // distinguishable from absence during snapshot recovery and reclamation.
+    virtual Status write_at(uint64_t off, const uint8_t *buf, size_t len) = 0;
+    virtual Status read_at(uint64_t off, uint8_t *buf, size_t len) const  = 0;
+
+    virtual Status write_typed_at(PagePurpose /*purpose*/, uint64_t off, const uint8_t *buf, size_t len)
+    {
+        return write_at(off, buf, len);
+    }
+
+    // Durability barrier: returns after all prior writes are persisted.
+    virtual Status sync() = 0;
+
+    // Current logical device size in bytes (highest written offset rounded up).
+    [[nodiscard]] virtual uint64_t size() const = 0;
+
+    // Indivisible Unit: the minimum atomically-writable size. Durable pages are
+    // padded to a multiple of it so a page write cannot tear. 1 for byte-
+    // addressable media (mem/SCM), a flash page for SSD.
+    [[nodiscard]] virtual uint32_t iu_size() const = 0;
+
+    // Translate between the mapping table's one-word cold-page locator and
+    // this page store's durable namespace. Local stores retain the original byte
+    // address encoding. Immutable stores may use the distinct page-reference
+    // tag while keeping lookup to one atomic mapping-word load.
+    virtual Status encode_mapping_location(uint64_t addr, uint32_t logical_len, uint64_t *word) const
+    {
+        if (word == nullptr || addr % iu_size() != 0) {
+            return Status::invalid_argument("mapping location is null or unaligned");
+        }
+        const uint64_t iu_index = addr / iu_size();
+        const auto     iu_count = static_cast<uint32_t>(round_up_to_iu(logical_len, iu_size()) / iu_size());
+        if (!slot_word::fits_unloaded(iu_index, iu_count)) {
+            return Status::resource_exhausted("mapping byte location exceeds packed word");
+        }
+        *word = slot_word::pack_unloaded(iu_index, iu_count);
+        return Status::Ok();
+    }
+
+    virtual Status decode_mapping_location(uint64_t word, uint64_t *addr, uint32_t *physical_len) const
+    {
+        if (addr == nullptr || physical_len == nullptr || !slot_word::is_unloaded(word)) {
+            return Status::corruption("mapping byte location has an invalid tag");
+        }
+        *addr         = slot_word::unloaded_iu_index(word) * iu_size();
+        *physical_len = slot_word::unloaded_iu_count(word) * iu_size();
+        return Status::Ok();
+    }
+
+    // Block size for array-of-blocks page stores (PageDiskStore::open_blocks).
+    // 0 for single-medium / PageDiskTextStore — no block-level compaction.
+    [[nodiscard]] virtual uint64_t block_size() const
+    {
+        return 0;
+    }
+
+    virtual Status delete_block(uint32_t /*unused*/)
+    {
+        return Status::invalid_argument("delete_block: unsupported page store");
+    }
+
+    // Run one bounded page store ownership-cleanup pass. Shared immutable stores
+    // override this; local byte stores have no ownership to materialize.
+    virtual Status materialize_ownership(uint64_t *bytes_written, bool *complete)
+    {
+        if (bytes_written != nullptr) {
+            *bytes_written = 0;
+        }
+        if (complete != nullptr) {
+            *complete = true;
+        }
+        return Status::Ok();
+    }
+
+    // Supply the current snapshot's verified live byte extents before an
+    // immutable page store repacks shared storage. Byte stores do not need this
+    // hint. Extents are logical PageStore addresses and lengths.
+    virtual void set_materialization_live_extents(std::vector<std::pair<uint64_t, uint64_t>> /*unused*/)
+    {
+    }
+
+    // Seed an unpublished destination from an immutable source snapshot when
+    // both stores support lineage sharing. Local and unlike page stores remain
+    // independent and require no preparation.
+    virtual Status inherit_snapshot_from(const PageStore & /*unused*/)
+    {
+        return Status::Ok();
+    }
+
+    [[nodiscard]] virtual bool has_inherited_snapshot() const
+    {
+        return false;
+    }
+
+    // True only while this store's inherited image is still the source
+    // store's current published snapshot. Range rebuild uses this after its
+    // iterator is exhausted before reusing any inherited mapping slot.
+    [[nodiscard]] virtual bool inherited_snapshot_matches(const PageStore & /*unused*/) const
+    {
+        return false;
+    }
+
+    [[nodiscard]] virtual bool has_shared_ownership() const
+    {
+        return false;
+    }
+
+    // ── Async API ────────────────────────────────────────────────────
+    // submit_read/submit_write/submit_fsync return an opaque op id usable
+    // with cancel(). The callback fires exactly once with the outcome.
+    // Default implementations delegate to the sync methods and invoke the
+    // callback immediately (ready completion). Page stores with a real async
+    // engine (IoUring) override these.
+
+    virtual uint64_t submit_read(uint64_t off, void *buf, size_t len, const std::function<void(Status)> &on_complete)
+    {
+        on_complete(read_at(off, static_cast<uint8_t *>(buf), len));
+        return 0;
+    }
+
+    virtual uint64_t submit_write(uint64_t off, const void *buf, size_t len,
+                                  const std::function<void(Status)> &on_complete)
+    {
+        on_complete(write_at(off, static_cast<const uint8_t *>(buf), len));
+        return 0;
+    }
+
+    virtual Status submit_fsync(const std::function<void(Status)> &on_complete)
+    {
+        on_complete(sync());
+        return Status::Ok();
+    }
+
+    virtual void cancel(uint64_t /*op_id*/)
+    {
+        // No-op for sync page stores: the callback has already fired.
+    }
+
+    // Set the durability barrier policy. CT_SYNC_SKIP makes sync() a no-op
+    // (tests/CI), CT_SYNC_BATCH defers to snapshot commit.
+    void set_sync_mode(SyncMode mode)
+    {
+        sync_mode_ = mode;
+    }
+
+    [[nodiscard]] SyncMode sync_mode() const
+    {
+        return sync_mode_;
+    }
+
+    using RuntimeFactory      = Status (*)(const Config &, std::shared_ptr<TreeCore> *);
+    using RuntimeOpenComplete = std::function<void(Status, std::shared_ptr<TreeCore>)>;
+    using RuntimeAsyncFactory = Status (*)(const Config &, RuntimeOpenComplete);
+
+    [[nodiscard]] virtual RuntimeFactory runtime_factory() const noexcept
+    {
+        return nullptr;
+    }
+
+    [[nodiscard]] virtual RuntimeAsyncFactory runtime_async_factory() const noexcept
+    {
+        return nullptr;
+    }
+
+  protected:
+    SyncMode sync_mode_ = SyncMode::kFull;
+
+  private:
+    std::atomic<bool> runtime_claimed_{false};
+};
+
+// Page mem store using sparse memory blocks. Stored bytes survive only for
+// the lifetime of the object. MemoryMedium delegates its byte storage here.
+class PageMemStore : public PageStore
+{
+  public:
+    static constexpr size_t kPageBlockPageBytes = 64 * 1024;
+
+    // Concurrent overlapping byte accesses require caller ordering. Existing
+    // page block/extent owners protect each I/O from whole-page reclamation.
+    explicit PageMemStore(uint32_t iu_size = 1);
+    ~PageMemStore() override;
+
+    Status write_at(uint64_t off, const uint8_t *buf, size_t len) override;
+    Status read_at(uint64_t off, uint8_t *buf, size_t len) const override;
+
+    Status sync() override
+    {
+        return Status::Ok();
+    }
+
+    [[nodiscard]] uint64_t size() const override;
+
+    // Allocated byte capacity of the memory data page block, excluding metadata.
+    [[nodiscard]] size_t resident_bytes() const;
+
+    // The caller must hold the ledger's exclusive free-range lease for this
+    // entire page block page until removal completes. The logical size is unchanged.
+    [[nodiscard]] bool release_page_block_page(uint64_t index);
+
+    [[nodiscard]] uint32_t iu_size() const override
+    {
+        return iu_size_;
+    }
+
+  private:
+    struct Data;
+    std::unique_ptr<Data> data_;
+    uint32_t              iu_size_;
+};
+
+// Debug wrapper (PT9-B): a byte-transparent pass-through over an inner store
+// with iu forced to 1 (byte-addressable, variable-length extents). It exposes
+// hooks for rendering page frames as readable text (see debug_codec.h) without
+// changing the on-disk byte layout, so an engine opened on it round-trips
+// identically. Useful for inspecting / diffing durable state in tests.
+class DebugPageStore : public PageStore
+{
+  public:
+    explicit DebugPageStore(PageStore *inner) : inner_(inner)
+    {
+    }
+
+    Status write_at(uint64_t off, const uint8_t *buf, size_t len) override
+    {
+        return write_typed_at(PagePurpose::kBtreePage, off, buf, len);
+    }
+
+    Status write_typed_at(PagePurpose purpose, uint64_t off, const uint8_t *buf, size_t len) override
+    {
+        ++writes_;
+        return inner_->write_typed_at(purpose, off, buf, len);
+    }
+
+    Status read_at(uint64_t off, uint8_t *buf, size_t len) const override
+    {
+        return inner_->read_at(off, buf, len);
+    }
+
+    Status sync() override
+    {
+        return inner_->sync();
+    }
+
+    [[nodiscard]] uint64_t size() const override
+    {
+        return inner_->size();
+    }
+
+    [[nodiscard]] uint32_t iu_size() const override
+    {
+        return 1;
+    } // byte-addressable debug media
+
+    [[nodiscard]] uint64_t writes() const
+    {
+        return writes_;
+    }
+
+  private:
+    PageStore *inner_;
+    uint64_t   writes_ = 0;
+};
+
+// Fault-injection wrapper (plan-tree #14e) for crash-recovery tests: lets a
+// test declaratively arm a fault on some future write_at/sync() call instead
+// of hand-computing byte offsets to corrupt after the fact (the pattern
+// crash_recovery_test.cpp/persist_test.cpp otherwise use). Delegates
+// everything to `inner_` except the armed call, which never reaches it in
+// kDrop mode, is truncated in kTear mode, or short-circuits with an error in
+// kFail mode -- all three are what a real crash can do to an in-flight,
+// not-yet-synced write. Not thread-safe (tests only, single-writer usage
+// matches every other page store's actual caller discipline).
+class FaultyPageStore : public PageStore
+{
+  public:
+    enum class Fault : std::uint8_t {
+        kNone,
+        kDrop, // the write never reaches `inner_` at all (as if lost pre-crash)
+        kTear, // only the first `tear_len` bytes of this write land
+        kFail, // the call returns io_error(); `inner_` is never touched
+    };
+
+    explicit FaultyPageStore(PageStore *inner) : inner_(inner)
+    {
+    }
+
+    // Arm a fault on the `n`th (0-indexed) future write_at call. `tear_len`
+    // is only meaningful for Fault::kTear. Call before triggering the
+    // sequence of writes under test; disarms itself once triggered (a
+    // second matching call won't refire without re-arming).
+    void arm_write_fault(int n, Fault kind, size_t tear_len = 0)
+    {
+        fault_write_idx_  = n;
+        fault_write_kind_ = kind;
+        tear_len_         = tear_len;
+    }
+
+    // Arm a fault on the `n`th (0-indexed) future sync() call. Only
+    // Fault::kFail is meaningful here (kDrop/kTear don't apply to a
+    // barrier call).
+    void arm_sync_fault(int n, Fault kind)
+    {
+        fault_sync_idx_  = n;
+        fault_sync_kind_ = kind;
+    }
+
+    Status write_at(uint64_t off, const uint8_t *buf, size_t len) override
+    {
+        return write_typed_at(PagePurpose::kBtreePage, off, buf, len);
+    }
+
+    Status write_typed_at(PagePurpose purpose, uint64_t off, const uint8_t *buf, size_t len) override
+    {
+        int idx = write_count_++;
+        if (idx == fault_write_idx_) {
+            Fault kind        = fault_write_kind_;
+            fault_write_idx_  = -1; // one-shot
+            fault_write_kind_ = Fault::kNone;
+            switch (kind) {
+            case Fault::kDrop:
+                return Status::Ok(); // silently lost -- inner_ never sees it
+            case Fault::kTear:
+                return inner_->write_typed_at(purpose, off, buf, std::min(len, tear_len_));
+            case Fault::kFail:
+                return Status::io_error("FaultyPageStore: armed write fault");
+            case Fault::kNone:
+                break;
+            }
+        }
+        return inner_->write_typed_at(purpose, off, buf, len);
+    }
+
+    Status read_at(uint64_t off, uint8_t *buf, size_t len) const override
+    {
+        return inner_->read_at(off, buf, len);
+    }
+
+    Status sync() override
+    {
+        int idx = sync_count_++;
+        if (idx == fault_sync_idx_) {
+            Fault kind       = fault_sync_kind_;
+            fault_sync_idx_  = -1; // one-shot
+            fault_sync_kind_ = Fault::kNone;
+            if (kind == Fault::kFail) {
+                return Status::io_error("FaultyPageStore: armed sync fault");
+            }
+        }
+        return inner_->sync();
+    }
+
+    [[nodiscard]] uint64_t size() const override
+    {
+        return inner_->size();
+    }
+
+    [[nodiscard]] uint32_t iu_size() const override
+    {
+        return inner_->iu_size();
+    }
+
+    [[nodiscard]] uint64_t block_size() const override
+    {
+        return inner_->block_size();
+    }
+
+    Status delete_block(uint32_t block_idx) override
+    {
+        return inner_->delete_block(block_idx);
+    }
+
+    [[nodiscard]] int write_count() const
+    {
+        return write_count_;
+    }
+
+    [[nodiscard]] int sync_count() const
+    {
+        return sync_count_;
+    }
+
+  private:
+    PageStore *inner_;
+    int        write_count_ = 0;
+    int        sync_count_  = 0;
+
+    int    fault_write_idx_  = -1;
+    Fault  fault_write_kind_ = Fault::kNone;
+    size_t tear_len_         = 0;
+
+    int   fault_sync_idx_  = -1;
+    Fault fault_sync_kind_ = Fault::kNone;
+};
+
+} // namespace crowdb::tree

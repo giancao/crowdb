@@ -47,7 +47,7 @@ class TestTrimLoader final : public PageLoader
         complete(Status::Ok(), leaf);
     }
 
-    void load_inner(std::shared_ptr<const BackingRef> /*backing*/, InnerComplete complete) override
+    void load_inner(std::shared_ptr<const PageBlockRef> /*page block*/, InnerComplete complete) override
     {
         ++indexes;
         complete(Status::Ok(), inner);
@@ -68,7 +68,7 @@ TEST(PageCacheTrim, LeafAndInnerBudgetsAreIndependentAndKeepRecentPinsValid)
         });
     };
     auto inner = [&](uint64_t pid) {
-        loader->load_inner(frames.at(pid - 1).backing, [](Status status, auto value) {
+        loader->load_inner(frames.at(pid - 1).page_block, [](Status status, auto value) {
             ASSERT_TRUE(status.ok());
             ASSERT_TRUE(value);
         });

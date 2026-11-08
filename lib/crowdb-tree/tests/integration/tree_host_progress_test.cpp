@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/local_backend_state.h"
 #include "btree/tree_apply_operation.h"
 #include "btree/tree_core.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "page_store/local/local_page_store_state.h"
 #include "test_tmp.h"
 
 #include <gtest/gtest.h>
@@ -100,12 +100,12 @@ TEST(TreeHostProgress, OneCpuPreservesOtherTreeProgressDuringSlowPersistentFlush
     options.limits.io_operations    = 2;
     std::shared_ptr<TreeRuntime> runtime;
     ASSERT_TRUE(TreeRuntime::create(options, &runtime).ok());
-    std::array<std::unique_ptr<BlockPageStore>, 2> stores;
-    std::array<std::shared_ptr<TreeCore>, 2>       cores;
+    std::array<std::unique_ptr<PageDiskStore>, 2> stores;
+    std::array<std::shared_ptr<TreeCore>, 2>      cores;
     for (size_t index = 0; index < cores.size(); ++index) {
         std::filesystem::create_directories(directory.path + "/" + std::to_string(index));
-        ASSERT_TRUE(BlockPageStore::open_blocks(directory.path + "/" + std::to_string(index), 1, index + 1, 64 * 1024,
-                                                4096, &stores[index])
+        ASSERT_TRUE(PageDiskStore::open_blocks(directory.path + "/" + std::to_string(index), 1, index + 1, 64 * 1024,
+                                               4096, &stores[index])
                         .ok());
         Config config;
         config.runtime                                 = runtime;

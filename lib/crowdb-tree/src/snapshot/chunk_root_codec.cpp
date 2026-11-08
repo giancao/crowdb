@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/allocation_bound.h"
 #include "snapshot/chunk_root_codec_internal.h"
+#include "snapshot/index_summary_codec.h"
 
 namespace crowdb::tree
 {
@@ -10,7 +11,7 @@ namespace
 bool valid_identity(const ChunkRootIdentity &id, uint64_t frames)
 {
     return id.tree != 0 && id.root_generation != 0 && id.owner_epoch != 0 && id.snapshot_sequence != 0 &&
-           id.page_generation != 0 && id.gc_floor <= id.coverage && id.next_page_id <= MappingView::kPageLimit &&
+           id.page_generation != 0 && id.gc_floor <= id.coverage && id.next_page_id <= MappingTable::kPageLimit &&
            ((frames == 0 && id.root_page_id == kInvalidPageId) || (frames != 0 && id.root_page_id < id.next_page_id));
 }
 
@@ -19,16 +20,21 @@ bool valid_indexes(const ChunkRootManifest &root)
     uint64_t count    = 0;
     uint64_t previous = 0;
     for (const auto &entry : root.indexes) {
-        if (entry.frame_count == 0 || entry.frame_count > kChunkIndexFrameLimit || entry.first_page > entry.last_page ||
-            entry.last_page >= root.identity.next_page_id || (count != 0 && entry.first_page <= previous) ||
+        if (entry.frame_count == 0 || entry.frame_count > kChunkMappingSegmentEntryLimit ||
+            entry.first_page > entry.last_page || entry.last_page >= root.identity.next_page_id ||
+            (count != 0 && entry.first_page <= previous) ||
             !chunk_codec::valid_pack(entry.pack, PagePurpose::kPageIndex) ||
-            entry.pack.length > kChunkIndexWindowBytes || count > UINT64_MAX - entry.frame_count) {
+            entry.pack.length > kChunkMappingSegmentWindowBytes || count > UINT64_MAX - entry.frame_count) {
             return false;
         }
         count += entry.frame_count;
         previous = entry.last_page;
     }
-    return count == root.frame_count && root.stored_references <= detail::kMaxCandidateReferences &&
+    return count == root.frame_count &&
+           (!root.summaries || (chunk_codec::valid_pack(*root.summaries, PagePurpose::kPageIndex) &&
+                                root.summaries->length % snapshot::kIndexSummaryRecordBytes == 0 &&
+                                root.summaries->length / snapshot::kIndexSummaryRecordBytes < root.frame_count)) &&
+           root.stored_references <= detail::kMaxCandidateReferences &&
            root.dependency_entries <= detail::kMaxCandidateReferences &&
            root.dependency_entries >= root.stored_references &&
            (root.stored_references != 0 || root.dependency_entries == 0);
@@ -51,7 +57,7 @@ try {
     auto           bytes = std::span(*out);
     const auto    &id    = root.identity;
     const uint64_t words[]{kRootMagic,
-                           1,
+                           2,
                            id.tree,
                            id.root_generation,
                            id.owner_epoch,
@@ -68,6 +74,12 @@ try {
                            root.dependency_entries};
     for (size_t i = 0; i < std::size(words); ++i) {
         put(bytes, i, words[i]);
+    }
+    if (root.root_summary) {
+        snapshot::encode_index_summary(bytes.data() + 128, 1, *root.root_summary);
+    }
+    if (root.summaries) {
+        pack(bytes.subspan(160, 72), *root.summaries);
     }
     size_t offset = kChunkRootHeaderBytes;
     for (const auto &entry : root.indexes) {
@@ -93,7 +105,7 @@ try {
         return Status::invalid_argument();
     }
     if (bytes.size() > detail::kMaxCandidateManifestBytes || !verified(bytes, kChunkRootHeaderBytes) ||
-        word(bytes, 0) != kRootMagic || word(bytes, 1) != 1 || word(bytes, 2) != tree ||
+        word(bytes, 0) != kRootMagic || word(bytes, 1) != 2 || word(bytes, 2) != tree ||
         (exact_generation != 0 && word(bytes, 3) != exact_generation)) {
         return Status::corruption("Chunk root checksum, format or identity mismatch");
     }
@@ -115,10 +127,27 @@ try {
     out->frame_count        = word(bytes, 12);
     out->stored_references  = word(bytes, 14);
     out->dependency_entries = word(bytes, 15);
+    uint32_t     summary_present;
+    IndexSummary summary;
+    if (!snapshot::decode_index_summary(bytes.data() + 128, &summary_present, &summary) || summary_present > 1 ||
+        (summary_present == 0 && summary.exact)) {
+        return Status::corruption("invalid Chunk root summary");
+    }
+    if (summary_present != 0) {
+        out->root_summary = summary;
+    }
+    const auto encoded_summaries = bytes.subspan(160, 72);
+    if (std::ranges::any_of(encoded_summaries, [](auto byte) { return byte != 0; })) {
+        detail::ChunkFixedPackRef ref;
+        if (!unpack(encoded_summaries, PagePurpose::kPageIndex, &ref)) {
+            return Status::corruption("invalid Chunk index summary reference");
+        }
+        out->summaries = ref;
+    }
     out->indexes.reserve(count);
     for (uint64_t i = 0; i < count; ++i) {
         const auto encoded = bytes.subspan(kChunkRootHeaderBytes + (i * kChunkRootEntryBytes), kChunkRootEntryBytes);
-        ChunkIndexReference entry{
+        ChunkMappingSegmentRef entry{
             .first_page = word(encoded, 0), .last_page = word(encoded, 1), .frame_count = word(encoded, 2), .pack = {}};
         if (!unpack(encoded.subspan(24), PagePurpose::kPageIndex, &entry.pack)) {
             return Status::corruption("Chunk root index pack identity mismatch");

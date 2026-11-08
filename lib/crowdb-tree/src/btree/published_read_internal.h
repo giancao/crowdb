@@ -19,7 +19,7 @@ struct LoadEvent
 class ReadPump : public std::enable_shared_from_this<ReadPump>
 {
   public:
-    ReadPump(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> transport,
+    ReadPump(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> transport,
              PublishedReadLimits bounds)
         : view(std::move(captured)),
           loader(std::move(transport)),
@@ -32,16 +32,16 @@ class ReadPump : public std::enable_shared_from_this<ReadPump>
     void stop() noexcept;
 
   protected:
-    virtual void                              begin()                        = 0;
-    virtual bool                              advance()                      = 0;
-    virtual void                              loaded(const LoadEvent &event) = 0;
-    virtual Status                           &status()                       = 0;
-    void                                      load_base(BaseRef base);
-    void                                      load_inner(std::shared_ptr<const BackingRef> backing);
-    void                                      load_value(const LogicalCell &cell);
-    std::shared_ptr<const PublishedTreeState> view;
-    std::shared_ptr<PageLoader>               loader;
-    PublishedReadLimits                       limits;
+    virtual void                    begin()                        = 0;
+    virtual bool                    advance()                      = 0;
+    virtual void                    loaded(const LoadEvent &event) = 0;
+    virtual Status                 &status()                       = 0;
+    void                            load_base(BaseRef base);
+    void                            load_inner(std::shared_ptr<const PageBlockRef> page_block);
+    void                            load_value(const LogicalCell &cell);
+    std::shared_ptr<const TreeRoot> view;
+    std::shared_ptr<PageLoader>     loader;
+    PublishedReadLimits             limits;
 
   private:
     void                       wake() noexcept;
@@ -57,7 +57,7 @@ class ReadPump : public std::enable_shared_from_this<ReadPump>
     std::shared_ptr<LoadEvent> event_;
 };
 
-Status validate_read(const std::shared_ptr<const PublishedTreeState> &view, const PublishedReadLimits &limits);
+Status validate_read(const std::shared_ptr<const TreeRoot> &view, const PublishedReadLimits &limits);
 [[nodiscard]] std::optional<size_t> read_metadata_allocation_bound(const PublishedReadLimits &limits,
                                                                    size_t                     workers) noexcept;
 LogicalCell                         owned_cell(std::shared_ptr<const CellVersion> owner);

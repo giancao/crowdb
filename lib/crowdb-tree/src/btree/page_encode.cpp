@@ -45,8 +45,8 @@ Status FinalPageEncoder::bind_overflow(ReservedOverflowIds ids)
         return Status::invalid_argument("overflow identities cannot change after encoding starts");
     }
     if (ids.count != needed ||
-        (needed != 0 && (!ids.owner || ids.first < state_->next_page_id || ids.first >= MappingView::kPageLimit ||
-                         needed > MappingView::kPageLimit - ids.first))) {
+        (needed != 0 && (!ids.owner || ids.first < state_->next_page_id || ids.first >= MappingTable::kPageLimit ||
+                         needed > MappingTable::kPageLimit - ids.first))) {
         return Status::invalid_argument("overflow interval must be reserved, owned and outside captured PIDs");
     }
     state_->ids = std::move(ids);
@@ -136,7 +136,7 @@ PageEncodeStep FinalPageEncoder::next_frame(std::span<uint8_t> output)
     };
 }
 
-PageEncodePreparation prepare_final_page(const std::shared_ptr<const PublishedTreeState> &captured, uint64_t pid,
+PageEncodePreparation prepare_final_page(const std::shared_ptr<const TreeRoot> &captured, uint64_t pid,
                                          const CapturedEncodeContext &context, const PageEncodeLimits &limits)
 {
     if (!captured) {
@@ -184,7 +184,7 @@ PageEncodePreparation prepare_final_page(const PageEncodeInput &input, const Pag
     const auto           &context     = input.context;
     const size_t          lower_bytes = context.range.lower.has_value() ? context.range.lower->size() : 0;
     const size_t          upper_bytes = context.range.upper.has_value() ? context.range.upper->size() : 0;
-    if (!input.page || input.page_id >= input.next_page_id || input.next_page_id > MappingView::kPageLimit ||
+    if (!input.page || input.page_id >= input.next_page_id || input.next_page_id > MappingTable::kPageLimit ||
         (context.range.lower && context.range.upper && *context.range.lower > *context.range.upper) ||
         limits.frame_bytes <= kFrameHeaderSize + kFrameTrailerSize || limits.max_sources == 0 ||
         limits.max_entries == 0 || limits.max_work_entries == 0 || input.gc_floor > input.coverage ||
@@ -204,6 +204,14 @@ PageEncodePreparation prepare_final_page(const PageEncodeInput &input, const Pag
         result.status = state->page->level == 0
                           ? detail::prepare_leaf(*state, input.coverage, input.gc_floor, context, &result)
                           : detail::prepare_inner(*state, context, &result);
+        if (state->page->level != 0 && input.children_summary) {
+            const auto &children                 = *input.children_summary;
+            state->summary.live_counts_known     = children.live_counts_known;
+            state->summary.live_keys             = children.live_keys;
+            state->summary.live_key_bytes        = children.live_key_bytes;
+            state->summary.live_value_bytes      = children.live_value_bytes;
+            state->summary.oldest_tombstone_slot = children.oldest_tombstone_slot;
+        }
         if (result.status.ok() && !result.needs_base && !result.needs_inner) {
             detail::ReservationAllocator<FinalPageEncoder> allocator(limits.metadata);
             auto                                          *storage = allocator.allocate(1);

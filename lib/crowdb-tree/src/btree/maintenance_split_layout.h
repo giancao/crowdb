@@ -63,8 +63,8 @@ class SplitWindowCursor
 
 Status plan_split_window(const std::shared_ptr<const PageState> &page, const PageMaintenanceLimits &limits,
                          SplitWindowLayout *layout, MaintenancePublicationResult *result);
-MaintenancePublicationResult build_split_layout_publication(std::shared_ptr<const PublishedTreeState> view,
-                                                            uint64_t leaf_pid, std::shared_ptr<InstallRecord> record,
+MaintenancePublicationResult build_split_layout_publication(std::shared_ptr<const TreeRoot> view, uint64_t leaf_pid,
+                                                            std::shared_ptr<InstallRecord>       record,
                                                             const MaintenancePublicationOptions &options,
                                                             const SplitWindowLayout             &layout);
 } // namespace crowdb::tree::detail

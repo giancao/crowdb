@@ -44,10 +44,10 @@ TEST(PublishedInnerRead, PointInlineLoadsBothLevelsWithoutMutatingCapturedMappin
 TEST(PublishedInnerRead, LoadedRootIsConsumedBeforeTraversingAResidentChild)
 {
     TestColdTree tree;
-    auto         child = std::make_shared<PublishedPage>(*tree.view->mapping.get(2));
+    auto         child = std::make_shared<PageEntry>(*tree.view->mapping.get(2));
     child->inner       = tree.loader->states[2];
-    const PageReplacement  change{.page_id = 2, .expected = tree.view->mapping.get(2), .replacement = child};
-    MappingView::CopyStats copied;
+    const PageReplacement   change{.page_id = 2, .expected = tree.view->mapping.get(2), .replacement = child};
+    MappingTable::CopyStats copied;
     tree.view->mapping = tree.view->mapping.replace({&change, 1}, copied);
     for (bool reverse : {false, true}) {
         PublishedRouteCursor route(tree.view->root_page_id, tree.view->mapping, 3, reverse);
@@ -107,13 +107,13 @@ TEST(PublishedInnerRead, LateLoadUsesOldMappingAfterReplacement)
     Completion done;
     auto       operation = stdexec::connect(request->sender(), Receiver{.done = &done});
     stdexec::start(operation);
-    auto                                 changed = std::make_shared<PublishedTreeState>(*tree.view);
+    auto                                 changed = std::make_shared<TreeRoot>(*tree.view);
     const std::array<PageReplacement, 1> changes{
         {{.page_id     = 5,
           .expected    = tree.view->mapping.get(5),
           .replacement = published(page({{.key = "m", .slot = 2, .value = "new"}}, {.lower = "m", .upper = "t"}))}}
     };
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     changed->mapping = changed->mapping.replace(changes, copied);
     tree.view        = std::move(changed);
     tree.loader->finish();

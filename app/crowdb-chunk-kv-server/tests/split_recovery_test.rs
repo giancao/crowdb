@@ -24,7 +24,7 @@ use std::sync::Arc;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovered_split_records_tree_completion_without_a_live_transfer() {
     use crowdb_chunk_kv_server::storage::open_root_catalog_with_process_for_tests;
-    use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
+    use crowdb_tree_ffi::chunk::test_util::TestPageChunkStore;
 
     let metadata = metadata::TestMetadata::start().await;
     let entry = entry(&transition(), false);
@@ -39,7 +39,7 @@ async fn recovered_split_records_tree_completion_without_a_live_transfer() {
     )
     .await
     .unwrap();
-    let backend = TestChunkBackend::new(entry.artifact.tree_id, entry.owner_epoch).unwrap();
+    let backend = TestPageChunkStore::new(entry.artifact.tree_id, entry.owner_epoch).unwrap();
     let pages = backend.page_store(0).unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(1),

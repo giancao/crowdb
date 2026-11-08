@@ -65,9 +65,10 @@ Status SourceWriteReservation::create(const SourceWriteOptions &options, WriteFo
     if (*bytes > detail::ResourceBudget::capacity(options.account, category)) {
         return Status::resource_exhausted("writer allocation exceeds its budget partition");
     }
-    auto credit = detail::ResourceBudget::try_reserve(options.account, category, *bytes);
+    bool memory_denied = false;
+    auto credit        = detail::ResourceBudget::try_reserve(options.account, category, *bytes, &memory_denied);
     if (!credit) {
-        if (!gap && detail::ResourceBudget::memory_exhausted(options.account)) {
+        if (memory_denied) {
             return Status::resource_exhausted("actual Tree memory exceeds 150% of the configured maximum");
         }
         return Status::unavailable("writer apply credit unavailable");

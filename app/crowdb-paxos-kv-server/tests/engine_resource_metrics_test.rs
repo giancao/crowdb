@@ -17,7 +17,7 @@ async fn service_collector_logs_host_and_tree_resource_windows() {
     let root = crowdb_test_harness::test_dirs::tempdir_in_test_data("paxos-tree-resources");
     let config = PaxosKvConfig {
         wal_backend: "mem-block".into(),
-        crowtree_backend: "mem-block".into(),
+        crowtree_store_kind: "mem-block".into(),
         wal_root: root.path().join("wal"),
         config_root: root.path().join("config"),
         data_root: root.path().join("tree"),
@@ -33,7 +33,7 @@ async fn service_collector_logs_host_and_tree_resource_windows() {
         PxLocalReplicaRole::Leader,
         &registry.config,
         registry.wal_backend.clone(),
-        registry.crowtree_backend,
+        registry.crowtree_store_kind,
         registry.tree_runtime.clone(),
     )
     .await

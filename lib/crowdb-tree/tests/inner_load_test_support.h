@@ -66,8 +66,8 @@ inline std::shared_ptr<InnerPageState> inner(std::vector<std::string> separators
     return result;
 }
 
-inline std::shared_ptr<const BackingRef> inner_backing(const std::shared_ptr<TestInnerStore> &store, uint64_t id,
-                                                       const InnerPageState &state)
+inline std::shared_ptr<const PageBlockRef> inner_page_block(const std::shared_ptr<TestInnerStore> &store, uint64_t id,
+                                                            const InnerPageState &state)
 {
     std::vector<std::string> separators;
     for (const auto &key : state.separators) {
@@ -77,11 +77,11 @@ inline std::shared_ptr<const BackingRef> inner_backing(const std::shared_ptr<Tes
     const std::unique_ptr<InnerBase> frame(InnerBase::build(separators, children));
     auto                            &blob = store->blobs[id];
     encode_durable_page(frame->frame(), frame->page_bytes(), compress_algo::kNone, &blob);
-    auto backing     = std::make_shared<BackingRef>();
-    backing->address = id;
-    backing->length  = blob.size();
-    backing->owner   = std::make_shared<int>(1);
-    return backing;
+    auto page_block     = std::make_shared<PageBlockRef>();
+    page_block->address = id;
+    page_block->length  = blob.size();
+    page_block->owner   = std::make_shared<int>(1);
+    return page_block;
 }
 
 class TestInnerLoader final : public PageLoader
@@ -98,15 +98,15 @@ class TestInnerLoader final : public PageLoader
         complete(Status::not_supported(), {});
     }
 
-    void load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete) override
+    void load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete) override
     {
         ++calls;
         if (deferred) {
             pending.push_back(std::move(complete));
-            ids.push_back(backing->address);
+            ids.push_back(page_block->address);
         }
         else {
-            complete(Status::Ok(), states.at(backing->address));
+            complete(Status::Ok(), states.at(page_block->address));
         }
     }
 
@@ -123,9 +123,9 @@ class TestInnerLoader final : public PageLoader
 
 struct TestColdTree
 {
-    std::shared_ptr<TestInnerStore>     store  = std::make_shared<TestInnerStore>();
-    std::shared_ptr<TestInnerLoader>    loader = std::make_shared<TestInnerLoader>();
-    std::shared_ptr<PublishedTreeState> view   = std::make_shared<PublishedTreeState>();
+    std::shared_ptr<TestInnerStore>  store  = std::make_shared<TestInnerStore>();
+    std::shared_ptr<TestInnerLoader> loader = std::make_shared<TestInnerLoader>();
+    std::shared_ptr<TreeRoot>        view   = std::make_shared<TreeRoot>();
 
     TestColdTree()
     {
@@ -135,9 +135,9 @@ struct TestColdTree
         std::vector<PageReplacement> changes;
         changes.reserve(7);
         for (uint64_t id = 0; id < 3; ++id) {
-            auto index           = std::make_shared<PublishedPage>();
-            index->level         = id == 0 ? 2 : 1;
-            index->inner_backing = inner_backing(store, id, *loader->states.at(id));
+            auto index              = std::make_shared<PageEntry>();
+            index->level            = id == 0 ? 2 : 1;
+            index->inner_page_block = inner_page_block(store, id, *loader->states.at(id));
             changes.push_back({.page_id = id, .expected = {}, .replacement = std::move(index)});
         }
         changes.push_back({
@@ -171,7 +171,7 @@ struct TestColdTree
                  {.lower = "t"}
                  ))
         });
-        MappingView::CopyStats copied;
+        MappingTable::CopyStats copied;
         view->mapping      = view->mapping.replace(changes, copied);
         view->root_page_id = 0;
     }

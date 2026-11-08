@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
 #include "snapshot/commit_anchor.h"
 #include "test_tmp.h"
 
@@ -18,9 +18,9 @@ constexpr size_t kMetadata = static_cast<size_t>(AllocationKind::kMetadata);
 
 TEST(TreeCoreBlockAccount, ConstructorRecoversAndTransfersExistingBackendWithMonotonicAutoSlots)
 {
-    tree_test::TempDir              directory("core_block_budget_");
-    std::unique_ptr<BlockPageStore> device;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());
+    tree_test::TempDir             directory("core_block_budget_");
+    std::unique_ptr<PageDiskStore> device;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());
     Config             config;
     TreeRuntimeOptions host;
     host.workers         = 1;
@@ -63,9 +63,9 @@ TEST(TreeCoreBlockAccount, ConstructorRecoversAndTransfersExistingBackendWithMon
 
 TEST(TreeCoreBlockAccount, FailedOpenReleasesDomainAndPrivateCreateCannotBypassIt)
 {
-    tree_test::TempDir              directory("core_block_fail_");
-    std::unique_ptr<BlockPageStore> device;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());
+    tree_test::TempDir             directory("core_block_fail_");
+    std::unique_ptr<PageDiskStore> device;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());
     Config config;
     ASSERT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
     config.page_store  = device.get();
@@ -96,7 +96,7 @@ TEST(TreeCoreBlockAccount, FailedOpenReleasesDomainAndPrivateCreateCannotBypassI
     cpu->drain();
     EXPECT_EQ(config.runtime->snapshot().allocated.routing_bytes, baseline.allocated.routing_bytes);
     EXPECT_EQ(config.runtime->snapshot().reserved.routing_bytes, baseline.reserved.routing_bytes);
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());
     config.page_store                           = device.get();
     config.runtime_binding.limits.routing_bytes = original_limit;
     {
@@ -110,9 +110,9 @@ TEST(TreeCoreBlockAccount, FailedOpenReleasesDomainAndPrivateCreateCannotBypassI
 
 TEST(TreeCoreBlockAccount, FailedRecoveryRetainsRealBackendChargeAndReleasesDomainForRetry)
 {
-    tree_test::TempDir              directory("core_block_recovery_fail_");
-    std::unique_ptr<BlockPageStore> device;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());
+    tree_test::TempDir             directory("core_block_recovery_fail_");
+    std::unique_ptr<PageDiskStore> device;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());
     Config config;
     ASSERT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
     config.page_store         = device.get();

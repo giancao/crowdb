@@ -128,7 +128,7 @@ void TreeApplyOperation::State::start_flush()
     preparation.persistence.reset();
     if (sources->capacity_paused()) {
         auto core = weak_core.lock();
-        if (core && (core->local_backend() || core->chunk_backend())) {
+        if (core && (core->local_page_store() || core->page_chunk_store())) {
             auto status = core->prepare_capacity_flush(&preparation, backend_ticket);
             if (!status.ok()) {
                 finish(std::move(status));

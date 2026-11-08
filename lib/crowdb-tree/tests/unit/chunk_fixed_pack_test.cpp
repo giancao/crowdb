@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "common/test_chunk_stage_backend.h"
+#include "common/test_page_chunk_store_stage.h"
 
 #include <array>
 
@@ -51,7 +51,7 @@ TEST(ChunkFixedPack, UnknownAllocateRetainsPreexistingStageIdentity)
     EXPECT_TRUE(transport->query_chunk(fixed, &physical).ok());
 }
 
-TEST(ChunkFixedPack, UnsupportedReadFenceRetainsAllocationWithoutPublishingBacking)
+TEST(ChunkFixedPack, UnsupportedReadFenceRetainsAllocationWithoutPublishingPageBlock)
 {
     auto catalog          = std::make_shared<TestStageCatalog>();
     auto transport        = std::make_shared<TestFixedTransport>(catalog);

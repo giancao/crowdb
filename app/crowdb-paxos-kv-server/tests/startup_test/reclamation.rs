@@ -36,7 +36,7 @@ async fn restored_wal_keeps_old_segments_visible_to_safe_reclamation() {
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowdbTreeBackend::Block,
+        CrowdbTreeStoreKind::Disk,
     )
     .await
     .unwrap();
@@ -63,7 +63,7 @@ async fn restored_wal_keeps_old_segments_visible_to_safe_reclamation() {
         .unwrap()
         .handle();
     let close = tree.close_result().unwrap();
-    let release = tree.backend_release_service().unwrap();
+    let release = tree.page_store_release_service().unwrap();
     drop(tree);
     drop(group);
     close.wait().await.unwrap();
@@ -75,7 +75,7 @@ async fn restored_wal_keeps_old_segments_visible_to_safe_reclamation() {
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowdbTreeBackend::Block,
+        CrowdbTreeStoreKind::Disk,
     )
     .await
     .unwrap();

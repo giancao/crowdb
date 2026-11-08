@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/publication_lane.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 #include "load_budget_test_support.h"
 
 #include <latch>

@@ -40,6 +40,7 @@ TEST(RecoveredFrameIdentity, ConcreteInnerPidMismatchIsRejectedBeforePublication
     test.balanced();
     std::vector<uint8_t> raw(4096);
     ASSERT_TRUE(inner_frame_build(raw.data(), raw.size(), 99, {1, 2}, {"m"}));
+    frame_set_inner_fence_pages(raw.data(), raw.size(), 1, 2);
     test.add(0, raw);
     ASSERT_TRUE(test.prepare().ok());
     test_read::Completion done;
@@ -63,6 +64,7 @@ TEST(RecoveredFrameIdentity, NativeImportStillRejectsEveryConcreteFrameIdentityM
                 test_import::inline_leaf(1)
             };
             ASSERT_TRUE(inner_frame_build(frames[0].frame.data(), 4096, 0, {1}, {}));
+            frame_set_inner_fence_pages(frames[0].frame.data(), 4096, 1, 1);
         }
         const auto count  = frames.size();
         auto       status = tree.install_snapshot_native(frames, 0, 7, count);

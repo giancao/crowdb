@@ -51,7 +51,7 @@ pub struct TreeResourceStats {
     pub read_inflight_bytes: u64,
     pub write_inflight_bytes: u64,
     pub materialize_inflight_bytes: u64,
-    pub allocated_backing_bytes: u64,
+    pub allocated_page_block_bytes: u64,
     pub maintenance_queued: u64,
     pub maintenance_inflight: u64,
 }
@@ -123,7 +123,7 @@ impl Crowdbtree {
                 read_inflight_bytes: raw.resources.read_inflight_bytes,
                 write_inflight_bytes: raw.resources.write_inflight_bytes,
                 materialize_inflight_bytes: raw.resources.materialize_inflight_bytes,
-                allocated_backing_bytes: raw.resources.allocated_backing_bytes,
+                allocated_page_block_bytes: raw.resources.allocated_page_block_bytes,
                 maintenance_queued: raw.resources.maintenance_queued,
                 maintenance_inflight: raw.resources.maintenance_inflight,
             },

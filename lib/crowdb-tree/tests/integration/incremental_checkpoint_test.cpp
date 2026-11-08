@@ -3,10 +3,10 @@
 
 // PT6d: incremental snapshot writes only dirty pages, retains clean pages'
 // durable addrs, and reopens to identical state.
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "runtime_tree_access.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 #include <gtest/gtest.h>
 
@@ -57,11 +57,11 @@ DurableLocations durable_locations(Crowdbtree &tree)
 {
     DurableLocations result;
     RuntimeTreeAccess_for_tests::capture(tree)->mapping.visit(
-        &result, [](void *raw, uint64_t pid, const std::shared_ptr<const PublishedPage> &page) {
-            if (page->primary && page->primary->frame.backing) {
-                auto       &out     = *static_cast<DurableLocations *>(raw);
-                const auto &backing = *page->primary->frame.backing;
-                out.emplace(pid, std::pair{backing.address, backing.length});
+        &result, [](void *raw, uint64_t pid, const std::shared_ptr<const PageEntry> &page) {
+            if (page->primary && page->primary->frame.page_block) {
+                auto       &out        = *static_cast<DurableLocations *>(raw);
+                const auto &page_block = *page->primary->frame.page_block;
+                out.emplace(pid, std::pair{page_block.address, page_block.length});
             }
         });
     return result;
@@ -88,7 +88,7 @@ void expect_untouched_locations(const DurableLocations &before, const DurableLoc
 
 TEST(IncrementalCheckpoint, SecondCheckpointWithoutChangesWritesNothing)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;
@@ -110,7 +110,7 @@ TEST(IncrementalCheckpoint, SecondCheckpointWithoutChangesWritesNothing)
 
 TEST(IncrementalCheckpoint, SingleKeyEditRewritesOnlyItsPath)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;
@@ -140,7 +140,7 @@ TEST(IncrementalCheckpoint, SingleKeyEditRewritesOnlyItsPath)
 
 TEST(IncrementalCheckpoint, UnchangedCheckpointPreservesExactPageLocations)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       options;
     options.page_store       = &store;
     options.leaf_split_bytes = 160;
@@ -161,7 +161,7 @@ TEST(IncrementalCheckpoint, UnchangedCheckpointPreservesExactPageLocations)
 
 TEST(IncrementalCheckpoint, LargeTreeEditPreservesUntouchedPhysicalPages)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       options;
     options.page_store       = &store;
     options.leaf_split_bytes = 160;
@@ -194,7 +194,7 @@ TEST(IncrementalCheckpoint, LargeTreeEditPreservesUntouchedPhysicalPages)
 
 TEST(IncrementalCheckpoint, SpaceIsReusedAcrossManyCheckpoints)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;
@@ -246,7 +246,7 @@ TEST(IncrementalCheckpoint, SpaceIsReusedAcrossManyCheckpoints)
 
 TEST(IncrementalCheckpoint, ReopenAfterIncrementalSeesAllValues)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;
@@ -286,7 +286,7 @@ TEST(IncrementalCheckpoint, ReopenAfterIncrementalSeesAllValues)
 
 TEST(IncrementalCheckpoint, SnapshotPagesTotalAccumulates)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;

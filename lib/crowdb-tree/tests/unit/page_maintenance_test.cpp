@@ -26,12 +26,12 @@ run(uint64_t id, std::initializer_list<std::pair<std::string, std::shared_ptr<co
     return output;
 }
 
-std::shared_ptr<const BackingRef> cold_backing()
+std::shared_ptr<const PageBlockRef> cold_page_block()
 {
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = 4096;
-    backing->owner  = std::make_shared<int>(1);
-    return backing;
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = 4096;
+    page_block->owner  = std::make_shared<int>(1);
+    return page_block;
 }
 
 PageMaintenanceLimits small_layout()
@@ -65,7 +65,7 @@ TEST(PageMaintenance, ColdOverlayCoalescePreservesTombstoneAndDoesNotLoadBase)
 {
     auto page        = std::make_shared<PageState>();
     page->content_id = 9;
-    page->bases.push_back({.identity = 1, .max_slot = 2, .backing = cold_backing()});
+    page->bases.push_back({.identity = 1, .max_slot = 2, .page_block = cold_page_block()});
     page->overlays.push_back(run(1, {
                                         {"key", cell(2, "old")}
     }));
@@ -83,7 +83,7 @@ TEST(PageMaintenance, ColdOverlayCoalescePreservesTombstoneAndDoesNotLoadBase)
     ASSERT_EQ(result.page->overlays.size(), 1U);
     EXPECT_EQ(result.page->overlays[0]->find("key")->owner, tombstone);
     EXPECT_EQ(result.page->lookup("key").state, LogicalLookupState::kTombstone);
-    EXPECT_EQ(result.page->bases[0].backing, page->bases[0].backing);
+    EXPECT_EQ(result.page->bases[0].page_block, page->bases[0].page_block);
     EXPECT_EQ(result.page->content_id, 9U);
     EXPECT_EQ(result.page->representation_id, 7U);
     EXPECT_EQ(page->overlays.size(), 2U);
@@ -151,8 +151,8 @@ TEST(PageMaintenance, CoalesceBudgetFailureDoesNotPublishPartialOutput)
 TEST(PageMaintenance, ColdLayoutRequestsOneBaseWithoutInventingPageSize)
 {
     auto page = dense_page();
-    page->bases.push_back({.identity = 1, .backing = cold_backing()});
-    page->bases.push_back({.identity = 2, .backing = cold_backing()});
+    page->bases.push_back({.identity = 1, .page_block = cold_page_block()});
+    page->bases.push_back({.identity = 2, .page_block = cold_page_block()});
     auto layout = plan_leaf_layout(page, small_layout());
     EXPECT_TRUE(layout.status.ok());
     EXPECT_EQ(layout.readiness, MaintenanceReadiness::kNeedsBase);

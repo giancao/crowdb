@@ -47,7 +47,7 @@ std::optional<size_t> PortableImportBuilder::allocation_bound(const NativeImport
 
 Status PortableImportBuilder::reserve_pid(uint64_t *out)
 {
-    if (next_pid_ >= MappingView::kPageLimit || next_pid_ == NativeImportLimits{}.max_frames) {
+    if (next_pid_ >= MappingTable::kPageLimit || next_pid_ == NativeImportLimits{}.max_frames) {
         return Status::resource_exhausted("portable import frame namespace is full");
     }
     *out = next_pid_++;

@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
 #include "test_tmp.h"
 
 #include <gtest/gtest.h>
@@ -13,9 +13,9 @@ namespace crowdb::tree
 {
 TEST(BlockDirectory, SparseMaximumIndexDoesNotCreateDensePlaceholders)
 {
-    tree_test::TempDir              dir("block_sparse_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 3, 4, 4096, 1, &store).ok());
+    tree_test::TempDir             dir("block_sparse_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 3, 4, 4096, 1, &store).ok());
     const uint8_t  value  = 7;
     const uint64_t offset = uint64_t{UINT32_MAX} * 4096;
     ASSERT_TRUE(store->write_at(offset, &value, 1).ok());
@@ -26,7 +26,7 @@ TEST(BlockDirectory, SparseMaximumIndexDoesNotCreateDensePlaceholders)
     EXPECT_EQ(store->size(), offset + 1);
     ASSERT_TRUE(store->sync().ok());
     store.reset();
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 3, 4, 4096, 1, &store).ok());
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 3, 4, 4096, 1, &store).ok());
     EXPECT_EQ(store->num_extents(), 2U);
     ASSERT_TRUE(store->read_at(offset, &actual, 1).ok());
     EXPECT_EQ(actual, value);
@@ -36,9 +36,9 @@ TEST(BlockDirectory, SparseMaximumIndexDoesNotCreateDensePlaceholders)
 
 TEST(BlockDirectory, DeletedInteriorAndLastBlockCanBeRecreatedWithoutReusingOldFd)
 {
-    tree_test::TempDir              dir("block_recreate_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 3, 4, 4096, 1, &store).ok());
+    tree_test::TempDir             dir("block_recreate_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 3, 4, 4096, 1, &store).ok());
     uint8_t value = 7;
     ASSERT_TRUE(store->write_at(8192, &value, 1).ok());
     ASSERT_TRUE(store->write_at(4096, &value, 1).ok());
@@ -68,9 +68,9 @@ TEST(BlockDirectory, DeletedInteriorAndLastBlockCanBeRecreatedWithoutReusingOldF
 
 TEST(BlockDirectory, ConcurrentGrowthDeletionAndEnumerationKeepReadersStable)
 {
-    tree_test::TempDir              dir("block_concurrent_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 3, 4, 4096, 1, &store).ok());
+    tree_test::TempDir             dir("block_concurrent_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 3, 4, 4096, 1, &store).ok());
     const uint8_t value = 37;
     ASSERT_TRUE(store->write_at(0, &value, 1).ok());
     std::barrier               start(4);

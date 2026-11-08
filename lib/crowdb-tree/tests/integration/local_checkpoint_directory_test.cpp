@@ -10,9 +10,9 @@ using namespace test_write;
 
 namespace
 {
-std::shared_ptr<PublishedTreeState> sparse_captured_tree(size_t leaves, bool first_pair_shared = false)
+std::shared_ptr<TreeRoot> sparse_captured_tree(size_t leaves, bool first_pair_shared = false)
 {
-    auto       captured = std::make_shared<PublishedTreeState>();
+    auto       captured = std::make_shared<TreeRoot>();
     auto       index    = std::make_shared<InnerPageState>();
     const auto page_id  = [first_pair_shared](size_t i) {
         return first_pair_shared && i == 1 ? 1 : i * kMappingSegmentSize;
@@ -38,7 +38,7 @@ std::shared_ptr<PublishedTreeState> sparse_captured_tree(size_t leaves, bool fir
         leaf->right_sibling = i + 1 == leaves ? kInvalidPageId : page_id(i + 1);
         replacements.push_back({.page_id = pid, .expected = {}, .replacement = published(std::move(leaf))});
     }
-    auto root              = std::make_shared<PublishedPage>();
+    auto root              = std::make_shared<PageEntry>();
     root->level            = 1;
     root->inner            = index;
     root->metrics.leaf     = false;
@@ -46,12 +46,12 @@ std::shared_ptr<PublishedTreeState> sparse_captured_tree(size_t leaves, bool fir
     captured->next_page_id = captured->root_page_id + 1;
     captured->coverage     = 10;
     replacements.push_back({.page_id = captured->root_page_id, .expected = {}, .replacement = root});
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     captured->mapping = captured->mapping.replace(replacements, copied);
     return captured;
 }
 
-DurableCapturedFrame rewrite_leaf(TestCheckpoint &test, const PublishedTreeState &tree, uint64_t pid, std::string key,
+DurableCapturedFrame rewrite_leaf(TestCheckpoint &test, const TreeRoot &tree, uint64_t pid, std::string key,
                                   std::string value)
 {
     const auto old      = tree.mapping.get(pid)->leaf;
@@ -94,7 +94,7 @@ DurableCapturedFrame rewrite_leaf(TestCheckpoint &test, const PublishedTreeState
 TEST(LocalCheckpoint, SparseMappingStreamsDirectoryAcrossWindowsAndEnforcesSegmentCap)
 {
     TestCheckpoint test;
-    // 385 segment entries require 12,340 logical directory bytes, crossing
+    // 385 mapping segment entries require 12,340 logical directory bytes, crossing
     // the single 12,288-byte aligned metadata window.
     constexpr size_t leaves = 384;
     ASSERT_TRUE(test.source

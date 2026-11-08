@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "load_budget_test_support.h"
 #include "overflow_load_test_support.h"
 
@@ -13,15 +13,15 @@ TEST(OverflowLoad, PrimaryDependenciesRetainOnlyItsChainWithoutGlobalResolver)
     auto runtime  = std::make_shared<detail::FlushRuntime>(1, 8);
     auto lane     = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto store    = std::make_shared<TestOverflowStore>();
-    auto captured = std::make_shared<TestBackingMap>();
+    auto captured = std::make_shared<TestPageBlockMap>();
     add_overflow(store, captured.get(), 1, 2, "hello");
     add_overflow(store, captured.get(), 2, kInvalidPageId, "world");
     add_overflow(store, captured.get(), 3, kInvalidPageId, "unrelated");
-    std::weak_ptr<const BackingRef> unrelated    = captured->at(3);
-    auto                            dependencies = std::make_shared<OverflowBackingSet>(nullptr);
-    dependencies->pages.emplace(1, OverflowBackingPage{.backing = captured->at(1)});
-    dependencies->pages.emplace(2, OverflowBackingPage{.backing = captured->at(2)});
-    auto primary      = std::make_shared<BackingRef>();
+    std::weak_ptr<const PageBlockRef> unrelated    = captured->at(3);
+    auto                              dependencies = std::make_shared<OverflowPageBlockSet>(nullptr);
+    dependencies->pages.emplace(1, OverflowPageBlock{.page_block = captured->at(1)});
+    dependencies->pages.emplace(2, OverflowPageBlock{.page_block = captured->at(2)});
+    auto primary      = std::make_shared<PageBlockRef>();
     primary->overflow = dependencies;
     captured.reset();
     EXPECT_TRUE(unrelated.expired());
@@ -42,10 +42,10 @@ TEST(OverflowLoad, PrimaryCannotResolveForeignPidThroughFallback)
     auto runtime  = std::make_shared<detail::FlushRuntime>(1, 8);
     auto lane     = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto store    = std::make_shared<TestOverflowStore>();
-    auto captured = std::make_shared<TestBackingMap>();
+    auto captured = std::make_shared<TestPageBlockMap>();
     add_overflow(store, captured.get(), 1, kInvalidPageId, "hello");
-    auto primary      = std::make_shared<BackingRef>();
-    primary->overflow = std::make_shared<OverflowBackingSet>(nullptr);
+    auto primary      = std::make_shared<PageBlockRef>();
+    primary->overflow = std::make_shared<OverflowPageBlockSet>(nullptr);
     AsyncStorePageLoader loader(store, runtime, lane, {}, resolver(captured));
     size_t               calls = 0;
     loader.load_overflow(primary, 1, 5, [&](Status status, std::shared_ptr<const buffer> value) {
@@ -64,7 +64,7 @@ TEST(OverflowLoad, ValueCapacityRemainsChargedAfterDecodeScratchAndLoaderAreGone
     auto              runtime  = std::make_shared<detail::FlushRuntime>(1, 8);
     auto              lane     = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto              store    = std::make_shared<TestOverflowStore>();
-    auto              captured = std::make_shared<TestBackingMap>();
+    auto              captured = std::make_shared<TestPageBlockMap>();
     const std::string first(4096, 'a');
     const std::string second(4096, 'b');
     add_overflow(store, captured.get(), 1, 2, first);
@@ -88,16 +88,16 @@ TEST(OverflowLoad, ValueCapacityRemainsChargedAfterDecodeScratchAndLoaderAreGone
     EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
 }
 
-TEST(OverflowLoad, CapturedResolverAndBackingSurviveDeferredTransport)
+TEST(OverflowLoad, CapturedResolverAndPageBlockSurviveDeferredTransport)
 {
     auto runtime    = std::make_shared<detail::FlushRuntime>(1, 8);
     auto lane       = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto store      = std::make_shared<TestOverflowStore>();
     store->deferred = true;
-    auto captured   = std::make_shared<TestBackingMap>();
+    auto captured   = std::make_shared<TestPageBlockMap>();
     add_overflow(store, captured.get(), 1, 2, "hello");
     add_overflow(store, captured.get(), 2, kInvalidPageId, "world");
-    std::weak_ptr<const TestBackingMap> retained = captured;
+    std::weak_ptr<const TestPageBlockMap> retained = captured;
     auto loader = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{}, resolver(captured));
     std::shared_ptr<const buffer> result;
     std::atomic<size_t>           calls{0};
@@ -127,7 +127,7 @@ TEST(OverflowLoad, RejectsShortLongAndCyclicChains)
     auto lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
     for (uint64_t length : {9, 11, 12}) {
         auto store    = std::make_shared<TestOverflowStore>();
-        auto captured = std::make_shared<TestBackingMap>();
+        auto captured = std::make_shared<TestPageBlockMap>();
         add_overflow(store, captured.get(), 1, 2, "hello");
         add_overflow(store, captured.get(), 2, length == 12 ? 1 : kInvalidPageId, "world");
         AsyncStorePageLoader loader(store, runtime, lane, {}, resolver(captured));
@@ -149,7 +149,7 @@ TEST(OverflowLoad, BoundsValueBytesAndPagesAndValidatesChecksum)
     auto lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
     for (size_t scenario = 0; scenario < 3; ++scenario) {
         auto store    = std::make_shared<TestOverflowStore>();
-        auto captured = std::make_shared<TestBackingMap>();
+        auto captured = std::make_shared<TestPageBlockMap>();
         add_overflow(store, captured.get(), 1, 2, "hello");
         add_overflow(store, captured.get(), 2, kInvalidPageId, "world");
         PageLoadLimits limits;
@@ -176,7 +176,7 @@ TEST(OverflowLoad, GetAndScanMaterializeTheSameCapturedChain)
     auto runtime  = std::make_shared<detail::FlushRuntime>(1, 8);
     auto lane     = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto store    = std::make_shared<TestOverflowStore>();
-    auto captured = std::make_shared<TestBackingMap>();
+    auto captured = std::make_shared<TestPageBlockMap>();
     add_overflow(store, captured.get(), 1, 2, "hello");
     add_overflow(store, captured.get(), 2, kInvalidPageId, "world");
     auto loader   = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{}, resolver(captured));
@@ -212,7 +212,7 @@ TEST(OverflowLoad, InlineChainUsesBoundedCpuContinuations)
     auto             runtime  = std::make_shared<detail::FlushRuntime>(1, 1);
     auto             lane     = std::make_shared<detail::FlushRuntime::Lane>(1);
     auto             store    = std::make_shared<TestOverflowStore>();
-    auto             captured = std::make_shared<TestBackingMap>();
+    auto             captured = std::make_shared<TestPageBlockMap>();
     constexpr size_t pages    = 128;
     for (size_t id = 1; id <= pages; ++id) {
         add_overflow(store, captured.get(), id, id == pages ? kInvalidPageId : id + 1, "x");
@@ -237,7 +237,7 @@ TEST(OverflowLoad, IndependentOverflowReadsStartBeforeLateReadErrors)
     auto lane       = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto store      = std::make_shared<TestOverflowStore>();
     store->deferred = true;
-    auto captured   = std::make_shared<TestBackingMap>();
+    auto captured   = std::make_shared<TestPageBlockMap>();
     add_overflow(store, captured.get(), 1, kInvalidPageId, "hello");
     AsyncStorePageLoader loader(store, runtime, lane, {}, resolver(captured));
     std::vector<Code>    outcomes;

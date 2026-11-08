@@ -62,14 +62,14 @@ TEST(MappingTable, AllocatePageIdIsMonotonic)
 TEST(MappingTable, SegmentGrowth)
 {
     TestMappingTable mt;
-    // Allocate enough PIDs to span multiple segments.
+    // Allocate enough PIDs to span multiple mapping segments.
     std::vector<uint64_t> pids;
     pids.reserve((TestMappingTable::kSegmentSize * 3) + 5);
     for (uint64_t i = 0; i < (TestMappingTable::kSegmentSize * 3) + 5; ++i) {
         pids.push_back(mt.allocate_page_id());
     }
     EXPECT_GE(mt.segments_allocated(), 4U);
-    // store + read back across segment boundaries.
+    // store + read back across mapping segment boundaries.
     PageBase *page  = make_leaf();
     uint64_t  cross = pids[TestMappingTable::kSegmentSize + 1];
     mt.store(cross, page);
@@ -190,11 +190,11 @@ TEST(MappingTable, StoreWordPackedUnloaded)
     EXPECT_EQ(unloaded_iu_count(got), 7U);
 }
 
-// -- #14b: segment recycling --------------------------------------------
+// -- #14b: mapping segment recycling --------------------------------------------
 
 TEST(MappingTable, SegmentRecycledWhenLastSlotCleared)
 {
-    // No epoch manager wired: recycled segments are deleted immediately on
+    // No epoch manager wired: recycled mapping segments are deleted immediately on
     // the writer thread (fine -- no concurrent readers in this test).
     TestMappingTable        mt;
     std::vector<uint64_t>   pids;
@@ -216,10 +216,10 @@ TEST(MappingTable, SegmentRecycledWhenLastSlotCleared)
     EXPECT_EQ(mt.segments_allocated(),
               1U); // one live slot left -> not recyclable
 
-    mt.clear(pids.back()); // last live slot -> segment recycles
+    mt.clear(pids.back()); // last live slot -> mapping segment recycles
     EXPECT_EQ(mt.segments_allocated(), 0U);
 
-    // A PID inside a recycled segment reads back as empty, never UB / stale data.
+    // A PID inside a recycled mapping segment reads back as empty, never UB / stale data.
     EXPECT_TRUE(is_empty(mt.get_word(pids.front())));
     EXPECT_EQ(mt.get_resident(pids.front()), nullptr);
 
@@ -250,7 +250,7 @@ TEST(MappingTable, SegmentNotRecycledWhilePartiallyLive)
     delete pb;
 }
 
-// -- #14c/#14d: segment-image persistence bookkeeping -------------------
+// -- #14c/#14d: mapping segment image persistence bookkeeping -------------------
 
 TEST(MappingTable, SegmentAtReflectsAllocationAndRecycling)
 {
@@ -324,7 +324,7 @@ TEST(MappingTable, CommitSegmentPersistSkippedIfRecycledDuringGap)
     TestMappingSegment *seg      = mt.segment_at(0);
     uint64_t            seen_seq = seg->write_seq.load();
 
-    mt.clear(page_id); // recycles segment 0 (no epoch wired -> deleted immediately)
+    mt.clear(page_id); // recycles mapping segment 0 (no epoch wired -> deleted immediately)
     EXPECT_EQ(mt.segment_at(0), nullptr);
 
     // `seg` is dangling now for a real epoch-backed table, but here (no epoch
@@ -373,12 +373,12 @@ TEST(MappingTable, RecycledSegmentFreedOnlyAfterEpochGuardDrains)
     mt.store(page_id, page);
     ASSERT_EQ(mt.segments_allocated(), 1U);
 
-    // Simulate a concurrent reader that entered before the segment recycles.
+    // Simulate a concurrent reader that entered before the mapping segment recycles.
     // Guard::release() is private (RAII-only); scope the guard to drop it.
     {
         EpochManager::Guard guard = epoch.enter();
 
-        mt.clear(page_id); // last live slot -> segment CAS'd out and retired
+        mt.clear(page_id); // last live slot -> mapping segment CAS'd out and retired
         EXPECT_EQ(mt.segments_allocated(), 0U);
         EXPECT_EQ(epoch.pending_retired(), 1U);
         EXPECT_EQ(epoch.try_reclaim(),

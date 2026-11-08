@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/backing_io.h"
 #include "page_load.h"
+#include "page_store/page_block_io.h"
 #include "resource_observation.h"
 #include "tree_metrics.h"
 
@@ -109,18 +109,18 @@ template <class Load> void page_read_completed(void *context, Status status) noe
 }
 
 template <class Load>
-void submit_page_read(const std::shared_ptr<Load> &operation, std::shared_ptr<const BackingRef> backing, void *buffer,
-                      size_t bytes, AsyncCompleteFn complete = &page_read_completed<Load>)
+void submit_page_read(const std::shared_ptr<Load> &operation, std::shared_ptr<const PageBlockRef> page_block,
+                      void *buffer, size_t bytes, AsyncCompleteFn complete = &page_read_completed<Load>)
 {
     auto ticket = detail::reserved_shared<PageReadTicket>(operation->metadata, operation, operation.get(), complete,
                                                           operation->metadata, operation->blob.capacity());
     try {
-        submit_backing_read(*operation->store, std::move(backing), buffer, bytes, operation->metadata,
-                            {.context     = ticket.get(),
-                             .complete_fn = &PageReadTicket::completed,
-                             .owner       = ticket,
-                             .allocations = operation->backend_budget,
-                             .cause       = operation->cause});
+        submit_page_block_read(*operation->store, std::move(page_block), buffer, bytes, operation->metadata,
+                               {.context     = ticket.get(),
+                                .complete_fn = &PageReadTicket::completed,
+                                .owner       = ticket,
+                                .allocations = operation->backend_budget,
+                                .cause       = operation->cause});
     }
     catch (const std::bad_alloc &) {
         operation->finish(Status::resource_exhausted());
@@ -128,7 +128,7 @@ void submit_page_read(const std::shared_ptr<Load> &operation, std::shared_ptr<co
     catch (...) {
         operation->finish(Status::io_error());
     }
-    // An uncertain submit retains the ticket and operation until the backend
+    // An uncertain submit retains the ticket and operation until the page store
     // releases its owner. A late callback cannot decode or finish twice.
     ticket->submitted();
 }

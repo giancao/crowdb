@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/memory_budget.h"
+#include "crowdb-tree/page_store/async_page_store.h"
 
 #include <atomic>
 #include <exec/detail/pool_resource.hpp>

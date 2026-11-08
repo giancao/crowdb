@@ -15,7 +15,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::{oneshot, Notify};
 
 use crate::close::CloseState;
-use crate::config::{Config, KeyRange, PageStoreBackend};
+use crate::config::{Config, KeyRange, PageStoreKind};
 use crate::error::{check, take_buf, CtError};
 use crate::page::PageInspection;
 use crate::reactor::{drain_eventfd, duplicate_eventfd, EventfdPump};
@@ -26,7 +26,7 @@ use crate::sys;
 /// writes internally and keeps reads lock-free.
 pub struct Crowdbtree {
     ptr: NonNull<sys::ct_tree>,
-    backend_release: Option<crate::BackendReleaseService>,
+    page_store_release: Option<crate::PageStoreReleaseService>,
     runtime: Option<Arc<crate::TreeRuntime>>,
     hosted_close: Option<(tokio::runtime::Handle, TreeClose)>,
     close_started: bool,
@@ -229,7 +229,7 @@ impl Crowdbtree {
                 let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
                 let result = if let Some(names) = &names {
                     let pointers: Vec<_> = names.iter().map(|name| name.as_ptr()).collect();
-                    crate::BackendReleaseService::attach_with(
+                    crate::PageStoreReleaseService::attach_with(
                         &executor,
                         |wake, drop, wake_context, native| unsafe {
                             sys::ct_open_block_with_runtime_async(
@@ -280,7 +280,7 @@ impl Crowdbtree {
                     check(reply.status)?;
                     let native = reply.tree.take().ok_or(CtError::Internal)?;
                     let mut tree = Self::from_native(native.as_ptr(), runtime)?;
-                    tree.backend_release = release.clone();
+                    tree.page_store_release = release.clone();
                     tree.hosted_close = Some((
                         tokio::runtime::Handle::current(),
                         TreeClose(Arc::new(CloseState::new(true))),
@@ -364,10 +364,10 @@ impl Crowdbtree {
             buffer_pool_bytes: opt.buffer_pool_bytes,
             compression: u8::from(opt.compression_lz4),
             max_inline_value: opt.max_inline_value,
-            backend: match opt.backend {
-                PageStoreBackend::File => 0,
-                PageStoreBackend::Block => 1,
-                PageStoreBackend::MemBlock => 2,
+            page_store_kind: match opt.page_store_kind {
+                PageStoreKind::DiskText => 0,
+                PageStoreKind::Disk => 1,
+                PageStoreKind::Mem => 2,
             },
             block_size: opt.block_size,
             store_id: opt.store_id,
@@ -388,7 +388,7 @@ impl Crowdbtree {
         runtime: Option<Arc<crate::TreeRuntime>>,
     ) -> Result<Self, CtError> {
         let mut tree = Self::from_native(out, runtime)?;
-        tree.backend_release = crate::BackendReleaseService::attach(tree.ptr)?;
+        tree.page_store_release = crate::PageStoreReleaseService::attach(tree.ptr)?;
         Ok(tree)
     }
 
@@ -398,7 +398,7 @@ impl Crowdbtree {
     ) -> Result<Self, CtError> {
         Ok(Self {
             ptr: NonNull::new(out).ok_or(CtError::Internal)?,
-            backend_release: None,
+            page_store_release: None,
             runtime,
             hosted_close: None,
             close_started: false,
@@ -408,7 +408,7 @@ impl Crowdbtree {
 
     /// Transfers the native handle to an asynchronous close. A rejected
     /// submission returns the Tree. Keep the Tokio host, its explicit Tree
-    /// runtime and backend release services alive through shutdown.
+    /// runtime and page store release services alive through shutdown.
     ///
     /// # Errors
     /// Returns the native rejection or a missing Tokio host for an explicit
@@ -460,10 +460,10 @@ impl Crowdbtree {
         self.hosted_close.as_ref().map(|(_, close)| close.clone())
     }
 
-    /// Host release handle, present for filesystem Block backends opened from
+    /// Host release handle, present for filesystem page disk store opened from
     /// a Tokio context. Retain it through host shutdown after all readers drop.
-    pub fn backend_release_service(&self) -> Option<crate::BackendReleaseService> {
-        self.backend_release.clone()
+    pub fn page_store_release_service(&self) -> Option<crate::PageStoreReleaseService> {
+        self.page_store_release.clone()
     }
 
     pub(crate) fn as_ptr(&self) -> *mut sys::ct_tree {
@@ -505,7 +505,7 @@ impl Crowdbtree {
             buffer_pool_bytes: opt.buffer_pool_bytes,
             compression: u8::from(opt.compression_lz4),
             max_inline_value: opt.max_inline_value,
-            backend: 0,
+            page_store_kind: 0,
             block_size: 0,
             store_id: opt.store_id,
             group_id: opt.group_id,

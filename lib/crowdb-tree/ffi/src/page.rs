@@ -18,7 +18,7 @@ pub struct PageInspection {
 }
 
 #[derive(Debug)]
-pub struct PageEntry<'a> {
+pub struct PageRecord<'a> {
     pub key: Option<&'a [u8]>,
     pub child: Option<u64>,
     pub cell: Option<&'a [u8]>,
@@ -71,7 +71,7 @@ impl PageInspection {
     }
 
     /// Resolves one structural child/separator or physical leaf record.
-    pub fn entry(&self, index: usize) -> Result<PageEntry<'_>, CtError> {
+    pub fn entry(&self, index: usize) -> Result<PageRecord<'_>, CtError> {
         if index >= self.len() {
             return Err(CtError::InvalidArgument);
         }
@@ -86,7 +86,7 @@ impl PageInspection {
                     word(&self.frame, slot + 4)? as usize,
                 )?)
             };
-            return Ok(PageEntry {
+            return Ok(PageRecord {
                 key,
                 child: Some(wide(&self.frame, 128 + index * 8)?),
                 cell: None,
@@ -101,7 +101,7 @@ impl PageInspection {
         };
         let start = word(&self.frame, slot)? as usize;
         let length = word(&self.frame, slot + 4)? as usize;
-        Ok(PageEntry {
+        Ok(PageRecord {
             key: Some(bytes(&self.frame, start, length)?),
             child: None,
             cell: Some(bytes(

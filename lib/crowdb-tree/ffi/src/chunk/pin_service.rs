@@ -16,7 +16,7 @@ struct ServiceState {
     done: AtomicBool,
     completion: Notify,
 }
-// The native queue has atomic producers and one serialized backend consumer.
+// The native queue has atomic producers and one serialized page store consumer.
 // The task owns this handle through the last metadata callback and queue tail.
 unsafe impl Send for ServiceState {}
 unsafe impl Sync for ServiceState {}

@@ -378,6 +378,9 @@ class SocketTransport : public Transport
     // Get a worker for a new connection (round-robin).
     Worker *get_worker();
 
+    // Explicit TCP control connection, independent of the RDMA policy for requests.
+    std::shared_ptr<Connection> connect_tcp(const std::string &addr, int port);
+
     // Create a connection and add it to a worker. Called by the acceptor
     // (server side) or the connect path (client side).
     std::shared_ptr<Connection> create_connection(int fd, const std::string &name,
@@ -564,7 +567,6 @@ class SocketTransport : public Transport
     void                              run_scheduled(bool timer_event = false);
     ScheduledExecutor                 scheduled_;
     std::atomic<bool>                 scheduled_changed_{false};
-    std::shared_ptr<Connection>       connect_tcp(const std::string &addr, int port);
     void                              prepare_tcp_socket(int fd) const;
     BufferPool                       *pool_;
     std::unique_ptr<SystemBufferPool> owned_pool_;

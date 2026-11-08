@@ -18,7 +18,7 @@ use std::{
 
 use crowdb_chunk_kv::{CrowdbPartitionTree, Partition, PartitionId, PartitionLifecycle, PartitionRange};
 use crowdb_chunk_kv_server::ChunkKvService;
-use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
+use crowdb_tree_ffi::chunk::test_util::TestPageChunkStore;
 use sampling_tree::TestSamplingTree;
 use split_storage::TestSplitStorage;
 
@@ -27,7 +27,7 @@ const CHILD: &str = "CROWDB_TEST_SAMPLING_SHUTDOWN_CHILD";
 #[tokio::test(flavor = "current_thread")]
 async fn hosted_close_joins_both_workers_and_releases_their_shared_native_writer() {
     let storage = TestSplitStorage::new();
-    let mut backend = TestChunkBackend::new(71, 1).unwrap();
+    let mut backend = TestPageChunkStore::new(71, 1).unwrap();
     let mut config = backend.config();
     config.page_store = Some(backend.page_store(0).unwrap());
     let tree = Arc::new(CrowdbPartitionTree::open(71, &config).unwrap());

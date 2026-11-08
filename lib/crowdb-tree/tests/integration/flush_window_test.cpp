@@ -20,7 +20,7 @@ void initialize_windows(PublicationCoordinator &publisher, size_t entries)
     table->close();
     auto sources = std::make_shared<PublishedSources>();
     sources->tables.push_back(std::move(table));
-    auto page            = std::make_shared<PublishedPage>();
+    auto page            = std::make_shared<PageEntry>();
     page->leaf           = std::make_shared<PageState>();
     auto request         = std::make_shared<PublicationRequest>();
     request->transaction = {.record           = std::make_shared<InstallRecord>(InstallToken{}),
@@ -32,7 +32,7 @@ void initialize_windows(PublicationCoordinator &publisher, size_t entries)
     ASSERT_TRUE(publisher.try_submit(request));
 }
 
-void verify_window_values(const std::shared_ptr<const PublishedTreeState> &view, size_t count)
+void verify_window_values(const std::shared_ptr<const TreeRoot> &view, size_t count)
 {
     EXPECT_EQ(view->stats.overlay_entries, count);
     const auto page = view->mapping.get(0);

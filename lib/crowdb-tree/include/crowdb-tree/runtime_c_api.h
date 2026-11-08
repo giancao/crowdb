@@ -101,7 +101,7 @@ struct ct_runtime_snapshot_v1
 };
 
 // Requires exact struct_size and version 1. Does not drain counters, allocate,
-// submit work or perform backend I/O; invalid inputs leave output unchanged.
+// submit work or perform page store I/O; invalid inputs leave output unchanged.
 int32_t ct_runtime_snapshot(const ct_runtime *runtime, ct_runtime_snapshot_v1 *out);
 
 void    ct_runtime_options_default(ct_runtime_options *out);

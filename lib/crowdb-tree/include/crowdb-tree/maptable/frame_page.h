@@ -3,6 +3,11 @@
 
 // Zero-copy slotted page frame.
 //
+// A page segment stores a group of page frames; a mapping segment stores
+// PID-to-page-segment-location entries; the current format encodes one frame per segment.
+// A page frame is one page's encoding; a page block is the storage holding it.
+// Physical allocation and reclamation units keep their own sizes and lifetimes.
+//
 // A page is a fixed-size byte frame whose in-memory layout IS its on-disk
 // layout: no encode/decode. The B+tree reads, binary-searches, and compares
 // keys directly on the frame bytes via the non-owning views below; Slices point
@@ -70,7 +75,7 @@ inline constexpr size_t kFlags                    = 6;  // u8 (reserved; compres
 inline constexpr size_t kSlotCount                = 8;  // u32 (leaf: entries; inner: separators)
 inline constexpr size_t kFreeLo                   = 12; // u32 (end of main slot dir)
 inline constexpr size_t kFreeHi                   = 16; // u32 (lowest used record offset)
-inline constexpr size_t kDeltaCount               = 20; // u32 (leaf: in-frame delta count, PT12)
+inline constexpr size_t kReservedLeaf             = 20; // u32, must be zero for leaf frames
 inline constexpr size_t kSelfpage_id              = 24; // u64
 inline constexpr size_t kRightSibling             = 32; // u64 (leaf only)
 inline constexpr size_t kLowerFenceOff            = 40; // u32
@@ -191,7 +196,7 @@ class LeafFrameView
 
     [[nodiscard]] bool empty() const
     {
-        return count() == 0 && delta_count() == 0;
+        return count() == 0;
     }
 
     [[nodiscard]] Slice key(uint32_t i) const
@@ -205,31 +210,6 @@ class LeafFrameView
     [[nodiscard]] Slice cell(uint32_t i) const
     {
         const uint8_t *s    = f_ + kFrameHeaderSize + (i * kLeafSlotSize);
-        uint32_t       off  = frame_u32(s, 0);
-        uint32_t       klen = frame_u32(s, 4);
-        uint32_t       clen = frame_u32(s, 8);
-        return {reinterpret_cast<const char *>(f_ + (off + klen)), clen};
-    }
-
-    // In-frame delta overlay (PT12). Deltas live just past the main slot dir
-    // (starting at the stored free_lo) and shadow the sorted main entries; the
-    // newest (highest index) wins. Appended in slot order so index order == age.
-    [[nodiscard]] uint32_t delta_count() const
-    {
-        return frame_u32(f_, fh::kDeltaCount);
-    }
-
-    [[nodiscard]] Slice delta_key(uint32_t i) const
-    {
-        const uint8_t *s    = f_ + frame_u32(f_, fh::kFreeLo) + (i * kLeafSlotSize);
-        uint32_t       off  = frame_u32(s, 0);
-        uint32_t       klen = frame_u32(s, 4);
-        return {reinterpret_cast<const char *>(f_ + off), klen};
-    }
-
-    [[nodiscard]] Slice delta_cell(uint32_t i) const
-    {
-        const uint8_t *s    = f_ + frame_u32(f_, fh::kFreeLo) + (i * kLeafSlotSize);
         uint32_t       off  = frame_u32(s, 0);
         uint32_t       klen = frame_u32(s, 4);
         uint32_t       clen = frame_u32(s, 8);
@@ -275,14 +255,6 @@ class LeafFrameView
 
     [[nodiscard]] bool lookup(Slice k, CellView *out) const
     {
-        // In-frame deltas (PT12) are newer than the main entries; scan them newest
-        // -first and let a match shadow the sorted base.
-        for (uint32_t i = delta_count(); i-- > 0;) {
-            if (delta_key(i).compare(k) == 0) {
-                *out = CellView{delta_cell(i)};
-                return true;
-            }
-        }
         int i = find(k);
         if (i < 0) {
             return false;
@@ -460,13 +432,5 @@ class OverflowFrameView
 // build one overflow frame holding `chunk_len` payload bytes (<= chunk cap).
 void overflow_frame_build(uint8_t *f, uint32_t page_bytes, uint64_t self_page_id, uint64_t next_page_id,
                           const uint8_t *payload, uint32_t chunk_len);
-
-// COW-append in-frame deltas (PT12): copy `src` (a leaf frame) into `out`
-// (page_bytes), append `entries` as in-frame delta slots+records, and restamp
-// the CRC. Returns false (leaving `out` undefined) if they do not fit, so the
-// caller folds into a fresh sorted base instead. The main slot dir / sorted
-// entries are untouched.
-bool leaf_frame_append_deltas(const uint8_t *src, uint32_t page_bytes, const std::vector<leaf_entry> &entries,
-                              uint8_t *out);
 
 } // namespace crowdb::tree

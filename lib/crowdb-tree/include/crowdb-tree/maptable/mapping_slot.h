@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Packed 64-bit mapping slot words. Segment recovery validates durable words
-// before constructing typed backing descriptors.
+// Packed 64-bit mapping slot words. Mapping segment recovery validates durable words
+// before constructing typed page block descriptors.
 //
 // Zero is empty. A nonzero word whose low three bits are zero is an aligned
 // resident PageBase pointer, valid only in memory.

@@ -115,13 +115,13 @@ void FlushBatch::State::plan_step(std::shared_ptr<const InnerPageState> loaded, 
             joined(std::move(status));
             return;
         }
-        if (auto backing = route->needs_inner()) {
+        if (auto page_block = route->needs_inner()) {
             if (!options.loader) {
                 joined(Status::unavailable("cold flush index requires an asynchronous loader"));
                 return;
             }
             auto self = shared_from_this();
-            options.loader->load_inner(std::move(backing), [self](Status loaded_status, auto inner) noexcept {
+            options.loader->load_inner(std::move(page_block), [self](Status loaded_status, auto inner) noexcept {
                 try {
                     self->schedule_plan(std::move(loaded_status), std::move(inner), true);
                 }

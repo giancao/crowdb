@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_account_test_support.h"
-#include "backend/local/block_account.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "page_store/local/block_account.h"
 #include "test_tmp.h"
 
 #include <thread>
@@ -18,12 +18,12 @@ constexpr size_t kIoBytes  = static_cast<size_t>(AllocationKind::kIo);
 
 TEST(BlockAccountGrant, AcceptedIoUsesActualMemoryWithoutOpeningOrdinaryBackendGrowth)
 {
-    tree_test::TempDir              directory("block_ongoing_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
-    ResourceBudget    host(limits(kCapacity), 1);
-    auto              account = host.make_account(limits(kCapacity));
-    BackendOpenBudget adopted;
+    tree_test::TempDir             directory("block_ongoing_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
+    ResourceBudget      host(limits(kCapacity), 1);
+    auto                account = host.make_account(limits(kCapacity));
+    PageStoreOpenBudget adopted;
     ASSERT_TRUE(bind_block_account(store.get(), account, 1, &adopted).ok());
     std::shared_ptr<AllocationBudget> ongoing;
     ASSERT_TRUE(ongoing_backend_operation(store.get(), &ongoing).ok());
@@ -47,15 +47,15 @@ TEST(BlockAccountGrant, AcceptedIoUsesActualMemoryWithoutOpeningOrdinaryBackendG
 
 TEST(BlockAccountGrant, SparseGrowthAndBounceUsePrepaidCapacityAtTheHardLimit)
 {
-    tree_test::TempDir              directory("block_grant_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
-    ResourceBudget    host(limits(kCapacity), 1);
-    auto              account = host.make_account(limits(kCapacity));
-    BackendOpenBudget adopted;
+    tree_test::TempDir             directory("block_grant_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
+    ResourceBudget      host(limits(kCapacity), 1);
+    auto                account = host.make_account(limits(kCapacity));
+    PageStoreOpenBudget adopted;
     ASSERT_TRUE(bind_block_account(store.get(), account, 1, &adopted).ok());
     std::shared_ptr<AllocationBudget> grant;
-    const BackendOperationLimits      work{.max_io_bytes = 512, .write_calls = 1, .workers = 1, .barriers = false};
+    const PageStoreOperationLimits    work{.max_io_bytes = 512, .write_calls = 1, .workers = 1, .barriers = false};
     ASSERT_TRUE(reserve_backend_operation(store.get(), account, work, &grant).ok());
     auto           occupied = use_remaining_memory(account, block_allocation_budget(*store));
     const uint8_t  value    = 73;
@@ -83,15 +83,15 @@ TEST(BlockAccountGrant, SparseGrowthAndBounceUsePrepaidCapacityAtTheHardLimit)
 
 TEST(BlockAccountGrant, CompletePrepaidBoundBindsAfterAllUnreservedCapacityIsOccupied)
 {
-    tree_test::TempDir              directory("block_prepaid_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
-    ResourceBudget    host(limits(kCapacity), 1);
-    auto              account = host.make_account(limits(kCapacity));
-    BackendOpenBudget adopted;
+    tree_test::TempDir             directory("block_prepaid_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
+    ResourceBudget      host(limits(kCapacity), 1);
+    auto                account = host.make_account(limits(kCapacity));
+    PageStoreOpenBudget adopted;
     ASSERT_TRUE(bind_block_account(store.get(), account, 1, &adopted).ok());
-    const BackendOperationLimits work{.max_io_bytes = 512, .write_calls = 1, .workers = 1, .barriers = false};
-    const auto                   bound = backend_operation_bound(store.get(), work);
+    const PageStoreOperationLimits work{.max_io_bytes = 512, .write_calls = 1, .workers = 1, .barriers = false};
+    const auto                     bound = backend_operation_bound(store.get(), work);
     if (!bound) {
         FAIL() << "missing bound test prerequisite";
     }
@@ -120,15 +120,15 @@ TEST(BlockAccountGrant, CompletePrepaidBoundBindsAfterAllUnreservedCapacityIsOcc
 
 TEST(BlockAccountGrant, IncompletePrepaidBoundFailsWithoutAllocatingOrGrowing)
 {
-    tree_test::TempDir              directory("block_prepaid_small_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
-    ResourceBudget    host(limits(kCapacity), 1);
-    auto              account = host.make_account(limits(kCapacity));
-    BackendOpenBudget adopted;
+    tree_test::TempDir             directory("block_prepaid_small_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
+    ResourceBudget      host(limits(kCapacity), 1);
+    auto                account = host.make_account(limits(kCapacity));
+    PageStoreOpenBudget adopted;
     ASSERT_TRUE(bind_block_account(store.get(), account, 1, &adopted).ok());
-    const BackendOperationLimits work{.max_io_bytes = 512, .write_calls = 1, .workers = 1, .barriers = false};
-    const auto                   bound = backend_operation_bound(store.get(), work);
+    const PageStoreOperationLimits work{.max_io_bytes = 512, .write_calls = 1, .workers = 1, .barriers = false};
+    const auto                     bound = backend_operation_bound(store.get(), work);
     if (!bound) {
         FAIL() << "missing bound test prerequisite";
     }
@@ -147,14 +147,14 @@ TEST(BlockAccountGrant, IncompletePrepaidBoundFailsWithoutAllocatingOrGrowing)
 
 TEST(BlockAccountGrant, WrongBackendGrantAndOverflowBoundAreRejectedBeforeGrowth)
 {
-    tree_test::TempDir              directory("block_grant_wrong_");
-    std::unique_ptr<BlockPageStore> left;
-    std::unique_ptr<BlockPageStore> right;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 1, 4096, 1, &left).ok());
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 4096, 1, &right).ok());
-    ResourceBudget    host(limits(kCapacity), 1);
-    auto              account = host.make_account(limits(kCapacity));
-    BackendOpenBudget adopted;
+    tree_test::TempDir             directory("block_grant_wrong_");
+    std::unique_ptr<PageDiskStore> left;
+    std::unique_ptr<PageDiskStore> right;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 1, 4096, 1, &left).ok());
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, 4096, 1, &right).ok());
+    ResourceBudget      host(limits(kCapacity), 1);
+    auto                account = host.make_account(limits(kCapacity));
+    PageStoreOpenBudget adopted;
     ASSERT_TRUE(bind_block_account(left.get(), account, 1, &adopted).ok());
     ASSERT_TRUE(bind_block_account(right.get(), account, 1, &adopted).ok());
     std::shared_ptr<AllocationBudget> grant;
@@ -175,12 +175,12 @@ TEST(BlockAccountGrant, WrongBackendGrantAndOverflowBoundAreRejectedBeforeGrowth
 
 TEST(BlockAccountGrant, DeletionOnNewBackendThreadUsesPrepaidMetadata)
 {
-    tree_test::TempDir              directory("block_grant_delete_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 3, 4, 4096, 1, &store).ok());
-    ResourceBudget    host(limits(kCapacity), 1);
-    auto              account = host.make_account(limits(kCapacity));
-    BackendOpenBudget adopted;
+    tree_test::TempDir             directory("block_grant_delete_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 3, 4, 4096, 1, &store).ok());
+    ResourceBudget      host(limits(kCapacity), 1);
+    auto                account = host.make_account(limits(kCapacity));
+    PageStoreOpenBudget adopted;
     ASSERT_TRUE(bind_block_account(store.get(), account, 1, &adopted).ok());
     std::shared_ptr<AllocationBudget> grant;
     ASSERT_TRUE(reserve_backend_operation(store.get(), account, {}, &grant).ok());
@@ -203,12 +203,12 @@ TEST(BlockAccountGrant, DeletionOnNewBackendThreadUsesPrepaidMetadata)
 
 TEST(BlockAccountGrant, OpeningThreadMetadataUsesItsPrepaidParticipant)
 {
-    tree_test::TempDir              directory("block_grant_thread_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 3, 4, 4096, 1, &store).ok());
-    ResourceBudget    host(limits(kCapacity), 1);
-    auto              account = host.make_account(limits(kCapacity));
-    BackendOpenBudget adopted;
+    tree_test::TempDir             directory("block_grant_thread_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 3, 4, 4096, 1, &store).ok());
+    ResourceBudget      host(limits(kCapacity), 1);
+    auto                account = host.make_account(limits(kCapacity));
+    PageStoreOpenBudget adopted;
     ASSERT_TRUE(bind_block_account(store.get(), account, 1, &adopted).ok());
     std::shared_ptr<AllocationBudget> grant;
     ASSERT_TRUE(reserve_backend_operation(store.get(), account,
@@ -222,7 +222,7 @@ TEST(BlockAccountGrant, OpeningThreadMetadataUsesItsPrepaidParticipant)
     bool        succeeded = false;
     std::thread opening([&] {
         try {
-            succeeded = backend_size(*store, grant) == 0;
+            succeeded = page_store_size(*store, grant) == 0;
         }
         catch (const std::bad_alloc &) {
             succeeded = false;

@@ -168,17 +168,17 @@ void SnapshotPageLoader::load_leaf(BaseRef base, LeafComplete complete)
     }
 }
 
-void SnapshotPageLoader::load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete)
+void SnapshotPageLoader::load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete)
 {
     if (auto loader = active_) {
-        loader->load_inner(std::move(backing), std::move(complete));
+        loader->load_inner(std::move(page_block), std::move(complete));
     }
     else {
         complete(Status::unavailable("snapshot loader has no active window"), {});
     }
 }
 
-void SnapshotPageLoader::load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
+void SnapshotPageLoader::load_overflow(std::shared_ptr<const PageBlockRef> primary, uint64_t head, uint64_t length,
                                        ValueComplete complete)
 {
     if (auto loader = active_) {

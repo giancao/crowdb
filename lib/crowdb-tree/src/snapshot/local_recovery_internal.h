@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "crowdb-tree/maptable/mapping_geometry.h"
 #include "snapshot/local_recovery.h"
 #include "snapshot/metadata_decode.h"
@@ -14,6 +14,8 @@ struct LocalRecoveryOperation::State : std::enable_shared_from_this<State>
     enum class Stage : uint8_t {
         NextAnchor,
         AnchorRead,
+        SummariesProtected,
+        SummariesRead,
         DirectoryProtected,
         DirectoryRead,
         Segment,
@@ -84,6 +86,9 @@ struct LocalRecoveryOperation::State : std::enable_shared_from_this<State>
     void        pump();
     void        next_anchor();
     void        anchor_read();
+    void        read_summaries();
+    void        summaries_read();
+    void        protect_directory();
     void        read_directory();
     void        directory_read();
     void        segment();
@@ -106,7 +111,10 @@ struct LocalRecoveryOperation::State : std::enable_shared_from_this<State>
     PageLoadBudget                                            budget;
     LocalRecoveryLimits                                       limits;
     ExtentLedgerLimits                                        domain;
-    uint64_t                                                  readable_bytes = 0;
+    uint64_t                                                  readable_bytes   = 0;
+    uint64_t                                                  summaries_offset = 0;
+    uint32_t                                                  summaries_crc    = 0;
+    detail::ReservedVector<IndexSummaries::Change>            summaries;
     std::shared_ptr<AsyncPageStore>                           store;
     std::shared_ptr<detail::FlushRuntime>                     runtime;
     std::shared_ptr<detail::FlushRuntime::Lane>               lane;
@@ -133,7 +141,7 @@ struct LocalRecoveryOperation::State : std::enable_shared_from_this<State>
     size_t                                                    dependency_steps = 0;
     uint64_t                                                  protected_leaf   = kInvalidPageId;
     std::shared_ptr<LeafProtection>                           protection;
-    std::shared_ptr<OverflowBackingSet>                       overflow_backing;
+    std::shared_ptr<OverflowPageBlockSet>                     overflow_page_block;
     uint64_t                                                  leaf_count  = 0;
     uint64_t                                                  inner_count = 0;
     Stage                                                     stage       = Stage::NextAnchor;

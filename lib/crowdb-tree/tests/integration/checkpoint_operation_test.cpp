@@ -12,9 +12,9 @@ using namespace test_write;
 
 struct TestCheckpointPipeline
 {
-    TestCheckpoint                            local;
-    std::shared_ptr<LocalBackendState>        backend = std::make_shared<LocalBackendState>();
-    std::shared_ptr<const PublishedTreeState> initial = [] {
+    TestCheckpoint                       local;
+    std::shared_ptr<LocalPageStoreState> backend = std::make_shared<LocalPageStoreState>();
+    std::shared_ptr<const TreeRoot>      initial = [] {
         auto result = captured_leaf(page({
             {.key = "a", .value = "v"}
         }));
@@ -64,7 +64,7 @@ struct TestCheckpointPipeline
             {.key = "a", .value = "new"}
         }));
         leaf->content_id            = before->mapping.get(0)->leaf->content_id + 1;
-        auto replacement            = std::make_shared<PublishedPage>(*before->mapping.get(0));
+        auto replacement            = std::make_shared<PageEntry>(*before->mapping.get(0));
         replacement->leaf           = std::move(leaf);
         auto request                = std::make_shared<PublicationRequest>();
         request->transaction.record = std::make_shared<InstallRecord>(InstallToken{.sequence = 99});
@@ -244,7 +244,7 @@ TEST(CheckpointOperation, ExhaustedMaterializationStillHasIndependentAbortCredit
 TEST(CheckpointOperation, ChangedPublicationAfterLayoutIsRejectedBeforeCapture)
 {
     TestCheckpointPipeline test;
-    ASSERT_TRUE(test.prepare([&test](const PublishedTreeState &, const CapturedWritePlan *plan, CheckpointWork *work) {
+    ASSERT_TRUE(test.prepare([&test](const TreeRoot &, const CapturedWritePlan *plan, CheckpointWork *work) {
                         work->budget = test.local.source.credits.credits;
                         work->loader = std::make_shared<test_read::TestLoader>();
                         if (plan != nullptr) {
@@ -268,7 +268,7 @@ TEST(CheckpointOperation, NewL0CatalogBetweenLayoutAndCapturePreservesTheFixedPr
 {
     TestCheckpointPipeline test;
     bool                   published = false;
-    ASSERT_TRUE(test.prepare([&](const PublishedTreeState &, const CapturedWritePlan *plan, CheckpointWork *work) {
+    ASSERT_TRUE(test.prepare([&](const TreeRoot &, const CapturedWritePlan *plan, CheckpointWork *work) {
                         work->budget = test.local.source.credits.credits;
                         work->loader = std::make_shared<test_read::TestLoader>();
                         if (plan != nullptr) {
@@ -302,7 +302,7 @@ TEST(CheckpointOperation, NewL0CatalogBetweenLayoutAndCapturePreservesTheFixedPr
 TEST(CheckpointOperation, PlannedWorkAdmissionFailureDoesNotCaptureOrWrite)
 {
     TestCheckpointPipeline test;
-    ASSERT_TRUE(test.prepare([&test](const PublishedTreeState &, const CapturedWritePlan *plan, CheckpointWork *work) {
+    ASSERT_TRUE(test.prepare([&test](const TreeRoot &, const CapturedWritePlan *plan, CheckpointWork *work) {
                         if (plan != nullptr) {
                             return Status::resource_exhausted();
                         }

@@ -61,7 +61,7 @@ TEST(LogicalPageCursorWindow, PartialSplitRetainsAnOversizedQueryableRemainder)
         });
         page->overlays.push_back(run->overlays.front());
     }
-    auto published          = std::make_shared<PublishedTreeState>(*test_read::view(page));
+    auto published          = std::make_shared<TreeRoot>(*test_read::view(page));
     published->next_page_id = 1;
     MaintenancePublicationOptions options;
     options.pages.max_sources        = 2;

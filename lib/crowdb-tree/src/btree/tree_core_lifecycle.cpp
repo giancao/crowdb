@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
-#include "backend/local/local_backend_state.h"
 #include "host_completion.h"
+#include "page_store/checkpoint_page_store.h"
+#include "page_store/local/local_page_store_state.h"
 #include "tree_core_internal.h"
 
 namespace crowdb::tree
@@ -275,12 +275,12 @@ const std::shared_ptr<SharedPageCache> &TreeCore::cache() const noexcept
     return state_->cache;
 }
 
-const std::shared_ptr<LocalBackendState> &TreeCore::local_backend() const noexcept
+const std::shared_ptr<LocalPageStoreState> &TreeCore::local_page_store() const noexcept
 {
     return state_->local;
 }
 
-const std::shared_ptr<CheckpointBackend> &TreeCore::chunk_backend() const noexcept
+const std::shared_ptr<CheckpointPageStore> &TreeCore::page_chunk_store() const noexcept
 {
     return state_->chunk;
 }
@@ -301,9 +301,9 @@ uint64_t TreeCore::snapshot_sequence() const noexcept
     return state_->local ? state_->local->checkpoints->snapshot_sequence() : 0;
 }
 
-AsyncPageStore *TreeCore::async_backend() const noexcept
+AsyncPageStore *TreeCore::async_page_store() const noexcept
 {
-    return state_->backend.get();
+    return state_->page_store.get();
 }
 
 PageLoadLimits TreeCore::load_limits() const noexcept
@@ -321,7 +321,7 @@ const std::shared_ptr<AllocationBudget> &TreeCore::accepted_allocations() const 
     return state_->work_allocations;
 }
 
-std::shared_ptr<const PublishedTreeState> TreeCore::capture() const
+std::shared_ptr<const TreeRoot> TreeCore::capture() const
 {
     return state_->publisher->capture();
 }

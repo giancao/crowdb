@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/chunk/chunk_fixed_pack.h"
 #include "btree/page_load.h"
 #include "crowdb-common/log.h"
+#include "page_store/chunk/chunk_fixed_pack.h"
 
 #include <variant>
 
@@ -18,17 +18,17 @@ struct AsyncStorePageLoader::State
     void                  start_leaf(BaseRef base, LeafCompletion complete, const std::shared_ptr<State> &owner,
                                      BaseRef *decode_target = nullptr);
     [[nodiscard]] Status  validate_leaf(const BaseRef &base) const;
-    void                  start_inner(std::shared_ptr<const BackingRef> backing, InnerCompletion complete,
+    void                  start_inner(std::shared_ptr<const PageBlockRef> page_block, InnerCompletion complete,
                                       const std::shared_ptr<State> &owner);
-    [[nodiscard]] Status  validate_inner(const std::shared_ptr<const BackingRef> &backing) const;
-    std::optional<Status> try_read_inner_inline(const std::shared_ptr<const BackingRef> &backing,
-                                                std::shared_ptr<const InnerPageState>   *out);
+    [[nodiscard]] Status  validate_inner(const std::shared_ptr<const PageBlockRef> &page_block) const;
+    std::optional<Status> try_read_inner_inline(const std::shared_ptr<const PageBlockRef> &page_block,
+                                                std::shared_ptr<const InnerPageState>     *out);
 
     std::shared_ptr<AsyncPageStore>             store;
     std::shared_ptr<detail::FlushRuntime>       runtime;
     std::shared_ptr<detail::FlushRuntime::Lane> lane;
     PageLoadLimits                              limits;
-    OverflowBackingResolver                     overflow;
+    OverflowPageBlockResolver                   overflow;
     PageLoadBudget                              budget;
 };
 
@@ -39,24 +39,24 @@ inline std::optional<size_t> chunk_load_window_bound(const PageLoadLimits &limit
              : detail::ChunkFixedPackStore::read_into_allocation_bound(limits.max_chunk_blob_bytes);
 }
 
-inline bool chunk_load_allowed(const BackingRef &backing, const PageLoadLimits &limits) noexcept
+inline bool chunk_load_allowed(const PageBlockRef &page_block, const PageLoadLimits &limits) noexcept
 {
-    return backing.storage != BackingStorage::kChunkPack || backing.length <= limits.max_chunk_blob_bytes;
+    return page_block.storage != PageBlockStorage::kChunkPack || page_block.length <= limits.max_chunk_blob_bytes;
 }
 
 using LoadBytes = OverwriteByteVector<AllocationKind::kScratch>;
 
-Status decode_backing_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
-                            LoadBytes &scratch, std::span<const uint8_t> *out);
-Status decode_backing_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
-                            FrameStore::Bytes &scratch, std::span<const uint8_t> *out);
+Status decode_page_block_frame(std::span<const uint8_t> blob, const PageBlockRef &page_block,
+                               const PageLoadLimits &limits, LoadBytes &scratch, std::span<const uint8_t> *out);
+Status decode_page_block_frame(std::span<const uint8_t> blob, const PageBlockRef &page_block,
+                               const PageLoadLimits &limits, FrameStore::Bytes &scratch, std::span<const uint8_t> *out);
 
 [[nodiscard]] std::optional<size_t> decoded_leaf_allocation_bound(const PageLoadLimits &limits) noexcept;
 [[nodiscard]] std::optional<size_t> overflow_read_allocation_bound(const PageLoadLimits &limits, size_t workers,
                                                                    size_t retained_values, size_t value_bytes) noexcept;
 
 // The charged storage supplies direct-I/O alignment itself, so a Block read
-// does not allocate an unaccounted second copy in the backend adapter.
+// does not allocate an unaccounted second copy in the page store adapter.
 template <class Bytes> class AlignedPageLoadBytes
 {
   public:

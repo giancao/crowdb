@@ -4,7 +4,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crate::kv::{CrowdbTreeBackend, CrowdbTreeConfig, CrowdbTreeEngine, KVEngine};
+use crate::kv::{CrowdbTreeConfig, CrowdbTreeEngine, CrowdbTreeStoreKind, KVEngine};
 use crate::paxos::learner::PxLearner;
 use crate::paxos::roles::{Acceptor, Learner};
 use crate::wal::replay::ReplayResult;
@@ -13,9 +13,9 @@ use std::sync::atomic::Ordering;
 
 impl PxLocalReplica {
     /// Rebuild a fresh local replica from WAL replay output, using the
-    /// default [`KVEngine`] (crowdb-tree with mem-block backend, in-memory).
+    /// default [`KVEngine`] (crowdb-tree with a page mem store).
     /// See [`PxLocalReplica::restore_from_replay_with_engine`] for the full argument
-    /// and for injecting a durable backend (e.g. [`crate::kv::CrowdbTreeEngine`]
+    /// and for injecting a durable page store (e.g. [`crate::kv::CrowdbTreeEngine`]
     /// with file/block storage).
     ///
     /// # Errors
@@ -28,7 +28,7 @@ impl PxLocalReplica {
         replay: &ReplayResult,
     ) -> io::Result<Self> {
         let opt = CrowdbTreeConfig {
-            backend: CrowdbTreeBackend::MemBlock,
+            page_store_kind: CrowdbTreeStoreKind::Mem,
             ..Default::default()
         };
         let engine = CrowdbTreeEngine::open_async(&opt)

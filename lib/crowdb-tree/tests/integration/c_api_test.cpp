@@ -60,8 +60,8 @@ TEST(CApi, LinuxBlockOpenRejectsUnavailableUring)
 {
     crowdb::tree_test::TempDir tmp("capi_no_uring_");
     ct_options                 options{};
-    options.backend = CT_BACKEND_BLOCK;
-    options.path    = tmp.path.c_str();
+    options.page_store_kind = CT_PAGE_STORE_DISK;
+    options.path            = tmp.path.c_str();
 
     ct_runtime_options runtime_options{};
     ct_runtime_options_default(&runtime_options);
@@ -322,7 +322,7 @@ TEST(CApi, FileCheckpointReopen)
     opt.iu_size     = 1;
     opt.frame_bytes = 4096;
     opt.compression = 1; // lz4 (falls back to stored-raw if unavailable)
-    // Default backend is CT_BACKEND_FILE (file-based page store)
+    // Default page store is CT_PAGE_STORE_DISK_TEXT (file-based page store)
 
     std::map<std::string, std::string> oracle;
     {
@@ -356,21 +356,21 @@ TEST(CApi, FileCheckpointReopen)
     }
 }
 
-// plan-tree #22: ct_options.backend=CT_BACKEND_BLOCK selects BlockPageStore
+// plan-tree #22: ct_options.page_store_kind=CT_PAGE_STORE_DISK selects PageDiskStore
 // instead of the default file-based page store -- same round-trip as
-// FileCheckpointReopen above, just through the block-device backend.
+// FileCheckpointReopen above, just through the block-device page store.
 TEST(CApi, BlockDeviceCheckpointReopen)
 {
     crowdb::tree_test::TempDir tmp("capi_");
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 
-    ct_options opt  = {};
-    opt.path        = path.c_str();
-    opt.iu_size     = 1;
-    opt.frame_bytes = 4096;
-    opt.backend     = CT_BACKEND_BLOCK; // BlockPageStore
-    opt.block_size  = 8 * 1024;         // 8 KiB blocks for testing
+    ct_options opt      = {};
+    opt.path            = path.c_str();
+    opt.iu_size         = 1;
+    opt.frame_bytes     = 4096;
+    opt.page_store_kind = CT_PAGE_STORE_DISK; // PageDiskStore
+    opt.block_size      = 8 * 1024;           // 8 KiB blocks for testing
 
     std::map<std::string, std::string> oracle;
     {
@@ -508,13 +508,13 @@ TEST(CApi, SyncSkipSnapshotReopen)
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 
-    ct_options opt  = {};
-    opt.path        = path.c_str();
-    opt.iu_size     = 1;
-    opt.frame_bytes = 4096;
-    opt.backend     = CT_BACKEND_BLOCK;
-    opt.block_size  = 8 * 1024;
-    opt.sync_mode   = CT_SYNC_SKIP;
+    ct_options opt      = {};
+    opt.path            = path.c_str();
+    opt.iu_size         = 1;
+    opt.frame_bytes     = 4096;
+    opt.page_store_kind = CT_PAGE_STORE_DISK;
+    opt.block_size      = 8 * 1024;
+    opt.sync_mode       = CT_SYNC_SKIP;
 
     {
         ct_tree *t = nullptr;

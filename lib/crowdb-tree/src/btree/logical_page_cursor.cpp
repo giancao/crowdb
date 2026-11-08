@@ -96,7 +96,7 @@ Slice LogicalPageCursor::source_key(const Source &source) const
 LogicalCell LogicalPageCursor::source_cell(const Source &source) const
 {
     return source.run != nullptr ? LogicalCell::from_entry(source.run->entries()[source.index])
-                                 : LogicalCell::from_base(source.base->resident, source.index, source.base->backing);
+                                 : LogicalCell::from_base(source.base->resident, source.index, source.base->page_block);
 }
 
 uint64_t LogicalPageCursor::source_slot(const Source &source) const

@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_c_api_internal.h"
 #include "common/test_protection_callbacks.h"
+#include "page_store/chunk/chunk_c_api_internal.h"
 
 #include <gtest/gtest.h>
 

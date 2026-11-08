@@ -60,7 +60,7 @@ Status FlushController::prepare_prepaid(const FlushPreparationOptions &preparati
     return prepare_impl({}, out, {}, &preparation, &plan, &credits);
 }
 
-Status FlushController::check_rotation(const FlushPreparationOptions &preparation, const PublishedTreeState &view,
+Status FlushController::check_rotation(const FlushPreparationOptions &preparation, const TreeRoot &view,
                                        const SourceCatalog &catalog, WriteFootprint sealed) const
 {
     detail::FlushReserveBounds bounds;

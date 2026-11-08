@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "crowdb-common/metrics/metrics.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "test_tmp.h"
 
 #include <gtest/gtest.h>
@@ -17,7 +17,7 @@ namespace crowdb::tree
 {
 // Metrics core moved to crowdb-common::metrics (R12); bring the moved types
 // into `crowdb-tree` so the test's unqualified `Counter`/`Gauge`/... references
-// resolve. `Crowdbtree`/`Config`/`Batch`/`MemPageStore` stay in `crowdb-tree`.
+// resolve. `Crowdbtree`/`Config`/`Batch`/`PageMemStore` stay in `crowdb-tree`.
 using namespace crowdb::common::metrics;
 
 namespace
@@ -244,7 +244,7 @@ TEST(MetricsRegistry, FlushFormat)
 
 TEST(MetricsRegistry, FlushMetricsStrFormat)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     Crowdbtree t(opt);

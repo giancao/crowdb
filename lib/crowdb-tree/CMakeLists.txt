@@ -27,7 +27,7 @@ endif()
 # The reactor now lives in crowdb-common; crowdb-tree gets liburing
 # transitively via the crowdbcommon PUBLIC link (CROWDB_HAVE_LIBURING
 # compile definition + liburing library). We still need to probe
-# liburing here to decide whether to compile block_async_page_store.cpp
+# liburing here to decide whether to compile async_page_disk_store.cpp
 # (which uses the reactor directly).
 # HINTS ENV CONDA_PREFIX: prefer the pixi/conda env's liburing (see
 # crowdb-common/cpp/CMakeLists.txt for rationale).
@@ -61,7 +61,7 @@ execute_process(COMMAND ${Python3_EXECUTABLE}
 file(GLOB_RECURSE CROWDB_TREE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
   list(REMOVE_ITEM CROWDB_TREE_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/local/block_async_page_store.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/page_store/local/async_page_disk_store.cpp
   )
 endif()
 add_library(crowdb-tree STATIC ${CROWDB_TREE_SRC})
@@ -120,7 +120,7 @@ file(GLOB_RECURSE CROWDB_TREE_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_
 if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
   list(REMOVE_ITEM CROWDB_TREE_TEST_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/reactor_test.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/block_async_page_store_test.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/async_page_disk_store_test.cpp)
 endif()
 list(APPEND CROWDB_TREE_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../crowdb-common/cpp/tests/test_main.cpp)
 add_executable(crowdb_tree_tests ${CROWDB_TREE_TEST_SRC})

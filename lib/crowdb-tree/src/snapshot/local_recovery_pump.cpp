@@ -90,6 +90,13 @@ void LocalRecoveryOperation::State::pump()
     case Stage::AnchorRead:
         anchor_read();
         break;
+    case Stage::SummariesProtected:
+        image->summaries = recovered;
+        read_summaries();
+        break;
+    case Stage::SummariesRead:
+        summaries_read();
+        break;
     case Stage::DirectoryProtected:
         image->metadata->extents.push_back(recovered);
         read_directory();

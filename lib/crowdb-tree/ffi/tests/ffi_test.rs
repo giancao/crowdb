@@ -4,7 +4,7 @@
 // PT8.5: C ABI / Rust integration tests through the safe adapter.
 use crowdb_tree_ffi::{
     AsyncCrowdbtree, BatchOp, ChunkRootCatalog, Config, Crowdbtree, CtError, ExtOp, KeyRange, PageStore,
-    PageStoreBackend, PinnedGetOutcome, RootCatalogObject, RootCatalogStore, ScanDirection,
+    PageStoreKind, PinnedGetOutcome, RootCatalogObject, RootCatalogStore, ScanDirection,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,7 +156,7 @@ fn owned_chunk_rpc_transport_retains_route_handles() {
         strip_capacity_bytes: 0,
     })
     .unwrap();
-    let backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(41, 7).unwrap();
+    let backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(41, 7).unwrap();
     let store = PageStore::open_chunk_runtime(
         &backend.runtime,
         crowdb_tree_ffi::ChunkRuntimeOptions {
@@ -343,7 +343,7 @@ fn reverse_scan_crosses_leaf_boundaries() {
 }
 
 fn open_runtime_chunk(
-    backend: &crowdb_tree_ffi::chunk::test_util::TestChunkBackend,
+    backend: &crowdb_tree_ffi::chunk::test_util::TestPageChunkStore,
     generation: u64,
 ) -> (Arc<PageStore>, Crowdbtree) {
     let store = backend.page_store(generation).unwrap();
@@ -356,8 +356,8 @@ fn open_runtime_chunk(
 }
 
 #[test]
-fn injected_chunk_runtime_round_trip_and_backing_stats() {
-    let backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(41, 7).unwrap();
+fn injected_chunk_runtime_round_trip_and_page_block_stats() {
+    let backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(41, 7).unwrap();
     let (store, tree) = open_runtime_chunk(&backend, 0);
     tree.apply_put(1, b"chunk-key", b"chunk-value").unwrap();
     let published = tree.flush_with_persistent_info().unwrap();
@@ -367,7 +367,7 @@ fn injected_chunk_runtime_round_trip_and_backing_stats() {
         tree.get(b"chunk-key").unwrap(),
         Some((1, b"chunk-value".to_vec()))
     );
-    let stats = tree.backing_stats().unwrap();
+    let stats = tree.page_block_stats().unwrap();
     assert!(stats.allocated_bytes > 0);
     assert_eq!(tree.materialize_ownership().unwrap(), (0, true));
     assert_eq!(store.chunk_manifest_generation().unwrap(), 1);
@@ -375,22 +375,22 @@ fn injected_chunk_runtime_round_trip_and_backing_stats() {
 
 #[test]
 fn runtime_root_catalog_reopens_published_manifest_and_wal() {
-    let mut backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(42, 9).unwrap();
+    let mut backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(42, 9).unwrap();
     let (store, tree) = open_runtime_chunk(&backend, 0);
     store.set_wal_replay_offset(4096).unwrap();
     store.set_wal_replay_offset(4095).unwrap();
     tree.apply_put(1, b"durable-root", b"chunk-value").unwrap();
     assert_eq!(tree.flush_with_persistent_info().unwrap(), (1, 1));
-    let before = tree.backing_stats().unwrap();
+    let before = tree.page_block_stats().unwrap();
     assert_eq!(store.wal_replay_offset().unwrap(), 4096);
     drop(tree);
     drop(store);
     backend.next_writer().unwrap();
     let (store, reopened) = open_runtime_chunk(&backend, 0);
     assert_eq!(store.wal_replay_offset().unwrap(), 4096);
-    assert_eq!(reopened.backing_stats().unwrap().scope_id, before.scope_id);
+    assert_eq!(reopened.page_block_stats().unwrap().scope_id, before.scope_id);
     assert_eq!(
-        reopened.backing_stats().unwrap().allocated_bytes,
+        reopened.page_block_stats().unwrap().allocated_bytes,
         before.allocated_bytes
     );
     assert_eq!(
@@ -404,7 +404,7 @@ async fn cancelling_chunk_open_closes_the_undelivered_tree() {
     use std::sync::{mpsc, Mutex};
     use std::time::Duration;
 
-    let mut backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(47, 9).unwrap();
+    let mut backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(47, 9).unwrap();
     let (pages, tree) = open_runtime_chunk(&backend, 0);
     tree.apply_put(1, b"durable-root", b"chunk-value").unwrap();
     assert_eq!(tree.flush_with_persistent_info().unwrap(), (1, 1));
@@ -511,8 +511,8 @@ fn callback_root_catalog_persists_transition_generation_pin() {
 }
 
 #[test]
-fn checkpoint_backing_survives_history_reclamation_and_reopen() {
-    let mut backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(46, 9).unwrap();
+fn checkpoint_page_block_survives_history_reclamation_and_reopen() {
+    let mut backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(46, 9).unwrap();
     let (store, tree) = open_runtime_chunk(&backend, 0);
     for sequence in 1..=4 {
         tree.apply_put(sequence, b"retained-key", &vec![sequence as u8; 64 * 1024])
@@ -520,7 +520,7 @@ fn checkpoint_backing_survives_history_reclamation_and_reopen() {
         tree.flush_with_persistent_info().unwrap();
     }
     let generation = store.chunk_manifest_generation().unwrap();
-    let before = tree.backing_stats().unwrap();
+    let before = tree.page_block_stats().unwrap();
     assert!(before.allocated_bytes >= 64 * 1024);
     assert!(backend.catalog.reclaim_before(46, generation) > 0);
     assert_eq!(tree.get(b"retained-key").unwrap(), Some((4, vec![4; 64 * 1024])));
@@ -528,7 +528,7 @@ fn checkpoint_backing_survives_history_reclamation_and_reopen() {
     drop(store);
     backend.next_writer().unwrap();
     let (_, recovered) = open_runtime_chunk(&backend, 0);
-    let after = recovered.backing_stats().unwrap();
+    let after = recovered.page_block_stats().unwrap();
     assert_eq!(after.scope_id, before.scope_id);
     assert!(after.allocated_bytes >= 64 * 1024);
     assert_eq!(
@@ -539,7 +539,7 @@ fn checkpoint_backing_survives_history_reclamation_and_reopen() {
 
 #[test]
 fn runtime_catalog_pin_blocks_generation_reclaim_until_unpin() {
-    let mut backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(45, 9).unwrap();
+    let mut backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(45, 9).unwrap();
     let (store, tree) = open_runtime_chunk(&backend, 0);
     for sequence in 1..=3 {
         tree.apply_put(sequence, b"key", &[sequence as u8]).unwrap();
@@ -571,7 +571,7 @@ fn runtime_catalog_pin_blocks_generation_reclaim_until_unpin() {
 
 #[test]
 fn runtime_root_catalog_opens_exact_manifest_without_latest_fallback() {
-    let mut backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(44, 11).unwrap();
+    let mut backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(44, 11).unwrap();
     let (store, latest) = open_runtime_chunk(&backend, 0);
     latest.apply_put(1, b"key", b"generation-one").unwrap();
     assert_eq!(latest.flush_with_persistent_info().unwrap(), (1, 1));
@@ -608,7 +608,7 @@ fn exact_manifest_tracks_durable_snapshot_after_range_rebuild() {
     .unwrap();
     source.apply_put(1, b"b", b"base").unwrap();
     source.flush().unwrap();
-    let mut backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(46, 12).unwrap();
+    let mut backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(46, 12).unwrap();
     let store = backend.page_store(0).unwrap();
     let (rebuilt, _) = source
         .rebuild_range(&Config {
@@ -631,7 +631,7 @@ fn exact_manifest_tracks_durable_snapshot_after_range_rebuild() {
 
 #[test]
 fn runtime_root_publication_is_visible_and_reusing_a_writer_is_rejected() {
-    let backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(43, 10).unwrap();
+    let backend = crowdb_tree_ffi::chunk::test_util::TestPageChunkStore::new(43, 10).unwrap();
     let (store, tree) = open_runtime_chunk(&backend, 0);
     tree.apply_put(1, b"durable-root", b"chunk-value").unwrap();
     let published = tree.flush_with_persistent_info().unwrap();
@@ -831,10 +831,10 @@ fn file_snapshot_reopen_smoke() {
     }
 }
 
-// : Config::backend = PageStoreBackend::Block selects
-// BlockPageStore instead of the default file-based page store -- same
+// : Config::page_store_kind = PageStoreKind::Disk selects
+// PageDiskStore instead of the default file-based page store -- same
 // round-trip as file_snapshot_reopen_smoke above, just through the
-// block-device backend.
+// block-device page store.
 #[test]
 fn block_device_snapshot_reopen_smoke() {
     let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
@@ -842,7 +842,7 @@ fn block_device_snapshot_reopen_smoke() {
         path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 4096,
         frame_bytes: 4096,
-        backend: PageStoreBackend::Block,
+        page_store_kind: PageStoreKind::Disk,
         ..Default::default()
     };
 
@@ -1458,7 +1458,7 @@ fn apply_batch_external_large_value_round_trip() {
 
 #[test]
 fn apply_batch_external_preserves_caller_clone_through_flush() {
-    // Unknown Bytes backing capacity takes a controlled copy. The caller's
+    // Unknown Bytes page block capacity takes a controlled copy. The caller's
     // clone remains valid independently of the engine's owned cell.
     let t = open_tree(&Config::default()).unwrap();
     let payload = bytes::Bytes::from(vec![0xAB; 1024]);

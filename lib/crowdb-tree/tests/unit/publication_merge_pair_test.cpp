@@ -3,7 +3,7 @@
 #include "btree/flush_batch.h"
 #include "btree/logical_page.h"
 #include "btree/maintenance_operation.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 #include "btree/tree_state_reconcile.h"
 
 #include <gtest/gtest.h>
@@ -50,7 +50,7 @@ class PublicationMergePair : public ::testing::Test
             if (pid < 3) {
                 logical->range.upper = OwnedKey(pid == 1 ? "m" : "t");
             }
-            auto page                     = std::make_shared<PublishedPage>();
+            auto page                     = std::make_shared<PageEntry>();
             page->leaf                    = std::move(logical);
             page->metrics.page_size_known = true;
             page->metrics.page_size_bytes = kFrameHeaderSize + kFrameTrailerSize;
@@ -60,7 +60,7 @@ class PublicationMergePair : public ::testing::Test
         auto inner         = std::make_shared<InnerPageState>();
         inner->children    = {1, 2, 3};
         inner->separators  = {OwnedKey("m"), OwnedKey("t")};
-        auto page          = std::make_shared<PublishedPage>();
+        auto page          = std::make_shared<PageEntry>();
         page->inner        = std::move(inner);
         page->level        = 1;
         page->metrics.leaf = false;
@@ -92,7 +92,7 @@ class PublicationMergePair : public ::testing::Test
         return transaction;
     }
 
-    void reconcile(const std::shared_ptr<const PublishedTreeState> &view)
+    void reconcile(const std::shared_ptr<const TreeRoot> &view)
     {
         TreeStateReconciliation audit(view);
         for (size_t steps = 0; steps < 1024 && !audit.complete(); ++steps) {
@@ -130,7 +130,7 @@ TEST_F(PublicationMergePair, ReadinessAndRepresentationChangesPreserveCandidateA
     ASSERT_TRUE(publish(classification(1, false)).status.ok());
     const auto before = publisher.capture();
     ASSERT_GT(before->merge_candidate_since_ns, 0U);
-    auto page = std::make_shared<PublishedPage>(*before->mapping.get(1));
+    auto page = std::make_shared<PageEntry>(*before->mapping.get(1));
     ++page->revision;
     page->metrics.merge_candidate = false; // Recomputed logical summary omits pair membership.
     ASSERT_TRUE(publish({.pages = {{1, before->mapping.get(1), page}}}).status.ok());
@@ -152,7 +152,7 @@ TEST_F(PublicationMergePair, ChangedMiddlePageInvalidatesBothPairsAtomically)
     ASSERT_TRUE(publish(classification(1)).status.ok());
     ASSERT_TRUE(publish(classification(2)).status.ok());
     const auto before  = publisher.capture();
-    auto       page    = std::make_shared<PublishedPage>(*before->mapping.get(2));
+    auto       page    = std::make_shared<PageEntry>(*before->mapping.get(2));
     auto       logical = std::make_shared<PageState>(*page->leaf);
     ++logical->content_id;
     page->leaf = std::move(logical);
@@ -171,7 +171,7 @@ TEST_F(PublicationMergePair, SplitPriorityInvalidatesPairWithoutChangingLogicalV
 {
     ASSERT_TRUE(publish(classification(1)).status.ok());
     const auto before             = publisher.capture();
-    auto       page               = std::make_shared<PublishedPage>(*before->mapping.get(2));
+    auto       page               = std::make_shared<PageEntry>(*before->mapping.get(2));
     page->metrics.split_candidate = true;
     ASSERT_TRUE(publish({.pages = {{2, before->mapping.get(2), page}}}).status.ok());
     EXPECT_EQ(publisher.capture()->stats.merge_candidate_pairs, 0U);
@@ -183,8 +183,8 @@ TEST_F(PublicationMergePair, SiblingInvalidationDoesNotRejectAlreadyPreparedPage
 {
     ASSERT_TRUE(publish(classification(1)).status.ok());
     const auto before        = publisher.capture();
-    auto       left          = std::make_shared<PublishedPage>(*before->mapping.get(1));
-    auto       right         = std::make_shared<PublishedPage>(*before->mapping.get(2));
+    auto       left          = std::make_shared<PageEntry>(*before->mapping.get(1));
+    auto       right         = std::make_shared<PageEntry>(*before->mapping.get(2));
     auto       left_logical  = std::make_shared<PageState>(*left->leaf);
     auto       right_logical = std::make_shared<PageState>(*right->leaf);
     ++left_logical->content_id;
@@ -206,7 +206,7 @@ TEST_F(PublicationMergePair, SiblingInvalidationDoesNotRejectAlreadyPreparedPage
 TEST_F(PublicationMergePair, ClassificationDoesNotRejectPreparedPageButRepresentationChangeDoes)
 {
     const auto before = publisher.capture();
-    auto       page   = std::make_shared<PublishedPage>(*before->mapping.get(2));
+    auto       page   = std::make_shared<PageEntry>(*before->mapping.get(2));
     ++page->revision;
     ASSERT_TRUE(publish(classification(1)).status.ok());
     const auto result = publish({.pages = {{.page_id = 2, .expected = before->mapping.get(2), .replacement = page}}});
@@ -260,7 +260,7 @@ TEST_F(PublicationMergePair, ParentRouteChangeInvalidatesOnlyItsDirectPairProofs
     ASSERT_TRUE(publish(classification(1)).status.ok());
     ASSERT_TRUE(publish(classification(2)).status.ok());
     const auto before    = publisher.capture();
-    auto       page      = std::make_shared<PublishedPage>(*before->mapping.get(10));
+    auto       page      = std::make_shared<PageEntry>(*before->mapping.get(10));
     auto       inner     = std::make_shared<InnerPageState>(*page->inner);
     inner->separators[0] = OwnedKey("n");
     page->inner          = std::move(inner);

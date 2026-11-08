@@ -1,11 +1,11 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/local_sparse_gc.h"
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "btree/tree_core_checkpoint_internal.h"
 #include "extent_ledger_test_support.h"
+#include "page_store/local/local_sparse_gc.h"
 #include "snapshot/operation_wait.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 #include "test_tmp.h"
 
 #include <future>
@@ -16,13 +16,13 @@ namespace
 {
 TEST(SparseBlockRelocation, SelectionSkipsDenseEmptyAndMissingBlocksAndKeepsItsFence)
 {
-    tree_test::TempDir              directory("sparse_candidate_");
-    std::unique_ptr<BlockPageStore> device;
-    constexpr uint64_t              block = 16384;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, block, 4096, &device).ok());
+    tree_test::TempDir             directory("sparse_candidate_");
+    std::unique_ptr<PageDiskStore> device;
+    constexpr uint64_t             block = 16384;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, block, 4096, &device).ok());
     ASSERT_TRUE(device->ensure_extents(0, 6 * block).ok());
     ASSERT_TRUE(device->delete_block(3).ok());
-    test_read::LedgerFixture test({.backend_id = 1, .file_size = 6 * block, .address_limit = 6 * block});
+    test_read::LedgerFixture test({.page_store_id = 1, .file_size = 6 * block, .address_limit = 6 * block});
     auto                     dense  = test.recover(block, block);
     auto                     sparse = test.recover(4 * block, 4096);
     ASSERT_TRUE(dense.status.ok() && sparse.status.ok());
@@ -49,9 +49,9 @@ TEST(SparseBlockRelocation, SelectionSkipsDenseEmptyAndMissingBlocksAndKeepsItsF
 
 TEST(SparseBlockRelocation, CopiesOnlyTheSelectedOverflowFramesAndRetainsOldReadersThroughTwoAnchors)
 {
-    tree_test::TempDir              directory("sparse_relocation_");
-    std::unique_ptr<BlockPageStore> device;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &device).ok());
+    tree_test::TempDir             directory("sparse_relocation_");
+    std::unique_ptr<PageDiskStore> device;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &device).ok());
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
     config.page_store                           = device.get();
@@ -61,20 +61,20 @@ TEST(SparseBlockRelocation, CopiesOnlyTheSelectedOverflowFramesAndRetainsOldRead
     config.runtime_binding.limits.io_operations = 1;
     std::shared_ptr<TreeCore> core;
     ASSERT_TRUE(TreeCore::open(config, &core).ok());
-    auto local = core->local_backend();
+    auto local = core->local_page_store();
     local->gc_active.store(true); // This test drives the two rotations explicitly.
     const std::string payload(100000, 'v');
     ASSERT_TRUE(core->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = payload}}}).ok());
     ASSERT_TRUE(core->checkpoint().ok());
     auto old  = core->capture();
     auto leaf = old->mapping.get(old->root_page_id);
-    ASSERT_TRUE(leaf->primary && leaf->primary->frame.backing->overflow);
-    const BackingExclusion interval{.address = 64 * 1024, .length = 64 * 1024};
-    size_t                 old_inside  = 0;
-    size_t                 old_outside = 0;
-    for (const auto &[pid, page] : leaf->primary->frame.backing->overflow->pages) {
+    ASSERT_TRUE(leaf->primary && leaf->primary->frame.page_block->overflow);
+    const PageBlockExclusion interval{.address = 64 * 1024, .length = 64 * 1024};
+    size_t                   old_inside  = 0;
+    size_t                   old_outside = 0;
+    for (const auto &[pid, page] : leaf->primary->frame.page_block->overflow->pages) {
         (void)pid;
-        interval.overlaps(*page.backing) ? ++old_inside : ++old_outside;
+        interval.overlaps(*page.page_block) ? ++old_inside : ++old_outside;
     }
     ASSERT_GT(old_inside, 0U);
     ASSERT_GT(old_outside, 0U);
@@ -91,11 +91,11 @@ TEST(SparseBlockRelocation, CopiesOnlyTheSelectedOverflowFramesAndRetainsOldRead
     EXPECT_GE(moved->result().written_frames, old_inside);
     EXPECT_GT(moved->result().reused_frames, 0U);
     auto current = core->capture()->mapping.get(old->root_page_id);
-    ASSERT_TRUE(current->primary && current->primary->frame.backing->overflow);
-    EXPECT_FALSE(interval.overlaps(*current->primary->frame.backing));
-    for (const auto &[pid, page] : current->primary->frame.backing->overflow->pages) {
+    ASSERT_TRUE(current->primary && current->primary->frame.page_block->overflow);
+    EXPECT_FALSE(interval.overlaps(*current->primary->frame.page_block));
+    for (const auto &[pid, page] : current->primary->frame.page_block->overflow->pages) {
         (void)pid;
-        EXPECT_FALSE(interval.overlaps(*page.backing));
+        EXPECT_FALSE(interval.overlaps(*page.page_block));
     }
     moved.reset();
     ASSERT_TRUE(core->prepare_checkpoint(options, &moved).ok());
@@ -133,12 +133,12 @@ TEST(SparseBlockRelocation, CopiesOnlyTheSelectedOverflowFramesAndRetainsOldRead
 
 TEST(SparseBlockRelocation, AsyncSelectionReturnsFromTheActiveLedgerCallbackBeforeItsFenceReply)
 {
-    tree_test::TempDir              directory("sparse_async_");
-    std::unique_ptr<BlockPageStore> device;
-    constexpr uint64_t              block = 16384;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, block, 4096, &device).ok());
+    tree_test::TempDir             directory("sparse_async_");
+    std::unique_ptr<PageDiskStore> device;
+    constexpr uint64_t             block = 16384;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, block, 4096, &device).ok());
     ASSERT_TRUE(device->ensure_extents(0, 4 * block).ok());
-    test_read::LedgerFixture test({.backend_id = 1, .file_size = 4 * block, .address_limit = 4 * block});
+    test_read::LedgerFixture test({.page_store_id = 1, .file_size = 4 * block, .address_limit = 4 * block});
     auto                     dense  = test.recover(block, block);
     auto                     sparse = test.recover(2 * block, 4096);
     ASSERT_TRUE(dense.status.ok() && sparse.status.ok());

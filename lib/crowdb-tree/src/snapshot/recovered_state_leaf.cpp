@@ -54,15 +54,13 @@ void RecoveredStateOperation::State::leaf_step()
             top.summary.live_key_bytes += key.size();
             top.summary.live_value_bytes += value_bytes;
             top.metrics.kv_bytes += key.size() + value_bytes;
+            top.metrics.key_bytes += key.size();
         }
         ++top.index;
     }
     if (top.index == top.leaf->count()) {
         if (top.index != 0) {
-            top.bounds.lower      = OwnedKey(top.leaf->key(0), metadata);
-            top.bounds.upper      = OwnedKey(top.leaf->key(top.index - 1), metadata);
-            top.bounds.lower_leaf = top.pid;
-            top.bounds.upper_leaf = top.pid;
+            top.fences = {.lower_leaf = top.pid, .upper_leaf = top.pid};
         }
         top.metrics.page_size_estimate_bytes = top.metrics.page_size_bytes;
         top.summary.live_counts_known        = true;
@@ -96,9 +94,9 @@ void RecoveredStateOperation::State::dependency_step()
             return;
         }
         const auto &frame = found->second;
-        if (frame.page_id != top.chain_pid || frame.type != page_type::kOverflowFrame || !frame.backing ||
-            (!frame.backing->readable() || (require_durable && !frame.backing->reloadable())) ||
-            frame.backing->backend_id != captured->backend_id || frame.overflow_bytes == 0 ||
+        if (frame.page_id != top.chain_pid || frame.type != page_type::kOverflowFrame || !frame.page_block ||
+            (!frame.page_block->readable() || (require_durable && !frame.page_block->reloadable())) ||
+            frame.page_block->page_store_id != captured->page_store_id || frame.overflow_bytes == 0 ||
             frame.overflow_bytes > top.chain_bytes ||
             (frame.next_overflow == kInvalidPageId) != (frame.overflow_bytes == top.chain_bytes)) {
             finish(Status::corruption());

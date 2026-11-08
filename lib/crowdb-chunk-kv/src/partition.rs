@@ -1577,13 +1577,13 @@ impl Partition {
         .map_err(|error| ChunkKvError::Internal(format!("split abort task failed: {error}")))?
     }
 
-    /// Samples the actual physical backing ledger. Equal scope IDs identify the
+    /// Samples the actual physical page block ledger. Equal scope IDs identify the
     /// same ledger and must be deduplicated when aggregating hosted partitions.
     ///
     /// # Errors
-    /// Returns a typed Tree error when the backing ledger is unavailable.
-    pub fn backing_storage_stats(&self) -> Result<Option<crowdb_tree_ffi::BackingStatsSnapshot>> {
-        self.tree.backing_stats()
+    /// Returns a typed Tree error when the page block ledger is unavailable.
+    pub fn backing_storage_stats(&self) -> Result<Option<crowdb_tree_ffi::PageBlockStatsSnapshot>> {
+        self.tree.page_block_stats()
     }
 
     /// Samples the Tree admission ledger without resetting periodic windows.

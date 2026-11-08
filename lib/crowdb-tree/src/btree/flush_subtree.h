@@ -27,29 +27,34 @@ struct FlushBatch::State::Subtree
 
     Subtree(State &state, uint64_t page_id, PageKeyRange range, bool selected);
     ~Subtree();
-    detail::CallbackSender                             sender() noexcept;
-    void                                               start(detail::CallbackComplete callback, void *argument);
-    void                                               schedule() noexcept;
-    static void                                        run(void *raw) noexcept;
-    void                                               step();
-    void                                               fork();
-    void                                               leaf();
-    Status                                             coalesce_leaf(const PageMaintenanceLimits &limits);
-    void                                               join();
-    void                                               finish_pages();
-    void                                               persist_next();
-    Status                                             prepare_root();
-    [[nodiscard]] InnerEncodeFences                    fences(uint64_t page_id) const;
-    [[nodiscard]] FinalPageSummary                     child_summary(uint64_t page_id) const;
-    [[nodiscard]] std::shared_ptr<const PublishedPage> find_page(uint64_t page_id) const;
-    [[nodiscard]] Subtree                             *page_owner(uint64_t page_id);
-    void                                               complete(Status result) noexcept;
-    void                                               prepare_builder();
-    static size_t                                      fork_bytes() noexcept;
-    void                                               reset_work();
-    std::optional<Status>                              load() noexcept;
-    Status collect(PublicationTransaction &transaction, uint64_t &handoff_bytes);
-    [[nodiscard]] std::shared_ptr<const PublishedPage> lookup(uint64_t page_id) const;
+    detail::CallbackSender                         sender() noexcept;
+    void                                           start(detail::CallbackComplete callback, void *argument);
+    void                                           schedule() noexcept;
+    static void                                    run(void *raw) noexcept;
+    void                                           step();
+    void                                           fork();
+    void                                           leaf();
+    Status                                         coalesce_leaf(const PageMaintenanceLimits &limits);
+    void                                           join();
+    void                                           finish_pages();
+    void                                           persist_next();
+    Status                                         prepare_root();
+    [[nodiscard]] InnerEncodeFences                fences(uint64_t page_id) const;
+    [[nodiscard]] FinalPageSummary                 child_summary(uint64_t page_id, IndexSummary live) const;
+    [[nodiscard]] IndexSummary                     index_summary(uint64_t page_id) const;
+    [[nodiscard]] IndexSummary                     previous_summary(uint64_t page_id) const;
+    [[nodiscard]] IndexSummary                     child_totals(const InnerPageState &page);
+    void                                           set_index_summary(uint64_t page_id, IndexSummary summary);
+    [[nodiscard]] std::shared_ptr<const PageEntry> find_page(uint64_t page_id) const;
+    [[nodiscard]] Subtree                         *page_owner(uint64_t page_id);
+    void                                           complete(Status result) noexcept;
+    void                                           prepare_builder();
+    static size_t                                  fork_bytes() noexcept;
+    void                                           reset_work();
+    std::optional<Status>                          load() noexcept;
+    Status collect(PublicationTransaction &transaction, detail::ReservedVector<IndexSummaries::Change> &summaries,
+                   uint64_t &handoff_bytes);
+    [[nodiscard]] std::shared_ptr<const PageEntry> lookup(uint64_t page_id) const;
 
     State       &owner;
     uint64_t     pid;
@@ -68,30 +73,33 @@ struct FlushBatch::State::Subtree
 
     struct FinalPage
     {
-        Subtree                             *task;
-        uint64_t                             pid;
-        uint32_t                             level;
-        Writes                              *writes      = nullptr;
-        std::shared_ptr<const PublishedPage> replacement = nullptr;
+        Subtree                         *task;
+        uint64_t                         pid;
+        uint32_t                         level;
+        Writes                          *writes      = nullptr;
+        std::shared_ptr<const PageEntry> replacement = nullptr;
     };
 
-    detail::ReservedVector<FinalPage>                  final_pages;
-    std::shared_ptr<Writes>                            page_writes;
-    std::optional<TreeMetricsOperation>                layout_metrics;
-    Status                                             status;
-    std::shared_ptr<const PublishedPage>               expected;
-    std::shared_ptr<const InnerPageState>              inner;
-    InnerDecode                                        decode_index;
-    std::atomic<unsigned>                              index_load_events{0};
-    std::shared_ptr<PageState>                         loaded_leaf;
-    LeafDecode                                         decode_bases;
-    std::shared_ptr<Range>                             range;
-    detail::ReservedUnique<detail::SplitWindowCursor>  layout;
-    detail::ReservedUnique<detail::MaintenanceBuilder> builder;
-    detail::MaintenanceChildren                        output;
-    detail::ReservedVector<std::shared_ptr<Subtree>>   children;
-    detail::ReservedUnique<Children>                   child_join;
-    detail::CallbackComplete                           done    = nullptr;
-    void                                              *context = nullptr;
+    detail::ReservedVector<FinalPage> final_pages;
+    // Most joins produce one PID. Allocate a list only for a split or merge.
+    std::optional<std::pair<uint64_t, IndexSummary>>          first_index_summary;
+    detail::ReservedVector<std::pair<uint64_t, IndexSummary>> more_index_summaries;
+    std::shared_ptr<Writes>                                   page_writes;
+    std::optional<TreeMetricsOperation>                       layout_metrics;
+    Status                                                    status;
+    std::shared_ptr<const PageEntry>                          expected;
+    std::shared_ptr<const InnerPageState>                     inner;
+    InnerDecode                                               decode_index;
+    std::atomic<unsigned>                                     index_load_events{0};
+    std::shared_ptr<PageState>                                loaded_leaf;
+    LeafDecode                                                decode_bases;
+    std::shared_ptr<Range>                                    range;
+    detail::ReservedUnique<detail::SplitWindowCursor>         layout;
+    detail::ReservedUnique<detail::MaintenanceBuilder>        builder;
+    detail::MaintenanceChildren                               output;
+    detail::ReservedVector<std::shared_ptr<Subtree>>          children;
+    detail::ReservedUnique<Children>                          child_join;
+    detail::CallbackComplete                                  done    = nullptr;
+    void                                                     *context = nullptr;
 };
 } // namespace crowdb::tree

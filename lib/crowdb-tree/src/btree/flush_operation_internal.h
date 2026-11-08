@@ -59,8 +59,8 @@ struct FlushOperation::State : std::enable_shared_from_this<State>
     void        drain_sources();
     void        start_batch();
     void        stage_done(Stage stage, Status status) noexcept;
-    void        maintain(std::shared_ptr<const PublishedTreeState> view, FlushBatch::MaintenanceComplete done);
-    Status      acknowledge(const PublishedTreeState &view);
+    void        maintain(std::shared_ptr<const TreeRoot> view, FlushBatch::MaintenanceComplete done);
+    Status      acknowledge(const TreeRoot &view);
     void        fail(Status status) noexcept;
     void        finish() noexcept;
     [[nodiscard]] bool stopped() const noexcept;

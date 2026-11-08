@@ -5,8 +5,8 @@
 // overflow frame chains; leaves keep small pointer cells. Covers multi-frame
 // chains, get/scan/delete, reopen, eviction-reload, overwrite (chain retire),
 // and parity vs an in-mem oracle.
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -66,7 +66,7 @@ Config overflow_opts(PageStore *store)
 
 TEST(Overflow, PutGetScanReopenMultiFrame)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt = overflow_opts(&store);
 
     // Sizes spanning chain boundaries: <1 chunk, exactly 1, just over 1, several,
@@ -137,7 +137,7 @@ TEST(Overflow, PutGetScanReopenMultiFrame)
 
 TEST(Overflow, EvictionReload)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt = overflow_opts(&store);
     Crowdbtree   t(opt);
 
@@ -163,7 +163,7 @@ TEST(Overflow, EvictionReload)
 
 TEST(Overflow, OverwriteAndDeleteRetiresChains)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt = overflow_opts(&store);
     {
         Crowdbtree        t(opt);

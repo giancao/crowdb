@@ -43,12 +43,12 @@ std::shared_ptr<const LeafBase> make_base()
     return std::shared_ptr<const LeafBase>(LeafBase::build(entries));
 }
 
-std::shared_ptr<const BackingRef> make_backing()
+std::shared_ptr<const PageBlockRef> make_page_block()
 {
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = 4096;
-    backing->owner  = std::make_shared<int>(1);
-    return backing;
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = 4096;
+    page_block->owner  = std::make_shared<int>(1);
+    return page_block;
 }
 } // namespace
 
@@ -265,7 +265,7 @@ TEST(LogicalPage, OverlayValidatesOrderAndSharesValues)
 TEST(LogicalPage, LookupPreservesTombstoneOverColdBaseAndRequestsUnknownData)
 {
     PageState page;
-    page.bases.push_back({.identity = 1, .max_slot = 3, .backing = make_backing()});
+    page.bases.push_back({.identity = 1, .max_slot = 3, .page_block = make_page_block()});
     page.overlays.push_back(make_run(1, {
                                             {"b", make_cell(7, {}, OpKind::kDelete)}
     }));
@@ -333,7 +333,7 @@ TEST(LogicalPage, CursorMergesBasesAndRunsForwardReverseAndAtFrontier)
 TEST(LogicalPage, CursorReportsColdBaseAndBudgetsWithoutStartingPartialScan)
 {
     auto page = std::make_shared<PageState>();
-    page->bases.push_back({.identity = 1, .range = {.upper = "c"}, .backing = make_backing()});
+    page->bases.push_back({.identity = 1, .range = {.upper = "c"}, .page_block = make_page_block()});
     page->overlays.push_back(make_run(1, {
                                              {"z", make_cell(7, "overlay")}
     }));
@@ -351,22 +351,22 @@ TEST(LogicalPage, CursorReportsColdBaseAndBudgetsWithoutStartingPartialScan)
     EXPECT_FALSE(windowed.valid());
 }
 
-TEST(LogicalPage, BackingNeedsIndependentOwnerAndCapabilities)
+TEST(LogicalPage, PageBlockNeedsIndependentOwnerAndCapabilities)
 {
-    BackingRef backing;
-    backing.length = 4096;
-    EXPECT_FALSE(backing.reloadable());
-    backing.owner = std::make_shared<int>(1);
-    EXPECT_TRUE(backing.reloadable());
-    EXPECT_FALSE(BackingCapabilities{}.can_stage());
-    EXPECT_FALSE((BackingCapabilities{true, false}).can_stage());
-    EXPECT_TRUE((BackingCapabilities{true, true}).can_stage());
+    PageBlockRef page_block;
+    page_block.length = 4096;
+    EXPECT_FALSE(page_block.reloadable());
+    page_block.owner = std::make_shared<int>(1);
+    EXPECT_TRUE(page_block.reloadable());
+    EXPECT_FALSE(PageBlockCapabilities{}.can_stage());
+    EXPECT_FALSE((PageBlockCapabilities{true, false}).can_stage());
+    EXPECT_TRUE((PageBlockCapabilities{true, true}).can_stage());
 }
 
 TEST(LogicalPage, ColdBaseSlotTieRespectsSourceOrderBeforeSkippingLoad)
 {
     PageState page;
-    page.bases.push_back({.identity = 1, .max_slot = 3, .backing = make_backing()});
+    page.bases.push_back({.identity = 1, .max_slot = 3, .page_block = make_page_block()});
     page.bases.push_back({.identity = 2, .resident = make_base()});
     auto result = page.lookup("a");
     EXPECT_EQ(result.state, LogicalLookupState::kNeedsBase);

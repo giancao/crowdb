@@ -2,19 +2,19 @@
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_bound.h"
 #include "page_cache_residency_internal.h"
-#include "published_state.h"
+#include "tree_root.h"
 
 namespace crowdb::tree
 {
 void PageCacheResidency::State::prepare_page(Update &update, uint64_t pid,
-                                             const std::shared_ptr<const PublishedPage> &replacement,
-                                             const std::shared_ptr<AllocationBudget>    &metadata)
+                                             const std::shared_ptr<const PageEntry>  &replacement,
+                                             const std::shared_ptr<AllocationBudget> &metadata)
 {
     std::shared_ptr<Page> page;
     if (replacement) {
         page           = detail::reserved_shared<Page>(metadata, metadata);
         const auto add = [&](const BaseRef &base, PageCacheKind kind) {
-            if (!base.backing || base.resident) {
+            if (!base.page_block || base.resident) {
                 return;
             }
             const auto key = page_cache_key(kind, base);
@@ -29,16 +29,17 @@ void PageCacheResidency::State::prepare_page(Update &update, uint64_t pid,
                 add(base, PageCacheKind::Leaf);
             }
         }
-        else if (!replacement->inner && replacement->inner_backing) {
+        else if (!replacement->inner && replacement->inner_page_block) {
             page->links.reserve(1);
-            add(BaseRef{.backing = replacement->inner_backing}, PageCacheKind::Inner);
+            add(BaseRef{.page_block = replacement->inner_page_block}, PageCacheKind::Inner);
         }
     }
     update.pages.emplace(pid, std::move(page));
 }
 
 std::shared_ptr<PageCacheResidency::Update>
-PageCacheResidency::prepare_initial(const MappingView &mapping, const std::shared_ptr<AllocationBudget> &metadata) const
+PageCacheResidency::prepare_initial(const MappingTable                      &mapping,
+                                    const std::shared_ptr<AllocationBudget> &metadata) const
 {
     auto                         update = detail::reserved_shared<Update>(metadata, state_);
     PageCacheNodeResource::Scope scope(metadata);
@@ -61,7 +62,7 @@ PageCacheResidency::prepare_initial(const MappingView &mapping, const std::share
 }
 
 std::shared_ptr<PageCacheResidency::Update>
-PageCacheResidency::prepare_replacement(const MappingView                       &mapping,
+PageCacheResidency::prepare_replacement(const MappingTable                      &mapping,
                                         const std::shared_ptr<AllocationBudget> &metadata) const
 {
     auto update   = prepare_initial(mapping, metadata);
@@ -69,7 +70,7 @@ PageCacheResidency::prepare_replacement(const MappingView                       
     return update;
 }
 
-size_t PageCacheResidency::initial_allocation_bound(const MappingView &mapping) noexcept
+size_t PageCacheResidency::initial_allocation_bound(const MappingTable &mapping) noexcept
 {
     detail::AllocationBound bound(detail::shared_allocation_bound<Update>());
     mapping.visit(&bound, [](void *argument, uint64_t, const auto &page) {

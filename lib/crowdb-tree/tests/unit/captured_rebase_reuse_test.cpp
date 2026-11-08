@@ -5,7 +5,7 @@
 #include "published_read_test_support.h"
 #include "snapshot/captured_plan.h"
 #include "snapshot/captured_rebase.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 namespace crowdb::tree
 {
@@ -63,7 +63,7 @@ struct TestReuse
                  .type          = page_type::kLeafBase,
                  .frame_bytes   = 4096,
                  .logical_bytes = 4096,
-                 .backing       = base_ref.backing};
+                 .page_block    = base_ref.page_block};
         frame.summary.emplace();
         frame.summary->live_counts_known = true;
         frame.summary->live_keys         = 1;
@@ -72,24 +72,24 @@ struct TestReuse
         frame.stored_overflow            = std::make_shared<StoredOverflowReferences>();
         auto page                        = published(leaf);
         page->metrics.dirty              = false;
-        page->primary                    = make_primary_backing(frame, *leaf, 10, 0, {});
+        page->primary                    = make_primary_page_block(frame, *leaf, 10, 0, {});
         EXPECT_TRUE(page->primary);
-        initial               = std::make_shared<PublishedTreeState>(nullptr, 10);
+        initial               = std::make_shared<TreeRoot>(nullptr, 10);
         initial->coverage     = 10;
         initial->root_page_id = 0;
         initial->next_page_id = 1;
-        MappingView::CopyStats copied;
+        MappingTable::CopyStats copied;
         initial->mapping = initial->mapping.replace(
             std::array<PageReplacement, 1>{{{.page_id = 0, .expected = {}, .replacement = page}}}, copied);
         EXPECT_TRUE(apply_page_metrics(initial->stats, nullptr, &page->metrics));
-        current = std::make_shared<PublishedTreeState>(*initial);
+        current = std::make_shared<TreeRoot>(*initial);
         if (later_overlay) {
             auto changed_leaf = std::make_shared<PageState>(*leaf);
             auto run          = test_read::page({
                 {.key = "a", .slot = 11, .value = "new"}
             });
             changed_leaf->overlays.push_back(run->overlays.front());
-            auto changed           = std::make_shared<PublishedPage>(*page);
+            auto changed           = std::make_shared<PageEntry>(*page);
             changed->leaf          = changed_leaf;
             changed->metrics.dirty = true;
             current->mapping       = current->mapping.replace(
@@ -97,9 +97,9 @@ struct TestReuse
         }
     }
 
-    DurableCapturedFrame                frame;
-    std::shared_ptr<PublishedTreeState> initial;
-    std::shared_ptr<PublishedTreeState> current;
+    DurableCapturedFrame      frame;
+    std::shared_ptr<TreeRoot> initial;
+    std::shared_ptr<TreeRoot> current;
 };
 
 TEST(CapturedRebaseReuse, ZeroReplacementCreditPreservesExactPageAndLaterOverlay)

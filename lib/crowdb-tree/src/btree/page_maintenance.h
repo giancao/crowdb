@@ -26,8 +26,9 @@ struct PageMaintenanceLimits
 
 struct LeafLayoutStats
 {
-    uint64_t kv_count = 0;
-    uint64_t kv_bytes = 0;
+    uint64_t kv_count  = 0;
+    uint64_t kv_bytes  = 0;
+    uint64_t key_bytes = 0;
 };
 
 enum class MaintenanceReadiness : uint8_t { kReady, kNeedsBase, kDeferred };

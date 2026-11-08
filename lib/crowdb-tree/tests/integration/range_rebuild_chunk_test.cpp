@@ -3,7 +3,7 @@
 #include "common/test_tree_core_chunk.h"
 #include "crowdb-tree/btree/range_rebuild.h"
 #include "runtime_tree_access.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 #include <gtest/gtest.h>
 
@@ -53,7 +53,7 @@ void next_owner(TestCoreChunk &child)
     child.configure_store(child.backend.catalog->current_generation);
 }
 
-TEST(RangeRebuildChunk, ChildPublishesIndependentPaidBackingAndKeepsParentUnchanged)
+TEST(RangeRebuildChunk, ChildPublishesIndependentPaidPageBlockAndKeepsParentUnchanged)
 {
     TestCoreChunk source;
     TestCoreChunk child;
@@ -68,7 +68,7 @@ TEST(RangeRebuildChunk, ChildPublishesIndependentPaidBackingAndKeepsParentUnchan
     auto       child_root  = RuntimeTreeAccess_for_tests::root(*child.tree);
     ASSERT_TRUE(source_root->primary);
     ASSERT_TRUE(child_root->primary);
-    EXPECT_NE(source_root->primary->frame.backing, child_root->primary->frame.backing);
+    EXPECT_NE(source_root->primary->frame.page_block, child_root->primary->frame.page_block);
     ASSERT_TRUE(child.tree->put("new-key", "child-only").ok());
     const auto checkpoint_status = child.tree->flush_with_persistent();
     ASSERT_TRUE(checkpoint_status.ok()) << checkpoint_status.to_string();
@@ -138,7 +138,7 @@ TEST(RangeRebuildChunk, BoundedChildHasOnlyItsReachableGraphAndReopens)
     child.config.key_range = range;
     const auto view        = RuntimeTreeAccess_for_tests::capture(*child.tree);
     size_t     count       = 0;
-    view->mapping.visit(&count, [](void *context, uint64_t, const std::shared_ptr<const PublishedPage> &) {
+    view->mapping.visit(&count, [](void *context, uint64_t, const std::shared_ptr<const PageEntry> &) {
         ++*static_cast<size_t *>(context);
     });
     EXPECT_EQ(count, view->stats.leaf_pages + view->stats.inner_pages);

@@ -14,7 +14,7 @@ Status TreeCore::capture_read_only_view(std::shared_ptr<PublishedReadViewContext
     return PublishedReadViewContext::capture_admitted(shared_from_this(), out);
 }
 
-Status TreeCore::capture_read_only_view(std::shared_ptr<const PublishedTreeState>  view,
+Status TreeCore::capture_read_only_view(std::shared_ptr<const TreeRoot>            view,
                                         std::shared_ptr<PublishedReadViewContext> *out)
 {
     State::Ingress ingress(*state_);
@@ -29,10 +29,10 @@ Status TreeCore::capture_read_only_view(std::shared_ptr<const PublishedTreeState
 
 Status TreeCore::acquire_snapshot_window(const std::shared_ptr<AllocationBudget>        &metadata,
                                          std::shared_ptr<TreeOperationLifetime::Ticket> *ticket,
-                                         AsyncPageStore                                **backend)
+                                         AsyncPageStore                                **page_store)
 {
-    if (backend == nullptr) {
-        return Status::invalid_argument("snapshot read window requires backend output");
+    if (page_store == nullptr) {
+        return Status::invalid_argument("snapshot read window requires page_store output");
     }
     State::Ingress ingress(*state_);
     if (ingress.owner == nullptr) {
@@ -40,7 +40,7 @@ Status TreeCore::acquire_snapshot_window(const std::shared_ptr<AllocationBudget>
     }
     auto status = state_->lifetime->acquire(metadata, ticket);
     if (status.ok()) {
-        *backend = state_->backend.get();
+        *page_store = state_->page_store.get();
     }
     return status;
 }

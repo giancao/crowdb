@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/captured_write_internal.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 #include "snapshot/stored_overflow.h"
 
 #include <cassert>
@@ -134,11 +134,11 @@ void CapturedWriteOperation::State::received_frame()
     frame      = result.frame;
     last_frame = result.complete;
     descriptor = {
-        .page_id = frame->info.page_id, .type = frame->info.type, .frame_bytes = frame->info.bytes, .backing = {}};
+        .page_id = frame->info.page_id, .type = frame->info.type, .frame_bytes = frame->info.bytes, .page_block = {}};
     descriptor.summary = frame->summary;
     if (!dependencies) {
-        dependencies     = detail::reserved_shared<Dependencies>(budget.bytes, budget.bytes);
-        overflow_backing = detail::reserved_shared<OverflowBackingSet>(budget.bytes, budget.bytes);
+        dependencies        = detail::reserved_shared<Dependencies>(budget.bytes, budget.bytes);
+        overflow_page_block = detail::reserved_shared<OverflowPageBlockSet>(budget.bytes, budget.bytes);
     }
     if (frame->reuse) {
         descriptor = frame->reuse->primary->frame;
@@ -185,8 +185,9 @@ void CapturedWriteOperation::State::received_frame()
 
 Status CapturedWriteOperation::State::insert(DurableCapturedFrame value, bool reused)
 {
-    if (!value.backing || !value.backing->reloadable() || value.page_id >= MappingView::kPageLimit ||
-        value.backing->backend_id == 0 || (pages->backend_id != 0 && pages->backend_id != value.backing->backend_id)) {
+    if (!value.page_block || !value.page_block->reloadable() || value.page_id >= MappingTable::kPageLimit ||
+        value.page_block->page_store_id == 0 ||
+        (pages->page_store_id != 0 && pages->page_store_id != value.page_block->page_store_id)) {
         return Status::corruption("captured write references a different or unprotected backend");
     }
     auto old = pages->frames.find(value.page_id);
@@ -195,14 +196,14 @@ Status CapturedWriteOperation::State::insert(DurableCapturedFrame value, bool re
                  ? Status::Ok()
                  : Status::corruption("duplicate captured PID");
     }
-    pages->backend_id         = value.backing->backend_id;
+    pages->page_store_id      = value.page_block->page_store_id;
     pages->next_page_id       = std::max(pages->next_page_id, value.page_id + 1);
-    const auto reused_bytes   = reused ? value.backing->length : 0;
+    const auto reused_bytes   = reused ? value.page_block->length : 0;
     value.incoming_references = 0;
     const auto pid            = value.page_id;
     pages->frames.emplace(pid, std::move(value));
     record_work(budget.work_metrics, TreeWorkCounter::ReusedFrames, static_cast<uint64_t>(reused), budget.cause);
-    record_work(budget.work_metrics, TreeWorkCounter::ReusedBackingBytes, reused_bytes, budget.cause);
+    record_work(budget.work_metrics, TreeWorkCounter::ReusedPageBlockBytes, reused_bytes, budget.cause);
     report.reused_frames += static_cast<uint64_t>(reused);
     return Status::Ok();
 }
@@ -228,7 +229,7 @@ void CapturedWriteOperation::State::reuse_step()
         dependency_steps = 0;
     }
     DurableCapturedFrame old;
-    const auto          &captured = frame->reused_overflow[dependency_index].backing;
+    const auto          &captured = frame->reused_overflow[dependency_index].page_block;
     if (captured) {
         if (++dependency_steps > captured->pages.size()) {
             finish(Status::corruption("captured overflow dependency cycle"));
@@ -246,7 +247,7 @@ void CapturedWriteOperation::State::reuse_step()
                             .logical_bytes  = page.logical_bytes,
                             .next_overflow  = page.next,
                             .overflow_bytes = page.bytes,
-                            .backing        = page.backing};
+                            .page_block     = page.page_block};
     }
     else {
         if (!inherited) {
@@ -270,24 +271,24 @@ void CapturedWriteOperation::State::reuse_step()
         finish(Status::corruption("captured overflow topology does not match the cell length"));
         return;
     }
-    if (old.backing && old.backing->storage == BackingStorage::kResidentFrame) {
+    if (old.page_block && old.page_block->storage == PageBlockStorage::kResidentFrame) {
         use_resident_dependency(std::move(old));
         return;
     }
     if (inherited) {
         const auto staged = inherited->frames.find(old.page_id);
-        if (staged != inherited->frames.end() && staged->second.resident_source.lock() == old.backing) {
+        if (staged != inherited->frames.end() && staged->second.resident_source.lock() == old.page_block) {
             old = staged->second;
         }
     }
-    if (limits.frames.exclusion.overlaps(*old.backing)) {
+    if (limits.frames.exclusion.overlaps(*old.page_block)) {
         use_relocated_dependency(std::move(old));
         return;
     }
     // A dirty primary adopts exact physical extents into its own dependency
     // group. Retaining an old overflow owner would also keep deleted values
     // from the old leaf alive. Clean primaries keep their existing exact graph.
-    if (limits.frames.exclusion.length != 0 || (!frame->reuse && old.backing->physical_owner)) {
+    if (limits.frames.exclusion.length != 0 || (!frame->reuse && old.page_block->physical_owner)) {
         reuse_durable_dependency(std::move(old));
         return;
     }

@@ -22,6 +22,7 @@ LocalRecoveryOperation::State::Window::Window(size_t blob_bytes, size_t frame_by
 
 LocalRecoveryOperation::State::State(PageLoadBudget credits)
     : budget(std::move(credits)),
+      summaries(detail::ReservationAllocator<IndexSummaries::Change>(budget.bytes)),
       directory(detail::ReservationAllocator<DirEntry>(budget.bytes)),
       references(detail::ReservationAllocator<LeafReference>(budget.bytes)),
       report(detail::reserved_shared<LocalRecoveryResult>(budget.bytes))
@@ -141,7 +142,7 @@ void LocalRecoveryOperation::State::finish(Status status) noexcept
     window.reset();
     recovered.owner.reset();
     protection.reset();
-    overflow_backing.reset();
+    overflow_page_block.reset();
     ledger.reset();
     store.reset();
     auto signal = report->status.ok() ? detail::CallbackSignal::kValue : detail::CallbackSignal::kError;

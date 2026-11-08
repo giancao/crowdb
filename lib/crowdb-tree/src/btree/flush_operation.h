@@ -15,17 +15,17 @@ struct FrozenSourceView
 {
     std::shared_ptr<const SourceCatalog> catalog;
     // Complete L1 paired with catalog.floor, fixed before capture terminal.
-    std::shared_ptr<const PublishedTreeState> base     = nullptr;
-    uint64_t                                  frontier = 0;
-    uint64_t                                  batch_id = 0;
+    std::shared_ptr<const TreeRoot> base     = nullptr;
+    uint64_t                        frontier = 0;
+    uint64_t                        batch_id = 0;
 };
 
 struct FlushReservePlan
 {
-    std::shared_ptr<const PublishedTreeState> view    = nullptr;
-    std::shared_ptr<const SourceCatalog>      sources = nullptr;
-    detail::FlushReserveBounds                bounds{};
-    std::shared_ptr<SourcePause>              pause = nullptr;
+    std::shared_ptr<const TreeRoot>      view    = nullptr;
+    std::shared_ptr<const SourceCatalog> sources = nullptr;
+    detail::FlushReserveBounds           bounds{};
+    std::shared_ptr<SourcePause>         pause = nullptr;
 };
 
 class FlushOperation
@@ -85,8 +85,8 @@ class FlushController
                     std::shared_ptr<ApplyProgress>                 progress  = {});
     [[nodiscard]] static size_t allocation_bound() noexcept;
     [[nodiscard]] size_t        source_window() const noexcept;
-    [[nodiscard]] Status check_rotation(const FlushPreparationOptions &preparation, const PublishedTreeState &view,
-                                        const SourceCatalog &catalog, WriteFootprint sealed) const;
+    [[nodiscard]] Status        check_rotation(const FlushPreparationOptions &preparation, const TreeRoot &view,
+                                               const SourceCatalog &catalog, WriteFootprint sealed) const;
     ~FlushController();
     FlushController(const FlushController &)            = delete;
     FlushController &operator=(const FlushController &) = delete;
@@ -116,7 +116,7 @@ class FlushController
     void close() noexcept;
     // Teardown requests discard through the existing preparation owner without
     // waiting. An active preparer consumes the request when leaving. Running
-    // operations retain their own state; the controller must not retain backend
+    // operations retain their own state; the controller must not retain page store
     // tickets while the host awaits their drain.
     void release_pending() noexcept;
 

@@ -24,7 +24,7 @@ class CapturedRebaseOperation
 
   public:
     static Status
-    create(PublicationCoordinator &publisher, std::shared_ptr<const PublishedTreeState> captured,
+    create(PublicationCoordinator &publisher, std::shared_ptr<const TreeRoot> captured,
            std::shared_ptr<const CapturedDurablePages> pages, std::shared_ptr<detail::FlushRuntime> runtime,
            std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<AllocationBudget> metadata,
            std::shared_ptr<CapturedRebaseOperation> *out, size_t max_sources = 128,

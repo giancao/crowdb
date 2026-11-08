@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 // CT13: read path (get, multi_get, scan with L0 overlay, iter_all via snapshot).
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -69,7 +69,7 @@ TEST(ReadPath, GetViewL0HitIsCorrect)
 
 TEST(ReadPath, GetViewL1HitBorrowsFrameSurvivingConcurrentEviction)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;

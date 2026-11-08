@@ -1,9 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/local_backend_state.h"
 #include "btree/allocation_account.h"
 #include "btree/tree_core.h"
-#include "crowdb-tree/backend/page_store.h"
+#include "btree/tree_core_batch.h"
+#include "crowdb-tree/page_store/page_store.h"
+#include "page_store/local/local_page_store_state.h"
 
 #include <gtest/gtest.h>
 
@@ -15,8 +16,8 @@ namespace crowdb::tree
 TEST(CheckpointActualMemory, PersistentFlushFinishesAboveTheCeilingAndNewWritesResumeAfterRelease)
 {
     constexpr size_t           partition = 32ULL * 1024 * 1024;
-    MemPageStore               store{4096};
-    const std::vector<uint8_t> orphan(160 * MemPageStore::kBackingPageBytes, 37);
+    PageMemStore               store{4096};
+    const std::vector<uint8_t> orphan(160 * PageMemStore::kPageBlockPageBytes, 37);
     ASSERT_TRUE(store.write_at(0, orphan.data(), orphan.size()).ok());
     const std::array<uint8_t, 8192> anchors{};
     ASSERT_TRUE(store.write_at(0, anchors.data(), anchors.size()).ok());
@@ -39,6 +40,19 @@ TEST(CheckpointActualMemory, PersistentFlushFinishesAboveTheCeilingAndNewWritesR
         input.ops.push_back({.key = std::to_string(i), .kind = OpKind::kPut, .value = std::string(64, 'v')});
     }
     ASSERT_TRUE(core->apply(1, input).ok());
+    const auto flush_attempts = [&] {
+        core->binding()->drain();
+        return core->binding()->work_metrics()->totals()[static_cast<size_t>(TreeStage::FlushBatch)].attempts;
+    };
+    const auto expect_writes_rejected = [&] {
+        EXPECT_EQ(core->apply(2, input).code(), Code::kUnavailable);
+        std::shared_ptr<TreeApplyOperation> operation;
+        const auto                          status = core->prepare_apply(
+            1, [](size_t) { return CoreWriteInput{.key = "key", .value = "value"}; },
+            detail::BudgetClass::kAdmittedWriter, 0, &operation);
+        EXPECT_EQ(status.code(), Code::kUnavailable);
+        EXPECT_FALSE(operation);
+    };
     {
         // Retain real allocated capacity from accepted work without touching
         // the unused bytes. The assertion covers total memory, not a forecast.
@@ -48,7 +62,10 @@ TEST(CheckpointActualMemory, PersistentFlushFinishesAboveTheCeilingAndNewWritesR
         const auto                                                           release =
             std::shared_ptr<uint8_t>(retained, [allocator](auto *data) mutable { allocator.deallocate(data, bytes); });
         ASSERT_TRUE(detail::ResourceBudget::memory_exhausted(core->binding()->account()));
-        EXPECT_EQ(core->apply(2, input).code(), Code::kUnavailable);
+        const auto before = flush_attempts();
+        expect_writes_rejected();
+        EXPECT_EQ(flush_attempts(), before);
+        EXPECT_EQ(core->durable_coverage(), 0U);
         std::promise<std::pair<Status, uint64_t>> complete;
         auto                                      result = complete.get_future();
         core->checkpoint_async(
@@ -60,8 +77,11 @@ TEST(CheckpointActualMemory, PersistentFlushFinishesAboveTheCeilingAndNewWritesR
         EXPECT_EQ(core->durable_coverage(), 1U);
         core->operation_lifetime().drain_accepted();
         core->binding()->drain();
-        EXPECT_LT(store.resident_bytes(), 3 * MemPageStore::kBackingPageBytes);
-        EXPECT_EQ(core->apply(2, input).code(), Code::kUnavailable);
+        EXPECT_LT(store.resident_bytes(), 3 * PageMemStore::kPageBlockPageBytes);
+        const auto after = flush_attempts();
+        expect_writes_rejected();
+        expect_writes_rejected();
+        EXPECT_EQ(flush_attempts(), after);
     }
     EXPECT_FALSE(detail::ResourceBudget::memory_exhausted(core->binding()->account()));
     ASSERT_TRUE(core->apply(2, input).ok());

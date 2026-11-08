@@ -11,7 +11,7 @@ use crowdb_chunk_stream::{
     ChunkStream, StreamChunkStore, StreamConfig, StreamMetadataStore, StreamName, StreamPurpose,
     StreamRecord, StreamRecordState, StreamRegistry,
 };
-use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
+use crowdb_tree_ffi::chunk::test_util::TestPageChunkStore;
 
 #[tokio::test]
 async fn interrupted_bootstrap_replays_wal_before_the_first_tree_checkpoint() {
@@ -26,7 +26,7 @@ async fn interrupted_bootstrap_replays_wal_before_the_first_tree_checkpoint() {
         };
         let store = Arc::new(MemoryStreamStore::new(4096));
         let stream = create_stream(name, &store).await;
-        let mut backend = TestChunkBackend::new(identity.low, 4).unwrap();
+        let mut backend = TestPageChunkStore::new(identity.low, 4).unwrap();
         let pages = backend.page_store(0).unwrap();
         let range = PartitionRange {
             start: Some(Vec::new()),

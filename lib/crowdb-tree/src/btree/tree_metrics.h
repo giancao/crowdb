@@ -42,6 +42,7 @@ struct PageMetricsContribution
     bool     kv_known                 = false;
     uint64_t kv_count                 = 0;
     uint64_t kv_bytes                 = 0;
+    uint64_t key_bytes                = 0;
     bool     consolidate_candidate    = false;
     bool     split_candidate          = false;
     bool     split_ready              = false;
@@ -170,13 +171,13 @@ enum class TreeResourceMetric : uint8_t {
     ReadInflightBytes,
     WriteInflightBytes,
     MaterializeInflightBytes,
-    AllocatedBackingBytes,
+    AllocatedPageBlockBytes,
     MaintenanceQueued,
     MaintenanceInflight,
     Count
 };
 
-class BackingMetricExtent;
+class PageBlockMetricExtent;
 
 class TreeResourceMetrics
 {
@@ -188,7 +189,7 @@ class TreeResourceMetrics
     [[nodiscard]] TreeResourceStats snapshot() const noexcept;
 
   private:
-    friend class BackingMetricExtent;
+    friend class PageBlockMetricExtent;
     std::array<std::atomic<uint64_t>, static_cast<size_t>(TreeResourceMetric::Count)> values_{};
 };
 

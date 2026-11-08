@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
 #include "btree/tree_core_read_internal.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "snapshot/published_snapshot_entries.h"
 
 #include <gtest/gtest.h>
@@ -12,13 +12,13 @@ namespace crowdb::tree
 {
 TEST(BorrowedReadBudget, InlineWritebackAndNewUnknownOverlaysAdmitConcurrentReads)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       config;
     ASSERT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
     config.page_store                           = &store;
     config.frame_bytes                          = 65536;
     config.runtime_binding.limits.routing_bytes = 128 * 1024 * 1024;
-    // I/O credit is consumed only when a backing read is submitted.
+    // I/O credit is consumed only when a page block read is submitted.
     config.runtime_binding.limits.io_operations = 64;
     Crowdbtree        tree(config);
     const std::string value(16384, 'v');
@@ -29,7 +29,7 @@ TEST(BorrowedReadBudget, InlineWritebackAndNewUnknownOverlaysAdmitConcurrentRead
     ASSERT_TRUE(tree.apply(2, Batch{.ops = {{.key = "b", .kind = OpKind::kPut, .value = value}}}).ok());
     ASSERT_TRUE(tree.flush().ok());
     core.binding()->drain();
-    auto captured = std::make_shared<PublishedTreeState>(*core.capture());
+    auto captured = std::make_shared<TreeRoot>(*core.capture());
     // A different, still-unmeasured leaf can coexist with the written base.
     captured->stats.kv_unknown_pages = 1;
     ASSERT_GT(captured->mapping.copy_bounds().max_leaf_bases, 0U);

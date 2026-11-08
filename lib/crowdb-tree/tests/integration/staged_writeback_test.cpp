@@ -14,9 +14,9 @@ using namespace test_write;
 
 struct TestStagedWriteback
 {
-    TestCheckpoint                            local;
-    std::shared_ptr<LocalBackendState>        backend = std::make_shared<LocalBackendState>();
-    std::shared_ptr<const PublishedTreeState> initial = [] {
+    TestCheckpoint                       local;
+    std::shared_ptr<LocalPageStoreState> backend = std::make_shared<LocalPageStoreState>();
+    std::shared_ptr<const TreeRoot>      initial = [] {
         auto result = captured_leaf(page({
             {.key = "a", .value = "old"}
         }));
@@ -71,7 +71,7 @@ TEST(StagedWriteback, ReloadablePagesDoNotAdvanceTheDurableCheckpoint)
     EXPECT_EQ(test.local.store->events, std::vector<std::string>{"metadata"});
     auto view = test.publisher.capture();
     EXPECT_FALSE(view->checkpoint_inflight);
-    ASSERT_TRUE(view->mapping.get(0)->leaf->bases.front().backing->reloadable());
+    ASSERT_TRUE(view->mapping.get(0)->leaf->bases.front().page_block->reloadable());
     EXPECT_FALSE(view->mapping.get(0)->metrics.dirty);
     EXPECT_EQ(view->stats.checkpoint_pending_pages, test.initial->stats.checkpoint_pending_pages);
     const auto metrics = test.publisher.work_metrics()->totals();
@@ -98,7 +98,7 @@ TEST(StagedWriteback, ANewerPublicationSurvivesDelayedWriteback)
     test.local.source.runtime->drain();
     ASSERT_TRUE(test.local.store->pending);
     auto before                 = test.publisher.capture()->mapping.get(0);
-    auto replacement            = std::make_shared<PublishedPage>(*before);
+    auto replacement            = std::make_shared<PageEntry>(*before);
     auto leaf                   = std::make_shared<PageState>(*page({
         {.key = "a", .value = "new"}
     }));
@@ -161,9 +161,9 @@ TEST(StagedWriteback, FailureAbortsTheCaptureAndKeepsItsInput)
 
 TEST(StagedWriteback, BlockReopenUsesTheAnchorUntilStagedPagesAreCommitted)
 {
-    tree_test::TempDir              directory("staged_writeback_");
-    std::unique_ptr<BlockPageStore> device;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &device).ok());
+    tree_test::TempDir             directory("staged_writeback_");
+    std::unique_ptr<PageDiskStore> device;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &device).ok());
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
     config.frame_bytes                          = 4096;

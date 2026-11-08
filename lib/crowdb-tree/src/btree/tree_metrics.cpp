@@ -47,6 +47,7 @@ TreeLogicalStats contribution(const PageMetricsContribution *page) noexcept
     out.page_size_estimate_bytes    = page->page_size_estimate_bytes;
     out.kv_known_count              = page->leaf && page->kv_known ? page->kv_count : 0;
     out.kv_known_bytes              = page->leaf && page->kv_known ? page->kv_bytes : 0;
+    out.key_known_bytes             = page->leaf && page->kv_known ? page->key_bytes : 0;
     out.kv_unknown_pages            = static_cast<uint64_t>(page->leaf && !page->kv_known);
     out.consolidate_candidate_pages = static_cast<uint64_t>(page->consolidate_candidate);
     out.split_candidate_pages       = static_cast<uint64_t>(page->split_candidate);
@@ -68,6 +69,7 @@ constexpr std::array kPageFields{&TreeLogicalStats::leaf_pages,
                                  &TreeLogicalStats::page_size_estimate_bytes,
                                  &TreeLogicalStats::kv_known_count,
                                  &TreeLogicalStats::kv_known_bytes,
+                                 &TreeLogicalStats::key_known_bytes,
                                  &TreeLogicalStats::kv_unknown_pages,
                                  &TreeLogicalStats::consolidate_candidate_pages,
                                  &TreeLogicalStats::split_candidate_pages,
@@ -91,7 +93,7 @@ constexpr std::array kResourceFields{&TreeResourceStats::allocated_bytes,
                                      &TreeResourceStats::read_inflight_bytes,
                                      &TreeResourceStats::write_inflight_bytes,
                                      &TreeResourceStats::materialize_inflight_bytes,
-                                     &TreeResourceStats::allocated_backing_bytes,
+                                     &TreeResourceStats::allocated_page_block_bytes,
                                      &TreeResourceStats::maintenance_queued,
                                      &TreeResourceStats::maintenance_inflight};
 static_assert(kResourceFields.size() == static_cast<size_t>(TreeResourceMetric::Count));

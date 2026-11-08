@@ -17,8 +17,8 @@ void set_between_split_captures_for_tests(std::function<void()> callback);
 
 struct SplitGeneration
 {
-    std::shared_ptr<const PublishedTreeState> expected;
-    std::shared_ptr<const PublishedSources>   inherited;
+    std::shared_ptr<const TreeRoot>         expected;
+    std::shared_ptr<const PublishedSources> inherited;
 };
 
 struct SplitSourceSession

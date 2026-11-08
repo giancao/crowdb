@@ -122,7 +122,7 @@ async fn malformed_accept_request_is_rejected_by_rpc_boundary() {
     let wrong_type_bytes = builder.finished_data().to_vec();
 
     let resp = client
-        .send_raw_accept(wrong_type_bytes)
+        .send_raw_accept(1, wrong_type_bytes)
         .await
         .expect("raw accept RPC should complete (server must not panic)");
 
@@ -157,7 +157,7 @@ async fn malformed_accept_request_is_rejected_by_rpc_boundary() {
     let missing_value_bytes = builder.finished_data().to_vec();
 
     let resp = client
-        .send_raw_accept(missing_value_bytes)
+        .send_raw_accept(2, missing_value_bytes)
         .await
         .expect("raw accept RPC should complete (server must not panic)");
 

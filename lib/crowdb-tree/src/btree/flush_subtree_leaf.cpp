@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "flush_subtree.h"
 #include "page_load.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 #include <algorithm>
 #include <limits>
@@ -25,7 +25,7 @@ void FlushBatch::State::Subtree::prepare_builder()
         owner.metadata, owner.captured, owner.coverage_record, limits, [this](uint64_t *output) {
             auto next = owner.next_pid.load(std::memory_order_relaxed);
             do {
-                if (next >= MappingView::kPageLimit) {
+                if (next >= MappingTable::kPageLimit) {
                     return Status::resource_exhausted("flush PID space exhausted");
                 }
             } while (!owner.next_pid.compare_exchange_weak(next, next + 1, std::memory_order_relaxed));
@@ -184,7 +184,7 @@ std::optional<Status> FlushBatch::State::Subtree::load() noexcept
         if (expected->level != 0) {
             if (auto *loader = dynamic_cast<AsyncStorePageLoader *>(owner.options.loader.get())) {
                 return loader->read_inner(
-                    expected->inner_backing, &inner,
+                    expected->inner_page_block, &inner,
                     [this, keep = owner.weak_from_this().lock()](Status result, InnerDecode decode) noexcept {
                         status       = std::move(result);
                         decode_index = std::move(decode);
@@ -192,8 +192,8 @@ std::optional<Status> FlushBatch::State::Subtree::load() noexcept
                     });
             }
             index_load_events.store(0, std::memory_order_relaxed);
-            owner.options.loader->load_inner(expected->inner_backing, [this, keep = owner.weak_from_this().lock()](
-                                                                          Status result, auto page) noexcept {
+            owner.options.loader->load_inner(expected->inner_page_block, [this, keep = owner.weak_from_this().lock()](
+                                                                             Status result, auto page) noexcept {
                 status = std::move(result);
                 inner  = std::move(page);
                 if (status.ok() && !inner) {
@@ -208,10 +208,11 @@ std::optional<Status> FlushBatch::State::Subtree::load() noexcept
             }
             return std::nullopt;
         }
-        const bool shared_backing =
+        const bool shared_page_block =
             std::ranges::any_of(loaded_leaf->bases, [](const BaseRef &base) { return base.clipped && !base.resident; });
-        const auto &loader = !shared_backing && owner.options.consolidation_loader ? owner.options.consolidation_loader
-                                                                                   : owner.options.loader;
+        const auto &loader = !shared_page_block && owner.options.consolidation_loader
+                               ? owner.options.consolidation_loader
+                               : owner.options.loader;
         return read_leaf_bases(*loader, *loaded_leaf, builder->options.metadata,
                                [this, keep = owner.weak_from_this().lock()](Status result, LeafDecode decode) noexcept {
                                    status       = std::move(result);
@@ -285,7 +286,9 @@ Status FlushBatch::State::Subtree::coalesce_leaf(const PageMaintenanceLimits &li
                     page->metrics.overlay_entries, TreeWorkCause::Flush);
         record_work(owner.publisher.work_metrics(), TreeWorkCounter::CoalesceOutputEntries, output_entries,
                     TreeWorkCause::Flush);
-        LeafLayoutStats stats{.kv_count = page->metrics.kv_count, .kv_bytes = page->metrics.kv_bytes};
+        LeafLayoutStats stats{.kv_count  = page->metrics.kv_count,
+                              .kv_bytes  = page->metrics.kv_bytes,
+                              .key_bytes = page->metrics.key_bytes};
         auto result = builder->make_leaf(output_pid, page, std::move(compacted.page),
                                          page->metrics.page_size_bytes - compacted.removed_primary_bytes, {}, &stats);
         if (!result.ok()) {

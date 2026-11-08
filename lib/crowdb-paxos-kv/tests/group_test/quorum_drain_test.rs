@@ -23,7 +23,7 @@ async fn completed_quorum_drains_release_groups_without_tenure_cancellation() {
     let mut retained = Vec::new();
     for early_ack in [false, true] {
         let remote = PxRemoteReplica::new(2, follower.listen_addr().unwrap().to_string());
-        remote.set_rpc_transport(Arc::new(PxRpcTransport::new()));
+        remote.set_rpc_transport(Arc::new(PxRpcTransport::with_peer_discovery_for_tests()));
         let mut group = PxGroup::new(1, PxLocalReplica::new(1, PxLocalReplicaRole::Leader));
         group.set_remote_replicas(vec![remote]);
         group.set_force_classic(true);

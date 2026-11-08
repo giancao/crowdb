@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/block_account.h"
-#include "backend/local/local_sparse_gc.h"
 #include "btree/allocation_bound.h"
 #include "btree/tree_core_checkpoint_internal.h"
 #include "crowdb-common/log.h"
+#include "page_store/local/block_account.h"
+#include "page_store/local/local_sparse_gc.h"
 
 #include <cassert>
 
@@ -52,7 +52,7 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
 
     std::shared_ptr<AllocationBudget>              metadata;
     std::shared_ptr<AllocationBudget>              backend;
-    std::shared_ptr<LocalBackendState>             local;
+    std::shared_ptr<LocalPageStoreState>           local;
     std::shared_ptr<TreeRuntimeBinding>            binding;
     std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
     TreeCore                                      *core = nullptr;
@@ -72,7 +72,7 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
         binding->backend_progress()->request(node, weak_from_this().lock());
     }
 
-    void collect(BlockPageStore &store, uint64_t first, LocalBlockGcLimits limits,
+    void collect(PageDiskStore &store, uint64_t first, LocalBlockGcLimits limits,
                  detail::InlineFunction<void(LocalBlockGcResult)> complete)
     {
         collect_free_file_blocks(store, local->ledger, first, limits, metadata, backend,
@@ -81,7 +81,7 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
 
     void advance()
     {
-        if (auto *memory = dynamic_cast<MemPageStore *>(core->config().page_store)) {
+        if (auto *memory = dynamic_cast<PageMemStore *>(core->config().page_store)) {
             if (!outcome.ok()) {
                 return;
             }
@@ -95,7 +95,7 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
                                        });
             return;
         }
-        auto *store = dynamic_cast<BlockPageStore *>(core->config().page_store);
+        auto *store = dynamic_cast<PageDiskStore *>(core->config().page_store);
         if (store == nullptr || store->block_size() == 0 || !outcome.ok()) {
             return;
         }
@@ -201,7 +201,7 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
             cleanup.advance();
         }
         catch (const std::bad_alloc &) {
-            // The existing anchors and live backing still protect their bytes.
+            // The existing anchors and live page block still protect their bytes.
             return;
         }
         catch (...) {
@@ -213,7 +213,7 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
 
 void schedule_free_blocks(TreeCore &core, std::shared_ptr<TreeOperationLifetime::Ticket> ticket) noexcept
 try {
-    auto                     local = core.local_backend();
+    auto                     local = core.local_page_store();
     auto                    *store = core.config().page_store;
     const LocalBlockGcLimits limits;
     const auto               unit = store != nullptr ? local_block_gc_unit(*store) : 0;
@@ -224,7 +224,7 @@ try {
 
     struct Gate
     {
-        LocalBackendState *local;
+        LocalPageStoreState *local;
 
         ~Gate()
         {

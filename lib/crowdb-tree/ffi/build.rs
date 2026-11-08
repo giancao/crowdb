@@ -186,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // liburing (io_uring reactor) -- Linux-only, no
     // macOS build exists, so reactor.cpp (now in crowdb-common) and
-    // block_async_page_store.cpp (still in crowdb-tree) are excluded from
+    // async_page_disk_store.cpp (still in crowdb-tree) are excluded from
     // the compiled set entirely when not found, mirroring
     // crowdb-common/cpp/CMakeLists.txt's CROWDB_HAVE_LIBURING gate exactly
     // (same reasoning: macOS dev-path note).
@@ -202,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         files.retain(|f| {
             !matches!(
                 f.file_name().and_then(|s| s.to_str()),
-                Some("reactor.cpp") | Some("block_async_page_store.cpp") | Some("diskio_uring.cpp")
+                Some("reactor.cpp") | Some("async_page_disk_store.cpp") | Some("diskio_uring.cpp")
             )
         });
     }

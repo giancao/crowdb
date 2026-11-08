@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/chunk_root_codec_internal.h"
 #include "snapshot/chunk_root_recovery.h"
+#include "snapshot/index_summary_codec.h"
 #include "snapshot/stored_overflow.h"
 
 namespace crowdb::tree
@@ -18,7 +19,7 @@ Status ChunkRootRecovery::finish_indexes()
 
 Status ChunkRootRecovery::index_loaded()
 {
-    auto status = decode_chunk_index_header(index_bytes_, root_.identity, index_, &left_, &offset_);
+    auto status = decode_chunk_mapping_segment_header(index_bytes_, root_.identity, index_, &left_, &offset_);
     if (!status.ok()) {
         return status;
     }
@@ -28,10 +29,35 @@ Status ChunkRootRecovery::index_loaded()
     return Status::Ok();
 }
 
-Status ChunkRootRecovery::prepare_frame(ChunkIndexFrame *out, size_t *offset, uint64_t left,
+Status ChunkRootRecovery::summaries_loaded()
+{
+    detail::ReservedVector<IndexSummaries::Change> changes{
+        detail::ReservationAllocator<IndexSummaries::Change>(window_)};
+    changes.reserve(index_bytes_.size() / snapshot::kIndexSummaryRecordBytes);
+    for (size_t offset = 0; offset < index_bytes_.size(); offset += snapshot::kIndexSummaryRecordBytes) {
+        uint32_t     pid;
+        IndexSummary summary;
+        if (!snapshot::decode_index_summary(index_bytes_.data() + offset, &pid, &summary) ||
+            pid >= root_.identity.next_page_id || pid == root_.identity.root_page_id ||
+            (!changes.empty() && changes.back().pid >= pid)) {
+            return Status::corruption("invalid Chunk index summary record");
+        }
+        const auto page = pages_->frames.find(pid);
+        if (page == pages_->frames.end() || page->second.type != page_type::kInnerBase) {
+            return Status::corruption("Chunk summary does not reference an index");
+        }
+        changes.push_back({.pid = pid, .summary = summary});
+    }
+    pages_->index_summaries = IndexSummaries{}.merge(changes, metadata_);
+    index_bytes_            = ChunkMetadataBytes(index_bytes_.get_allocator());
+    summaries_ready_        = true;
+    return Status::Ok();
+}
+
+Status ChunkRootRecovery::prepare_frame(ChunkPageEntry *out, size_t *offset, uint64_t left,
                                         std::optional<uint64_t> previous) const
 {
-    auto status = decode_chunk_index_frame(index_bytes_, offset, out);
+    auto status = decode_chunk_page_entry(index_bytes_, offset, out);
     if (!status.ok()) {
         return status;
     }
@@ -48,27 +74,27 @@ Status ChunkRootRecovery::prepare_frame(ChunkIndexFrame *out, size_t *offset, ui
     return Status::Ok();
 }
 
-Status ChunkRootRecovery::frame_loaded(const ChunkIndexFrame &record, std::shared_ptr<const ChunkPackBacking> pack,
+Status ChunkRootRecovery::frame_loaded(const ChunkPageEntry &record, std::shared_ptr<const ChunkPageBlock> pack,
                                        std::span<const uint8_t> blob)
 {
-    auto backing              = detail::reserved_shared<BackingRef>(metadata_);
-    backing->backend_id       = domain_->backend_id;
-    backing->length           = record.pack.length;
-    backing->generation       = domain_->epoch;
-    backing->checksum         = record.pack.checksum;
-    backing->durability       = BackingDurability::kCheckpointCommitted;
-    backing->storage          = BackingStorage::kChunkPack;
-    backing->owner            = pack;
-    backing->physical_owner   = pack;
-    backing->physical_metrics = pack->physical_metrics;
-    backing->chunk            = std::move(pack);
+    auto page_block              = detail::reserved_shared<PageBlockRef>(metadata_);
+    page_block->page_store_id    = domain_->page_store_id;
+    page_block->length           = record.pack.length;
+    page_block->generation       = domain_->epoch;
+    page_block->checksum         = record.pack.checksum;
+    page_block->durability       = PageBlockDurability::kCheckpointCommitted;
+    page_block->storage          = PageBlockStorage::kChunkPack;
+    page_block->owner            = pack;
+    page_block->physical_owner   = pack;
+    page_block->physical_metrics = pack->physical_metrics;
+    page_block->chunk            = std::move(pack);
     DurableCapturedFrame descriptor{.page_id         = record.page_id,
                                     .type            = record.type,
                                     .frame_bytes     = record.frame_bytes,
                                     .logical_bytes   = record.logical_bytes,
                                     .next_overflow   = record.next_overflow,
                                     .overflow_bytes  = record.overflow_bytes,
-                                    .backing         = std::move(backing),
+                                    .page_block      = std::move(page_block),
                                     .stored_overflow = {},
                                     .summary         = {}};
     auto                 status = validate_frame(descriptor, record.stored_reference_words, blob);
@@ -108,15 +134,20 @@ Status ChunkRootRecovery::validate_frame(DurableCapturedFrame &descriptor, std::
                  ? Status::Ok()
                  : Status::corruption();
     }
-    if (descriptor.type != page_type::kLeafBase) {
+    if (descriptor.type == page_type::kInnerBase) {
+        if (root_.root_summary) {
+            const auto summary = frame_summary(raw_.data());
+            descriptor.summary = FinalPageSummary{.live_counts_known = summary.exact,
+                                                  .live_keys         = summary.live_kv,
+                                                  .live_key_bytes    = summary.live_key_bytes,
+                                                  .live_value_bytes  = summary.live_value_bytes};
+        }
         return Status::Ok();
     }
     const LeafFrameView leaf(raw_.data(), raw_.size());
-    const uint64_t      cells  = uint64_t{leaf.count()} + leaf.delta_count();
     size_t              stored = 0;
-    for (uint64_t i = 0; i < cells; ++i) {
-        const auto     raw = i < leaf.count() ? leaf.cell(static_cast<uint32_t>(i))
-                                              : leaf.delta_cell(static_cast<uint32_t>(i - leaf.count()));
+    for (uint32_t i = 0; i < leaf.count(); ++i) {
+        const auto     raw = leaf.cell(i);
         const CellView cell(raw);
         if (!cell.valid() || cell.slot() > pages_->coverage ||
             (cell.flags() != 0 && cell.flags() != kFlagTombstone && cell.flags() != kFlagOverflow) ||
@@ -128,7 +159,7 @@ Status ChunkRootRecovery::validate_frame(DurableCapturedFrame &descriptor, std::
     if (stored != words.size() / 16 || stored > root_.stored_references - references_) {
         return Status::corruption();
     }
-    status = capture_stored_overflow(leaf, kChunkIndexReferencesPerFrame, metadata_, &descriptor.stored_overflow);
+    status = capture_stored_overflow(leaf, kChunkPageEntryReferenceLimit, metadata_, &descriptor.stored_overflow);
     if (!status.ok()) {
         return status;
     }

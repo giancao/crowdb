@@ -10,7 +10,7 @@ namespace crowdb::tree
 struct PageMaintenanceOperationOptions
 {
     using AcquireReservation = detail::InlineFunction<Status(std::shared_ptr<detail::AllocationReservation> *)>;
-    using AcquireWindow      = detail::InlineFunction<Status(const MappingView &, MaintenancePublicationOptions *,
+    using AcquireWindow      = detail::InlineFunction<Status(const MappingTable &, MaintenancePublicationOptions *,
                                                              std::shared_ptr<detail::AllocationReservation> *)>;
 
     MaintenancePublicationOptions publication;
@@ -37,17 +37,17 @@ struct PageMaintenanceOperationOptions
 // Control, traversal, one complete logical maintenance transaction and its
 // publication. Later bounded steps may stop when this reservation is spent.
 // New handoff runs are included before they appear in the current mapping.
-[[nodiscard]] std::optional<size_t> page_maintenance_reserve_bound(const MappingView &mapping, size_t new_runs,
+[[nodiscard]] std::optional<size_t> page_maintenance_reserve_bound(const MappingTable &mapping, size_t new_runs,
                                                                    const PageMaintenanceOperationOptions &options,
                                                                    bool track_residency          = false,
                                                                    bool separate_snapshot_credit = false) noexcept;
 [[nodiscard]] std::optional<size_t>
-page_maintenance_snapshot_reserve_bound(const MappingView                     &mapping,
+page_maintenance_snapshot_reserve_bound(const MappingTable                    &mapping,
                                         const PageMaintenanceOperationOptions &options) noexcept;
 
 // Choose the largest output window whose complete prepaid bounds fit. Keep
 // the minimum two-range window when pressure requires admission to wait.
-void limit_page_maintenance_window(const MappingView &mapping, size_t new_runs, size_t reclaim_bytes,
+void limit_page_maintenance_window(const MappingTable &mapping, size_t new_runs, size_t reclaim_bytes,
                                    size_t snapshot_bytes, bool track_residency,
                                    PageMaintenanceOperationOptions *options) noexcept;
 

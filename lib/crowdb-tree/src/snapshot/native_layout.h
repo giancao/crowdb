@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "snapshot/captured_frames.h"
 
 #include <set>
@@ -20,8 +20,8 @@ struct NativeLayoutLimits
 class NativeLayoutPlanner
 {
   public:
-    NativeLayoutPlanner(std::shared_ptr<const PublishedTreeState> view, NativeLayoutLimits limits,
-                        std::shared_ptr<detail::AllocationReservation> metadata, uint64_t backend_id = 0,
+    NativeLayoutPlanner(std::shared_ptr<const TreeRoot> view, NativeLayoutLimits limits,
+                        std::shared_ptr<detail::AllocationReservation> metadata, uint64_t page_store_id = 0,
                         uint64_t incarnation = 0);
     static std::optional<size_t> allocation_bound(uint64_t next_page_id, NativeLayoutLimits limits) noexcept;
     Status                       accept(CapturedFrameResult::Plan page);
@@ -43,18 +43,18 @@ class NativeLayoutPlanner
         return primary_.size() + new_overflow_ + old_.pages.size();
     }
 
-    [[nodiscard]] const OverflowBackingSet::Pages &old_frames() const noexcept
+    [[nodiscard]] const OverflowPageBlockSet::Pages &old_frames() const noexcept
     {
         return old_.pages;
     }
 
   private:
-    Status                                    include(uint64_t pid, const OverflowBackingPage &page);
-    std::shared_ptr<const PublishedTreeState> view_;
-    NativeLayoutLimits                        limits_;
-    uint64_t                                  backend_id_;
-    uint64_t                                  incarnation_;
-    OverflowBackingSet                        old_;
+    Status                          include(uint64_t pid, const OverflowPageBlock &page);
+    std::shared_ptr<const TreeRoot> view_;
+    NativeLayoutLimits              limits_;
+    uint64_t                        page_store_id_;
+    uint64_t                        incarnation_;
+    OverflowPageBlockSet            old_;
     std::set<uint64_t, std::less<>, detail::ReservationAllocator<uint64_t>> primary_;
     std::optional<CapturedFrameResult::Plan>                                page_;
     size_t                                                                  reference_    = 0;

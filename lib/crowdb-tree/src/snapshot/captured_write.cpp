@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/scheduled_page_store.h"
+#include "page_store/local/scheduled_page_store.h"
 #include "snapshot/captured_write_internal.h"
 
 namespace crowdb::tree
@@ -19,8 +19,8 @@ bool valid_write_limits(const CapturedWriteLimits &limits, const PageLoadBudget 
 }
 } // namespace
 
-Status CapturedWriteOperation::create(std::shared_ptr<const PublishedTreeState> captured,
-                                      std::shared_ptr<PageLoader> loader, std::shared_ptr<AsyncPageStore> store,
+Status CapturedWriteOperation::create(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> loader,
+                                      std::shared_ptr<AsyncPageStore>             store,
                                       std::shared_ptr<detail::FlushRuntime>       runtime,
                                       std::shared_ptr<detail::FlushRuntime::Lane> lane, CapturedWriteLimits limits,
                                       PageLoadBudget budget, CapturedFrameStream::ReserveOverflow reserve_overflow,
@@ -201,13 +201,13 @@ void CapturedWriteOperation::State::finish(Status status) noexcept
         report.pages = std::move(pages);
     }
     pages.reset();
-    descriptor.backing.reset();
-    resident_dependency.backing.reset();
+    descriptor.page_block.reset();
+    resident_dependency.page_block.reset();
     resident_sources.clear();
     descriptor.stored_overflow.reset();
     frame.reset();
     dependencies.reset();
-    overflow_backing.reset();
+    overflow_page_block.reset();
     stream.reset();
     write.reset();
     relocation_read.reset();

@@ -11,8 +11,8 @@
 //     -DCMAKE_BUILD_TYPE=Release
 //   cmake --build crowdb-tree/build-bench -j
 //   ./crowdb-tree/build-bench/crowtree_bench --benchmark_filter=ReadPath
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <benchmark/benchmark.h>
 
@@ -37,7 +37,7 @@ std::string make_key(int i)
 void build_tree(benchmark::State &state, std::unique_ptr<Crowdbtree> *t, std::vector<std::string> *keys_out)
 {
     int    n     = static_cast<int>(state.range(0));
-    auto   store = std::make_shared<MemPageStore>(1);
+    auto   store = std::make_shared<PageMemStore>(1);
     Config opt;
     opt.page_store       = store.get();
     opt.leaf_split_bytes = 160;

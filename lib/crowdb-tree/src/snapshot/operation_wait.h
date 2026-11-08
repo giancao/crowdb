@@ -36,7 +36,7 @@ struct SnapshotWaitReceiver
 };
 
 // Synchronous public facades call this only on their host thread. All CPU and
-// backend work still runs through the operation's admitted asynchronous path.
+// page store work still runs through the operation's admitted asynchronous path.
 template <class Operation> Status wait_snapshot_operation(const std::shared_ptr<Operation> &operation)
 {
     SnapshotWaitCompletion completion;

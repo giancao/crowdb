@@ -59,9 +59,9 @@ TEST(SnapshotPublication, AbortRetainsLatestChangesAndTheNextCaptureSharesTheirR
 
 TEST(SnapshotPublication, CompactChangesDoNotRetainOldPagesAndRepresentationChangesStayClean)
 {
-    PublicationCoordinator       publisher;
-    auto                         first = leaf(1);
-    std::weak_ptr<PublishedPage> old   = first;
+    PublicationCoordinator   publisher;
+    auto                     first = leaf(1);
+    std::weak_ptr<PageEntry> old   = first;
     ASSERT_TRUE(publish(publisher, {.pages = {{.page_id = 0, .replacement = first}}, .root_page_id = 0}).status.ok());
     auto second = leaf(2);
     ASSERT_TRUE(publish(publisher, {.pages = {{.page_id = 0, .expected = first, .replacement = second}}}).status.ok());
@@ -85,7 +85,7 @@ TEST(SnapshotPublication, BaselineMustBelongToTheExactCapturedFrontierAndToken)
     baseline->generation        = 1;
     baseline->capture_token     = 1;
     baseline->snapshot_sequence = 1;
-    baseline->backend_id        = 17;
+    baseline->page_store_id     = 17;
     baseline->pages             = pages;
     auto wrong                  = std::make_shared<SnapshotBaseline>(*baseline);
     wrong->capture_token        = 2;
@@ -128,7 +128,7 @@ TEST(SnapshotPublication, UnchangedSequenceRequiresTheSameProtectedBaseline)
     baseline->generation        = 1;
     baseline->capture_token     = 1;
     baseline->snapshot_sequence = 1;
-    baseline->backend_id        = 17;
+    baseline->page_store_id     = 17;
     baseline->pages             = pages;
     ASSERT_TRUE(
         publish(publisher,
@@ -149,7 +149,7 @@ TEST(SnapshotPublication, UnchangedSequenceRequiresTheSameProtectedBaseline)
             ++wrong->wal_offset;
         }
         else {
-            ++wrong->backend_id;
+            ++wrong->page_store_id;
         }
         EXPECT_EQ(
             publish(publisher,

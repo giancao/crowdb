@@ -3,7 +3,7 @@
 #pragma once
 
 #include "btree/apply_dispatcher.h"
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "snapshot/captured_write.h"
 #include "snapshot/native_frame_read.h"
 
@@ -41,8 +41,8 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
 
     struct ResidentSource
     {
-        std::shared_ptr<const BackingRef> backing;
-        std::shared_ptr<Dependencies>     dependencies;
+        std::shared_ptr<const PageBlockRef> page_block;
+        std::shared_ptr<Dependencies>       dependencies;
     };
 
     using ResidentEntry = std::pair<const uint64_t, ResidentSource>;
@@ -131,7 +131,7 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     std::shared_ptr<PageWriteOperation>         write;
     std::shared_ptr<NativeFrameRead>            relocation_read;
     std::shared_ptr<Dependencies>               dependencies;
-    std::shared_ptr<OverflowBackingSet>         overflow_backing;
+    std::shared_ptr<OverflowPageBlockSet>       overflow_page_block;
     std::shared_ptr<OverflowWrites>             overflow_writes;
     std::optional<CapturedFrame>                frame;
     DurableCapturedFrame                        descriptor;

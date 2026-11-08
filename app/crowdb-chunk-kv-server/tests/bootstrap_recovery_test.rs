@@ -8,7 +8,7 @@ use crowdb_chunk_stream::{
     ChunkStream, StreamConfig, StreamName, StreamPurpose, StreamRecord, StreamRecordState,
 };
 use crowdb_protocol::chunk_kv::Id128;
-use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
+use crowdb_tree_ffi::chunk::test_util::TestPageChunkStore;
 use std::sync::Arc;
 
 #[path = "common/process.rs"]
@@ -49,7 +49,7 @@ async fn bootstrap_resume_finishes_its_first_checkpoint_and_does_not_reinitializ
     let name = StreamName { high: 2, low: 11 };
     let store = Arc::new(MemoryStreamStore::new(4096));
     let stream = create_stream(name, &store).await;
-    let mut backend = TestChunkBackend::new(45, 4).unwrap();
+    let mut backend = TestPageChunkStore::new(45, 4).unwrap();
     let pages = backend.page_store(0).unwrap();
     let tree_config = crowdb_tree_ffi::Config {
         runtime: Some(backend.runtime.clone()),

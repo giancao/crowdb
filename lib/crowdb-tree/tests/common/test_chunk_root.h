@@ -9,30 +9,30 @@
 
 namespace crowdb::tree::test_chunk
 {
-struct TestRootBackend
+struct TestRootPageStore
 {
     test_read::LoadCredits                   credits;
     std::shared_ptr<TestRootCatalog>         catalog = std::make_shared<TestRootCatalog>(credits.credits.reservation());
     std::shared_ptr<TestRootTransport>       transport = std::make_shared<TestRootTransport>(catalog);
-    std::shared_ptr<ChunkBackingDomain>      domain    = std::make_shared<ChunkBackingDomain>();
+    std::shared_ptr<PageChunkStoreDomain>    domain    = std::make_shared<PageChunkStoreDomain>();
     std::shared_ptr<detail::ChunkRuntimeIds> ids =
         std::make_shared<detail::ChunkRuntimeIds>(1, 23, uint64_t{45} << 32U);
 
-    explicit TestRootBackend(size_t pin_capacity = 256)
+    explicit TestRootPageStore(size_t pin_capacity = 256)
     {
         EXPECT_TRUE(detail::ChunkPinReleaseQueue::create(
                         credits.credits.reservation(), pin_capacity, std::make_shared<int>(1), [](void *) noexcept {},
                         nullptr, &catalog->queue)
                         .ok());
-        domain->backend_id = 17;
-        domain->tree       = 19;
-        domain->epoch      = 1;
-        domain->mirrors    = 2;
-        domain->catalog    = catalog;
-        domain->transport  = transport;
+        domain->page_store_id = 17;
+        domain->tree          = 19;
+        domain->epoch         = 1;
+        domain->mirrors       = 2;
+        domain->catalog       = catalog;
+        domain->transport     = transport;
     }
 
-    ~TestRootBackend()
+    ~TestRootPageStore()
     {
         catalog->queue->stop_admission();
         (void)catalog->queue->pump(catalog->queue->snapshot().pending);
@@ -44,29 +44,29 @@ struct TestRootBackend
     {
         auto pages =
             detail::reserved_shared<CapturedDurablePages>(credits.credits.reservation(), credits.credits.reservation());
-        pages->generation   = 3;
-        pages->coverage     = 15;
-        pages->root_page_id = count != 0 ? 0 : kInvalidPageId;
-        pages->next_page_id = count;
-        pages->backend_id   = 17;
+        pages->generation    = 3;
+        pages->coverage      = 15;
+        pages->root_page_id  = count != 0 ? 0 : kInvalidPageId;
+        pages->next_page_id  = count;
+        pages->page_store_id = 17;
         for (uint64_t i = 0; i < count; ++i) {
             detail::ChunkStageId stage;
             detail::ChunkId      chunk;
             EXPECT_TRUE(ids->next(PagePurpose::kBtreePage, &stage, &chunk).ok());
-            std::shared_ptr<ChunkPackBacking> pack;
-            EXPECT_TRUE(prepare_chunk_backing(domain, stage, chunk, 8192, PagePurpose::kBtreePage,
-                                              credits.credits.reservation(), &pack)
+            std::shared_ptr<ChunkPageBlock> pack;
+            EXPECT_TRUE(prepare_chunk_page_block(domain, stage, chunk, 8192, PagePurpose::kBtreePage,
+                                                 credits.credits.reservation(), &pack)
                             .ok());
             std::array<uint8_t, 8192> raw{};
-            EXPECT_TRUE(write_chunk_backing(*pack, raw, credits.credits.reservation()).ok());
-            auto backing            = detail::reserved_shared<BackingRef>(credits.credits.reservation());
-            backing->backend_id     = 17;
-            backing->length         = 8192;
-            backing->owner          = pack;
-            backing->physical_owner = pack;
-            backing->storage        = BackingStorage::kChunkPack;
-            backing->chunk          = std::move(pack);
-            auto refs               = detail::reserved_shared<StoredOverflowReferences>(
+            EXPECT_TRUE(write_chunk_page_block(*pack, raw, credits.credits.reservation()).ok());
+            auto page_block            = detail::reserved_shared<PageBlockRef>(credits.credits.reservation());
+            page_block->page_store_id  = 17;
+            page_block->length         = 8192;
+            page_block->owner          = pack;
+            page_block->physical_owner = pack;
+            page_block->storage        = PageBlockStorage::kChunkPack;
+            page_block->chunk          = std::move(pack);
+            auto refs                  = detail::reserved_shared<StoredOverflowReferences>(
                 credits.credits.reservation(),
                 detail::ReservationAllocator<StoredOverflowReference>(credits.credits.reservation()));
             pages->frames.emplace(i, DurableCapturedFrame{.page_id         = i,
@@ -75,7 +75,7 @@ struct TestRootBackend
                                                           .logical_bytes   = 4132,
                                                           .next_overflow   = kInvalidPageId,
                                                           .overflow_bytes  = 0,
-                                                          .backing         = std::move(backing),
+                                                          .page_block      = std::move(page_block),
                                                           .stored_overflow = std::move(refs),
                                                           .summary         = {}});
         }

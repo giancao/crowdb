@@ -51,7 +51,7 @@ void AllocationAccount::release_to(AllocationReservation &source, size_t bytes) 
 {
     const auto entered = ingress_.fetch_add(1, std::memory_order_acq_rel);
     if ((entered & kClosed) != 0) {
-        // The operation normally seals before a backend rebind. If a final
+        // The operation normally seals before a page store rebind. If a final
         // owner races that handoff, return its capacity through the same
         // bounded pending-release path instead of reviving a source reserve.
         pending_release_.fetch_add(bytes, std::memory_order_relaxed);

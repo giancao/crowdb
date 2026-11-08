@@ -216,7 +216,7 @@ impl TestPxClient {
     #[allow(clippy::unused_async_trait_impl)]
     pub async fn connect(endpoint: String) -> Self {
         Self {
-            transport: PxRpcTransport::new(),
+            transport: PxRpcTransport::with_peer_discovery_for_tests(),
             endpoint,
         }
     }
@@ -277,13 +277,14 @@ impl TestPxClient {
     /// and return the raw response control buffer. Used by R120 to
     /// verify the server rejects malformed Accept frames.
     #[cfg(feature = "test-util")]
-    pub async fn send_raw_accept(&self, control: Vec<u8>) -> Result<Vec<u8>, TestRpcStatus> {
+    pub async fn send_raw_accept(&self, request_id: u64, control: Vec<u8>) -> Result<Vec<u8>, TestRpcStatus> {
         use crowdb_protocol::fb::FBMsgType;
         use crowdb_rpc_ffi::Buffer;
         let resp = self
             .transport
             .send_raw_request(
                 &self.endpoint,
+                request_id,
                 FBMsgType::EAcceptRequest.0 as u16,
                 Buffer::from_bytes(&control),
             )

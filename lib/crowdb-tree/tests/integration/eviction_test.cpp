@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Clean cache eviction preserves the immutable publication and independent
-// read owners; the next uncached access reloads the same backing.
-#include "crowdb-tree/backend/page_store.h"
+// read owners; the next uncached access reloads the same page block.
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "runtime_tree_access.h"
 
 #include <gtest/gtest.h>
@@ -57,17 +57,17 @@ void warm_cache(Crowdbtree &tree, const std::map<std::string, std::string> &orac
 // Counts read_at calls so a test can observe whether a specific page was
 // demand-loaded (evicted, then reloaded) vs. still resident (plan-tree #17
 // recency-ranked eviction).
-class CountingPageStore : public MemPageStore
+class CountingPageStore : public PageMemStore
 {
   public:
-    explicit CountingPageStore(uint32_t iu_size = 1) : MemPageStore(iu_size)
+    explicit CountingPageStore(uint32_t iu_size = 1) : PageMemStore(iu_size)
     {
     }
 
     Status read_at(uint64_t off, uint8_t *buf, size_t len) const override
     {
         ++reads;
-        return MemPageStore::read_at(off, buf, len);
+        return PageMemStore::read_at(off, buf, len);
     }
 
     mutable std::atomic<int> reads{0};
@@ -76,7 +76,7 @@ class CountingPageStore : public MemPageStore
 
 TEST(Eviction, EvictedLeavesFreeMemoryAndReloadCorrectly)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;
@@ -109,7 +109,7 @@ TEST(Eviction, EvictedLeavesFreeMemoryAndReloadCorrectly)
 
 TEST(Eviction, EvictIsIdempotentAndSkipsDirty)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;
@@ -140,7 +140,7 @@ TEST(Eviction, EvictIsIdempotentAndSkipsDirty)
 
 TEST(Eviction, ConcurrentReadersWhileEvicting)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;
@@ -360,13 +360,13 @@ TEST(Eviction, RecentlyTouchedAncestorChainSurvivesInnerEvictionOverColderOnes)
 // evict_clean_inner can unload an *inner* ancestor while its leaf
 // descendants stay fully resident underneath it: a root-rooted walk that
 // bails on the unloaded root would never reach (or free) those leaves at
-// all. Fixed by free_all_resident_pages's segment-scan (crowdb-tree.cpp) --
+// all. Fixed by free_all_resident_pages's mapping segment scan (crowdb-tree.cpp) --
 // this exercises it via install_snapshot's retire=true path (checkable
 // without a sanitizer, via BufferPool::Stats::used, unlike ~Crowdbtree's own
 // teardown path, which needs ASan's leak detector to observe from outside).
 TEST(Eviction, InstallSnapshotReclaimsResidentLeavesEvenWhenInnerAncestorWasEvicted)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;

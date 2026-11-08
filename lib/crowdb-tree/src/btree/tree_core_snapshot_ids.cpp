@@ -5,11 +5,11 @@
 
 namespace crowdb::tree
 {
-Status TreeCore::reserve_snapshot_ids(const PublishedTreeState &expected, uint64_t count,
+Status TreeCore::reserve_snapshot_ids(const TreeRoot &expected, uint64_t count,
                                       const std::shared_ptr<detail::AllocationReservation> &metadata)
 try {
     if (!metadata || metadata->account() != binding()->account() || metadata->category() == detail::BudgetClass::kIo ||
-        expected.next_page_id > MappingView::kPageLimit || count > MappingView::kPageLimit - expected.next_page_id) {
+        expected.next_page_id > MappingTable::kPageLimit || count > MappingTable::kPageLimit - expected.next_page_id) {
         return Status::invalid_argument("snapshot PID lease requires bounded same-domain metadata");
     }
     detail::SnapshotWaitCompletion                 completion;

@@ -2,29 +2,29 @@
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/published_snapshot.h"
 
-#include "backend/local/block_account.h"
-#include "backend/local/local_backend_state.h"
-#include "backend/local/scheduled_page_store.h"
 #include "btree/allocation_bound.h"
 #include "btree/tree_core.h"
 #include "host_completion.h"
+#include "page_store/local/block_account.h"
+#include "page_store/local/local_page_store_state.h"
+#include "page_store/local/scheduled_page_store.h"
 
 namespace crowdb::tree
 {
 namespace
 {
-struct SnapshotBackendOwner
+struct SnapshotPageStoreOwner
 {
-    std::shared_ptr<TreeRuntimeBinding> binding;
-    std::shared_ptr<LocalBackendDomain> domain;
-    std::shared_ptr<const void>         backend;
-    std::shared_ptr<AsyncPageStore>     scheduled;
+    std::shared_ptr<TreeRuntimeBinding>   binding;
+    std::shared_ptr<LocalPageStoreDomain> domain;
+    std::shared_ptr<const void>           page_store;
+    std::shared_ptr<AsyncPageStore>       scheduled;
 };
 } // namespace
 
 HostReadTail::~HostReadTail()
 {
-    backend.reset();
+    page_store.reset();
     done.signal();
 }
 
@@ -55,15 +55,15 @@ struct PublishedReadViewContext::State : std::enable_shared_from_this<State>
     }
 
     std::shared_ptr<detail::AllocationReservation> metadata;
-    std::shared_ptr<const PublishedTreeState>      view;
+    std::shared_ptr<const TreeRoot>                view;
     std::shared_ptr<TreeRuntimeBinding>            binding;
     std::shared_ptr<detail::FlushRuntime::Lane>    lane;
     std::shared_ptr<detail::FlushRuntime::Lane>    backend_lane;
-    std::shared_ptr<SnapshotBackendOwner>          owner;
+    std::shared_ptr<SnapshotPageStoreOwner>        owner;
     detail::ReservedUnique<TreeOperationLifetime>  lifetime;
     std::weak_ptr<TreeCore>                        core;
     std::shared_ptr<TreeWorkMetrics>               work_metrics;
-    AsyncPageStore                                *backend = nullptr;
+    AsyncPageStore                                *page_store = nullptr;
     PageLoadLimits                                 loads;
     PublishedReadLimits                            reads;
     PageKeyRange                                   range;
@@ -106,15 +106,15 @@ SnapshotReadWindow &SnapshotReadWindow::operator=(SnapshotReadWindow &&other) no
     if (this != &other) {
         seal();
         loader.reset();
-        backend.reset();
+        page_store.reset();
         ticket.reset();
         budget = {};
         host_core.reset();
-        host_core = std::move(other.host_core);
-        budget    = std::move(other.budget);
-        ticket    = std::move(other.ticket);
-        backend   = std::move(other.backend);
-        loader    = std::move(other.loader);
+        host_core  = std::move(other.host_core);
+        budget     = std::move(other.budget);
+        ticket     = std::move(other.ticket);
+        page_store = std::move(other.page_store);
+        loader     = std::move(other.loader);
     }
     return *this;
 }
@@ -134,9 +134,9 @@ size_t PublishedReadViewContext::allocation_bound() noexcept
 {
     using namespace detail;
     return shared_allocation_bound<State>() + shared_allocation_bound<PublishedReadViewContext>() +
-           shared_allocation_bound<AllocationReservation>() + shared_allocation_bound<PublishedTreeState>() +
+           shared_allocation_bound<AllocationReservation>() + shared_allocation_bound<TreeRoot>() +
            PublishedSources::allocation_bound() + shared_allocation_bound<FlushRuntime::Lane>() +
-           shared_allocation_bound<SnapshotBackendOwner>() + sizeof(TreeOperationLifetime) +
+           shared_allocation_bound<SnapshotPageStoreOwner>() + sizeof(TreeOperationLifetime) +
            TreeOperationLifetime::allocation_bound() + TreeOperationLifetime::ticket_allocation_bound();
 }
 
@@ -155,7 +155,7 @@ Status PublishedReadViewContext::capture(const std::shared_ptr<TreeCore>        
 
 Status PublishedReadViewContext::capture_admitted(const std::shared_ptr<TreeCore>           &core,
                                                   std::shared_ptr<PublishedReadViewContext> *out,
-                                                  std::shared_ptr<const PublishedTreeState>  captured)
+                                                  std::shared_ptr<const TreeRoot>            captured)
 try {
     using namespace detail;
     if (!core || out == nullptr || *out) {
@@ -170,7 +170,7 @@ try {
                        .add(core->config().key_range.end() ? core->config().key_range.end()->size() : 0)
                        .value();
     if (!bound) {
-        return Status::resource_exhausted("snapshot backend control bound overflow");
+        return Status::resource_exhausted("snapshot page_store control bound overflow");
     }
     auto credit = ResourceBudget::try_reserve(binding->account(), BudgetClass::kRouting, *bound);
     if (!credit) {
@@ -197,7 +197,7 @@ try {
     if (!captured) {
         captured = core->publisher().capture_complete();
     }
-    auto view      = reserved_shared<PublishedTreeState>(metadata, *captured);
+    auto view      = reserved_shared<TreeRoot>(metadata, *captured);
     auto sources   = reserved_shared<PublishedSources>(metadata, metadata);
     sources->floor = view->coverage;
     view->sources  = std::move(sources);
@@ -206,28 +206,28 @@ try {
 
     state->reads               = core->read_limits();
     state->reads.max_memtables = 1;
-    state->backend             = core->config().async_page_store;
-    state->detached            = (state->backend == nullptr && core->config().page_store == nullptr) ||
-                                 static_cast<bool>(core->config().backend_owner);
+    state->page_store          = core->config().async_page_store;
+    state->detached            = (state->page_store == nullptr && core->config().page_store == nullptr) ||
+                                 static_cast<bool>(core->config().page_store_owner);
     if (state->detached) {
-        state->owner          = reserved_shared<SnapshotBackendOwner>(metadata);
-        state->owner->binding = state->binding;
-        state->owner->backend = core->config().backend_owner;
-        if (const auto &local = core->local_backend()) {
+        state->owner             = reserved_shared<SnapshotPageStoreOwner>(metadata);
+        state->owner->binding    = state->binding;
+        state->owner->page_store = core->config().page_store_owner;
+        if (const auto &local = core->local_page_store()) {
             state->owner->domain = local->domain;
         }
-        if (core->config().page_store != nullptr || state->backend != nullptr) {
+        if (core->config().page_store != nullptr || state->page_store != nullptr) {
             state->backend_lane = reserved_shared<FlushRuntime::Lane>(
                 metadata, state->binding->options().backend_queue_limit, state->binding->backend_lane()->allocations());
-            status = ScheduledPageStore::create(core->config().page_store, state->backend, core->config().backend_owner,
-                                                state->binding, metadata, state->backend_lane, &state->owner->scheduled,
-                                                state->binding->view_backend_progress());
+            status = ScheduledPageStore::create(
+                core->config().page_store, state->page_store, core->config().page_store_owner, state->binding, metadata,
+                state->backend_lane, &state->owner->scheduled, state->binding->view_backend_progress());
             if (!status.ok()) {
                 return status;
             }
             // The ticket aliases this store. Keep the wrapper in the ticket's
-            // backend owner so dropping the view cannot invalidate a window.
-            state->backend = state->owner->scheduled.get();
+            // page store owner so dropping the view cannot invalidate a window.
+            state->page_store = state->owner->scheduled.get();
         }
         state->lifetime = reserved_unique<TreeOperationLifetime>(metadata, metadata, state->owner);
     }
@@ -294,14 +294,14 @@ Status PublishedReadViewContext::finish_window(SnapshotReadWindow window, Snapsh
 try {
     using namespace detail;
     Status          status;
-    AsyncPageStore *backend = state_->backend;
+    AsyncPageStore *page_store = state_->page_store;
     if (state_->detached) {
         status = state_->lifetime->acquire(window.budget.bytes, &window.ticket);
     }
     else {
         window.host_core = state_->core.lock();
         if (window.host_core) {
-            status = window.host_core->acquire_snapshot_window(window.budget.bytes, &window.ticket, &backend);
+            status = window.host_core->acquire_snapshot_window(window.budget.bytes, &window.ticket, &page_store);
         }
         else {
             status = Status::unavailable("snapshot source Tree closed");
@@ -310,14 +310,14 @@ try {
     if (!status.ok()) {
         return status;
     }
-    window.backend = window.ticket->backend(backend);
-    if (tail && window.backend) {
-        tail->backend  = std::move(window.backend);
-        window.backend = std::shared_ptr<AsyncPageStore>(tail, backend);
+    window.page_store = window.ticket->page_store(page_store);
+    if (tail && window.page_store) {
+        tail->page_store  = std::move(window.page_store);
+        window.page_store = std::shared_ptr<AsyncPageStore>(tail, page_store);
     }
     window.loader =
-        reserved_shared<AsyncStorePageLoader>(window.budget.bytes, window.backend, state_->binding->cpu(), state_->lane,
-                                              state_->loads, OverflowBackingResolver{}, window.budget);
+        reserved_shared<AsyncStorePageLoader>(window.budget.bytes, window.page_store, state_->binding->cpu(),
+                                              state_->lane, state_->loads, OverflowPageBlockResolver{}, window.budget);
     *out = std::move(window);
     return Status::Ok();
 }
@@ -325,7 +325,7 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot read window allocation failed");
 }
 
-const std::shared_ptr<const PublishedTreeState> &PublishedReadViewContext::view() const noexcept
+const std::shared_ptr<const TreeRoot> &PublishedReadViewContext::view() const noexcept
 {
     return state_->view;
 }

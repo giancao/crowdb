@@ -3,18 +3,18 @@
 #include "snapshot/captured_plan.h"
 
 #include "btree/allocation_bound.h"
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "crowdb-tree/maptable/mapping_geometry.h"
 
 #include <algorithm>
 
 namespace crowdb::tree
 {
-CapturedLayoutPlanner::CapturedLayoutPlanner(uint64_t next_page_id, uint64_t backend_id, CapturedWriteLimits limits,
+CapturedLayoutPlanner::CapturedLayoutPlanner(uint64_t next_page_id, uint64_t page_store_id, CapturedWriteLimits limits,
                                              size_t max_segments, std::shared_ptr<const CapturedDurablePages> inherited,
                                              std::shared_ptr<AllocationBudget> metadata)
     : next_(next_page_id),
-      backend_(backend_id),
+      backend_(page_store_id),
       limits_(std::move(limits)),
       max_segments_(max_segments),
       inherited_(std::move(inherited)),
@@ -27,9 +27,9 @@ std::optional<size_t> CapturedLayoutPlanner::allocation_bound(uint64_t next_page
 {
     const auto segments = (next_page_id + kMappingSegmentSize - 1) / kMappingSegmentSize;
     const auto rebase_segments =
-        (next_page_id / MappingView::kFanout) + static_cast<uint64_t>(next_page_id % MappingView::kFanout != 0);
+        (next_page_id / MappingTable::kFanout) + static_cast<uint64_t>(next_page_id % MappingTable::kFanout != 0);
     const auto max_rebase_segments =
-        detail::AllocationBound().add_product(max_segments, kMappingSegmentSize / MappingView::kFanout).value();
+        detail::AllocationBound().add_product(max_segments, kMappingSegmentSize / MappingTable::kFanout).value();
     return detail::AllocationBound(detail::shared_allocation_bound<CapturedLayoutPlanner>())
         .add_product(std::min<uint64_t>(segments, max_segments), sizeof(uint64_t) + (4 * sizeof(void *)))
         .add(max_rebase_segments ? detail::AllocationBound()
@@ -79,7 +79,7 @@ Status CapturedLayoutPlanner::accept(CapturedFrameResult::Plan page)
         ++plan_.reused_primary_frames;
     }
     else {
-        rebase_segments_.insert(page.page_id / MappingView::kFanout);
+        rebase_segments_.insert(page.page_id / MappingTable::kFanout);
     }
     plan_.new_overflow_frames += page.summary.new_overflow_frames;
     plan_.reference_heads += page.reused_overflow.size();
@@ -108,8 +108,8 @@ Status CapturedLayoutPlanner::step()
         chain_steps_ = 0;
     }
     size_t count = 0;
-    if (reference.backing) {
-        count = reference.backing->pages.size();
+    if (reference.page_block) {
+        count = reference.page_block->pages.size();
     }
     else if (inherited_) {
         count = inherited_->frames.size();
@@ -117,10 +117,10 @@ Status CapturedLayoutPlanner::step()
     if (count != 0 && ++chain_steps_ > count) {
         return Status::corruption("captured overflow dependency cycle");
     }
-    OverflowBackingPage old;
-    if (reference.backing) {
-        const auto found = reference.backing->pages.find(pid_);
-        if (found == reference.backing->pages.end()) {
+    OverflowPageBlock old;
+    if (reference.page_block) {
+        const auto found = reference.page_block->pages.find(pid_);
+        if (found == reference.page_block->pages.end()) {
             return Status::corruption("missing captured overflow");
         }
         old = found->second;
@@ -134,16 +134,16 @@ Status CapturedLayoutPlanner::step()
             return Status::corruption("missing captured overflow");
         }
         const auto &frame = found->second;
-        old               = {.backing       = frame.backing,
+        old               = {.page_block    = frame.page_block,
                              .next          = frame.next_overflow,
                              .bytes         = frame.overflow_bytes,
                              .frame_bytes   = frame.frame_bytes,
                              .logical_bytes = frame.logical_bytes};
     }
-    const bool resident = old.backing && old.backing->storage == BackingStorage::kResidentFrame;
-    if (!old.backing || !old.backing->readable() || (!resident && old.backing->backend_id != backend_) ||
-        (resident &&
-         (old.backing->resident_frame.size() != old.frame_bytes || old.frame_bytes > limits_.write.max_frame_bytes)) ||
+    const bool resident = old.page_block && old.page_block->storage == PageBlockStorage::kResidentFrame;
+    if (!old.page_block || !old.page_block->readable() || (!resident && old.page_block->page_store_id != backend_) ||
+        (resident && (old.page_block->resident_frame.size() != old.frame_bytes ||
+                      old.frame_bytes > limits_.write.max_frame_bytes)) ||
         old.bytes == 0 || old.bytes > remaining_ || (old.next == kInvalidPageId) != (old.bytes == remaining_)) {
         return Status::corruption("captured overflow topology or owner differs from the cell");
     }
@@ -153,7 +153,7 @@ Status CapturedLayoutPlanner::step()
     }
     ++plan_.reused_dependency_entries;
     plan_.resident_dependency_entries += static_cast<size_t>(resident);
-    plan_.relocated_dependency_entries += static_cast<size_t>(limits_.frames.exclusion.overlaps(*old.backing));
+    plan_.relocated_dependency_entries += static_cast<size_t>(limits_.frames.exclusion.overlaps(*old.page_block));
     remaining_ -= old.bytes;
     pid_ = old.next;
     if (remaining_ == 0) {
@@ -167,7 +167,7 @@ Status CapturedLayoutPlanner::finish()
     if (pending()) {
         return Status::invalid_argument();
     }
-    if (plan_.new_overflow_frames > MappingView::kPageLimit - next_) {
+    if (plan_.new_overflow_frames > MappingTable::kPageLimit - next_) {
         return Status::resource_exhausted("checkpoint overflow namespace exhausted");
     }
     plan_.segments       = segments_.size();

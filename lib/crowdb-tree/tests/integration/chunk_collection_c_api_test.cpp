@@ -1,12 +1,12 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_c_api_internal.h"
 #include "btree/tree_core_access.h"
 #include "c_api_internal.h"
 #include "common/test_chunk_collector.h"
 #include "crowdb-tree/btree/tree.h"
 #include "crowdb-tree/chunk_runtime_c_api.h"
 #include "load_budget_test_support.h"
+#include "page_store/chunk/chunk_c_api_internal.h"
 
 #include <latch>
 
@@ -63,7 +63,7 @@ struct TestCollectionCAbi
                                                .iu_size         = 4096,
                                                .mirror_copies   = 2,
                                                .max_chunk_bytes = 256 * 1024 * 1024};
-        result = ct_chunk_runtime_page_store_open(runtime, &options, &roots, &chunks, &store);
+        result = ct_page_chunk_store_open(runtime, &options, &roots, &chunks, &store);
         if (result != 0) {
             return result;
         }

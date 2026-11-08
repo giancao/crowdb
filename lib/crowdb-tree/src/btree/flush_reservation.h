@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/local/block_account.h"
 #include "maintenance_operation.h"
 #include "page_load.h"
+#include "page_store/local/block_account.h"
 #include "source_admission.h"
 
 namespace crowdb::tree
@@ -57,12 +57,12 @@ struct FlushReservations
 };
 
 // Derive the complete fixed-state bound without acquiring any resources.
-Status flush_reserve_bounds(PublicationCoordinator &publisher, const PublishedTreeState &view,
-                            const SourceCatalog &sources, const FlushPreparationOptions &preparation,
-                            size_t control_bytes, const FlushBatchOptions &batch, FlushReserveBounds *out,
+Status flush_reserve_bounds(PublicationCoordinator &publisher, const TreeRoot &view, const SourceCatalog &sources,
+                            const FlushPreparationOptions &preparation, size_t control_bytes,
+                            const FlushBatchOptions &batch, FlushReserveBounds *out,
                             std::optional<WriteFootprint> stable_active = {}, bool add_successor = false);
 // The caller transfers complete grants directly from asynchronous admission;
-// loader, backend and maintenance construction never acquire the same credit again.
+// loader, page store and maintenance construction never acquire the same credit again.
 Status bind_flush_reservations(PublicationCoordinator &publisher, const FlushPreparationOptions &preparation,
                                const std::shared_ptr<ResourceBudget::Account> &account,
                                std::shared_ptr<FlushRuntime::Lane> lane, const FlushReserveBounds &bounds,
@@ -71,10 +71,10 @@ Status bind_flush_reservations(PublicationCoordinator &publisher, const FlushPre
 
 // All-or-rollback admission: no source is closed and no publication gate is
 // taken while these independent partitions are being acquired/prepared.
-Status prepare_flush_reservations(PublicationCoordinator &publisher, const PublishedTreeState &view,
-                                  const SourceCatalog &sources, const FlushPreparationOptions &preparation,
-                                  size_t control_bytes, std::shared_ptr<FlushRuntime::Lane> lane,
-                                  FlushBatchOptions *batch, FlushBatch::Maintenance *maintenance,
-                                  FlushReservations *out, std::optional<WriteFootprint> stable_active = {});
+Status prepare_flush_reservations(PublicationCoordinator &publisher, const TreeRoot &view, const SourceCatalog &sources,
+                                  const FlushPreparationOptions &preparation, size_t control_bytes,
+                                  std::shared_ptr<FlushRuntime::Lane> lane, FlushBatchOptions *batch,
+                                  FlushBatch::Maintenance *maintenance, FlushReservations *out,
+                                  std::optional<WriteFootprint> stable_active = {});
 } // namespace detail
 } // namespace crowdb::tree

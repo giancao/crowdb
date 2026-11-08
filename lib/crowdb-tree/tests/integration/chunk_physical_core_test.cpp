@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_purpose.h"
 #include "common/test_tree_core_chunk.h"
+#include "page_store/chunk/chunk_purpose.h"
 
 namespace crowdb::tree
 {
@@ -21,7 +21,7 @@ TEST(ChunkPhysicalCore, SingleIoCheckpointReportsAllPhysicalMirrorAllocationsInc
     }
     ASSERT_TRUE(index);
     ASSERT_GT(expected, 0U);
-    EXPECT_EQ(test.tree->tree_state_stats().resources.allocated_backing_bytes, expected);
+    EXPECT_EQ(test.tree->tree_state_stats().resources.allocated_page_block_bytes, expected);
     const auto first = expected;
     ASSERT_TRUE(test.put(2, "small").ok());
     ASSERT_TRUE(test.tree->flush_with_persistent().ok());
@@ -31,6 +31,6 @@ TEST(ChunkPhysicalCore, SingleIoCheckpointReportsAllPhysicalMirrorAllocationsInc
         expected += receipt.physical_bytes;
     }
     EXPECT_GT(expected, first);
-    EXPECT_EQ(test.tree->tree_state_stats().resources.allocated_backing_bytes, expected);
+    EXPECT_EQ(test.tree->tree_state_stats().resources.allocated_page_block_bytes, expected);
 }
 } // namespace crowdb::tree

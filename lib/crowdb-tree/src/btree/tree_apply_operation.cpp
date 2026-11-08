@@ -107,7 +107,7 @@ Status TreeApplyOperation::State::arm()
     source_rotation   = state.source_rotation;
     work              = state.work;
     preparation       = state.preparation;
-    preparation.store = backend_ticket->backend(core->async_backend());
+    preparation.store = backend_ticket->page_store(core->async_page_store());
     if (!replay_control) {
         metadata->seal();
     }

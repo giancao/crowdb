@@ -18,16 +18,16 @@ struct RecoveredStateLimits
 
 struct RecoveredStateResult
 {
-    Status                                    status;
-    std::shared_ptr<const PublishedTreeState> state;
-    uint64_t                                  pages     = 0;
-    uint64_t                                  loads     = 0;
-    uint64_t                                  cpu_steps = 0;
+    Status                          status;
+    std::shared_ptr<const TreeRoot> state;
+    uint64_t                        pages     = 0;
+    uint64_t                        loads     = 0;
+    uint64_t                        cpu_steps = 0;
 };
 
 // Validates a recovered immutable namespace before its one-time installation.
 // Only a bounded decoded path and one leaf are retained. The resulting mapping
-// owns cold proxies; overflow extents remain protected by each leaf's backing.
+// owns cold proxies; overflow extents remain protected by each leaf's page block.
 class RecoveredStateOperation
 {
     struct State;

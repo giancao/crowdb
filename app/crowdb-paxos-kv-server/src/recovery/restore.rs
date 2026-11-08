@@ -180,7 +180,7 @@ pub async fn load_local_groups(
                 PxLocalReplicaRole::Follower,
                 &registry.config,
                 registry.wal_backend.clone(),
-                registry.crowtree_backend,
+                registry.crowtree_store_kind,
                 registry.tree_runtime.clone(),
             )
             .await

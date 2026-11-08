@@ -15,15 +15,15 @@
 #include "c_api_future_internal.h"
 #include "c_api_internal.h"
 #include "crowdb-common/log.h"
-#include "crowdb-tree/backend/async_page_store.h"
-#include "crowdb-tree/backend/backend_release_service.h"
-#include "crowdb-tree/backend/block_page_store.h"
-#include "crowdb-tree/backend/page_store.h"
-#include "crowdb-tree/backend/text_page_store.h"
-#include "crowdb-tree/backend_release_c_api.h"
 #include "crowdb-tree/btree/cell.h"
 #include "crowdb-tree/btree/range_rebuild.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/async_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "crowdb-tree/page_store/page_disk_text_store.h"
+#include "crowdb-tree/page_store/page_store.h"
+#include "crowdb-tree/page_store/page_store_release_service.h"
+#include "crowdb-tree/page_store_release_c_api.h"
 #include "crowdb-tree/snapshot/snapshot_io.h"
 #include "runtime/tree_runtime_c_api.h"
 #include "runtime/tree_tuning_c_api.h"
@@ -73,7 +73,7 @@ ct_buf make_buf(const void *data, size_t len)
 
 // Unlike make_buf(), does not malloc/copy -- `data` is returned as-is (design
 // §5's zero-copy fast path). Only for a ct_buf whose
-// backing memory the caller separately keeps alive for at least as long as the
+// page block memory the caller separately keeps alive for at least as long as the
 // buffer is in use (ct_future_poll's kGet case: the ct_future_impl's own
 // GetView allocation owner). The caller must NOT pass this to ct_free_buf.
 ct_buf make_borrowed_buf(const void *data, size_t len)
@@ -164,8 +164,8 @@ struct CompletionSignal
 
 struct ct_tree
 {
-    // Read-only views can share the backend bundle independently of Tree.
-    std::shared_ptr<PageStoreBundle>  backend;
+    // Read-only views can share the page store bundle independently of Tree.
+    std::shared_ptr<PageStoreBundle>  store_bundle;
     std::shared_ptr<CompletionSignal> completion = std::make_shared<CompletionSignal>();
     std::unique_ptr<Crowdbtree>       tree;
     void (*close_complete)(void *, ct_status) = nullptr;
@@ -247,8 +247,8 @@ struct BlockOpenInput
     size_t             count;
     void (*wake)(void *);
     void (*drop)(void *);
-    void                        *context;
-    ct_backend_release_service **release;
+    void                           *context;
+    ct_page_store_release_service **release;
 };
 
 #ifdef CROWDB_HAVE_LIBURING
@@ -259,10 +259,10 @@ struct AsyncBlockOpen : AsyncOpen
         auto &open = *static_cast<AsyncBlockOpen *>(context);
         if (status.ok()) {
             try {
-                auto &backend = *open.handle->backend;
-                auto *store   = static_cast<BlockPageStore *>(backend.store.get());
+                auto &store_bundle = *open.handle->store_bundle;
+                auto *store        = static_cast<PageDiskStore *>(store_bundle.store.get());
                 for (int fd : store->all_extent_fds()) {
-                    backend.uring->register_fd(fd);
+                    store_bundle.uring->register_fd(fd);
                 }
                 status = open.start(open.options);
             }
@@ -355,11 +355,11 @@ ct_status ct_page_store_open_mem(uint32_t iu_size, ct_page_store **out)
     if (out == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    auto handle                   = std::make_unique<ct_page_store>();
-    handle->bundle                = std::make_shared<PageStoreBundle>();
-    handle->bundle->store         = std::make_unique<MemPageStore>(iu_size == 0 ? 1 : iu_size);
-    handle->bundle->backend_label = "mem";
-    *out                          = handle.release();
+    auto handle                      = std::make_unique<ct_page_store>();
+    handle->bundle                   = std::make_shared<PageStoreBundle>();
+    handle->bundle->store            = std::make_unique<PageMemStore>(iu_size == 0 ? 1 : iu_size);
+    handle->bundle->page_store_label = "mem";
+    *out                             = handle.release();
     return static_cast<ct_status>(Code::kOk);
 }
 
@@ -387,7 +387,7 @@ std::shared_ptr<crowdb::common::DiskIOUring> c_api_create_block_reactor()
     topology.pipelines.push_back(pipeline);
     auto reactor = std::make_shared<crowdb::common::DiskIOUring>(std::move(topology));
     if (!reactor->valid()) {
-        CRB_LOG_ERROR("Linux block backend requires a usable io_uring reactor");
+        CRB_LOG_ERROR("Linux block page store requires a usable io_uring reactor");
         return nullptr;
     }
     return reactor;
@@ -405,23 +405,24 @@ static ct_status submit_block_open(Config options, const ct_options &opt, SyncMo
         }
         names.emplace_back(input.names[i]);
     }
-    const auto                      block_size = opt.block_size == 0 ? (uint64_t{64} * 1024 * 1024) : opt.block_size;
-    const auto                      iu         = opt.iu_size == 0 ? 4096 : opt.iu_size;
-    std::unique_ptr<BlockPageStore> store;
-    auto status = BlockPageStore::prepare_blocks(opt.path, opt.store_id, opt.group_id, block_size, iu, &store);
+    const auto                     block_size = opt.block_size == 0 ? (uint64_t{64} * 1024 * 1024) : opt.block_size;
+    const auto                     iu         = opt.iu_size == 0 ? 4096 : opt.iu_size;
+    std::unique_ptr<PageDiskStore> store;
+    auto status = PageDiskStore::prepare_blocks(opt.path, opt.store_id, opt.group_id, block_size, iu, &store);
     if (!status.ok()) {
         return to_status(status);
     }
-    auto open      = std::make_shared<AsyncBlockOpen>();
-    open->handle   = std::move(handle);
-    open->options  = std::move(options);
-    open->complete = complete;
-    open->context  = context;
-    auto &backend  = *open->handle->backend;
-    auto *block    = store.get();
+    auto open          = std::make_shared<AsyncBlockOpen>();
+    open->handle       = std::move(handle);
+    open->options      = std::move(options);
+    open->complete     = complete;
+    open->context      = context;
+    auto &store_bundle = *open->handle->store_bundle;
+    auto *block        = store.get();
     block->set_sync_mode(sync);
-    backend.store    = std::move(store);
-    const auto bound = c_api_bind_backend_release(&backend, true, input.wake, input.drop, input.context, input.release);
+    store_bundle.store = std::move(store);
+    const auto bound =
+        c_api_bind_page_store_release(&store_bundle, true, input.wake, input.drop, input.context, input.release);
     if (bound != 0) {
         return bound;
     }
@@ -429,12 +430,12 @@ static ct_status submit_block_open(Config options, const ct_options &opt, SyncMo
     // From here the host owns the release driver. Report even immediate
     // failures by completion so the driver can drain the reactor and files.
     try {
-        backend.async_store            = std::make_unique<BlockAsyncPageStore>(block, backend.uring.get());
+        store_bundle.async_store       = std::make_unique<AsyncPageDiskStore>(block, store_bundle.uring.get());
         open->options.page_store       = block;
-        open->options.async_page_store = backend.async_store.get();
-        open->options.async_uring      = backend.uring.get();
+        open->options.async_page_store = store_bundle.async_store.get();
+        open->options.async_uring      = store_bundle.uring.get();
         status                         = block->submit_open_blocks(
-            names, *backend.uring,
+            names, *store_bundle.uring,
             {.context = open.get(), .complete_fn = &AsyncBlockOpen::files_opened, .owner = open});
     }
     catch (const std::bad_alloc &) {
@@ -495,17 +496,17 @@ try {
         o.key_range = KeyRange::bounded(std::move(start), std::move(end));
     }
 
-    // Set backend label for metric names
+    // Set page store label for metric names
     {
         const bool durable = opt->path != nullptr && opt->path[0] != '\0';
-        if (!durable || opt->backend == CT_BACKEND_MEM_BLOCK) {
-            o.backend_label = "mem";
+        if (!durable || opt->page_store_kind == CT_PAGE_STORE_MEM) {
+            o.page_store_label = "mem";
         }
-        else if (opt->backend == CT_BACKEND_FILE) {
-            o.backend_label = "file";
+        else if (opt->page_store_kind == CT_PAGE_STORE_DISK_TEXT) {
+            o.page_store_label = "file";
         }
         else {
-            o.backend_label = "block";
+            o.page_store_label = "block";
         }
     }
 
@@ -525,22 +526,22 @@ try {
 
     const bool durable = opt->path != nullptr && opt->path[0] != '\0';
     if (opt->page_store == nullptr && (durable || runtime == nullptr || complete != nullptr)) {
-        h->backend                = std::make_shared<PageStoreBundle>();
-        h->backend->backend_label = o.backend_label;
-        o.backend_owner           = h->backend;
+        h->store_bundle                   = std::make_shared<PageStoreBundle>();
+        h->store_bundle->page_store_label = o.page_store_label;
+        o.page_store_owner                = h->store_bundle;
     }
     if (opt->page_store != nullptr) {
         if (opt->page_store->bundle == nullptr || opt->page_store->bundle->store == nullptr) {
             return static_cast<ct_status>(Code::kInvalidArgument);
         }
-        h->backend      = opt->page_store->bundle;
-        o.backend_owner = h->backend;
-        o.page_store    = h->backend->store.get();
-        o.async_page_store =
-            h->backend->async_store_view != nullptr ? h->backend->async_store_view : h->backend->async_store.get();
-        o.backend_label = h->backend->backend_label;
+        h->store_bundle    = opt->page_store->bundle;
+        o.page_store_owner = h->store_bundle;
+        o.page_store       = h->store_bundle->store.get();
+        o.async_page_store = h->store_bundle->async_store_view != nullptr ? h->store_bundle->async_store_view
+                                                                          : h->store_bundle->async_store.get();
+        o.page_store_label = h->store_bundle->page_store_label;
 #ifdef CROWDB_HAVE_LIBURING
-        o.async_uring = h->backend->uring.get();
+        o.async_uring = h->store_bundle->uring.get();
 #endif
         if (complete != nullptr) {
             return submit_open(o, std::move(h), complete, context);
@@ -553,7 +554,7 @@ try {
         h->tree = std::move(t);
     }
     else if (!durable && runtime != nullptr && complete == nullptr) {
-        // A volatile runtime Tree has no reloadable backend or checkpoint.
+        // A volatile runtime Tree has no reloadable page store or checkpoint.
         // Keep it on the same immutable core as direct C++ construction.
         auto status = TreeCoreAccess::create_volatile(o, &h->tree);
         if (!status.ok()) {
@@ -561,15 +562,15 @@ try {
         }
     }
     else if (!durable && complete == nullptr) {
-        // In-memory: BlockPageStore::open_mem with IU=1
-        std::unique_ptr<BlockPageStore> bs;
-        Status                          s = BlockPageStore::open_mem(opt->iu_size == 0 ? 1 : opt->iu_size, &bs);
+        // In-memory: PageDiskStore::open_mem with IU=1
+        std::unique_ptr<PageDiskStore> bs;
+        Status                         s = PageDiskStore::open_mem(opt->iu_size == 0 ? 1 : opt->iu_size, &bs);
         if (!s.ok()) {
             return to_status(s);
         }
         bs->set_sync_mode(sm);
-        h->backend->store = std::move(bs);
-        o.page_store      = h->backend->store.get();
+        h->store_bundle->store = std::move(bs);
+        o.page_store           = h->store_bundle->store.get();
         std::unique_ptr<Crowdbtree> t;
         Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
@@ -577,18 +578,18 @@ try {
         }
         h->tree = std::move(t);
     }
-    else if (opt->backend == CT_BACKEND_FILE) {
-        // File backend: file-based page store, no alignment
-        uint32_t                       store_id = opt->store_id;
-        uint32_t                       group_id = opt->group_id;
-        std::unique_ptr<TextPageStore> ts;
-        Status                         s = TextPageStore::open(opt->path, store_id, group_id, &ts);
+    else if (opt->page_store_kind == CT_PAGE_STORE_DISK_TEXT) {
+        // File page store: file-based page store, no alignment
+        uint32_t                           store_id = opt->store_id;
+        uint32_t                           group_id = opt->group_id;
+        std::unique_ptr<PageDiskTextStore> ts;
+        Status                             s = PageDiskTextStore::open(opt->path, store_id, group_id, &ts);
         if (!s.ok()) {
             return to_status(s);
         }
         ts->set_sync_mode(sm);
-        h->backend->store = std::move(ts);
-        o.page_store      = h->backend->store.get();
+        h->store_bundle->store = std::move(ts);
+        o.page_store           = h->store_bundle->store.get();
         std::unique_ptr<Crowdbtree> t;
         Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
@@ -596,13 +597,13 @@ try {
         }
         h->tree = std::move(t);
     }
-    else if (opt->backend == CT_BACKEND_MEM_BLOCK) {
+    else if (opt->page_store_kind == CT_PAGE_STORE_MEM) {
         // Mem block device: in-memory, no alignment (iu=1)
         uint32_t iu = opt->iu_size == 0 ? 1 : opt->iu_size;
-        auto     ms = std::make_unique<MemPageStore>(iu);
+        auto     ms = std::make_unique<PageMemStore>(iu);
         ms->set_sync_mode(sm);
-        h->backend->store = std::move(ms);
-        o.page_store      = h->backend->store.get();
+        h->store_bundle->store = std::move(ms);
+        o.page_store           = h->store_bundle->store.get();
         if (complete != nullptr) {
             return submit_open(o, std::move(h), complete, context);
         }
@@ -614,28 +615,28 @@ try {
         h->tree = std::move(t);
     }
     else {
-        // CT_BACKEND_BLOCK: block device, 4K aligned, O_DIRECT
+        // CT_PAGE_STORE_DISK: block device, 4K aligned, O_DIRECT
 #if defined(__linux__) && !defined(CROWDB_HAVE_LIBURING)
-        CRB_LOG_ERROR("Linux block backend requires liburing");
+        CRB_LOG_ERROR("Linux block page store requires liburing");
         return static_cast<ct_status>(Code::kNotSupported);
 #endif
 #ifdef CROWDB_HAVE_LIBURING
         if (block_open != nullptr) {
             return submit_block_open(std::move(o), *opt, sm, std::move(h), *block_open, complete, context);
         }
-        h->backend->uring = c_api_create_block_reactor();
-        if (!h->backend->uring) {
+        h->store_bundle->uring = c_api_create_block_reactor();
+        if (!h->store_bundle->uring) {
             return static_cast<ct_status>(Code::kNotSupported);
         }
 #endif
         uint64_t block_size = opt->block_size == 0 ? (uint64_t{64} * 1024 * 1024) : opt->block_size;
         uint32_t iu         = opt->iu_size == 0 ? 4096 : opt->iu_size;
-        std::unique_ptr<BlockPageStore> bs;
+        std::unique_ptr<PageDiskStore> bs;
 #ifdef CROWDB_HAVE_LIBURING
-        Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->group_id, block_size, iu,
-                                               *h->backend->uring, &bs);
+        Status s = PageDiskStore::open_blocks(opt->path, opt->store_id, opt->group_id, block_size, iu,
+                                              *h->store_bundle->uring, &bs);
 #else
-        Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->group_id, block_size, iu, &bs);
+        Status s = PageDiskStore::open_blocks(opt->path, opt->store_id, opt->group_id, block_size, iu, &bs);
 #endif
         if (!s.ok()) {
             return to_status(s);
@@ -643,14 +644,14 @@ try {
         bs->set_sync_mode(sm);
 #ifdef CROWDB_HAVE_LIBURING
         for (int fd : bs->all_extent_fds()) {
-            h->backend->uring->register_fd(fd);
+            h->store_bundle->uring->register_fd(fd);
         }
-        h->backend->async_store = std::make_unique<BlockAsyncPageStore>(bs.get(), h->backend->uring.get());
-        o.async_uring           = h->backend->uring.get();
-        o.async_page_store      = h->backend->async_store.get();
+        h->store_bundle->async_store = std::make_unique<AsyncPageDiskStore>(bs.get(), h->store_bundle->uring.get());
+        o.async_uring                = h->store_bundle->uring.get();
+        o.async_page_store           = h->store_bundle->async_store.get();
 #endif
-        h->backend->store = std::move(bs);
-        o.page_store      = h->backend->store.get();
+        h->store_bundle->store = std::move(bs);
+        o.page_store           = h->store_bundle->store.get();
         std::unique_ptr<Crowdbtree> t;
         Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
@@ -681,7 +682,7 @@ ct_status ct_open_with_runtime_async(const ct_options *opt, ct_runtime *runtime,
     if (opt == nullptr || complete == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    if (opt->page_store == nullptr && opt->backend != CT_BACKEND_MEM_BLOCK) {
+    if (opt->page_store == nullptr && opt->page_store_kind != CT_PAGE_STORE_MEM) {
         return static_cast<ct_status>(Code::kNotSupported);
     }
     bool       initializing = false;
@@ -694,11 +695,12 @@ ct_status ct_open_block_with_runtime_async(const ct_options *opt, ct_runtime *ru
                                            const ct_tree_runtime_options *binding, const char *const *names,
                                            size_t count, OpenCallback complete, void        *open_context,
                                            void (*wake)(void *), void (*drop)(void *), void *release_context,
-                                           ct_backend_release_service **release)
+                                           ct_page_store_release_service **release)
 {
-    if (opt == nullptr || opt->page_store != nullptr || opt->backend != CT_BACKEND_BLOCK || opt->path == nullptr ||
-        opt->path[0] == '\0' || runtime == nullptr || complete == nullptr || (count != 0 && names == nullptr) ||
-        wake == nullptr || drop == nullptr || release == nullptr || *release != nullptr) {
+    if (opt == nullptr || opt->page_store != nullptr || opt->page_store_kind != CT_PAGE_STORE_DISK ||
+        opt->path == nullptr || opt->path[0] == '\0' || runtime == nullptr || complete == nullptr ||
+        (count != 0 && names == nullptr) || wake == nullptr || drop == nullptr || release == nullptr ||
+        *release != nullptr) {
         return to_status(Status::invalid_argument());
     }
 #ifdef CROWDB_HAVE_LIBURING
@@ -725,13 +727,13 @@ crowdb::tree::Crowdbtree *c_api_tree(ct_tree *tree) noexcept
 
 crowdb::tree::PageStore *c_api_page_store(ct_tree *tree) noexcept
 {
-    auto *backend = c_api_backend_bundle(tree);
-    return backend != nullptr ? backend->store.get() : nullptr;
+    auto *store_bundle = c_api_page_store_bundle(tree);
+    return store_bundle != nullptr ? store_bundle->store.get() : nullptr;
 }
 
-PageStoreBundle *c_api_backend_bundle(ct_tree *tree) noexcept
+PageStoreBundle *c_api_page_store_bundle(ct_tree *tree) noexcept
 {
-    return tree != nullptr ? tree->backend.get() : nullptr;
+    return tree != nullptr ? tree->store_bundle.get() : nullptr;
 }
 
 std::shared_ptr<CompletionSignal> c_api_completion_signal(ct_tree *tree) noexcept
@@ -755,8 +757,8 @@ ct_status ct_close_async(ct_tree *tree, void (*complete)(void *, ct_status), voi
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
     auto *store = c_api_page_store(tree);
-    auto *block = dynamic_cast<BlockPageStore *>(store);
-    if (dynamic_cast<TextPageStore *>(store) != nullptr ||
+    auto *block = dynamic_cast<PageDiskStore *>(store);
+    if (dynamic_cast<PageDiskTextStore *>(store) != nullptr ||
         (block != nullptr && block->release_service() && !block->release_service()->externally_driven())) {
         return static_cast<ct_status>(Code::kNotSupported);
     }
@@ -822,12 +824,13 @@ try {
         options.key_range = KeyRange::bounded(std::move(start), std::move(end));
     }
 
-    handle->backend          = destination_options->page_store->bundle;
-    options.backend_owner    = handle->backend;
-    options.page_store       = handle->backend->store.get();
-    options.async_page_store = handle->backend->async_store_view != nullptr ? handle->backend->async_store_view
-                                                                            : handle->backend->async_store.get();
-    options.backend_label    = handle->backend->backend_label;
+    handle->store_bundle     = destination_options->page_store->bundle;
+    options.page_store_owner = handle->store_bundle;
+    options.page_store       = handle->store_bundle->store.get();
+    options.async_page_store = handle->store_bundle->async_store_view != nullptr
+                                 ? handle->store_bundle->async_store_view
+                                 : handle->store_bundle->async_store.get();
+    options.page_store_label = handle->store_bundle->page_store_label;
     RangeRebuildStats rebuilt;
     Status            status = rebuild_range(*source->tree, options.key_range, options, &handle->tree, &rebuilt);
     if (!status.ok()) {
@@ -1329,7 +1332,7 @@ try {
         const auto  kind = op.kind == 0 ? OpKind::kPut : OpKind::kDelete;
         // This legacy ABI has no complete allocation identity or capacity.
         // Copy only the requested value into an owned cell, then release the
-        // unknown backing allocation instead of retaining it at slice cost.
+        // unknown page block allocation instead of retaining it at slice cost.
         const Slice value(reinterpret_cast<const char *>(op.value), op.kind == 0 ? op.value_len : 0);
         auto        cell = encode_cell_buf(slot, kind, value);
         unclaimed.next   = i + 1;
@@ -1727,7 +1730,7 @@ size_t ct_uring_eventfds(const ct_tree *t, int32_t *out_fds, size_t max_fds)
         out_fds[0] = t->completion->fd;
     }
 #ifdef CROWDB_HAVE_LIBURING
-    auto *uring = t->backend == nullptr ? nullptr : t->backend->uring.get();
+    auto *uring = t->store_bundle == nullptr ? nullptr : t->store_bundle->uring.get();
     if (uring != nullptr) {
         const size_t room  = max_fds > total ? max_fds - total : 0;
         const size_t count = uring->eventfds(out_fds == nullptr ? nullptr : out_fds + total, room);

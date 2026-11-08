@@ -15,7 +15,7 @@ use crowdb_chunk_stream::{
     memory::MemoryStreamStore, ChunkStream, StreamConfig, StreamName, StreamPurpose, StreamRecord,
     StreamRecordState,
 };
-use crowdb_tree_ffi::{chunk::test_util::TestChunkBackend, Config};
+use crowdb_tree_ffi::{chunk::test_util::TestPageChunkStore, Config};
 
 async fn partition(id: u64, tree: Arc<dyn PartitionTree>) -> Partition {
     let store = Arc::new(MemoryStreamStore::new(4096));
@@ -52,7 +52,7 @@ async fn partition(id: u64, tree: Arc<dyn PartitionTree>) -> Partition {
 
 #[tokio::test]
 async fn registry_counts_one_physical_ledger_once_across_partition_views() {
-    let backend = TestChunkBackend::new(82, 1).unwrap();
+    let backend = TestPageChunkStore::new(82, 1).unwrap();
     let tree = Arc::new(
         CrowdbPartitionTree::open(
             82,
@@ -73,7 +73,7 @@ async fn registry_counts_one_physical_ledger_once_across_partition_views() {
     .await
     .unwrap();
     tree.checkpoint(0).await.unwrap();
-    let expected = tree.backing_stats().unwrap().unwrap();
+    let expected = tree.page_block_stats().unwrap().unwrap();
     assert!(expected.allocated_bytes >= 8192);
     assert_eq!(tree.estimated_bytes().unwrap(), expected.allocated_bytes);
     let first = partition(1, tree.clone()).await;

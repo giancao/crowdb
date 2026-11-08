@@ -3,7 +3,7 @@
 #pragma once
 
 #include "btree/page_load.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 #include "stdexec_adapter.h"
 
 namespace crowdb::tree
@@ -62,7 +62,7 @@ class PublishedGet
     struct State;
 
   public:
-    static Status create(std::shared_ptr<const PublishedTreeState> view, std::shared_ptr<PageLoader> loader, Slice key,
+    static Status create(std::shared_ptr<const TreeRoot> view, std::shared_ptr<PageLoader> loader, Slice key,
                          PublishedReadLimits limits, std::shared_ptr<PublishedGet> *out);
     [[nodiscard]] detail::CallbackSender       sender() noexcept;
     [[nodiscard]] static std::optional<size_t> allocation_bound(const PublishedReadLimits &limits,
@@ -88,9 +88,9 @@ class PublishedScan
     struct State;
 
   public:
-    static Status create(std::shared_ptr<const PublishedTreeState> view, std::shared_ptr<PageLoader> loader,
-                         PageKeyRange range, bool reverse, PublishedReadLimits limits,
-                         std::shared_ptr<PublishedScan> *out, PublishedScanOptions options = {});
+    static Status create(std::shared_ptr<const TreeRoot> view, std::shared_ptr<PageLoader> loader, PageKeyRange range,
+                         bool reverse, PublishedReadLimits limits, std::shared_ptr<PublishedScan> *out,
+                         PublishedScanOptions options = {});
     [[nodiscard]] detail::CallbackSender       next_sender() noexcept;
     [[nodiscard]] static std::optional<size_t> allocation_bound(const PublishedReadLimits &limits,
                                                                 size_t                     workers) noexcept;

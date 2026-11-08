@@ -27,7 +27,7 @@ struct TestStream
         return *value;
     }
 
-    Status create(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> loader = {},
+    Status create(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> loader = {},
                   CapturedFrameLimits limits = {}, CapturedFrameStream::ReserveOverflow reserve = {})
     {
         return CapturedFrameStream::create(std::move(captured), std::move(loader), runtime, lane, std::move(limits),
@@ -43,16 +43,16 @@ struct TestStream
     }
 };
 
-std::shared_ptr<PublishedTreeState> snapshot_leaf(std::shared_ptr<const PageState> page, uint64_t coverage = 10)
+std::shared_ptr<TreeRoot> snapshot_leaf(std::shared_ptr<const PageState> page, uint64_t coverage = 10)
 {
-    auto result          = std::make_shared<PublishedTreeState>(*view(std::move(page), {}, coverage));
+    auto result          = std::make_shared<TreeRoot>(*view(std::move(page), {}, coverage));
     result->next_page_id = 1;
     return result;
 }
 
-std::shared_ptr<PublishedTreeState> snapshot_tree(size_t leaves, size_t value_bytes = 1)
+std::shared_ptr<TreeRoot> snapshot_tree(size_t leaves, size_t value_bytes = 1)
 {
-    auto                         result = std::make_shared<PublishedTreeState>();
+    auto                         result = std::make_shared<TreeRoot>();
     std::vector<PageReplacement> changes;
     auto                         index = std::make_shared<InnerPageState>();
     for (size_t i = 0; i < leaves; ++i) {
@@ -74,12 +74,12 @@ std::shared_ptr<PublishedTreeState> snapshot_tree(size_t leaves, size_t value_by
                  range))
         });
     }
-    auto root          = std::make_shared<PublishedPage>();
+    auto root          = std::make_shared<PageEntry>();
     root->level        = 1;
     root->metrics.leaf = false;
     root->inner        = index;
     changes.push_back({.page_id = leaves, .expected = {}, .replacement = root});
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     result->mapping      = result->mapping.replace(changes, copied);
     result->root_page_id = leaves;
     result->next_page_id = leaves + 1;
@@ -126,7 +126,7 @@ TEST(CapturedFrames, FinalIndexOutputUsesJoinedFencesWithoutTraversingChildren)
     auto inner        = std::make_shared<InnerPageState>();
     inner->children   = {7, 12};
     inner->separators = {"m"};
-    auto output       = std::make_shared<PublishedPage>();
+    auto output       = std::make_shared<PageEntry>();
     output->level     = 2;
     output->inner     = inner;
     TestStream test;
@@ -202,7 +202,7 @@ TEST(CapturedFrames, CapturedMappingSurvivesUnvisitedReplacementAndFiltersFuture
     capture->transaction.record            = std::make_shared<InstallRecord>(InstallToken{});
     capture->transaction.expected_coverage = 10;
     capture->transaction.checkpoint        = {.action = CheckpointAction::Capture, .token = 1};
-    std::shared_ptr<const PublishedTreeState> fixed;
+    std::shared_ptr<const TreeRoot> fixed;
     capture->on_done = [&](auto result) {
         EXPECT_TRUE(result.status.ok());
         fixed = std::move(result.checkpoint_view);
@@ -468,7 +468,7 @@ TEST(CapturedFrames, GcEmptyLeavesDoNotBecomeInnerFenceEndpoints)
 {
     auto captured      = snapshot_tree(3);
     captured->gc_floor = 10;
-    MappingView::CopyStats               copied;
+    MappingTable::CopyStats              copied;
     const std::array<PageReplacement, 2> changes{
         {{.page_id  = 0,
           .expected = {},
@@ -496,15 +496,15 @@ TEST(CapturedFrames, GcEmptyLeavesDoNotBecomeInnerFenceEndpoints)
 TEST(CapturedFrames, ReusedOverflowDependencyOutlivesStreamAndCapturedInput)
 {
     auto               logical    = std::make_shared<PageState>();
-    auto               backing    = std::make_shared<BackingRef>();
+    auto               page_block = std::make_shared<PageBlockRef>();
     auto               protection = std::make_shared<int>(1);
     std::weak_ptr<int> weak       = protection;
-    backing->owner                = protection;
-    backing->length               = 4096;
+    page_block->owner             = protection;
+    page_block->length            = 4096;
     std::vector<leaf_entry> entries;
     entries.push_back({.key = "a", .cell = encode_overflow_cell_buf(2, 40, 1000)});
     auto base = std::shared_ptr<const LeafBase>(LeafBase::build(entries));
-    logical->bases.push_back({.identity = 1, .resident = base, .backing = backing});
+    logical->bases.push_back({.identity = 1, .resident = base, .page_block = page_block});
     auto captured          = snapshot_leaf(logical);
     captured->next_page_id = 100;
     TestStream test;
@@ -520,7 +520,7 @@ TEST(CapturedFrames, ReusedOverflowDependencyOutlivesStreamAndCapturedInput)
     test.stream.reset();
     captured.reset();
     logical.reset();
-    backing.reset();
+    page_block.reset();
     protection.reset();
     EXPECT_FALSE(weak.expired());
     EXPECT_EQ(frame->reused_overflow[0].head, 40U);

@@ -124,14 +124,14 @@ void ReadPump::load_value(const LogicalCell &cell)
     auto event = detail::reserved_shared<LoadEvent>(limits.metadata);
     event_     = event;
     if (!loader || cell.encoded.size() < kOverflowCellSize) {
-        event->status = Status::not_supported("overflow read requires a captured backing resolver");
+        event->status = Status::not_supported("overflow read requires a captured page_block resolver");
         event->ready.store(true, std::memory_order_release);
         wake();
         return;
     }
     const CellView encoded(cell.encoded);
     auto           self = shared_from_this();
-    loader->load_overflow(cell.backing, encoded.overflow_head(), encoded.overflow_len(),
+    loader->load_overflow(cell.page_block, encoded.overflow_head(), encoded.overflow_len(),
                           [self, event](Status status, std::shared_ptr<const buffer> value) {
                               event->status = std::move(status);
                               event->value  = std::move(value);
@@ -140,7 +140,7 @@ void ReadPump::load_value(const LogicalCell &cell)
                           });
 }
 
-void ReadPump::load_inner(std::shared_ptr<const BackingRef> backing)
+void ReadPump::load_inner(std::shared_ptr<const PageBlockRef> page_block)
 {
     auto event = detail::reserved_shared<LoadEvent>(limits.metadata);
     event_     = event;
@@ -151,15 +151,16 @@ void ReadPump::load_inner(std::shared_ptr<const BackingRef> backing)
         return;
     }
     auto self = shared_from_this();
-    loader->load_inner(std::move(backing), [self, event](Status status, std::shared_ptr<const InnerPageState> inner) {
-        event->status = std::move(status);
-        event->inner  = std::move(inner);
-        event->ready.store(true, std::memory_order_release);
-        self->wake();
-    });
+    loader->load_inner(std::move(page_block),
+                       [self, event](Status status, std::shared_ptr<const InnerPageState> inner) {
+                           event->status = std::move(status);
+                           event->inner  = std::move(inner);
+                           event->ready.store(true, std::memory_order_release);
+                           self->wake();
+                       });
 }
 
-Status validate_read(const std::shared_ptr<const PublishedTreeState> &view, const PublishedReadLimits &limits)
+Status validate_read(const std::shared_ptr<const TreeRoot> &view, const PublishedReadLimits &limits)
 {
     if (!view || !view->sources || limits.max_route_depth == 0 || limits.max_page_sources == 0 ||
         limits.max_work == 0 || limits.max_entries == 0 || limits.max_result_bytes == 0) {

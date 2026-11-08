@@ -134,7 +134,7 @@ try {
         return Status::invalid_argument("portable export needs a fixed view, completion and bounded chunk size");
     }
     if (!view->detached()) {
-        return Status::not_supported("asynchronous portable export requires owned source backing");
+        return Status::not_supported("asynchronous portable export requires owned source page_block");
     }
     auto stream = allocate(view->binding(), snapshot_format::kPortable, chunk_bytes);
     if (!stream) {

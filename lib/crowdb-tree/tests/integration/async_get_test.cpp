@@ -10,7 +10,7 @@
 // Runs against a durable (file-backed) ct_tree so ct_evict_clean_leaves can
 // force the demand-load ("slow path") that ct_get_async's retry loop exists
 // for. On a build with liburing (CROWDB_HAVE_LIBURING), ct_open wires a
-// real Reactor + BlockAsyncPageStore, so the slow path genuinely completes
+// real Reactor + AsyncPageDiskStore, so the slow path genuinely completes
 // off the Reactor thread. Linux block tests require a usable io_uring.
 // Poll until done with a bounded retry.
 #include "crowdb-tree/c_api.h"
@@ -135,7 +135,7 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
     crowdb::tree_test::TempDir tmp;
     ct_options                 opt = {};
     opt.path                       = tmp.path.c_str();
-    opt.backend                    = CT_BACKEND_BLOCK;
+    opt.page_store_kind            = CT_PAGE_STORE_DISK;
     opt.iu_size                    = 4096;
     opt.frame_bytes                = 4096;
     ct_tree *t                     = nullptr;
@@ -271,7 +271,7 @@ TEST(AsyncFlushSnapshot, FlushAndSnapshotCompleteWithTheirPublishedFrontier)
     ct_close(t);
 }
 
-// Block-backend async snapshot: exercises BlockAsyncPageStore::submit_write
+// Block-page store async snapshot: exercises AsyncPageDiskStore::submit_write
 // + submit_fsync through the Reactor's io_uring on Linux (CROWDB_HAVE_LIBURING).
 // On non-liburing builds, snapshot_async falls back to the sync path — the
 // assertions hold either way (poll-until-done).
@@ -280,7 +280,7 @@ TEST(AsyncSnapshot, BlockBackendAsyncSnapshotRoundTrip)
     crowdb::tree_test::TempDir tmp;
     ct_options                 opt = {};
     opt.path                       = tmp.path.c_str();
-    opt.backend                    = CT_BACKEND_BLOCK;
+    opt.page_store_kind            = CT_PAGE_STORE_DISK;
     opt.iu_size                    = 4096;
     opt.frame_bytes                = 4096;
     opt.block_size                 = 8 * 1024; // small blocks to force multi-extent

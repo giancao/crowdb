@@ -55,8 +55,8 @@ TreeOutcome outcome(const Status &status, bool ready = true, bool publication = 
 }
 } // namespace
 
-Status MaintenanceOperation::merge_pair(const std::shared_ptr<const PublishedTreeState> &view,
-                                        const std::shared_ptr<const PublishedPage> &left, bool *eligible) const
+Status MaintenanceOperation::merge_pair(const std::shared_ptr<const TreeRoot>  &view,
+                                        const std::shared_ptr<const PageEntry> &left, bool *eligible) const
 {
     MergePairPublication classification;
     auto                 status = classify_merge(view, left, &classification);
@@ -64,9 +64,9 @@ Status MaintenanceOperation::merge_pair(const std::shared_ptr<const PublishedTre
     return status;
 }
 
-Status MaintenanceOperation::classify_merge(const std::shared_ptr<const PublishedTreeState> &view,
-                                            const std::shared_ptr<const PublishedPage>      &left,
-                                            MergePairPublication                            *classification) const
+Status MaintenanceOperation::classify_merge(const std::shared_ptr<const TreeRoot>  &view,
+                                            const std::shared_ptr<const PageEntry> &left,
+                                            MergePairPublication                   *classification) const
 {
     classification->left          = (*candidates)[index].pid;
     classification->expected_left = left;
@@ -114,8 +114,8 @@ Status MaintenanceOperation::classify_merge(const std::shared_ptr<const Publishe
     return Status::Ok();
 }
 
-MaintenancePublicationResult MaintenanceOperation::plan(const std::shared_ptr<const PublishedTreeState> &view,
-                                                        const std::shared_ptr<const PublishedPage>      &page)
+MaintenancePublicationResult MaintenanceOperation::plan(const std::shared_ptr<const TreeRoot>  &view,
+                                                        const std::shared_ptr<const PageEntry> &page)
 {
     const auto pid    = (*candidates)[index].pid;
     auto       record = reserved_shared<InstallRecord>(

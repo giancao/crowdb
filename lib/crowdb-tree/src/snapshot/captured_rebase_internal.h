@@ -14,24 +14,24 @@ struct CapturedRebaseOperation::State : std::enable_shared_from_this<State>
     {
     }
 
-    static void                      run(void *context) noexcept;
-    void                             wake() noexcept;
-    void                             step();
-    void                             prepare_batch();
-    void                             add_replacement(uint64_t pid, std::shared_ptr<const PublishedPage> current,
-                                                     std::shared_ptr<const PublishedPage> replacement);
-    void                             defer(uint64_t pid, Status status);
-    void                             finish_batch(TreeOutcome outcome);
-    void                             summary_step();
-    void                             finish(Status status) noexcept;
-    ApplyDispatcher::Node            cpu_node{&State::run, this};
-    std::shared_ptr<ApplyDispatcher> cpu_progress;
-    std::shared_ptr<PublicationLane> publication;
-    PublicationCoordinator          &publisher;
-    std::shared_ptr<const PublishedTreeState>       captured;
-    std::shared_ptr<const CapturedDurablePages>     pages;
-    CapturedDurablePages::Frames::const_iterator    next;
-    std::shared_ptr<detail::FlushRuntime>           runtime;
+    static void                                  run(void *context) noexcept;
+    void                                         wake() noexcept;
+    void                                         step();
+    void                                         prepare_batch();
+    void                                         add_replacement(uint64_t pid, std::shared_ptr<const PageEntry> current,
+                                                                 std::shared_ptr<const PageEntry> replacement);
+    void                                         defer(uint64_t pid, Status status);
+    void                                         finish_batch(TreeOutcome outcome);
+    void                                         summary_step();
+    void                                         finish(Status status) noexcept;
+    ApplyDispatcher::Node                        cpu_node{&State::run, this};
+    std::shared_ptr<ApplyDispatcher>             cpu_progress;
+    std::shared_ptr<PublicationLane>             publication;
+    PublicationCoordinator                      &publisher;
+    std::shared_ptr<const TreeRoot>              captured;
+    std::shared_ptr<const CapturedDurablePages>  pages;
+    CapturedDurablePages::Frames::const_iterator next;
+    std::shared_ptr<detail::FlushRuntime>        runtime;
     std::shared_ptr<detail::FlushRuntime::Progress> progress;
     std::shared_ptr<AllocationBudget>               metadata;
     std::shared_ptr<PublicationRequest>             request;
@@ -40,7 +40,7 @@ struct CapturedRebaseOperation::State : std::enable_shared_from_this<State>
     bool                                            waiting         = false;
     bool                                            summarizing     = false;
     bool                                            summary_pending = false;
-    std::shared_ptr<const PublishedTreeState>       summary_view;
+    std::shared_ptr<const TreeRoot>                 summary_view;
     TreeSummary                                     summary;
     Status                                          publication_status;
     std::atomic<bool>                               ready{false};

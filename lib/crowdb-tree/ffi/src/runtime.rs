@@ -175,7 +175,7 @@ impl TreeRuntime {
     }
 
     /// Stops the shared workers after all Tree bindings and accepted runtime
-    /// work have drained. Close Tree and backend owners first. Keep Tokio alive
+    /// work have drained. Close Tree and page store owners first. Keep Tokio alive
     /// through completion, then drop the runtime from the external host.
     /// Repeated waits share the same shutdown. Canceling a wait leaves it live.
     ///

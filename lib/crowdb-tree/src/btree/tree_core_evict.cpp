@@ -19,13 +19,13 @@ void complete_eviction(const std::function<void(size_t)> &complete, size_t count
     }
 }
 
-bool evictable(const PublishedPage &page, PageCacheKind kind)
+bool evictable(const PageEntry &page, PageCacheKind kind)
 {
     if (page.metrics.dirty) {
         return false;
     }
     if (kind == PageCacheKind::Inner) {
-        return page.level != 0 && page.inner && page.inner_backing && page.inner_backing->reloadable();
+        return page.level != 0 && page.inner && page.inner_page_block && page.inner_page_block->reloadable();
     }
     if (page.level != 0 || !page.leaf || !page.leaf->overlays.empty()) {
         return false;
@@ -33,7 +33,7 @@ bool evictable(const PublishedPage &page, PageCacheKind kind)
     bool resident = false;
     for (const auto &base : page.leaf->bases) {
         if (base.resident) {
-            if (!base.backing || !base.backing->reloadable()) {
+            if (!base.page_block || !base.page_block->reloadable()) {
                 return false;
             }
             resident = true;
@@ -50,13 +50,13 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
     size_t                                          resident  = 0;
     size_t                                          evicted   = 0;
     uint64_t                                        cursor    = 0;
-    uint64_t                                        candidate = MappingView::kPageLimit;
+    uint64_t                                        candidate = MappingTable::kPageLimit;
     bool                                            counting  = true;
     bool                                            waiting   = false;
     bool                                            installed = false;
     bool                                            trimming  = false;
     std::atomic<bool>                               ready{false};
-    std::shared_ptr<const PublishedTreeState>       view;
+    std::shared_ptr<const TreeRoot>                 view;
     std::shared_ptr<TreeOperationLifetime::Ticket>  ticket;
     std::shared_ptr<detail::AllocationReservation>  controls;
     std::shared_ptr<detail::AllocationReservation>  publication_credit;
@@ -144,14 +144,14 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
             trim_cache();
             return;
         }
-        candidate      = MappingView::kPageLimit;
+        candidate      = MappingTable::kPageLimit;
         const auto end = view->mapping.visit_from(cursor, 1, this, [](void *context, uint64_t pid, const auto &page) {
             auto &self = *static_cast<CleanEviction *>(context);
             if (evictable(*page, self.kind)) {
                 self.candidate = pid;
             }
         });
-        if (candidate != MappingView::kPageLimit) {
+        if (candidate != MappingTable::kPageLimit) {
             publish();
         }
         else if (end) {
@@ -174,9 +174,9 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
         using namespace detail;
         const auto bound =
             AllocationBound(PublicationCoordinator::empty_commit_reserve_bytes())
-                .add(MappingView::path_copy_bound())
+                .add(MappingTable::path_copy_bound())
                 .add(current->mapping.copy_bounds().max_leaf_bytes)
-                .add(shared_allocation_bound<PublishedPage>() + shared_allocation_bound<PublicationRequest>() +
+                .add(shared_allocation_bound<PageEntry>() + shared_allocation_bound<PublicationRequest>() +
                      shared_allocation_bound<InstallRecord>() + shared_allocation_bound<AllocationReservation>() +
                      sizeof(PageReplacement))
                 .add(PageCacheResidency::page_allocation_bound(page->leaf ? page->leaf->bases.size() : 1))
@@ -188,7 +188,7 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
             return;
         }
         publication_credit = AllocationReservation::create(std::move(*credit));
-        auto replacement   = reserved_shared<PublishedPage>(publication_credit, *page);
+        auto replacement   = reserved_shared<PageEntry>(publication_credit, *page);
         ++replacement->revision;
         replacement->metrics.evict_candidate = false;
         if (page->leaf) {

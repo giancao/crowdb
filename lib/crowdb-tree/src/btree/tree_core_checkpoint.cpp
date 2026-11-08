@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
 #include "btree/allocation_bound.h"
 #include "btree/tree_core_checkpoint_internal.h"
 #include "btree/tree_core_internal.h"
 #include "crowdb-common/log.h"
+#include "page_store/checkpoint_page_store.h"
 #include "snapshot/flush_persistence.h"
 #include "snapshot/operation_wait.h"
 
@@ -19,8 +19,8 @@ Status TreeCore::prepare_checkpoint(const CheckpointOptions &options, std::share
                                     std::shared_ptr<TreeOperationLifetime::Ticket> accepted)
 try {
     State::Ingress admission(*state_);
-    if ((!accepted && admission.owner == nullptr) || (!local_backend() && !chunk_backend()) ||
-        async_backend() == nullptr) {
+    if ((!accepted && admission.owner == nullptr) || (!local_page_store() && !page_chunk_store()) ||
+        async_page_store() == nullptr) {
         return Status::unavailable("checkpoint requires an open reloadable backend");
     }
     if (out == nullptr || *out) {
@@ -35,25 +35,25 @@ try {
     using namespace detail;
     std::shared_ptr<FlushPersistence> persistence;
     if (options.mode == CheckpointMode::Durable) {
-        persistence = reserved_shared<FlushPersistence>(credit, preparation,
-                                                        chunk_backend() ? chunk_backend()->requested_wal_offset() : 0);
+        persistence = reserved_shared<FlushPersistence>(
+            credit, preparation, page_chunk_store() ? page_chunk_store()->requested_wal_offset() : 0);
     }
     return CheckpointOperation::create(
-        preparation, publisher(), local_backend(), preparation->ticket->backend(async_backend()), binding()->cpu(),
-        binding()->lane(), preparation->options, {.bytes = credit, .io = {}, .cpu_progress = state_->apply_dispatcher},
-        preparation->finish, {},
+        preparation, publisher(), local_page_store(), preparation->ticket->page_store(async_page_store()),
+        binding()->cpu(), binding()->lane(), preparation->options,
+        {.bytes = credit, .io = {}, .cpu_progress = state_->apply_dispatcher}, preparation->finish, {},
         [preparation, persistence, controller = state_->flush.get(),
          initial_options = &state_->preparation](std::shared_ptr<FlushOperation> *handoff) {
             if (persistence) {
                 auto flush_options        = *initial_options;
-                flush_options.store       = preparation->ticket->backend(preparation->core->async_backend());
+                flush_options.store       = preparation->ticket->page_store(preparation->core->async_page_store());
                 flush_options.persistent  = true;
                 flush_options.persistence = persistence;
                 return controller->prepare(flush_options, handoff, &preparation->handoff_blocked);
             }
             return preparation->core->prepare_flush(handoff, preparation->ticket);
         },
-        [preparation](const PublishedTreeState &view, const CapturedWritePlan *plan, CheckpointWork *work) {
+        [preparation](const TreeRoot &view, const CapturedWritePlan *plan, CheckpointWork *work) {
             return preparation->work(view, plan, work);
         },
         out, persistence ? CheckpointOperation::PrepareCleanup{} : CheckpointOperation::PrepareCleanup{[preparation] {
@@ -69,8 +69,8 @@ try {
             }
             progress->advance();
         },
-        {}, chunk_backend(),
-        [preparation](std::shared_ptr<const PublishedTreeState> view, uint64_t pid,
+        {}, page_chunk_store(),
+        [preparation](std::shared_ptr<const TreeRoot> view, uint64_t pid,
                       std::shared_ptr<PageSplitOperation> *operation) {
             return preparation->structure(std::move(view), pid, operation);
         },
@@ -125,7 +125,7 @@ Status TreeCore::prepare_capacity_flush(FlushPreparationOptions                 
     }
     // Only the host's paired checkpoint request advances the WAL replay point.
     auto persistence = detail::reserved_shared<FlushPersistence>(
-        preparation->control, preparation, chunk_backend() ? chunk_backend()->durable_wal_offset() : 0);
+        preparation->control, preparation, page_chunk_store() ? page_chunk_store()->durable_wal_offset() : 0);
     out->persistent  = true;
     out->persistence = std::move(persistence);
     return Status::Ok();

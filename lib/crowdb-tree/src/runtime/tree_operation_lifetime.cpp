@@ -116,7 +116,7 @@ TreeOperationLifetime::Ticket::~Ticket()
     state_->release();
 }
 
-std::shared_ptr<AsyncPageStore> TreeOperationLifetime::Ticket::backend(AsyncPageStore *store)
+std::shared_ptr<AsyncPageStore> TreeOperationLifetime::Ticket::page_store(AsyncPageStore *store)
 {
     return store == nullptr ? nullptr : std::shared_ptr<AsyncPageStore>(shared_from_this(), store);
 }

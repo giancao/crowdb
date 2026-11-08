@@ -183,7 +183,7 @@ Status OverlayBuilder::finish(uint64_t id, std::shared_ptr<const OverlayBatch> *
 
 bool BaseRef::valid() const
 {
-    return resident != nullptr || (backing != nullptr && backing->readable());
+    return resident != nullptr || (page_block != nullptr && page_block->readable());
 }
 
 LogicalCell LogicalCell::from_entry(const EntryRef &entry)
@@ -196,15 +196,15 @@ LogicalCell LogicalCell::from_entry(const EntryRef &entry)
 }
 
 LogicalCell LogicalCell::from_base(const std::shared_ptr<const LeafBase> &base, size_t index,
-                                   std::shared_ptr<const BackingRef> backing)
+                                   std::shared_ptr<const PageBlockRef> page_block)
 {
     const CellView view(base->cell(index));
-    return {.owner   = base,
-            .slot    = view.slot(),
-            .flags   = view.flags(),
-            .value   = view.value(),
-            .encoded = view.raw(),
-            .backing = std::move(backing)};
+    return {.owner      = base,
+            .slot       = view.slot(),
+            .flags      = view.flags(),
+            .value      = view.value(),
+            .encoded    = view.raw(),
+            .page_block = std::move(page_block)};
 }
 
 LogicalLookup PageState::lookup(Slice key, uint64_t frontier) const
@@ -245,7 +245,7 @@ LogicalLookup PageState::lookup(Slice key, uint64_t frontier) const
         if (base.resident != nullptr) {
             const int index = base.resident->find(key);
             if (index >= 0) {
-                consider(LogicalCell::from_base(base.resident, static_cast<size_t>(index), base.backing),
+                consider(LogicalCell::from_base(base.resident, static_cast<size_t>(index), base.page_block),
                          overlays.size() + i);
             }
         }

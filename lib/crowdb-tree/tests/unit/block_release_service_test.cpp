@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_account_test_support.h"
-#include "crowdb-tree/backend/backend_release_service.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "crowdb-tree/page_store/page_store_release_service.h"
 #include "test_tmp.h"
 #ifdef CROWDB_HAVE_LIBURING
 #    include "crowdb-common/diskio_uring.h"
@@ -24,9 +24,9 @@ namespace
 {
 TEST(BlockReleaseService, BackendFinalOwnerQueuesDirectoryAndLateFileWithoutClosingOnCallback)
 {
-    tree_test::TempDir              path("block_release_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(path.path, 3, 4, 4096, 1, &store).ok());
+    tree_test::TempDir             path("block_release_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(path.path, 3, 4, 4096, 1, &store).ok());
     const uint8_t value = 37;
     ASSERT_TRUE(store->write_at(uint64_t{UINT32_MAX} * 4096, &value, 1).ok());
     auto service       = store->release_service();
@@ -72,9 +72,9 @@ TEST(BlockReleaseService, BackendFinalOwnerQueuesDirectoryAndLateFileWithoutClos
 
 TEST(BlockReleaseService, ManualHostDestructionDrainsCurrentWorkAndPreservesLateReaders)
 {
-    tree_test::TempDir              path("block_manual_release_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(path.path, 3, 4, 4096, 1, &store).ok());
+    tree_test::TempDir             path("block_manual_release_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(path.path, 3, 4, 4096, 1, &store).ok());
     auto service = store->release_service();
     auto account = std::dynamic_pointer_cast<detail::AllocationAccount>(service->allocation_budget());
     ASSERT_NE(account, nullptr);
@@ -106,9 +106,9 @@ TEST(BlockReleaseService, ManualHostDestructionDrainsCurrentWorkAndPreservesLate
 
 TEST(BlockReleaseService, FailedSingleFileOpenReturnsAllQueuedCloseControls)
 {
-    tree_test::TempDir              path("block_open_release_");
-    std::unique_ptr<BlockPageStore> store;
-    const auto                      status = BlockPageStore::open(path.path + "/missing/file", 1, &store);
+    tree_test::TempDir             path("block_open_release_");
+    std::unique_ptr<PageDiskStore> store;
+    const auto                     status = PageDiskStore::open(path.path + "/missing/file", 1, &store);
     EXPECT_FALSE(status.ok());
     EXPECT_FALSE(store);
 }
@@ -116,9 +116,9 @@ TEST(BlockReleaseService, FailedSingleFileOpenReturnsAllQueuedCloseControls)
 #ifdef CROWDB_HAVE_LIBURING
 TEST(BlockReleaseService, CloseDoesNotDrainUntilKernelCompletionReleasesItsStorage)
 {
-    tree_test::TempDir              path("block_kernel_release_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(path.path, 3, 4, 4096, 1, &store).ok());
+    tree_test::TempDir             path("block_kernel_release_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(path.path, 3, 4, 4096, 1, &store).ok());
     common::Topology topology;
     topology.pipelines.push_back({});
     common::DiskIOUring reactor(std::move(topology));

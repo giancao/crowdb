@@ -7,10 +7,10 @@ namespace crowdb::tree
 {
 namespace
 {
-std::shared_ptr<PublishedTreeState> routing_tree()
+std::shared_ptr<TreeRoot> routing_tree()
 {
-    auto tree         = std::make_shared<PublishedTreeState>();
-    auto root         = std::make_shared<PublishedPage>();
+    auto tree         = std::make_shared<TreeRoot>();
+    auto root         = std::make_shared<PageEntry>();
     auto inner        = std::make_shared<InnerPageState>();
     inner->children   = {1, 2, 3};
     inner->separators = {"m", "t"};
@@ -26,7 +26,7 @@ std::shared_ptr<PublishedTreeState> routing_tree()
     const std::array<PageReplacement, 2> replacements{
         {{.page_id = 0, .expected = {}, .replacement = root}, {.page_id = 2, .expected = {}, .replacement = middle}}
     };
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     tree->mapping      = tree->mapping.replace(replacements, copied);
     tree->root_page_id = 0;
     return tree;

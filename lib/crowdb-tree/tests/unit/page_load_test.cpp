@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/scheduled_page_store.h"
 #include "crowdb-tree/maptable/compressor.h"
 #include "load_budget_test_support.h"
+#include "page_store/local/scheduled_page_store.h"
 #include "published_read_test_support.h"
 
 #include <cstring>
@@ -64,29 +64,29 @@ class TestAsyncStore final : public AsyncPageStore
     }
 };
 
-BaseRef test_backing(const std::shared_ptr<TestAsyncStore> &store)
+BaseRef test_page_block(const std::shared_ptr<TestAsyncStore> &store)
 {
     const auto frame = base({
         {.key = "key", .slot = 5, .value = "disk"}
     });
     encode_durable_page(frame->frame(), frame->page_bytes(), compress_algo::kNone, &store->blob);
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = store->blob.size();
-    backing->owner  = store;
-    return {.identity = 1, .max_slot = 5, .backing = std::move(backing)};
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = store->blob.size();
+    page_block->owner  = store;
+    return {.identity = 1, .max_slot = 5, .page_block = std::move(page_block)};
 }
 } // namespace
 
 TEST(PageLoad, InlineTransportDecodesAndCompletesOnCpuPool)
 {
-    auto                 runtime = std::make_shared<detail::FlushRuntime>(1, 8);
-    auto                 lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
-    auto                 store   = std::make_shared<TestAsyncStore>();
-    auto                 backing = test_backing(store);
+    auto                 runtime    = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto                 lane       = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto                 store      = std::make_shared<TestAsyncStore>();
+    auto                 page_block = test_page_block(store);
     AsyncStorePageLoader loader(store, runtime, lane);
     std::atomic<size_t>  calls{0};
     const auto           caller = std::this_thread::get_id();
-    loader.load_leaf(backing, [&](Status status, std::shared_ptr<const LeafBase> leaf) {
+    loader.load_leaf(page_block, [&](Status status, std::shared_ptr<const LeafBase> leaf) {
         EXPECT_TRUE(status.ok()) << status.to_string();
         EXPECT_NE(std::this_thread::get_id(), caller);
         ASSERT_NE(leaf, nullptr);
@@ -102,15 +102,15 @@ TEST(PageLoad, InlineTransportDecodesAndCompletesOnCpuPool)
 TEST(PageLoad, ColdLeafBasesJoinReverseCompletions)
 {
     LoadCredits credits;
-    auto        runtime = std::make_shared<detail::FlushRuntime>(1, 8);
-    auto        lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
-    auto        store   = std::make_shared<TestAsyncStore>();
-    store->deferred     = true;
-    auto      backing   = test_backing(store);
+    auto        runtime  = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto        lane     = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto        store    = std::make_shared<TestAsyncStore>();
+    store->deferred      = true;
+    auto      page_block = test_page_block(store);
     PageState leaf;
-    leaf.bases.push_back(backing);
-    backing.identity = 2;
-    leaf.bases.push_back(backing);
+    leaf.bases.push_back(page_block);
+    page_block.identity = 2;
+    leaf.bases.push_back(page_block);
     AsyncStorePageLoader loader(store, runtime, lane);
     size_t               calls = 0;
     LeafDecode           decode;
@@ -157,13 +157,13 @@ TEST(PageLoad, ColdLeafBasesJoinReverseCompletions)
 
 TEST(PageLoad, MemBlockLeafReadCompletesWithoutAnotherWorkerJob)
 {
-    auto encoded = std::make_shared<TestAsyncStore>();
-    auto backing = test_backing(encoded);
-    auto memory  = std::make_shared<MemPageStore>();
+    auto encoded    = std::make_shared<TestAsyncStore>();
+    auto page_block = test_page_block(encoded);
+    auto memory     = std::make_shared<PageMemStore>();
     ASSERT_TRUE(memory->write_at(0, encoded->blob.data(), encoded->blob.size()).ok());
-    auto ref        = std::make_shared<BackingRef>(*backing.backing);
-    ref->owner      = memory;
-    backing.backing = std::move(ref);
+    auto ref              = std::make_shared<PageBlockRef>(*page_block.page_block);
+    ref->owner            = memory;
+    page_block.page_block = std::move(ref);
 
     std::shared_ptr<TreeRuntime>        runtime;
     std::shared_ptr<TreeRuntimeBinding> binding;
@@ -176,7 +176,7 @@ TEST(PageLoad, MemBlockLeafReadCompletesWithoutAnotherWorkerJob)
     LoadCredits          credits;
     AsyncStorePageLoader loader(store, binding->cpu(), binding->lane(), {}, {}, credits.credits);
     PageState            leaf;
-    leaf.bases.push_back(std::move(backing));
+    leaf.bases.push_back(std::move(page_block));
     auto result = read_leaf_bases(loader, leaf, credits.credits.bytes, [](Status, LeafDecode) noexcept {
         ADD_FAILURE() << "memory read unexpectedly scheduled a continuation";
     });
@@ -188,9 +188,9 @@ TEST(PageLoad, MemBlockLeafReadCompletesWithoutAnotherWorkerJob)
     EXPECT_EQ(CellView(leaf.bases.front().resident->cell(0)).value().to_string(), "disk");
     auto invalid = leaf.bases.front();
     invalid.resident.reset();
-    auto missing       = std::make_shared<BackingRef>(*invalid.backing);
+    auto missing       = std::make_shared<PageBlockRef>(*invalid.page_block);
     missing->address   = memory->size();
-    invalid.backing    = std::move(missing);
+    invalid.page_block = std::move(missing);
     leaf.bases.front() = std::move(invalid);
     result             = read_leaf_bases(loader, leaf, credits.credits.bytes, [](Status, LeafDecode) noexcept {
         ADD_FAILURE() << "memory read failure unexpectedly scheduled a continuation";
@@ -207,15 +207,15 @@ TEST(PageLoad, MemBlockLeafReadCompletesWithoutAnotherWorkerJob)
 TEST(PageLoad, ColdLeafReadFailureDrainsBeforeReturning)
 {
     LoadCredits credits;
-    auto        runtime = std::make_shared<detail::FlushRuntime>(1, 8);
-    auto        lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
-    auto        store   = std::make_shared<TestAsyncStore>();
-    store->deferred     = true;
-    auto      backing   = test_backing(store);
+    auto        runtime  = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto        lane     = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto        store    = std::make_shared<TestAsyncStore>();
+    store->deferred      = true;
+    auto      page_block = test_page_block(store);
     PageState leaf;
-    leaf.bases.push_back(backing);
-    backing.identity = 2;
-    leaf.bases.push_back(backing);
+    leaf.bases.push_back(page_block);
+    page_block.identity = 2;
+    leaf.bases.push_back(page_block);
     AsyncStorePageLoader loader(store, runtime, lane);
     size_t               calls = 0;
     read_leaf_bases(loader, leaf, credits.credits.bytes, [&](Status status, LeafDecode decode) noexcept {
@@ -236,14 +236,14 @@ TEST(PageLoad, ColdLeafReadFailureDrainsBeforeReturning)
 TEST(PageLoad, DecodedLeafRetainsItsActualFrameChargeAfterLoaderAndReserveAreReleased)
 {
     LoadCredits credits;
-    auto        runtime = std::make_shared<detail::FlushRuntime>(1, 8);
-    auto        lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
-    auto        store   = std::make_shared<TestAsyncStore>();
-    auto        backing = test_backing(store);
-    auto        loader  = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
-                                                                 OverflowBackingResolver{}, credits.credits);
+    auto        runtime    = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto        lane       = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto        store      = std::make_shared<TestAsyncStore>();
+    auto        page_block = test_page_block(store);
+    auto        loader     = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
+                                                                    OverflowPageBlockResolver{}, credits.credits);
     std::shared_ptr<const LeafBase> result;
-    loader->load_leaf(backing, [&](Status status, auto leaf) {
+    loader->load_leaf(page_block, [&](Status status, auto leaf) {
         EXPECT_TRUE(status.ok()) << status.to_string();
         result = std::move(leaf);
     });
@@ -266,20 +266,20 @@ TEST(PageLoad, IndependentReadsIgnoreLegacyIoCreditsAndRetainBuffersUntilComplet
     auto        lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto        store   = std::make_shared<TestAsyncStore>();
     store->deferred     = true;
-    auto   backing      = test_backing(store);
+    auto   page_block   = test_page_block(store);
     auto   loader       = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
-                                                                 OverflowBackingResolver{}, credits.credits);
+                                                                 OverflowPageBlockResolver{}, credits.credits);
     size_t failures     = 0;
-    loader->load_leaf(backing, [&](Status status, auto leaf) {
+    loader->load_leaf(page_block, [&](Status status, auto leaf) {
         EXPECT_EQ(status.code(), Code::kIoError);
         EXPECT_FALSE(leaf);
         ++failures;
     });
     EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
-    auto second         = backing;
-    auto second_backing = std::make_shared<BackingRef>(*backing.backing);
-    ++second_backing->address;
-    second.backing = std::move(second_backing);
+    auto second            = page_block;
+    auto second_page_block = std::make_shared<PageBlockRef>(*page_block.page_block);
+    ++second_page_block->address;
+    second.page_block = std::move(second_page_block);
     loader->load_leaf(second, [&](Status status, auto leaf) {
         EXPECT_EQ(status.code(), Code::kIoError);
         EXPECT_FALSE(leaf);
@@ -292,7 +292,7 @@ TEST(PageLoad, IndependentReadsIgnoreLegacyIoCreditsAndRetainBuffersUntilComplet
     EXPECT_EQ(failures, 2U);
     EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     size_t successes = 0;
-    loader->load_leaf(backing, [&](Status status, auto leaf) {
+    loader->load_leaf(page_block, [&](Status status, auto leaf) {
         EXPECT_TRUE(status.ok());
         EXPECT_NE(leaf, nullptr);
         ++successes;
@@ -314,18 +314,18 @@ TEST(PageLoad, SealedDecodeCreditRetainsInflightBlobUntilTransportTerminal)
     auto        lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto        store   = std::make_shared<TestAsyncStore>();
     store->deferred     = true;
-    auto   backing      = test_backing(store);
+    auto   page_block   = test_page_block(store);
     auto   loader       = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
-                                                                 OverflowBackingResolver{}, credits.credits);
+                                                                 OverflowPageBlockResolver{}, credits.credits);
     size_t calls        = 0;
-    loader->load_leaf(backing, [&](Status status, auto leaf) {
+    loader->load_leaf(page_block, [&](Status status, auto leaf) {
         EXPECT_EQ(status.code(), Code::kResourceExhausted);
         EXPECT_FALSE(leaf);
         ++calls;
     });
     loader.reset();
     credits.seal();
-    EXPECT_GT(credits.budget.snapshot().allocated[LoadCredits::kBytes], backing.backing->length + 4095);
+    EXPECT_GT(credits.budget.snapshot().allocated[LoadCredits::kBytes], page_block.page_block->length + 4095);
     EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     store->finish();
     runtime->drain();
@@ -354,14 +354,14 @@ TEST(PageLoad, RejectsMixedAccountsAndByteIoUnitsBeforeAllocatingLoaderState)
 
 TEST(PageLoad, SlowReadLeavesSingleCpuWorkerAvailable)
 {
-    auto runtime                = std::make_shared<detail::FlushRuntime>(1, 8);
-    auto lane                   = std::make_shared<detail::FlushRuntime::Lane>(8);
-    auto store                  = std::make_shared<TestAsyncStore>();
-    store->deferred             = true;
-    auto                backing = test_backing(store);
-    auto                loader  = std::make_shared<AsyncStorePageLoader>(store, runtime, lane);
+    auto runtime                   = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto lane                      = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto store                     = std::make_shared<TestAsyncStore>();
+    store->deferred                = true;
+    auto                page_block = test_page_block(store);
+    auto                loader     = std::make_shared<AsyncStorePageLoader>(store, runtime, lane);
     std::atomic<size_t> completed{0};
-    loader->load_leaf(backing, [&](Status status, std::shared_ptr<const LeafBase> leaf) {
+    loader->load_leaf(page_block, [&](Status status, std::shared_ptr<const LeafBase> leaf) {
         EXPECT_TRUE(status.ok());
         EXPECT_NE(leaf, nullptr);
         ++completed;
@@ -383,21 +383,21 @@ TEST(PageLoad, SlowReadLeavesSingleCpuWorkerAvailable)
 
 TEST(PageLoad, IndependentReadsStartBeforeLateIoFailures)
 {
-    auto runtime                 = std::make_shared<detail::FlushRuntime>(1, 8);
-    auto lane                    = std::make_shared<detail::FlushRuntime::Lane>(8);
-    auto store                   = std::make_shared<TestAsyncStore>();
-    store->deferred              = true;
-    auto                 backing = test_backing(store);
+    auto runtime                    = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto lane                       = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto store                      = std::make_shared<TestAsyncStore>();
+    store->deferred                 = true;
+    auto                 page_block = test_page_block(store);
     AsyncStorePageLoader loader(store, runtime, lane, {});
     std::vector<Code>    codes;
     auto complete = [&](Status status, std::shared_ptr<const LeafBase>) { codes.push_back(status.code()); };
-    loader.load_leaf(backing, complete);
-    loader.load_leaf(backing, complete);
+    loader.load_leaf(page_block, complete);
+    loader.load_leaf(page_block, complete);
     EXPECT_TRUE(codes.empty());
     EXPECT_EQ(store->reads, 2U);
     store->finish(Status::io_error("late failure"));
     store->finish(Status::io_error("second failure"));
-    loader.load_leaf(backing, complete);
+    loader.load_leaf(page_block, complete);
     store->finish(Status::io_error("third failure"));
     EXPECT_EQ(codes, (std::vector<Code>{Code::kIoError, Code::kIoError, Code::kIoError}));
     EXPECT_EQ(store->reads, 3U);
@@ -408,17 +408,17 @@ TEST(PageLoad, CorruptionAndProvenSlotBoundsRejectLoadedFrames)
     auto runtime = std::make_shared<detail::FlushRuntime>(1, 8);
     auto lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
     for (bool corrupt_bytes : {false, true}) {
-        auto store   = std::make_shared<TestAsyncStore>();
-        auto backing = test_backing(store);
+        auto store      = std::make_shared<TestAsyncStore>();
+        auto page_block = test_page_block(store);
         if (corrupt_bytes) {
             store->blob.back() ^= 1;
         }
         else {
-            backing.max_slot = 4;
+            page_block.max_slot = 4;
         }
         AsyncStorePageLoader loader(store, runtime, lane);
         std::atomic<size_t>  errors{0};
-        loader.load_leaf(backing, [&](Status status, std::shared_ptr<const LeafBase> leaf) {
+        loader.load_leaf(page_block, [&](Status status, std::shared_ptr<const LeafBase> leaf) {
             EXPECT_EQ(status.code(), Code::kCorruption);
             EXPECT_EQ(leaf, nullptr);
             ++errors;
@@ -430,14 +430,14 @@ TEST(PageLoad, CorruptionAndProvenSlotBoundsRejectLoadedFrames)
 
 TEST(PageLoad, RejectedCpuQueueFailsWithoutDecodingOnIoThread)
 {
-    auto runtime = std::make_shared<detail::FlushRuntime>(1, 8);
-    auto lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
-    auto store   = std::make_shared<TestAsyncStore>();
-    auto backing = test_backing(store);
+    auto runtime    = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto lane       = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto store      = std::make_shared<TestAsyncStore>();
+    auto page_block = test_page_block(store);
     runtime->close();
     AsyncStorePageLoader loader(store, runtime, lane);
     size_t               calls = 0;
-    loader.load_leaf(backing, [&](Status status, std::shared_ptr<const LeafBase> leaf) {
+    loader.load_leaf(page_block, [&](Status status, std::shared_ptr<const LeafBase> leaf) {
         EXPECT_EQ(status.code(), Code::kUnavailable);
         EXPECT_EQ(leaf, nullptr);
         ++calls;
@@ -447,16 +447,16 @@ TEST(PageLoad, RejectedCpuQueueFailsWithoutDecodingOnIoThread)
 
 TEST(PageLoad, BoundsAndMissingRuntimeRejectBeforeIo)
 {
-    auto                 runtime = std::make_shared<detail::FlushRuntime>(1, 8);
-    auto                 lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
-    auto                 store   = std::make_shared<TestAsyncStore>();
-    auto                 backing = test_backing(store);
+    auto                 runtime    = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto                 lane       = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto                 store      = std::make_shared<TestAsyncStore>();
+    auto                 page_block = test_page_block(store);
     AsyncStorePageLoader bounded(store, runtime, lane, {.max_blob_bytes = 1});
-    bounded.load_leaf(backing, [](Status status, std::shared_ptr<const LeafBase>) {
+    bounded.load_leaf(page_block, [](Status status, std::shared_ptr<const LeafBase>) {
         EXPECT_EQ(status.code(), Code::kResourceExhausted);
     });
     AsyncStorePageLoader missing(store, {}, lane);
-    missing.load_leaf(backing, [](Status status, std::shared_ptr<const LeafBase>) {
+    missing.load_leaf(page_block, [](Status status, std::shared_ptr<const LeafBase>) {
         EXPECT_EQ(status.code(), Code::kInvalidArgument);
     });
     missing.load_overflow(

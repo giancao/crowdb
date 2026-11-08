@@ -47,7 +47,7 @@ pub async fn shutdown_stores(registry: &PaxosKvStoreRegistry) -> OperationReport
     }
 }
 
-/// Waits for the stopped stores' Tree closes and backend releases. The caller
+/// Waits for the stopped stores' Tree closes and page store releases. The caller
 /// has already stopped serving and joined its workers.
 pub async fn release_hosted_trees(registry: Arc<PaxosKvStoreRegistry>) -> OperationReport {
     let timeout = Duration::from_millis(registry.config.server.shutdown_timeout_ms);
@@ -73,7 +73,7 @@ pub async fn release_hosted_trees(registry: Arc<PaxosKvStoreRegistry>) -> Operat
     let mut report = OperationReport::new();
     let mut closing = tokio::task::JoinSet::new();
     for (store_id, group_id, tree) in trees {
-        let release = tree.backend_release_service();
+        let release = tree.page_store_release_service();
         let close = if let Some(close) = tree.close_result() {
             drop(tree);
             close

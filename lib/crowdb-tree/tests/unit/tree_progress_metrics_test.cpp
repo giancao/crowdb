@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 #include "c_api_internal.h"
 #include "crowdb-tree/tree_stats_c_api.h"
 
@@ -81,27 +81,27 @@ TEST(TreeProgressMetrics, CaptureCommitRetainsNewChangesAndFailureKeepsTheOrigin
 
 TEST(TreeProgressMetrics, CandidateFirstEntrySurvivesReplacementAndOldViews)
 {
-    MappingView            mapping;
-    MappingView::CopyStats copied;
-    auto                   candidate         = std::make_shared<PublishedPage>();
+    MappingTable            mapping;
+    MappingTable::CopyStats copied;
+    auto                    candidate        = std::make_shared<PageEntry>();
     candidate->leaf                          = std::make_shared<PageState>();
     candidate->metrics.consolidate_candidate = true;
     const std::array<PageReplacement, 1> first{
-        {{.page_id = MappingView::kPageLimit - 1, .expected = nullptr, .replacement = candidate}}};
+        {{.page_id = MappingTable::kPageLimit - 1, .expected = nullptr, .replacement = candidate}}};
     mapping           = mapping.replace(first, copied);
     const auto oldest = mapping.copy_bounds().candidate_since_ns;
     ASSERT_NE(oldest, 0U);
     const auto old_view                    = mapping;
-    auto       changed                     = std::make_shared<PublishedPage>(*candidate);
+    auto       changed                     = std::make_shared<PageEntry>(*candidate);
     changed->revision                      = 20;
     changed->metrics.consolidate_candidate = false;
     changed->metrics.writeback_candidate   = true;
     const std::array<PageReplacement, 1> second{
-        {{.page_id = MappingView::kPageLimit - 1, .expected = candidate, .replacement = changed}}};
+        {{.page_id = MappingTable::kPageLimit - 1, .expected = candidate, .replacement = changed}}};
     mapping = mapping.replace(second, copied);
     EXPECT_EQ(mapping.copy_bounds().candidate_since_ns, oldest);
     const std::array<PageReplacement, 1> remove{
-        {{.page_id = MappingView::kPageLimit - 1, .expected = changed, .replacement = nullptr}}};
+        {{.page_id = MappingTable::kPageLimit - 1, .expected = changed, .replacement = nullptr}}};
     mapping = mapping.replace(remove, copied);
     EXPECT_EQ(mapping.copy_bounds().candidate_since_ns, 0U);
     EXPECT_EQ(old_view.copy_bounds().candidate_since_ns, oldest);
@@ -130,10 +130,10 @@ TEST(TreeProgressMetrics, VersionedCAbiSamplesWithoutChangingTheExistingSnapshot
 
 TEST(TreeProgressMetrics, OldestWritebackUsesItsOwnMembershipAgeAcrossSparseImmutableViews)
 {
-    MappingView            mapping;
-    MappingView::CopyStats copied;
-    const auto             make = [] {
-        auto page                         = std::make_shared<PublishedPage>();
+    MappingTable            mapping;
+    MappingTable::CopyStats copied;
+    const auto              make = [] {
+        auto page                         = std::make_shared<PageEntry>();
         page->leaf                        = std::make_shared<PageState>();
         page->metrics.dirty               = true;
         page->metrics.writeback_candidate = true;
@@ -141,7 +141,7 @@ TEST(TreeProgressMetrics, OldestWritebackUsesItsOwnMembershipAgeAcrossSparseImmu
     };
     const auto                           older     = make();
     const auto                           newer     = make();
-    const uint64_t                       older_pid = MappingView::kPageLimit - 1;
+    const uint64_t                       older_pid = MappingTable::kPageLimit - 1;
     const std::array<PageReplacement, 1> first{{{.page_id = older_pid, .expected = nullptr, .replacement = older}}};
     mapping        = mapping.replace(first, copied);
     const auto age = mapping.copy_bounds().writeback_since_ns;
@@ -150,12 +150,12 @@ TEST(TreeProgressMetrics, OldestWritebackUsesItsOwnMembershipAgeAcrossSparseImmu
     const std::array<PageReplacement, 1> second{{{.page_id = 1, .expected = nullptr, .replacement = newer}}};
     mapping = mapping.replace(second, copied);
     EXPECT_EQ(mapping.oldest_writeback_leaf(), older_pid);
-    auto changed = std::make_shared<PublishedPage>(*older);
+    auto changed = std::make_shared<PageEntry>(*older);
     ++changed->revision;
     const std::array<PageReplacement, 1> replace{{{.page_id = older_pid, .expected = older, .replacement = changed}}};
     mapping = mapping.replace(replace, copied);
     EXPECT_EQ(mapping.copy_bounds().writeback_since_ns, age);
-    changed                              = std::make_shared<PublishedPage>(*changed);
+    changed                              = std::make_shared<PageEntry>(*changed);
     changed->metrics.dirty               = false;
     changed->metrics.writeback_candidate = false;
     changed->metrics.evict_candidate     = true;

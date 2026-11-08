@@ -1,6 +1,5 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/recovered_frame_identity.h"
 #include "snapshot/recovered_state_internal.h"
 
 namespace crowdb::tree
@@ -14,7 +13,7 @@ void RecoveredStateOperation::State::begin_load()
     ++report.loads;
     try {
         if (top.descriptor->type == page_type::kInnerBase) {
-            loader->load_inner(top.descriptor->backing, [self, event](Status status, auto inner) {
+            loader->load_inner(top.descriptor->page_block, [self, event](Status status, auto inner) {
                 if (!event->claimed.exchange(true, std::memory_order_acq_rel)) {
                     event->status = std::move(status);
                     event->inner  = std::move(inner);
@@ -28,7 +27,7 @@ void RecoveredStateOperation::State::begin_load()
                          .generation = captured->generation,
                          .range      = top.range,
                          .max_slot   = captured->coverage,
-                         .backing    = top.descriptor->backing};
+                         .page_block = top.descriptor->page_block};
             loader->load_leaf(std::move(base), [self, event](Status status, auto leaf) {
                 if (!event->claimed.exchange(true, std::memory_order_acq_rel)) {
                     event->status = std::move(status);
@@ -59,8 +58,7 @@ void RecoveredStateOperation::State::loaded()
     if (top.descriptor->type == page_type::kInnerBase) {
         if (!event->inner || !event->inner->frame_proof || event->inner->children.empty() ||
             event->inner->children.size() != event->inner->separators.size() + 1 ||
-            !recovered_frame_identity_matches(*top.descriptor->backing, page_type::kInnerBase,
-                                              event->inner->frame_proof->self_page_id, top.pid) ||
+            event->inner->frame_proof->self_page_id != top.pid ||
             event->inner->frame_proof->frame_bytes != top.descriptor->frame_bytes) {
             finish(Status::corruption());
             return;
@@ -75,11 +73,8 @@ void RecoveredStateOperation::State::loaded()
         top.metrics.page_size_estimate_bytes = top.descriptor->frame_bytes;
     }
     else {
-        if (!event->leaf ||
-            !recovered_frame_identity_matches(*top.descriptor->backing, page_type::kLeafBase,
-                                              event->leaf->view().self_page_id(), top.pid) ||
-            event->leaf->page_bytes() != top.descriptor->frame_bytes || event->leaf->view().delta_count() != 0 ||
-            !top.descriptor->stored_overflow) {
+        if (!event->leaf || event->leaf->view().self_page_id() != top.pid ||
+            event->leaf->page_bytes() != top.descriptor->frame_bytes || !top.descriptor->stored_overflow) {
             finish(Status::corruption());
             return;
         }

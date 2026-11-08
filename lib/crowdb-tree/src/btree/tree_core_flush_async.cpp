@@ -194,7 +194,7 @@ void TreeCore::flush_async(std::function<void(Status)> complete)
             status = state_->lifetime->acquire(credit, &ticket);
             if (status.ok()) {
                 auto preparation  = state_->preparation;
-                preparation.store = ticket->backend(async_backend());
+                preparation.store = ticket->page_store(async_page_store());
                 call = detail::reserved_shared<FlushCall>(credit, shared_from_this(), std::move(ticket), *state_->flush,
                                                           std::move(preparation), state_->apply_dispatcher,
                                                           state_->apply_progress);

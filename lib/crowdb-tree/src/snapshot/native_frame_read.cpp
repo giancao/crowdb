@@ -5,7 +5,6 @@
 #include "btree/allocation_bound.h"
 #include "btree/page_load_internal.h"
 #include "btree/page_load_lifetime.h"
-#include "btree/recovered_frame_identity.h"
 #include "crowdb-tree/maptable/compressor.h"
 
 namespace crowdb::tree
@@ -15,14 +14,14 @@ namespace
 struct NativeReadBuffer
 {
     NativeReadBuffer(size_t bytes, const std::shared_ptr<AllocationBudget> &metadata,
-                     std::shared_ptr<const BackingRef> extent)
+                     std::shared_ptr<const PageBlockRef> extent)
         : frame(bytes, detail::ReservationAllocator<uint8_t, AllocationKind::kFrame>(metadata)),
-          backing(std::move(extent))
+          page_block(std::move(extent))
     {
     }
 
     detail::ReservedVector<uint8_t, AllocationKind::kFrame> frame;
-    std::shared_ptr<const BackingRef>                       backing;
+    std::shared_ptr<const PageBlockRef>                     page_block;
 };
 } // namespace
 
@@ -43,7 +42,7 @@ struct NativeFrameRead::State : PageLoadProgress, std::enable_shared_from_this<S
     std::shared_ptr<State>                      lifetime;
     std::shared_ptr<NativeReadBuffer>           buffer;
     AlignedLoadBytes                            blob;
-    OverflowBackingPage                         descriptor;
+    OverflowPageBlock                           descriptor;
     uint64_t                                    pid = kInvalidPageId;
     std::atomic<bool>                           started{false};
     std::atomic<bool>                           terminal{false};
@@ -82,14 +81,14 @@ struct NativeFrameRead::State : PageLoadProgress, std::enable_shared_from_this<S
                 self->finish(Status::unavailable("native frame read stopped"));
                 return;
             }
-            if (self->descriptor.backing->storage == BackingStorage::kResidentFrame) {
+            if (self->descriptor.page_block->storage == PageBlockStorage::kResidentFrame) {
                 self->decode_frame();
                 return;
             }
-            self->blob.resize(self->descriptor.backing->length);
+            self->blob.resize(self->descriptor.page_block->length);
             self->buffer = detail::reserved_shared<NativeReadBuffer>(self->metadata, self->descriptor.frame_bytes,
-                                                                     self->metadata, self->descriptor.backing);
-            submit_page_read(self, self->descriptor.backing, self->blob.data(), self->blob.size());
+                                                                     self->metadata, self->descriptor.page_block);
+            submit_page_read(self, self->descriptor.page_block, self->blob.data(), self->blob.size());
         }
         catch (const std::bad_alloc &) {
             self->finish(Status::resource_exhausted("native frame read allocation failed"));
@@ -118,9 +117,9 @@ struct NativeFrameRead::State : PageLoadProgress, std::enable_shared_from_this<S
         const auto                 &expected = descriptor;
         std::span<const uint8_t>    bytes;
         std::shared_ptr<const void> owner;
-        if (expected.backing->storage == BackingStorage::kResidentFrame) {
-            bytes = expected.backing->resident_frame;
-            owner = expected.backing;
+        if (expected.page_block->storage == PageBlockStorage::kResidentFrame) {
+            bytes = expected.page_block->resident_frame;
+            owner = expected.page_block;
         }
         else {
             const auto raw     = durable_blob_raw_len(blob.data(), blob.size());
@@ -139,8 +138,7 @@ struct NativeFrameRead::State : PageLoadProgress, std::enable_shared_from_this<S
         }
         const auto *frame = bytes.data();
         if (!frame_validate(frame, expected.frame_bytes) || frame_page_type(frame) != page_type::kOverflowFrame ||
-            !recovered_frame_identity_matches(*expected.backing, page_type::kOverflowFrame,
-                                              frame_u64(frame, fh::kSelfpage_id), pid)) {
+            frame_u64(frame, fh::kSelfpage_id) != pid) {
             finish(Status::corruption("native captured overflow frame has invalid CRC, type or PID"));
             return;
         }
@@ -148,12 +146,6 @@ struct NativeFrameRead::State : PageLoadProgress, std::enable_shared_from_this<S
         if (overflow.next_page_id() != expected.next || overflow.chunk_len() != expected.bytes) {
             finish(Status::corruption("native overflow topology changed from its captured descriptor"));
             return;
-        }
-        // Native transfer emits canonical identities. The local decoded window
-        // is already owned and charged; the legacy durable bytes stay immutable.
-        if (frame_u64(frame, fh::kSelfpage_id) == kInvalidPageId) {
-            frame_put_u64(buffer->frame.data(), fh::kSelfpage_id, pid);
-            frame_restamp_crc(buffer->frame.data(), expected.frame_bytes);
         }
         report.frame = NativeFrameView{.page_id      = pid,
                                        .bytes        = bytes,
@@ -177,7 +169,7 @@ std::optional<size_t> NativeFrameRead::allocation_bound(PageLoadLimits limits) n
         .value();
 }
 
-Status NativeFrameRead::create(uint64_t pid, OverflowBackingPage page, std::shared_ptr<AsyncPageStore> store,
+Status NativeFrameRead::create(uint64_t pid, OverflowPageBlock page, std::shared_ptr<AsyncPageStore> store,
                                std::shared_ptr<detail::FlushRuntime>       runtime,
                                std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadLimits limits,
                                PageLoadBudget budget, std::shared_ptr<NativeFrameRead> *out)
@@ -188,27 +180,28 @@ Status NativeFrameRead::create(uint64_t pid, OverflowBackingPage page, std::shar
         try {
             if (out == nullptr || *out || pid == kInvalidPageId || !runtime || !lane || !budget.bytes ||
                 (budget.reservation() && budget.reservation()->category() == detail::BudgetClass::kIo) ||
-                !page.backing || !page.backing->readable() || page.backing->encoding != 0 || page.bytes == 0 ||
+                !page.page_block || !page.page_block->readable() || page.page_block->encoding != 0 || page.bytes == 0 ||
                 page.frame_bytes <= kFrameHeaderSize + kFrameTrailerSize ||
                 page.bytes > overflow_chunk_cap(page.frame_bytes) || page.next == pid) {
                 return Status::invalid_argument("native frame read requires a protected bounded descriptor");
             }
-            const bool resident = page.backing->storage == BackingStorage::kResidentFrame;
+            const bool resident = page.page_block->storage == PageBlockStorage::kResidentFrame;
             if (resident) {
-                if (page.backing->durability != BackingDurability::kResident ||
-                    page.backing->resident_frame.size() != page.frame_bytes || page.logical_bytes != page.frame_bytes) {
+                if (page.page_block->durability != PageBlockDurability::kResident ||
+                    page.page_block->resident_frame.size() != page.frame_bytes ||
+                    page.logical_bytes != page.frame_bytes) {
                     return Status::invalid_argument("native resident descriptor has inconsistent physical geometry");
                 }
             }
             else if (!store ||
                      (budget.io && (!budget.reservation() || budget.io->category() != detail::BudgetClass::kIo ||
                                     budget.reservation()->account() != budget.io->account())) ||
-                     page.logical_bytes < kDurableBlobHeader || page.logical_bytes > page.backing->length) {
+                     page.logical_bytes < kDurableBlobHeader || page.logical_bytes > page.page_block->length) {
                 return Status::invalid_argument(
                     "native durable frame read needs valid allocation ownership and blob geometry");
             }
-            if (page.backing->length > limits.max_blob_bytes || page.frame_bytes > limits.max_frame_bytes ||
-                !chunk_load_allowed(*page.backing, limits)) {
+            if (page.page_block->length > limits.max_blob_bytes || page.frame_bytes > limits.max_frame_bytes ||
+                !chunk_load_allowed(*page.page_block, limits)) {
                 return Status::resource_exhausted("native captured frame exceeds read bounds");
             }
             auto progress = budget;

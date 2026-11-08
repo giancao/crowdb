@@ -4,7 +4,7 @@
 
 namespace crowdb::tree
 {
-Status validate_flush_admission(const PublishedTreeState &current, const PublicationTransaction &transaction)
+Status validate_flush_admission(const TreeRoot &current, const PublicationTransaction &transaction)
 {
     if (transaction.flush_admission) {
         const auto &admission = *transaction.flush_admission;

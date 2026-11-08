@@ -152,11 +152,11 @@ using ct_tree_summary = struct
     int32_t  exact;
 };
 
-// Backend selection for durable storage.
-enum ct_backend : uint8_t {
-    CT_BACKEND_FILE      = 0, // FilePageStore (file-based, no alignment)
-    CT_BACKEND_BLOCK     = 1, // BlockPageStore (block device, 4K aligned, O_DIRECT)
-    CT_BACKEND_MEM_BLOCK = 2, // MemPageStore (in-memory block device, no alignment)
+// Page store selection for durable storage.
+enum ct_page_store_kind : uint8_t {
+    CT_PAGE_STORE_DISK_TEXT = 0, // PageDiskTextStore (file-based, no alignment)
+    CT_PAGE_STORE_DISK      = 1, // PageDiskStore (block device, 4K aligned, O_DIRECT)
+    CT_PAGE_STORE_MEM       = 2, // PageMemStore (in-memory block device, no alignment)
 };
 
 // Durability barrier policy.
@@ -166,36 +166,36 @@ enum ct_sync_mode : uint8_t {
     CT_SYNC_BATCH = 2, // fsync once per snapshot commit
 };
 
-// Backend / engine configuration. `path` null or empty selects an in-memory
+// Page store / engine configuration. `path` null or empty selects an in-memory
 // store. Zero numeric fields take engine defaults.
 struct ct_options
 {
-    // Optional injected backend. The tree retains shared ownership; callers
+    // Optional injected page store. The tree retains shared ownership; callers
     // may release their handle after ct_open returns. When non-null, path and
-    // backend are ignored.
-    ct_page_store        *page_store;
-    uint8_t               range_bounded; // 0 = unbounded; 1 = use endpoints below
-    const uint8_t        *range_start;   // null = minimum-unbounded; non-null empty is an empty key
-    size_t                range_start_len;
-    const uint8_t        *range_end; // null = maximum-unbounded; exclusive when present
-    size_t                range_end_len;
-    const char           *path;              // durable file path; null/empty => in-memory
-    uint32_t              iu_size;           // 0 => default (1 for mem, 4096 for file)
-    uint32_t              frame_bytes;       // 0 => default
-    uint64_t              buffer_pool_bytes; // 0 => default
-    uint8_t               compression;       // 0 = none, 1 = lz4
-    uint64_t              max_inline_value;  // 0 => default (frame_bytes/4)
-    enum ct_backend       backend;           // default CT_BACKEND_BLOCK; ignored for in-memory
-    uint64_t              block_size;        // 0 => default 64 MiB; ignored for file/mem-block
-    uint32_t              store_id;          // default 0; block file naming
-    uint32_t              group_id;          // default 0; maps to PxGroupId in CrowdbKV
-    enum ct_sync_mode     sync_mode;         // default CT_SYNC_FULL
-    const char           *log_dir;           // null/empty => no C++ file logging
-    const char           *log_level;         // null/empty => "info"
-    const char           *log_file_prefix;   // null/empty => "crowdb-tree"; filename prefix
-    size_t                log_max_file_mb;   // 0 => default 30
-    size_t                log_max_files;     // 0 => default 5
-    const ct_tree_tuning *tuning;            // null => native tuning defaults
+    // page store are ignored.
+    ct_page_store          *page_store;
+    uint8_t                 range_bounded; // 0 = unbounded; 1 = use endpoints below
+    const uint8_t          *range_start;   // null = minimum-unbounded; non-null empty is an empty key
+    size_t                  range_start_len;
+    const uint8_t          *range_end; // null = maximum-unbounded; exclusive when present
+    size_t                  range_end_len;
+    const char             *path;              // durable file path; null/empty => in-memory
+    uint32_t                iu_size;           // 0 => default (1 for mem, 4096 for file)
+    uint32_t                frame_bytes;       // 0 => default
+    uint64_t                buffer_pool_bytes; // 0 => default
+    uint8_t                 compression;       // 0 = none, 1 = lz4
+    uint64_t                max_inline_value;  // 0 => default (frame_bytes/4)
+    enum ct_page_store_kind page_store_kind;   // default CT_PAGE_STORE_DISK; ignored for in-memory
+    uint64_t                block_size;        // 0 => default 64 MiB; ignored for file/mem-block
+    uint32_t                store_id;          // default 0; block file naming
+    uint32_t                group_id;          // default 0; maps to PxGroupId in CrowdbKV
+    enum ct_sync_mode       sync_mode;         // default CT_SYNC_FULL
+    const char             *log_dir;           // null/empty => no C++ file logging
+    const char             *log_level;         // null/empty => "info"
+    const char             *log_file_prefix;   // null/empty => "crowdb-tree"; filename prefix
+    size_t                  log_max_file_mb;   // 0 => default 30
+    size_t                  log_max_files;     // 0 => default 5
+    const ct_tree_tuning   *tuning;            // null => native tuning defaults
 };
 
 // ── Lifecycle + durability ────────────────────────────────────────
@@ -275,12 +275,12 @@ ct_status ct_root_catalog_unpin_generation(ct_root_catalog *catalog, uint64_t tr
                                            uint64_t transition_low);
 ct_status ct_open(const ct_options *opt, ct_tree **out);
 // Uses the budgeted publication core and validates binding for either host.
-// A null runtime selects the process-shared host and ct_open backend defaults.
+// A null runtime selects the process-shared host and ct_open page store defaults.
 // With an explicit runtime, an empty path without an injected store creates a
-// volatile Tree; checkpoint requires a reloadable backend pair.
+// volatile Tree; checkpoint requires a reloadable page store pair.
 ct_status ct_open_with_runtime(const ct_options *opt, ct_runtime *runtime, const ct_tree_runtime_options *binding,
                                ct_tree **out);
-// Asynchronously opens a typed Chunk backend or a reloadable memory backend.
+// Asynchronously opens a typed page chunk store or a reloadable page mem store.
 // A null runtime selects the process-shared host. CT_OPEN_RETRY means that
 // host is initializing and no recovery or callback was accepted.
 // Inputs are copied or retained before return. On successful submission the
@@ -299,7 +299,7 @@ void      ct_close(ct_tree *t);
 // On success, consumes the handle and calls complete once after the Tree
 // facade and its own accepted operations retire. On failure the caller
 // retains the handle and callback context. Stop all new handle users first.
-// Keep the runtime and any bound backend release driver alive through close.
+// Keep the runtime and any bound page store release driver alive through close.
 ct_status ct_close_async(ct_tree *tree, void (*complete)(void *, ct_status), void *context);
 
 // Process-global logging control (not bound to any ct_tree instance).
@@ -464,7 +464,7 @@ using ct_kv_ref = struct
 // instead of a packed buffer — eliminates the Rust-side packing copy.
 ct_status ct_apply_batch_slices(ct_tree *t, uint64_t slot, const ct_kv_ref *ops, uint64_t count);
 
-// Legacy external value input. Its backing allocation identity/capacity is
+// Legacy external value input. Its page block allocation identity/capacity is
 // unknown: `value_len` describes only the slice. Values are copied into owned
 // cells during the call; `drop_fn(bytes_ref)` releases the original owner
 // exactly once, including failures. kind: 0 = put, 1 = delete; owner fields
@@ -481,7 +481,7 @@ using ct_ext_op = struct
 };
 
 // Same semantics as ct_apply_batch_slices, consuming every put's owner.
-// Unknown backing capacity requires a controlled copy; a short slice must
+// Unknown page block capacity requires a controlled copy; a short slice must
 // never keep an unaccounted large allocation alive inside the tree.
 ct_status ct_apply_batch_external(ct_tree *t, uint64_t slot, const ct_ext_op *ops, uint64_t count);
 
@@ -590,7 +590,7 @@ ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64
 // this after a resolved poll, never before).
 void ct_future_free(ct_future *f);
 
-// Completion descriptors for all async backends. The backend-independent
+// Completion descriptors for all async page stores. The page store-independent
 // future eventfd comes first; local DiskIOUring pipeline eventfds follow it.
 // Fills `out_fds` up to `max_fds` and returns the total count. Tree-owned;
 // callers must not close the descriptors.

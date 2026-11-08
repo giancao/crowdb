@@ -9,7 +9,7 @@
 // default; when the LZ4 library is unavailable at build time the codec degrades
 // to identity (store raw), so callers always work.
 //
-// Durable compressed-page blob (what a backend writes for one page):
+// Durable compressed-page blob (what a page store writes for one page):
 //   [u8 algo][u32 raw_len][u32 stored_len][u32 crc32c(stored)][stored bytes...]
 // crc32c is over the stored (possibly compressed) bytes so torn-write detection
 // is independent of the codec.
@@ -41,7 +41,7 @@ void encode_durable_page(const uint8_t *frame, uint32_t page_bytes, compress_alg
 // Allocation-free encoding into a caller-owned output window of at least
 // kDurableBlobHeader + frame.size() bytes. Input/output must not overlap.
 // Scratch includes codec-state alignment slack and may start at any address.
-// The returned logical length excludes any backend alignment padding.
+// The returned logical length excludes any page store alignment padding.
 [[nodiscard]] size_t durable_encode_scratch_bytes(compress_algo prefer) noexcept;
 Status encode_durable_page_into(std::span<const uint8_t> frame, compress_algo prefer, std::span<uint8_t> output,
                                 std::span<uint8_t> scratch, uint32_t *logical_bytes);

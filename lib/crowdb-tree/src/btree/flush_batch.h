@@ -6,7 +6,7 @@
 #include "logical_page.h"
 #include "maintenance_publication.h"
 #include "page_encode.h"
-#include "published_state.h"
+#include "tree_root.h"
 
 namespace crowdb::tree
 {
@@ -35,7 +35,7 @@ struct FlushResult
 
 struct FlushBatchOptions
 {
-    using PersistComplete = detail::InlineFunction<void(Status, std::shared_ptr<const PublishedPage>)>;
+    using PersistComplete = detail::InlineFunction<void(Status, std::shared_ptr<const PageEntry>)>;
     using ReserveOverflow = detail::InlineFunction<Status(uint64_t, ReservedOverflowIds *)>;
     // Fixed for this flush. The parent submits only pages that survive its
     // sibling decisions; the ordinary memory flow has no persistence sink.
@@ -77,7 +77,7 @@ struct FlushBatchOptions
 // a fixed frontier. It retains this batch after any partial failure and retries
 // it before accepting another batch or changing routing. No Tree worker waits.
 // This core has its own mapping owner; legacy mutable mapping cannot be mixed
-// with it. Backend/capture adapters must finish migration before default use.
+// with it. Page store/capture adapters must finish migration before default use.
 // Host runtime/publisher ownership must outlive all CPU steps, including the
 // return from terminal callbacks. Runtime destruction is a host-side operation.
 class FlushBatch
@@ -86,11 +86,11 @@ class FlushBatch
 
   public:
     using MaintenanceComplete = detail::InlineFunction<void(Status, uint64_t)>;
-    using Maintenance = detail::InlineFunction<void(std::shared_ptr<const PublishedTreeState>, MaintenanceComplete)>;
+    using Maintenance         = detail::InlineFunction<void(std::shared_ptr<const TreeRoot>, MaintenanceComplete)>;
     // Bound the batch's metadata before closing sources. Counts include
     // admitted writers, not only currently materialized table entries. Source
     // capture/controller and cold routing byte/I/O credit are added separately.
-    [[nodiscard]] static std::optional<size_t> metadata_reserve_bound(const MappingView &mapping, size_t sources,
+    [[nodiscard]] static std::optional<size_t> metadata_reserve_bound(const MappingTable &mapping, size_t sources,
                                                                       size_t entries, size_t key_bytes, size_t workers,
                                                                       const FlushBatchOptions &options,
                                                                       bool                     track_residency = false,

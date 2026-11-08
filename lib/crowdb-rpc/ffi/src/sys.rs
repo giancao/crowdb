@@ -389,6 +389,11 @@ extern "C" {
         addr: *const c_char,
         port: c_int,
     ) -> crowdb_rpc_conn_t;
+    pub fn crowdb_rpc_connect_tcp(
+        server: crowdb_rpc_server_t,
+        addr: *const c_char,
+        port: c_int,
+    ) -> crowdb_rpc_conn_t;
     pub fn crowdb_rpc_connect_begin(
         server: crowdb_rpc_server_t,
         addr: *const c_char,

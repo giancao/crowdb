@@ -4,7 +4,7 @@
 
 #include "page_cache.h"
 #include "page_cache_frame.h"
-#include "published_state.h"
+#include "tree_root.h"
 
 namespace crowdb::tree
 {
@@ -55,17 +55,17 @@ struct SharedPageCache::State : std::enable_shared_from_this<SharedPageCache::St
 
     struct Entry
     {
-        Command                           command{.kind = CommandKind::Loaded};
-        Phase                             phase = Phase::Empty;
-        Key                               key;
-        uint64_t                          touched         = 0;
-        size_t                            bytes           = 0;
-        uint64_t                          max_slot        = 0;
-        bool                              drop_when_ready = false;
-        PageLoadPriority                  priority        = PageLoadPriority::Maintenance;
-        Request                          *waiters         = nullptr;
-        std::shared_ptr<const BackingRef> backing;
-        std::shared_ptr<PageLoader>       upstream;
+        Command                             command{.kind = CommandKind::Loaded};
+        Phase                               phase = Phase::Empty;
+        Key                                 key;
+        uint64_t                            touched         = 0;
+        size_t                              bytes           = 0;
+        uint64_t                            max_slot        = 0;
+        bool                                drop_when_ready = false;
+        PageLoadPriority                    priority        = PageLoadPriority::Maintenance;
+        Request                            *waiters         = nullptr;
+        std::shared_ptr<const PageBlockRef> page_block;
+        std::shared_ptr<PageLoader>         upstream;
         // One atomic identity/terminal word rejects duplicate/late callbacks,
         // including after an entry has been recycled for another generation.
         std::atomic<uint64_t>                      completion{0};

@@ -8,7 +8,7 @@
 
 namespace crowdb::tree::detail
 {
-// Per-operation backend capacity. Retained backend objects keep only this
+// Per-operation page store capacity. Retained page store objects keep only this
 // small budget and their stable account, never the Tree/operation/runtime.
 // seal returns unused capacity; allocated nodes/fds keep their actual charge.
 class BackendAllocationGrant final : public AllocationBudget

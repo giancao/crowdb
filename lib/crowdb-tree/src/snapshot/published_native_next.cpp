@@ -73,7 +73,7 @@ Status PublishedNativeCursor::State::generated_frame(const SnapshotReadWindow   
 Status PublishedNativeCursor::State::old_frame(const SnapshotReadWindow &window, std::optional<NativeFrameView> *out)
 {
     std::shared_ptr<NativeFrameRead> read;
-    auto status = NativeFrameRead::create(old->first, old->second, window.backend, snapshot->binding()->cpu(),
+    auto status = NativeFrameRead::create(old->first, old->second, window.page_store, snapshot->binding()->cpu(),
                                           snapshot->lane(), snapshot->load_limits(), window.budget, &read);
     if (status.ok()) {
         status = detail::wait_snapshot_operation(read);

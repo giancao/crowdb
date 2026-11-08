@@ -392,7 +392,10 @@ void FlushOperation::State::finish() noexcept
                           .phase              = report.phase,
                           .handoff_advanced   = report.handoff_advanced,
                           .admission_stale    = report.admission_stale};
-    replaceable.store(!admitted && !capture && !batch, std::memory_order_release);
+    // After an acknowledged persistent round has failed, the next round
+    // needs a fresh persistence context and checkpoint token.
+    const bool persistent_failed = options.persistent && source_acknowledged && !report.maintenance_status.ok();
+    replaceable.store(persistent_failed || (!admitted && !capture && !batch), std::memory_order_release);
     lifecycle.exchange(0, std::memory_order_acq_rel);
     lifecycle.notify_all();
     if (progress) {

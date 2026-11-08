@@ -73,7 +73,7 @@ Status TreeCore::install_split_baseline(const SplitSourceSession &session, uint6
     if (!status.ok()) {
         return status;
     }
-    std::shared_ptr<const PublishedTreeState> candidate;
+    std::shared_ptr<const TreeRoot> candidate;
     status = prepare_readable(std::move(staging.catalog), staging.credit, &candidate);
     if (!status.ok()) {
         return status;

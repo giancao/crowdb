@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/scheduled_page_store.h"
 #include "btree/tree_metrics.h"
+#include "page_store/local/scheduled_page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -39,7 +39,7 @@ struct TestCompletion
     }
 };
 
-struct TestBlockingStore : MemPageStore
+struct TestBlockingStore : PageMemStore
 {
     mutable std::atomic<bool> entered{false};
     mutable std::atomic<bool> released{false};
@@ -51,7 +51,7 @@ struct TestBlockingStore : MemPageStore
         while (!released.load(std::memory_order_acquire)) {
             released.wait(false, std::memory_order_acquire);
         }
-        return MemPageStore::read_at(address, data, length);
+        return PageMemStore::read_at(address, data, length);
     }
 
     void wait() const
@@ -254,7 +254,7 @@ TEST(ScheduledPageStore, DroppedAcceptedCallbackTerminatesOnceWhileOtherWorkCont
 
 TEST(ScheduledPageStore, CountersIncludeMetadataAndCountOnlyFirstRealTerminal)
 {
-    MemPageStore       device;
+    PageMemStore       device;
     TestScheduledStore test;
     ASSERT_TRUE(test.create(&device).ok());
     std::array<uint8_t, 8> bytes{};

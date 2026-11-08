@@ -1,19 +1,19 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #pragma once
-#include "crowdb-tree/backend/async_page_store.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/async_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
 
 #include <atomic>
 
 namespace crowdb::tree
 {
-// The actual BlockPageStore remains the allocator/domain authority. Its async
+// The actual PageDiskStore remains the allocator/domain authority. Its async
 // adapter runs on ScheduledPageStore's backend lane and preserves each grant.
 class TestCompactionFaultStore final : public AsyncPageStore
 {
   public:
-    explicit TestCompactionFaultStore(BlockPageStore &store) : store_(store)
+    explicit TestCompactionFaultStore(PageDiskStore &store) : store_(store)
     {
     }
 
@@ -70,7 +70,7 @@ class TestCompactionFaultStore final : public AsyncPageStore
     }
 
   private:
-    BlockPageStore       &store_;
+    PageDiskStore        &store_;
     std::atomic<int>      writes_{0};
     std::atomic<int>      syncs_{0};
     std::atomic<int>      fail_write_{-1};

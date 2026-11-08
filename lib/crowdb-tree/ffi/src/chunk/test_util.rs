@@ -52,14 +52,14 @@ impl Drop for TestReleaseOwner {
 /// One persistent test tree with a shared CPU host and real candidate/pin rules.
 /// Drop every Tree and snapshot before this service. Reopen through `next_writer`
 /// only after the previous Tree closes; the catalog incarnation cannot be reused.
-pub struct TestChunkBackend {
+pub struct TestPageChunkStore {
     _release: TestReleaseOwner,
     pub catalog: Arc<ChunkRootCatalog>,
     transport: ChunkTransport,
     options: ChunkRuntimeOptions,
     pub runtime: Arc<TreeRuntime>,
 }
-impl TestChunkBackend {
+impl TestPageChunkStore {
     pub fn new(tree: u64, epoch: u64) -> Result<Self, CtError> {
         let runtime = Arc::new(TreeRuntime::new(TreeRuntimeOptions {
             workers: 1,

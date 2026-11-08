@@ -36,7 +36,7 @@ struct ViewRebuild : std::enable_shared_from_this<ViewRebuild>
     Status start(const std::shared_ptr<PublishedReadViewContext> &view)
     {
         if (!view->detached()) {
-            return Status::not_supported("asynchronous range rebuild requires owned source backing");
+            return Status::not_supported("asynchronous range rebuild requires owned source page_block");
         }
         return copy_read_only_view_range_async(
             view, *core, core->config().key_range,

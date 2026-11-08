@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "published_state.h"
+#include "tree_root.h"
 
 #include <algorithm>
 #include <cassert>

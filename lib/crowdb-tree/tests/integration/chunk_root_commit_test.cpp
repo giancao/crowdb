@@ -20,12 +20,12 @@ void complete(const std::shared_ptr<ChunkRootCommit> &operation)
 
 TEST(ChunkRootCommit, LostMutationRepliesResolveTheSameCandidateWithoutRepeatingReferenceWindows)
 {
-    test_chunk::TestRootBackend test;
-    auto                        pages     = test.pages(65);
-    auto                        operation = test.commit(pages);
-    test.catalog->lose_begin              = true;
-    test.catalog->lose_prepare            = true;
-    test.catalog->lose_commit             = true;
+    test_chunk::TestRootPageStore test;
+    auto                          pages     = test.pages(65);
+    auto                          operation = test.commit(pages);
+    test.catalog->lose_begin                = true;
+    test.catalog->lose_prepare              = true;
+    test.catalog->lose_commit               = true;
     complete(operation);
     ASSERT_TRUE(operation->status().ok()) << operation->status().to_string();
     EXPECT_TRUE(operation->committed());
@@ -45,22 +45,22 @@ TEST(ChunkRootCommit, LostMutationRepliesResolveTheSameCandidateWithoutRepeating
     detail::ChunkStageId pin;
     detail::ChunkId      unused;
     ASSERT_TRUE(test.ids->next(PagePurpose::kPageIndex, &pin, &unused).ok());
-    std::shared_ptr<const ChunkPackBacking> index;
+    std::shared_ptr<const ChunkPageBlock> index;
     ASSERT_TRUE(
-        pin_chunk_backing(test.domain, root.indexes[0].pack, pin, test.credits.credits.reservation(), &index).ok());
+        pin_chunk_page_block(test.domain, root.indexes[0].pack, pin, test.credits.credits.reservation(), &index).ok());
     std::vector<uint8_t> bytes(index->pack.length);
-    ASSERT_TRUE(read_chunk_backing(*index, bytes, test.credits.credits.reservation()).ok());
+    ASSERT_TRUE(read_chunk_page_block(*index, bytes, test.credits.credits.reservation()).ok());
     uint64_t count  = 0;
     size_t   offset = 0;
-    ASSERT_TRUE(decode_chunk_index_header(bytes, root.identity, 0, &count, &offset).ok());
+    ASSERT_TRUE(decode_chunk_mapping_segment_header(bytes, root.identity, 0, &count, &offset).ok());
     EXPECT_EQ(count, 64U);
 }
 
 TEST(ChunkRootCommit, KnownFailedCommitAbortsAndReleasesEveryAcceptedWindow)
 {
-    test_chunk::TestRootBackend test;
-    auto                        operation = test.commit(test.pages(65));
-    test.catalog->fail_commit             = true;
+    test_chunk::TestRootPageStore test;
+    auto                          operation = test.commit(test.pages(65));
+    test.catalog->fail_commit               = true;
     complete(operation);
     EXPECT_EQ(operation->status().code(), Code::kUnavailable);
     EXPECT_FALSE(operation->committed());
@@ -71,10 +71,10 @@ TEST(ChunkRootCommit, KnownFailedCommitAbortsAndReleasesEveryAcceptedWindow)
 
 TEST(ChunkRootCommit, UnqueryableCommitKeepsCandidateProtectionAndDoesNotReportDurability)
 {
-    test_chunk::TestRootBackend test;
-    auto                        operation = test.commit(test.pages(1));
-    test.catalog->lose_commit             = true;
-    test.catalog->fail_query              = true;
+    test_chunk::TestRootPageStore test;
+    auto                          operation = test.commit(test.pages(1));
+    test.catalog->lose_commit               = true;
+    test.catalog->fail_query                = true;
     complete(operation);
     EXPECT_EQ(operation->status().code(), Code::kUnavailable);
     EXPECT_FALSE(operation->committed());
@@ -89,8 +89,8 @@ TEST(ChunkRootCommit, UnqueryableCommitKeepsCandidateProtectionAndDoesNotReportD
 
 TEST(ChunkRootCommit, CancellationReleasesOnlyTheWindowsThatWereActuallyPrepared)
 {
-    test_chunk::TestRootBackend test;
-    auto                        operation = test.commit(test.pages(65));
+    test_chunk::TestRootPageStore test;
+    auto                          operation = test.commit(test.pages(65));
     for (size_t i = 0; i < 30 && test.catalog->prepare_calls == 0; ++i) {
         ASSERT_TRUE(operation->step().ok());
     }
@@ -105,10 +105,10 @@ TEST(ChunkRootCommit, CancellationReleasesOnlyTheWindowsThatWereActuallyPrepared
 
 TEST(ChunkRootCommit, AdmittedMetadataAndOneWindowFinishWithHostCreditExhausted)
 {
-    test_chunk::TestRootBackend test;
-    auto                        pages    = test.pages(65);
-    const auto                  metadata = ChunkRootCommit::allocation_bound(65);
-    const auto                  window   = ChunkRootCommit::window_allocation_bound(0);
+    test_chunk::TestRootPageStore test;
+    auto                          pages    = test.pages(65);
+    const auto                    metadata = ChunkRootCommit::allocation_bound(65);
+    const auto                    window   = ChunkRootCommit::window_allocation_bound(0);
     if (!metadata || !window) {
         FAIL() << "checkpoint bound overflow";
     }
@@ -144,7 +144,7 @@ TEST(ChunkRootCommit, DependencyTraversalContinuesPastTheFormerCumulativeWorkLim
 {
     constexpr size_t                           leaves     = 257;
     constexpr size_t                           references = 4096;
-    test_chunk::TestRootBackend                test(512);
+    test_chunk::TestRootPageStore              test(512);
     auto                                       pages = test.pages(leaves + 1);
     std::shared_ptr<detail::AllocationAccount> metadata;
     ASSERT_TRUE(
@@ -174,9 +174,9 @@ TEST(ChunkRootCommit, DependencyTraversalContinuesPastTheFormerCumulativeWorkLim
 
 TEST(ChunkRootCommit, OverflowCyclesFailByGraphIdentityWithoutExhaustingAWorkQuota)
 {
-    test_chunk::TestRootBackend test;
-    auto                        pages      = test.pages(3);
-    auto                        references = detail::reserved_shared<StoredOverflowReferences>(
+    test_chunk::TestRootPageStore test;
+    auto                          pages      = test.pages(3);
+    auto                          references = detail::reserved_shared<StoredOverflowReferences>(
         test.credits.credits.bytes, detail::ReservationAllocator<StoredOverflowReference>(test.credits.credits.bytes));
     references->push_back({.head = 1, .bytes = UINT64_MAX});
     pages->frames.at(0).stored_overflow = references;

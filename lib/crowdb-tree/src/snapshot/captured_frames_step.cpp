@@ -169,7 +169,8 @@ void CapturedFrameStream::State::prepare()
                                         .coverage     = single_page ? single_page->coverage : view->coverage,
                                         .gc_floor     = single_page ? single_page->gc_floor : view->gc_floor,
                                         .next_page_id = single_page ? single_page->next_page_id : view->next_page_id,
-                                        .context      = std::move(context)},
+                                        .context      = std::move(context),
+                                        .children_summary = single_page ? single_page->children_summary : std::nullopt},
                                        limits.encode);
     if (!prepared.status.ok()) {
         if (prepared.needs_split) {
@@ -200,9 +201,9 @@ void CapturedFrameStream::State::prepare_encoder()
         if (status.ok() && ids.first < overflow_end) {
             status = Status::invalid_argument("snapshot overflow intervals must be disjoint and increasing");
         }
-        const auto end = ids.first <= MappingView::kPageLimit && ids.count <= MappingView::kPageLimit - ids.first
+        const auto end = ids.first <= MappingTable::kPageLimit && ids.count <= MappingTable::kPageLimit - ids.first
                            ? ids.first + ids.count
-                           : MappingView::kPageLimit;
+                           : MappingTable::kPageLimit;
         if (status.ok()) {
             status = encoder->bind_overflow(std::move(ids));
         }

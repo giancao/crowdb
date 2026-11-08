@@ -1,11 +1,11 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_backend_state.h"
-#include "backend/chunk/chunk_collection_operation.h"
-#include "backend/chunk/chunk_runtime_page_store.h"
 #include "btree/tree_core_access.h"
 #include "common/test_chunk_collector.h"
 #include "load_budget_test_support.h"
+#include "page_store/chunk/chunk_collection_operation.h"
+#include "page_store/chunk/page_chunk_store.h"
+#include "page_store/chunk/page_chunk_store_state.h"
 #include "snapshot/operation_wait.h"
 
 #include <future>
@@ -17,12 +17,12 @@ namespace
 {
 struct TestCollectionCore
 {
-    test_read::LoadCredits                         credits;
-    std::shared_ptr<detail::TestCollectorCatalog>  catalog   = std::make_shared<detail::TestCollectorCatalog>();
-    std::shared_ptr<detail::TestFixedTransport>    transport = std::make_shared<detail::TestFixedTransport>(catalog);
-    Config                                         config;
-    std::shared_ptr<detail::ChunkRuntimePageStore> store;
-    std::unique_ptr<Crowdbtree>                    tree;
+    test_read::LoadCredits                        credits;
+    std::shared_ptr<detail::TestCollectorCatalog> catalog   = std::make_shared<detail::TestCollectorCatalog>();
+    std::shared_ptr<detail::TestFixedTransport>   transport = std::make_shared<detail::TestFixedTransport>(catalog);
+    Config                                        config;
+    std::shared_ptr<detail::PageChunkStore>       store;
+    std::unique_ptr<Crowdbtree>                   tree;
 
     TestCollectionCore()
     {
@@ -34,16 +34,16 @@ struct TestCollectionCore
         options.workers         = 1;
         options.backend_workers = 1;
         EXPECT_TRUE(TreeRuntime::create(options, &config.runtime).ok());
-        store = std::make_shared<detail::ChunkRuntimePageStore>(
-            detail::ChunkRuntimeOptions{.tree            = 17,
-                                        .owner_epoch     = 1,
-                                        .open_generation = 0,
-                                        .iu_size         = 4096,
-                                        .mirrors         = 2,
-                                        .max_chunk_bytes = 256 * 1024 * 1024},
-            catalog, transport, credits.credits.reservation());
+        store =
+            std::make_shared<detail::PageChunkStore>(detail::ChunkRuntimeOptions{.tree            = 17,
+                                                                                 .owner_epoch     = 1,
+                                                                                 .open_generation = 0,
+                                                                                 .iu_size         = 4096,
+                                                                                 .mirrors         = 2,
+                                                                                 .max_chunk_bytes = 256 * 1024 * 1024},
+                                                     catalog, transport, credits.credits.reservation());
         config.page_store                           = store.get();
-        config.backend_owner                        = store;
+        config.page_store_owner                     = store;
         config.frame_bytes                          = 4096;
         config.leaf_split_bytes                     = 3000;
         config.runtime_binding.limits.io_operations = 1;
@@ -52,7 +52,7 @@ struct TestCollectionCore
     ~TestCollectionCore()
     {
         tree.reset();
-        config.backend_owner.reset();
+        config.page_store_owner.reset();
         store.reset();
         config.runtime.reset();
         catalog->queue->stop_admission();
@@ -131,7 +131,7 @@ TEST(ChunkCollectionOperation, CloseDrainsAcceptedDeleteWithoutWaitingForCallerH
     ASSERT_TRUE(test.prepare(&operation).ok());
     auto run = std::async(std::launch::async, [&] { return detail::wait_snapshot_operation(operation); });
     ASSERT_EQ(receipt.wait_for(std::chrono::seconds(3)), std::future_status::ready);
-    auto backend   = std::dynamic_pointer_cast<ChunkBackendState>(TreeCoreAccess::get(*test.tree)->chunk_backend());
+    auto backend = std::dynamic_pointer_cast<PageChunkStoreState>(TreeCoreAccess::get(*test.tree)->page_chunk_store());
     auto scheduled = std::static_pointer_cast<ScheduledPageStore>(backend->store);
     std::promise<Status> other;
     auto                 ready = other.get_future();

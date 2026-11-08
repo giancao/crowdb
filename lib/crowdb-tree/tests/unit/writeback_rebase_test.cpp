@@ -13,13 +13,13 @@ using namespace test_read;
 
 DurableCapturedFrame receipt()
 {
-    auto backing        = std::make_shared<BackingRef>();
-    backing->backend_id = 1;
-    backing->content_id = 33;
-    backing->generation = 7;
-    backing->length     = 4096;
-    backing->owner      = std::make_shared<int>(1);
-    DurableCapturedFrame result{.page_id = 0, .backing = std::move(backing)};
+    auto page_block           = std::make_shared<PageBlockRef>();
+    page_block->page_store_id = 1;
+    page_block->content_id    = 33;
+    page_block->generation    = 7;
+    page_block->length        = 4096;
+    page_block->owner         = std::make_shared<int>(1);
+    DurableCapturedFrame result{.page_id = 0, .page_block = std::move(page_block)};
     result.summary.emplace();
     result.summary->primary_used_bytes = 128;
     result.summary->live_counts_known  = true;
@@ -29,7 +29,7 @@ DurableCapturedFrame receipt()
     return result;
 }
 
-std::shared_ptr<PublishedPage> dirty_page(std::shared_ptr<const PageState> leaf)
+std::shared_ptr<PageEntry> dirty_page(std::shared_ptr<const PageState> leaf)
 {
     auto result                         = published(std::move(leaf));
     result->metrics.overlay_runs        = result->leaf->overlays.size();
@@ -51,9 +51,9 @@ TEST(WritebackRebase, ReplacesCapturedSuffixAndKeepsNewValuesAndTombstones)
         {.key = "b", .slot = 11, .value = "", .tombstone = true}
     });
     current_leaf->overlays.insert(current_leaf->overlays.begin(), later->overlays.front());
-    current_leaf->content_id                     = 9;
-    auto                                 current = dirty_page(current_leaf);
-    std::shared_ptr<const PublishedPage> replacement;
+    current_leaf->content_id                 = 9;
+    auto                             current = dirty_page(current_leaf);
+    std::shared_ptr<const PageEntry> replacement;
     ASSERT_TRUE(
         build_writeback_rebase(captured, current, receipt(), 10, credits.credits.reservation(), &replacement).ok());
     ASSERT_EQ(replacement->leaf->overlays.size(), 1U);
@@ -82,12 +82,12 @@ TEST(WritebackRebase, ReplacesCapturedSuffixAndKeepsNewValuesAndTombstones)
 
 TEST(WritebackRebase, CleanReceiptMakesColdPageExactWithoutRetainingCapturedRun)
 {
-    auto                                 captured = dirty_page(page({
+    auto                              captured = dirty_page(page({
         {.key = "a", .value = "old"},
         {.key = "b", .value = "old"}
     }));
-    std::weak_ptr<const OverlayBatch>    old      = captured->leaf->overlays.front();
-    std::shared_ptr<const PublishedPage> replacement;
+    std::weak_ptr<const OverlayBatch> old      = captured->leaf->overlays.front();
+    std::shared_ptr<const PageEntry>  replacement;
     ASSERT_TRUE(build_writeback_rebase(captured, captured, receipt(), 10, {}, &replacement).ok());
     EXPECT_FALSE(replacement->metrics.dirty);
     EXPECT_FALSE(replacement->metrics.writeback_candidate);
@@ -124,8 +124,8 @@ TEST(WritebackRebase, ChangedRouteBaseAndRunRejectWithoutPublishingOutput)
             })
                                          ->overlays.front();
         }
-        auto                                 current = dirty_page(leaf);
-        std::shared_ptr<const PublishedPage> out;
+        auto                             current = dirty_page(leaf);
+        std::shared_ptr<const PageEntry> out;
         EXPECT_EQ(build_writeback_rebase(captured, current, receipt(), 10, {}, &out).code(), Code::kUnavailable);
         EXPECT_FALSE(out);
     }
@@ -144,8 +144,8 @@ TEST(WritebackRebase, CapturedSourcesDoNotConsumeTheRetainedSuffixWindow)
     })
                             ->overlays.front();
     current_leaf->overlays.insert(current_leaf->overlays.begin(), later);
-    auto                                 current = dirty_page(current_leaf);
-    std::shared_ptr<const PublishedPage> replacement;
+    auto                             current = dirty_page(current_leaf);
+    std::shared_ptr<const PageEntry> replacement;
     auto status = build_writeback_rebase(captured, current, receipt(), 10, {}, &replacement, 1);
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_EQ(replacement->leaf->overlays.size(), 1U);
@@ -159,10 +159,10 @@ TEST(WritebackRebase, BudgetFailurePreservesCurrentAndOutput)
     auto        metadata  = credits.credits.reservation();
     const auto  remaining = metadata->available();
     ASSERT_TRUE(metadata->claim(remaining));
-    auto                                 captured = dirty_page(page({
+    auto                             captured = dirty_page(page({
         {.key = "a", .value = "old"}
     }));
-    std::shared_ptr<const PublishedPage> out;
+    std::shared_ptr<const PageEntry> out;
     EXPECT_EQ(build_writeback_rebase(captured, captured, receipt(), 10, metadata, &out).code(),
               Code::kResourceExhausted);
     EXPECT_FALSE(out);
@@ -178,12 +178,12 @@ TEST(WritebackRebase, BoundedOperationPublishesOnlyRepresentationAndDefersChange
                                        {.key = "a", .value = "old"}
         }),
                                    {}, 10);
-        auto        current = std::make_shared<PublishedTreeState>(*initial);
+        auto        current = std::make_shared<TreeRoot>(*initial);
         ASSERT_TRUE(apply_page_metrics(current->stats, nullptr, &current->mapping.get(0)->metrics));
         if (conflict) {
             auto changed = std::make_shared<PageState>(*initial->mapping.get(0)->leaf);
             ++changed->route_generation;
-            MappingView::CopyStats         copied;
+            MappingTable::CopyStats        copied;
             std::array<PageReplacement, 1> changes{
                 {{.page_id = 0, .expected = initial->mapping.get(0), .replacement = published(changed)}}};
             current->mapping = current->mapping.replace(changes, copied);
@@ -215,21 +215,21 @@ TEST(WritebackRebase, BoundedOperationPublishesOnlyRepresentationAndDefersChange
     }
 }
 
-TEST(WritebackRebase, InnerKeepsRoutingOwnerAndInstallsDurableBacking)
+TEST(WritebackRebase, InnerKeepsRoutingOwnerAndInstallsDurablePageBlock)
 {
     auto inner = std::make_shared<InnerPageState>();
     inner->children.push_back(1);
-    auto captured           = std::make_shared<PublishedPage>();
+    auto captured           = std::make_shared<PageEntry>();
     captured->level         = 1;
     captured->inner         = inner;
     captured->metrics.leaf  = false;
     captured->metrics.dirty = true;
     auto written            = receipt();
     written.type            = page_type::kInnerBase;
-    std::shared_ptr<const PublishedPage> out;
+    std::shared_ptr<const PageEntry> out;
     ASSERT_TRUE(build_writeback_rebase(captured, captured, written, 10, {}, &out).ok());
     EXPECT_EQ(out->inner, inner);
-    EXPECT_EQ(out->inner_backing, written.backing);
+    EXPECT_EQ(out->inner_page_block, written.page_block);
     EXPECT_FALSE(out->metrics.dirty);
     EXPECT_TRUE(out->metrics.evict_candidate);
 }

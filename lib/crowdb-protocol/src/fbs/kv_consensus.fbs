@@ -54,6 +54,17 @@ table FBPeerConnectionResponse {
     accepted:bool;
 }
 
+table FBPeerListenerRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+}
+
+table FBPeerListenerResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    port:uint16;
+}
+
 // ── Accepted value (table — has a payload vector) ────────────────
 table FBAcceptedValue {
     slot:uint64;

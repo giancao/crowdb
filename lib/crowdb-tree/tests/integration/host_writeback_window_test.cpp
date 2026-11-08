@@ -15,7 +15,7 @@ namespace
 struct TestHostWriteback
 {
     Config                        config;
-    std::shared_ptr<MemPageStore> store = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore> store = std::make_shared<PageMemStore>(4096);
     std::shared_ptr<TreeCore>     core;
 
     Status open()
@@ -29,7 +29,7 @@ struct TestHostWriteback
         config.frame_bytes                          = 4096;
         config.max_inline_value                     = 64;
         config.page_store                           = store.get();
-        config.backend_owner                        = store;
+        config.page_store_owner                     = store;
         config.runtime_binding.limits.io_operations = 1;
         return TreeCore::open(config, &core);
     }
@@ -186,7 +186,7 @@ TEST(HostWritebackWindow, FailedAndCancelledWindowsLeaveTheCandidateForALaterPas
     auto                   connected = stdexec::connect(operation->sender(), test_write::Receiver{.done = &done});
     stdexec::start(connected);
     test.core->binding()->cpu()->drain();
-    // Backend submission runs on a separate worker from the CPU continuation.
+    // Page store submission runs on a separate worker from the CPU continuation.
     store.wait_deferred();
     ASSERT_TRUE(store.pending);
     operation->request_stop();

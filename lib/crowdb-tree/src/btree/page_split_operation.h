@@ -17,19 +17,18 @@ struct MaintenanceOperation;
 class PageSplitOperation
 {
   public:
-    static Status               create(PublicationCoordinator &publisher, detail::FlushRuntime &runtime,
-                                       std::shared_ptr<detail::FlushRuntime::Lane> lane,
-                                       std::shared_ptr<const PublishedTreeState> view, uint64_t pid,
-                                       PageMaintenanceOperationOptions options, std::shared_ptr<PageLoader> loader,
-                                       std::shared_ptr<ApplyDispatcher> progress, std::shared_ptr<const void> resources,
-                                       TreeWorkCause cause, std::shared_ptr<PageSplitOperation> *out);
-    [[nodiscard]] static size_t control_allocation_bound() noexcept;
-    [[nodiscard]] detail::CallbackSender                           sender() noexcept;
-    void                                                           request_stop() noexcept;
-    [[nodiscard]] uint64_t                                         commit_sequence() const noexcept;
-    [[nodiscard]] uint64_t                                         l1_sequence() const noexcept;
-    [[nodiscard]] std::span<const uint64_t>                        output_leaf_pids() const noexcept;
-    [[nodiscard]] const std::shared_ptr<const PublishedTreeState> &captured_view() const noexcept;
+    static Status create(PublicationCoordinator &publisher, detail::FlushRuntime &runtime,
+                         std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<const TreeRoot> view,
+                         uint64_t pid, PageMaintenanceOperationOptions options, std::shared_ptr<PageLoader> loader,
+                         std::shared_ptr<ApplyDispatcher> progress, std::shared_ptr<const void> resources,
+                         TreeWorkCause cause, std::shared_ptr<PageSplitOperation> *out);
+    [[nodiscard]] static size_t                          control_allocation_bound() noexcept;
+    [[nodiscard]] detail::CallbackSender                 sender() noexcept;
+    void                                                 request_stop() noexcept;
+    [[nodiscard]] uint64_t                               commit_sequence() const noexcept;
+    [[nodiscard]] uint64_t                               l1_sequence() const noexcept;
+    [[nodiscard]] std::span<const uint64_t>              output_leaf_pids() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const TreeRoot> &captured_view() const noexcept;
 
   private:
     explicit PageSplitOperation(std::shared_ptr<detail::MaintenanceOperation> state,

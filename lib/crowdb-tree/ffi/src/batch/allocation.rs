@@ -18,7 +18,7 @@ pub struct OwnedAllocation {
 }
 
 impl OwnedAllocation {
-    /// Complete backing allocation capacity, not this slice's length.
+    /// Complete page block allocation capacity, not this slice's length.
     pub fn capacity(&self) -> usize {
         self.capacity
     }

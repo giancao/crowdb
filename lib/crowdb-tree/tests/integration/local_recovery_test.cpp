@@ -46,7 +46,7 @@ void write_directory(TestRecovery &test, const std::vector<DirEntry> &entries)
         test.store->device->write_at(test.anchor.snapshot_seq % 2 == 0 ? 4096 : 0, bytes.data(), bytes.size()).ok());
 }
 
-std::vector<uint64_t> read_segment(TestRecovery &test, const DirEntry &entry, SegmentImageHeader *header)
+std::vector<uint64_t> read_segment(TestRecovery &test, const DirEntry &entry, MappingSegmentImageHeader *header)
 {
     std::vector<uint8_t> bytes(round_up_to_iu(entry.image_len, 4096));
     EXPECT_TRUE(test.store->device->read_at(entry.image_addr, bytes.data(), bytes.size()).ok());
@@ -55,7 +55,7 @@ std::vector<uint64_t> read_segment(TestRecovery &test, const DirEntry &entry, Se
     return words;
 }
 
-void write_segment(TestRecovery &test, DirEntry &entry, const SegmentImageHeader &header,
+void write_segment(TestRecovery &test, DirEntry &entry, const MappingSegmentImageHeader &header,
                    const std::vector<uint64_t> &words)
 {
     std::vector<uint8_t> bytes;
@@ -113,7 +113,7 @@ TEST(LocalRecovery, ChoosesTheNewestAnchorAcrossParityRotationAndReleasesUnrelat
     EXPECT_EQ(result.latest, result.anchors[0]->pages);
     EXPECT_EQ(result.registry->snapshot_sequence(), 3U);
     EXPECT_EQ(ledger->stats().protected_ranges, 6U);
-    auto leaf = result.latest->frames.at(0).backing;
+    auto leaf = result.latest->frames.at(0).page_block;
     EXPECT_EQ(leaf->generation, 2U);
     test.original.expect_read("third");
     test.operation.reset();
@@ -169,7 +169,7 @@ TEST(LocalRecovery, RecoveredRegistryCanCommitTheNextCheckpointAndAdvanceDurable
     EXPECT_EQ(result.registry->snapshot_sequence(), 2U);
     EXPECT_EQ(result.registry->durable_coverage(), 11U);
     EXPECT_EQ(checkpoint->result().checkpoint->anchor.last_applied_slot, 11U);
-    EXPECT_EQ(checkpoint->result().checkpoint->pages->frames.at(0).backing, result.latest->frames.at(0).backing);
+    EXPECT_EQ(checkpoint->result().checkpoint->pages->frames.at(0).page_block, result.latest->frames.at(0).page_block);
     test.original.expect_read("reopened");
 }
 
@@ -180,10 +180,10 @@ TEST(LocalRecovery, SegmentGenerationIsIndependentOfTheAnchorSequence)
         test.checkpoint();
         auto entries = read_directory(test);
         ASSERT_EQ(entries.size(), 1U);
-        SegmentImageHeader header;
-        const auto         words = read_segment(test, entries[0], &header);
-        header.generation        = generation;
-        entries[0].generation    = generation;
+        MappingSegmentImageHeader header;
+        const auto                words = read_segment(test, entries[0], &header);
+        header.generation               = generation;
+        entries[0].generation           = generation;
         write_segment(test, entries[0], header, words);
         write_directory(test, entries);
         ASSERT_TRUE(recover(test).ok());
@@ -215,14 +215,34 @@ TEST(LocalRecovery, ValidAnchorWithCorruptDirectoryOrSegmentNeverFallsBackSilent
     }
 }
 
+TEST(LocalRecovery, RejectsUnsupportedAnchorVersionEvenWithoutACurrentRoot)
+{
+    for (const bool have_current_anchor : {false, true}) {
+        TestRecovery test;
+        test.checkpoint("first");
+        if (have_current_anchor) {
+            test.checkpoint("second");
+        }
+        auto anchor                     = test.anchor;
+        anchor.format_version           = snapshot::kFormatVersion - 1;
+        const auto           slot_bytes = snapshot::superblock_slot_bytes(test.store->device->iu_size());
+        const auto           slot       = anchor.snapshot_seq % 2 == 0 ? slot_bytes : 0;
+        std::vector<uint8_t> encoded;
+        snapshot::encode_anchor(anchor, slot_bytes, &encoded);
+        ASSERT_TRUE(test.store->device->write_at(slot, encoded.data(), encoded.size()).ok());
+        EXPECT_EQ(recover(test).code(), Code::kNotSupported);
+        EXPECT_FALSE(test.operation->result().latest);
+    }
+}
+
 TEST(LocalRecovery, ChecksSegmentIdentityGenerationBodyCrcAndLiveCountAgainstDirectory)
 {
     for (size_t mode = 0; mode < 4; ++mode) {
         TestRecovery test;
         test.checkpoint();
-        auto               entries = read_directory(test);
-        SegmentImageHeader header;
-        const auto         words = read_segment(test, entries.at(0), &header);
+        auto                      entries = read_directory(test);
+        MappingSegmentImageHeader header;
+        const auto                words = read_segment(test, entries.at(0), &header);
         if (mode == 0) {
             ++header.seg_idx;
         }
@@ -245,10 +265,10 @@ TEST(LocalRecovery, RejectsMappingExtentsThatOverlapProtectedMetadata)
 {
     TestRecovery test;
     test.checkpoint();
-    auto               entries = read_directory(test);
-    SegmentImageHeader header;
-    auto               words = read_segment(test, entries.at(0), &header);
-    words[0]                 = slot_word::pack_unloaded((entries[0].image_addr + 4096) / 4096, 1);
+    auto                      entries = read_directory(test);
+    MappingSegmentImageHeader header;
+    auto                      words = read_segment(test, entries.at(0), &header);
+    words[0]                        = slot_word::pack_unloaded((entries[0].image_addr + 4096) / 4096, 1);
     write_segment(test, entries[0], header, words);
     write_directory(test, entries);
     expect_corruption(test);

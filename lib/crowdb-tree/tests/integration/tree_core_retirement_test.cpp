@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/local_backend_state.h"
 #include "btree/retirement_queue.h"
 #include "btree/tree_core_access.h"
 #include "btree/tree_core_checkpoint_internal.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "page_store/local/local_page_store_state.h"
 #include "test_tmp.h"
 
 #include <gtest/gtest.h>
@@ -54,10 +54,10 @@ TEST(TreeCoreRetirement, OldPublicationRootsAreCollectedWhileTreeRemainsOpen)
 {
     Config config;
     ASSERT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
-    Crowdbtree                              tree(config);
-    auto                                   *core    = TreeCoreAccess::get(tree);
-    auto                                    old     = core->capture();
-    std::weak_ptr<const PublishedTreeState> retired = old;
+    Crowdbtree                    tree(config);
+    auto                         *core    = TreeCoreAccess::get(tree);
+    auto                          old     = core->capture();
+    std::weak_ptr<const TreeRoot> retired = old;
     old.reset();
     ASSERT_TRUE(tree.put("key", "value").ok());
     const auto flushed = tree.flush();
@@ -75,9 +75,9 @@ TEST(TreeCoreRetirement, OldPublicationRootsAreCollectedWhileTreeRemainsOpen)
 
 TEST(TreeCoreRetirement, BackgroundLocalGcSuspendsWithoutHoldingTheBackendWorker)
 {
-    tree_test::TempDir              directory("runtime_gc_retirement_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
+    tree_test::TempDir             directory("runtime_gc_retirement_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
     config.page_store  = store.get();
@@ -86,7 +86,7 @@ TEST(TreeCoreRetirement, BackgroundLocalGcSuspendsWithoutHoldingTheBackendWorker
     const auto                opened = TreeCore::open(config, &core);
     ASSERT_TRUE(opened.ok()) << opened.to_string();
     auto                                           binding = core->binding();
-    auto                                           local   = core->local_backend();
+    auto                                           local   = core->local_page_store();
     std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
     ASSERT_TRUE(core->operation_lifetime().acquire(binding->lifecycle_budget(), &ticket).ok());
 

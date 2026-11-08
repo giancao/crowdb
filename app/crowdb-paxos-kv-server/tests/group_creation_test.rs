@@ -98,7 +98,7 @@ async fn explicit_removal_keeps_the_deployment_tombstone_and_restore_cannot_recr
         PxLocalReplicaRole::Follower,
         &fixture.registry.config,
         fixture.registry.wal_backend.clone(),
-        fixture.registry.crowtree_backend,
+        fixture.registry.crowtree_store_kind,
     )
     .await;
     assert!(matches!(restored, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));

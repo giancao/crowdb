@@ -49,6 +49,7 @@ pub struct PxRpcTransport {
     rpc: Arc<RpcClient>,
     connections: ConnectionPoolIndex,
     peer_store: Option<Weak<PxKvStore>>,
+    discover_peer_listener: bool,
     next_req_id: AtomicU64,
     cluster_id: Option<String>,
     rdma_accept_prefix_bytes: usize,
@@ -136,6 +137,7 @@ impl PxRpcTransport {
             rpc,
             connections: ConnectionPoolIndex::new(pool_size, None),
             peer_store,
+            discover_peer_listener: false,
             next_req_id: AtomicU64::new(1),
             cluster_id,
             rdma_accept_prefix_bytes,
@@ -161,6 +163,9 @@ impl PxRpcTransport {
         }
         if self.peer_store.is_some() {
             return self.connect_peer(&normalized).await;
+        }
+        if self.discover_peer_listener {
+            return self.connect_snapshot_peer(&normalized).await;
         }
         self.connect_standalone(&normalized)
     }
@@ -928,10 +933,10 @@ impl PxRpcTransport {
     pub async fn send_raw_request(
         &self,
         rpc_endpoint: &str,
+        req_id: u64,
         msg_type: u16,
         control: Buffer,
     ) -> Result<crowdb_rpc_ffi::Response, PxReplicaError> {
-        let req_id = self.next_id();
         let conn = self.conn_for(rpc_endpoint).await?;
         let fut = self
             .rpc

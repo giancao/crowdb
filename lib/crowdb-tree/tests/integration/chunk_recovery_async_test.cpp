@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/scheduled_page_store.h"
 #include "common/test_tree_core_chunk.h"
+#include "page_store/local/scheduled_page_store.h"
 
 #include <future>
 
@@ -40,7 +40,7 @@ TEST(ChunkRecoveryAsync, RootAndIndexReadsReleaseTheOnlyBackendWorkerUntilTheirR
 
     std::shared_ptr<TreeRuntimeBinding> binding;
     ASSERT_TRUE(TreeRuntimeBinding::create(test.config.runtime, {}, &binding).ok());
-    MemPageStore                    memory(4096);
+    PageMemStore                    memory(4096);
     std::shared_ptr<AsyncPageStore> probe;
     ASSERT_TRUE(ScheduledPageStore::create(&memory, nullptr, {}, binding, binding->lifecycle_budget(),
                                            binding->backend_lane(), &probe)

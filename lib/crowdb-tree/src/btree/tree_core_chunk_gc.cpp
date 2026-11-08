@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_backend_state.h"
-#include "backend/chunk/chunk_collection_operation.h"
 #include "btree/allocation_account.h"
 #include "btree/tree_core_internal.h"
+#include "page_store/chunk/chunk_collection_operation.h"
+#include "page_store/chunk/page_chunk_store_state.h"
 
 namespace crowdb::tree
 {
@@ -16,8 +16,8 @@ try {
     if (ingress.owner == nullptr) {
         return Status::unavailable();
     }
-    auto backend = std::dynamic_pointer_cast<ChunkBackendState>(chunk_backend());
-    if (!backend) {
+    auto page_store_state = std::dynamic_pointer_cast<PageChunkStoreState>(page_chunk_store());
+    if (!page_store_state) {
         return Status::not_supported();
     }
     std::shared_ptr<detail::AllocationAccount> allocations;
@@ -35,8 +35,8 @@ try {
     if (!status.ok()) {
         return status;
     }
-    status = ChunkCollectionOperation::create(backend, ticket->backend(backend->store.get()), binding()->cpu(),
-                                              binding()->lane(), budget, out);
+    status = ChunkCollectionOperation::create(page_store_state, ticket->page_store(page_store_state->store.get()),
+                                              binding()->cpu(), binding()->lane(), budget, out);
     return status;
 }
 catch (const std::bad_alloc &) {

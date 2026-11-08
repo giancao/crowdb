@@ -53,8 +53,7 @@ struct TreeCore::State
     void        finish_replacement_ingress() noexcept;
     void        finish_replacement() noexcept;
     void        drain_ingress() noexcept;
-    static std::shared_ptr<PublishedTreeState>
-    empty_state(const std::shared_ptr<detail::AllocationReservation> &credit);
+    static std::shared_ptr<TreeRoot> empty_state(const std::shared_ptr<detail::AllocationReservation> &credit);
 
     struct Ingress
     {
@@ -79,9 +78,9 @@ struct TreeCore::State
     std::shared_ptr<TreeResourceMetrics>           resources;
     std::shared_ptr<TreeWorkMetrics>               work;
     std::shared_ptr<SharedPageCache>               cache;
-    std::shared_ptr<LocalBackendState>             local;
-    std::shared_ptr<CheckpointBackend>             chunk;
-    std::shared_ptr<AsyncPageStore>                backend;
+    std::shared_ptr<LocalPageStoreState>           local;
+    std::shared_ptr<CheckpointPageStore>           chunk;
+    std::shared_ptr<AsyncPageStore>                page_store;
     std::shared_ptr<AllocationBudget>              work_allocations;
     std::shared_ptr<ApplyFrontier>                 frontier;
     detail::ReservedUnique<TreeOperationLifetime>  lifetime;

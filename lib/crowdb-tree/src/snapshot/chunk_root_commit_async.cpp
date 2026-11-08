@@ -1,6 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "chunk_root_commit.h"
+#include "page_store/local/scheduled_page_store.h"
+#include "page_store/page_block_io.h"
 
 namespace crowdb::tree
 {
@@ -35,6 +37,45 @@ void ChunkRootCommit::submit_step(bool stopped, std::shared_ptr<ScheduledPageSto
         }
         auto *catalog = domain_->catalog->protection();
         switch (stage_) {
+        case Stage::Summaries: {
+            auto status = prepare_summaries();
+            if (!status.ok()) {
+                complete_step(fail(std::move(status)));
+                return;
+            }
+            auto completion = step_reply(+[](void *raw, Status result) {
+                auto &self = *static_cast<ChunkRootCommit *>(raw);
+                try {
+                    if (result.ok() && self.new_summary_pack_) {
+                        self.summary_pack_ = std::move(self.new_summary_pack_);
+                    }
+                    result = result.ok() ? self.install_summaries() : self.fail(std::move(result));
+                }
+                catch (const std::bad_alloc &) {
+                    result = self.fail(Status::resource_exhausted());
+                }
+                self.complete_step(std::move(result));
+            });
+            if (root_.summaries) {
+                detail::ChunkStageId pin;
+                detail::ChunkId      unused;
+                status = ids_->next(PagePurpose::kPageIndex, &pin, &unused);
+                if (status.ok()) {
+                    submit_pin_chunk_page_block(domain_, *root_.summaries, pin, metadata_, &summary_pack_,
+                                                std::move(completion));
+                }
+                else {
+                    completion.complete(std::move(status));
+                }
+            }
+            else if (new_summary_pack_) {
+                submit_chunk_write(*store, new_summary_pack_, summary_bytes_, window_, std::move(completion));
+            }
+            else {
+                completion.complete(Status::Ok());
+            }
+            return;
+        }
         case Stage::Begin: {
             auto status = catalog->check_read_owner();
             if (!status.ok()) {

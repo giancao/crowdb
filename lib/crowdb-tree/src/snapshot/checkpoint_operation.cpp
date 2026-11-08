@@ -10,16 +10,16 @@
 namespace crowdb::tree
 {
 Status CheckpointOperation::create(
-    std::shared_ptr<const void> owner, PublicationCoordinator &publisher, std::shared_ptr<LocalBackendState> backend,
-    std::shared_ptr<AsyncPageStore> operation_store, std::shared_ptr<detail::FlushRuntime> runtime,
-    std::shared_ptr<detail::FlushRuntime::Lane> lane, CheckpointOptions options, PageLoadBudget budget,
-    std::shared_ptr<AllocationBudget> finish_metadata, std::shared_ptr<PageLoader> loader,
-    PrepareHandoff prepare_handoff, PrepareWork prepare_work, std::shared_ptr<CheckpointOperation> *out,
-    PrepareCleanup prepare_cleanup, PrepareWorkAsync prepare_work_async, PrepareCleanup on_terminal,
-    PrepareCleanup cancel_work, std::shared_ptr<CheckpointBackend> chunk, PrepareStructure prepare_structure,
-    CheckpointOperation::AfterFlush flush_result)
+    std::shared_ptr<const void> owner, PublicationCoordinator &publisher,
+    std::shared_ptr<LocalPageStoreState> local_page_store, std::shared_ptr<AsyncPageStore> operation_store,
+    std::shared_ptr<detail::FlushRuntime> runtime, std::shared_ptr<detail::FlushRuntime::Lane> lane,
+    CheckpointOptions options, PageLoadBudget budget, std::shared_ptr<AllocationBudget> finish_metadata,
+    std::shared_ptr<PageLoader> loader, PrepareHandoff prepare_handoff, PrepareWork prepare_work,
+    std::shared_ptr<CheckpointOperation> *out, PrepareCleanup prepare_cleanup, PrepareWorkAsync prepare_work_async,
+    PrepareCleanup on_terminal, PrepareCleanup cancel_work, std::shared_ptr<CheckpointPageStore> chunk,
+    PrepareStructure prepare_structure, CheckpointOperation::AfterFlush flush_result)
 {
-    const bool local_valid = backend && backend->ledger && backend->checkpoints;
+    const bool local_valid = local_page_store && local_page_store->ledger && local_page_store->checkpoints;
     const bool chunk_valid = chunk && chunk->supported();
     if ((options.mode != CheckpointMode::Durable && options.mode != CheckpointMode::Writeback) ||
         local_valid == chunk_valid || !operation_store || !runtime || !lane ||
@@ -40,7 +40,7 @@ Status CheckpointOperation::create(
     if ((options.mode == CheckpointMode::Durable &&
          (options.write.frames.selected_page || options.select_oldest_page)) ||
         (options.select_oldest_page && options.write.frames.selected_page) ||
-        options.write.write.iu_size != (chunk ? chunk->iu_size : backend->ledger->limits().iu_size) ||
+        options.write.write.iu_size != (chunk ? chunk->iu_size : local_page_store->ledger->limits().iu_size) ||
         options.write.write.chunk_backed != chunk_valid || !PageWriteOperation::allocation_bound(options.write.write) ||
         options.write.frames.plan_only ||
         options.write.frames.encode.frame_bytes > options.write.write.max_frame_bytes ||
@@ -48,7 +48,8 @@ Status CheckpointOperation::create(
         options.metadata.max_segments == 0) {
         return Status::invalid_argument("checkpoint requires matching bounded page geometry");
     }
-    if (chunk ? chunk->needs_recovery.load(std::memory_order_acquire) : backend->checkpoints->needs_recovery()) {
+    if (chunk ? chunk->needs_recovery.load(std::memory_order_acquire)
+              : local_page_store->checkpoints->needs_recovery()) {
         return Status::unavailable();
     }
     try {
@@ -57,7 +58,7 @@ Status CheckpointOperation::create(
         }
         auto state                = detail::reserved_shared<State>(budget.bytes, publisher);
         state->owner              = std::move(owner);
-        state->backend            = std::move(backend);
+        state->local_page_store   = std::move(local_page_store);
         state->chunk              = std::move(chunk);
         state->chunk_wal_offset   = state->chunk ? state->chunk->requested_wal_offset() : 0;
         state->store              = std::move(operation_store);
@@ -106,7 +107,7 @@ size_t CheckpointOperation::control_allocation_bound() noexcept
     using detail::shared_allocation_bound;
     return shared_allocation_bound<State>() + shared_allocation_bound<CheckpointOperation>() +
            shared_allocation_bound<PublicationRequest>() + shared_allocation_bound<InstallRecord>() +
-           (4 * shared_allocation_bound<PublishedTreeState>()) + (3 * PublishedSources::allocation_bound()) +
+           (4 * shared_allocation_bound<TreeRoot>()) + (3 * PublishedSources::allocation_bound()) +
            PublicationCoordinator::empty_commit_reserve_bytes() + shared_allocation_bound<SnapshotBaseline>();
 }
 
@@ -214,10 +215,10 @@ void CheckpointOperation::State::finish(Status status) noexcept
         record_work(publisher.work_metrics(), TreeWorkCounter::CheckpointFailures, 1, options.cause);
     }
     if (!report.durable_committed) {
-        report.durable_coverage =
-            chunk ? chunk->durable_coverage.load(std::memory_order_acquire) : backend->checkpoints->durable_coverage();
+        report.durable_coverage  = chunk ? chunk->durable_coverage.load(std::memory_order_acquire)
+                                         : local_page_store->checkpoints->durable_coverage();
         report.snapshot_sequence = chunk ? chunk->snapshot_sequence.load(std::memory_order_acquire)
-                                         : backend->checkpoints->snapshot_sequence();
+                                         : local_page_store->checkpoints->snapshot_sequence();
     }
     view.reset();
     capture_request.reset();

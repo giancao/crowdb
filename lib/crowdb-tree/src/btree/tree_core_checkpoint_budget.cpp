@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
-#include "backend/local/block_account.h"
 #include "btree/tree_core_checkpoint_internal.h"
+#include "page_store/checkpoint_page_store.h"
+#include "page_store/local/block_account.h"
 
 #include <algorithm>
 #include <bit>
@@ -35,19 +35,19 @@ CheckpointOptions defaults(const TreeCore &core)
         config.max_inline_value != 0 ? config.max_inline_value : config.frame_bytes / 4;
     options.write.write.max_frame_bytes = config.frame_bytes;
     options.write.write.compression     = config.compression;
-    if (core.local_backend()) {
-        options.write.write.iu_size          = core.local_backend()->ledger->limits().iu_size;
+    if (core.local_page_store()) {
+        options.write.write.iu_size          = core.local_page_store()->ledger->limits().iu_size;
         options.write.write.buffer_alignment = std::bit_ceil(std::max<size_t>(4096, options.write.write.iu_size));
     }
-    if (core.chunk_backend()) {
+    if (core.page_chunk_store()) {
         options.write.write.chunk_backed     = true;
-        options.write.write.iu_size          = core.chunk_backend()->iu_size;
+        options.write.write.iu_size          = core.page_chunk_store()->iu_size;
         options.write.write.buffer_alignment = std::bit_ceil(std::max<size_t>(4096, options.write.write.iu_size));
     }
     return options;
 }
 
-Status Preparation::work(const PublishedTreeState &view, const CapturedWritePlan *plan, CheckpointWork *out)
+Status Preparation::work(const TreeRoot &view, const CapturedWritePlan *plan, CheckpointWork *out)
 {
     if (out == nullptr || !work_allocations || !view.mapping.get(view.root_page_id) ||
         (plan != nullptr && plan->reused_primary_frames > plan->primary_frames)) {
@@ -61,8 +61,8 @@ Status Preparation::work(const PublishedTreeState &view, const CapturedWritePlan
                                 .cpu_progress = cpu_progress,
                                 .cause        = options.cause};
     out->loader              = detail::reserved_shared<AsyncStorePageLoader>(
-        work_allocations, ticket->backend(core->async_backend()), core->binding()->cpu(), core->binding()->lane(),
-        loads, OverflowBackingResolver{}, out->budget);
+        work_allocations, ticket->page_store(core->async_page_store()), core->binding()->cpu(), core->binding()->lane(),
+        loads, OverflowPageBlockResolver{}, out->budget);
     out->owner = work_allocations;
     return Status::Ok();
 }

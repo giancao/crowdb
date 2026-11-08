@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "crowdb-tree/backend/async_page_store.h"
+#include "crowdb-tree/page_store/async_page_store.h"
 
 #include <memory>
 #include <type_traits>
@@ -12,7 +12,7 @@
 namespace crowdb::tree::detail
 {
 
-// Transitional owner for existing tree continuations. The backend boundary
+// Transitional owner for existing tree continuations. The page store boundary
 // receives only the fixed token; each completion destroys its callable before
 // invoking it. New sender operation states pass their own address directly and
 // do not use this adapter.

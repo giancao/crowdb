@@ -105,11 +105,11 @@ TEST(MemTableBudget, FirstKeyAndOverwriteEachAllocateOnceAndReleaseTheOldPayload
     {
         auto registration = epoch.enter();
     }
-    auto            table    = std::make_unique<MemTable>(1, &epoch, budget);
-    const auto      value    = std::string(4096, 'a');
-    auto            cell     = encode_cell_buf(1, OpKind::kPut, value);
-    const auto      capacity = cell.capacity();
-    const auto     *backing  = cell.data();
+    auto            table      = std::make_unique<MemTable>(1, &epoch, budget);
+    const auto      value      = std::string(4096, 'a');
+    auto            cell       = encode_cell_buf(1, OpKind::kPut, value);
+    const auto      capacity   = cell.capacity();
+    const auto     *page_block = cell.data();
     AllocationLease payload(budget, capacity, AllocationKind::kPayload);
 
     budget->fail_after = 1;
@@ -123,14 +123,14 @@ TEST(MemTableBudget, FirstKeyAndOverwriteEachAllocateOnceAndReleaseTheOldPayload
         auto cursor = table->prefix_cursor(1);
         ASSERT_TRUE(cursor.valid());
         owner = cursor.cell_owner();
-        EXPECT_EQ(owner->cell.data(), backing);
+        EXPECT_EQ(owner->cell.data(), page_block);
         key_storage = cursor.key().data();
     }
 
-    const auto  next_value   = std::string(4096, 'b');
-    auto        next_cell    = encode_cell_buf(2, OpKind::kPut, next_value);
-    const auto *next_backing = next_cell.data();
-    budget->fail_after       = 1;
+    const auto  next_value      = std::string(4096, 'b');
+    auto        next_cell       = encode_cell_buf(2, OpKind::kPut, next_value);
+    const auto *next_page_block = next_cell.data();
+    budget->fail_after          = 1;
     AllocationLease next_payload(budget, next_cell.capacity(), AllocationKind::kPayload);
     budget->fail_after = 1;
     auto second        = table->prepare_write("key", std::move(next_cell), 0, std::move(next_payload), 2, budget);
@@ -146,7 +146,7 @@ TEST(MemTableBudget, FirstKeyAndOverwriteEachAllocateOnceAndReleaseTheOldPayload
         auto cursor = table->prefix_cursor(2);
         ASSERT_TRUE(cursor.valid());
         EXPECT_EQ(cursor.key().data(), key_storage);
-        EXPECT_EQ(cursor.cell_version()->cell.data(), next_backing);
+        EXPECT_EQ(cursor.cell_version()->cell.data(), next_page_block);
         EXPECT_EQ(CellView(cursor.cell_version()->cell.slice()).value().to_string(), next_value);
     }
     table.reset();

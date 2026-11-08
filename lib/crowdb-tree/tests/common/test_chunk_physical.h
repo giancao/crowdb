@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #pragma once
-#include "backend/chunk/chunk_physical_registry.h"
 #include "btree/retirement_queue.h"
 #include "btree/tree_metrics.h"
+#include "page_store/chunk/chunk_physical_registry.h"
 #include "runtime/bootstrap_budget.h"
 
 #include <gtest/gtest.h>

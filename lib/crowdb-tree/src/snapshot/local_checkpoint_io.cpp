@@ -52,7 +52,7 @@ void LocalCheckpointOperation::State::io(bool barrier, uint64_t address, size_t 
                              .cause       = budget.cause};
     Status          status;
     // A callback may finish the operation on another worker after submit
-    // returns; keep the backend itself alive across the entire call.
+    // returns; keep the page store itself alive across the entire call.
     auto backend = store;
     try {
         if (barrier) {

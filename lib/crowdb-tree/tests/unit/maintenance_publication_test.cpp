@@ -31,8 +31,8 @@ PublicationResult publish_maintenance(PublicationCoordinator &publisher, Publica
     return result.get();
 }
 
-std::shared_ptr<PublishedPage> maintenance_leaf(std::vector<std::string> keys, size_t value_bytes,
-                                                PageKeyRange range = {}, uint64_t sibling = kInvalidPageId)
+std::shared_ptr<PageEntry> maintenance_leaf(std::vector<std::string> keys, size_t value_bytes, PageKeyRange range = {},
+                                            uint64_t sibling = kInvalidPageId)
 {
     auto logical               = std::make_shared<PageState>();
     logical->range             = std::move(range);
@@ -49,7 +49,7 @@ std::shared_ptr<PublishedPage> maintenance_leaf(std::vector<std::string> keys, s
     std::shared_ptr<const OverlayBatch> run;
     EXPECT_TRUE(builder.finish(1, &run).ok());
     logical->overlays.push_back(std::move(run));
-    auto page                     = std::make_shared<PublishedPage>();
+    auto page                     = std::make_shared<PageEntry>();
     page->revision                = 1;
     page->leaf                    = std::move(logical);
     page->metrics.dirty           = true;
@@ -58,13 +58,13 @@ std::shared_ptr<PublishedPage> maintenance_leaf(std::vector<std::string> keys, s
     return page;
 }
 
-std::shared_ptr<PublishedPage> maintenance_inner(std::vector<uint64_t> children, std::vector<std::string> separators,
-                                                 uint32_t level = 1)
+std::shared_ptr<PageEntry> maintenance_inner(std::vector<uint64_t> children, std::vector<std::string> separators,
+                                             uint32_t level = 1)
 {
     auto inner = std::make_shared<InnerPageState>();
     inner->children.assign(children.begin(), children.end());
     inner->separators.assign(separators.begin(), separators.end());
-    auto page          = std::make_shared<PublishedPage>();
+    auto page          = std::make_shared<PageEntry>();
     page->revision     = 1;
     page->level        = level;
     page->inner        = std::move(inner);
@@ -84,7 +84,7 @@ MaintenancePublicationOptions maintenance_limits()
     return options;
 }
 
-std::shared_ptr<const PublishedPage> route(const PublishedTreeState &view, const std::string &key)
+std::shared_ptr<const PageEntry> route(const TreeRoot &view, const std::string &key)
 {
     auto page = view.mapping.get(view.root_page_id);
     for (size_t depth = 0; depth < 64 && page && page->inner; ++depth) {
@@ -103,7 +103,7 @@ std::shared_ptr<const PublishedPage> route(const PublishedTreeState &view, const
     return page;
 }
 
-void seed_leaf(PublicationCoordinator &publisher, const std::shared_ptr<PublishedPage> &page)
+void seed_leaf(PublicationCoordinator &publisher, const std::shared_ptr<PageEntry> &page)
 {
     EXPECT_TRUE(publish_maintenance(publisher, {.record       = maintenance_record(0),
                                                 .pages        = {{.page_id = 0, .expected = {}, .replacement = page}},
@@ -291,7 +291,7 @@ TEST(MaintenancePublication, StaleLeafPlanCannotPublishAnyOfItsStructuralChanges
     seed_leaf(publisher, original);
     auto plan = build_split_publication(publisher.capture(), 0, maintenance_record(1), maintenance_limits());
     ASSERT_TRUE(plan.status.ok());
-    auto newer = std::make_shared<PublishedPage>(*original);
+    auto newer = std::make_shared<PageEntry>(*original);
     ++newer->revision;
     ASSERT_TRUE(publish_maintenance(publisher, {.record = maintenance_record(2),
                                                 .pages  = {{.page_id = 0, .expected = original, .replacement = newer}}})

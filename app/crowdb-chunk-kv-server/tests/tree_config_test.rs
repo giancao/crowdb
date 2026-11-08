@@ -82,11 +82,11 @@ fn configured_native_engine_and_shared_runtime_are_used() {
 
 #[test]
 fn configured_chunk_tree_survives_range_rebuild() {
-    use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
+    use crowdb_tree_ffi::chunk::test_util::TestPageChunkStore;
 
     let config = load(&CANONICAL.replace("max_key_size = 0", "max_key_size = 4")).unwrap();
-    let source_backend = TestChunkBackend::new(84, 1).unwrap();
-    let child_backend = TestChunkBackend::new(85, 1).unwrap();
+    let source_backend = TestPageChunkStore::new(84, 1).unwrap();
+    let child_backend = TestPageChunkStore::new(85, 1).unwrap();
     let source_options = crowdb_tree_ffi::Config {
         runtime: Some(source_backend.runtime.clone()),
         page_store: Some(source_backend.page_store(0).unwrap()),

@@ -43,8 +43,8 @@ Node *ConcurrentSkipList::construct_node(void *storage, uint32_t height, Slice k
     n->height_  = height;
     n->key_len_ = static_cast<uint32_t>(key.size());
     n->destroy  = [](EpochManager::Deferred *entry) noexcept {
-        auto *node    = static_cast<Node *>(entry);
-        auto  backing = std::move(node->shared_allocation);
+        auto *node       = static_cast<Node *>(entry);
+        auto  page_block = std::move(node->shared_allocation);
         destroy_node(node);
     };
     // Construct the tower (next_[0..height-1]) with placement new.

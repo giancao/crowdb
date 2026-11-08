@@ -78,7 +78,7 @@ pub struct ReadOnlyTreeView {
 }
 
 // SAFETY: the native handle owns an immutable mapping; each read has independent
-// paid operation state and backend ownership. Destruction follows host ownership.
+// paid operation state and page store ownership. Destruction follows host ownership.
 unsafe impl Send for ReadOnlyTreeView {}
 unsafe impl Sync for ReadOnlyTreeView {}
 
@@ -92,7 +92,7 @@ impl Crowdbtree {
     /// Capture exactly the expected completed L1 coverage. A nonzero sequence
     /// also requires the current durable sequence and coverage to match.
     /// # Errors
-    /// Rejects changed coverage, unsupported backends, or unavailable budget.
+    /// Rejects changed coverage, unsupported page stores, or unavailable budget.
     pub fn read_only_view(&self, sequence: u64, coverage: u64) -> Result<ReadOnlyTreeView, CtError> {
         let mut raw = std::ptr::null_mut();
         check(unsafe { sys::ct_read_only_view_capture(self.as_ptr(), sequence, coverage, &mut raw) })?;

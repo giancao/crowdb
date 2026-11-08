@@ -22,14 +22,14 @@ Status ChunkRootRecovery::dependencies()
             return Status::corruption();
         }
         if (!overflow_) {
-            overflow_         = detail::reserved_shared<OverflowBackingSet>(metadata_, metadata_);
-            auto owner        = detail::reserved_shared<LeafProtection>(metadata_);
-            owner->primary    = leaf.backing->physical_owner;
-            owner->overflow   = overflow_;
-            auto backing      = detail::reserved_shared<BackingRef>(metadata_, *leaf.backing);
-            backing->owner    = std::move(owner);
-            backing->overflow = overflow_;
-            leaf.backing      = std::move(backing);
+            overflow_            = detail::reserved_shared<OverflowPageBlockSet>(metadata_, metadata_);
+            auto owner           = detail::reserved_shared<LeafProtection>(metadata_);
+            owner->primary       = leaf.page_block->physical_owner;
+            owner->overflow      = overflow_;
+            auto page_block      = detail::reserved_shared<PageBlockRef>(metadata_, *leaf.page_block);
+            page_block->owner    = std::move(owner);
+            page_block->overflow = overflow_;
+            leaf.page_block      = std::move(page_block);
         }
         if (pid_ == kInvalidPageId) {
             const auto &ref = (*leaf.stored_overflow)[reference_];
@@ -49,11 +49,11 @@ Status ChunkRootRecovery::dependencies()
             (frame.next_overflow == kInvalidPageId) != (frame.overflow_bytes == remaining_)) {
             return Status::corruption();
         }
-        overflow_->pages.emplace(pid_, OverflowBackingPage{.backing       = frame.backing,
-                                                           .next          = frame.next_overflow,
-                                                           .bytes         = frame.overflow_bytes,
-                                                           .frame_bytes   = frame.frame_bytes,
-                                                           .logical_bytes = frame.logical_bytes});
+        overflow_->pages.emplace(pid_, OverflowPageBlock{.page_block    = frame.page_block,
+                                                         .next          = frame.next_overflow,
+                                                         .bytes         = frame.overflow_bytes,
+                                                         .frame_bytes   = frame.frame_bytes,
+                                                         .logical_bytes = frame.logical_bytes});
         ++steps_;
         remaining_ -= frame.overflow_bytes;
         pid_ = frame.next_overflow;

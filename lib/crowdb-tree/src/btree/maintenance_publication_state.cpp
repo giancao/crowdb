@@ -7,10 +7,9 @@
 
 namespace crowdb::tree::detail
 {
-MaintenanceBuilder::MaintenanceBuilder(std::shared_ptr<const PublishedTreeState> captured,
-                                       std::shared_ptr<InstallRecord>            record,
-                                       const MaintenancePublicationOptions      &limits,
-                                       InlineFunction<Status(uint64_t *)>        allocate)
+MaintenanceBuilder::MaintenanceBuilder(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<InstallRecord> record,
+                                       const MaintenancePublicationOptions &limits,
+                                       InlineFunction<Status(uint64_t *)>   allocate)
     : view(std::move(captured)),
       options(limits),
       allocate_(std::move(allocate)),
@@ -34,7 +33,7 @@ Status MaintenanceBuilder::validate() const
     return Status::Ok();
 }
 
-std::shared_ptr<const PublishedPage> MaintenanceBuilder::lookup(uint64_t pid) const
+std::shared_ptr<const PageEntry> MaintenanceBuilder::lookup(uint64_t pid) const
 {
     const auto changed = changes_.find(pid);
     return changed == changes_.end() ? view->mapping.get(pid) : changed->second.replacement;
@@ -45,14 +44,14 @@ Status MaintenanceBuilder::allocate_pid(uint64_t *pid)
     if (allocate_) {
         return allocate_(pid);
     }
-    if (next_pid_ >= MappingView::kPageLimit) {
+    if (next_pid_ >= MappingTable::kPageLimit) {
         return Status::resource_exhausted("maintenance PID space exhausted");
     }
     *pid = next_pid_++;
     return Status::Ok();
 }
 
-Status MaintenanceBuilder::replace(uint64_t pid, std::shared_ptr<const PublishedPage> replacement)
+Status MaintenanceBuilder::replace(uint64_t pid, std::shared_ptr<const PageEntry> replacement)
 {
     const auto expected = view->mapping.get(pid);
     if (!expected && !replacement) {
@@ -89,10 +88,11 @@ Status summarize_leaf(const std::shared_ptr<const PageState> &page, const PageMa
     if (cursor.needs_base().has_value()) {
         return Status::unavailable("exact maintenance summary still needs a base");
     }
-    metrics->kv_known = true;
-    metrics->kv_count = 0;
-    metrics->kv_bytes = 0;
-    size_t visited    = 0;
+    metrics->kv_known  = true;
+    metrics->kv_count  = 0;
+    metrics->kv_bytes  = 0;
+    metrics->key_bytes = 0;
+    size_t visited     = 0;
     while (cursor.valid()) {
         if (++visited > limits.max_work_entries) {
             return Status::resource_exhausted("maintenance summary work bound exhausted");
@@ -109,6 +109,7 @@ Status summarize_leaf(const std::shared_ptr<const PageState> &page, const PageMa
             }
             ++metrics->kv_count;
             metrics->kv_bytes += value_bytes + cursor.key().size();
+            metrics->key_bytes += cursor.key().size();
         }
         cursor.next();
     }
@@ -121,7 +122,7 @@ Status summarize_leaf(const std::shared_ptr<const PageState> &page, const PageMa
     return Status::Ok();
 }
 
-Status MaintenanceBuilder::make_leaf(uint64_t pid, const std::shared_ptr<const PublishedPage> &old,
+Status MaintenanceBuilder::make_leaf(uint64_t pid, const std::shared_ptr<const PageEntry> &old,
                                      std::shared_ptr<const PageState> logical, std::optional<size_t> exact_bytes,
                                      std::shared_ptr<const void> second_owner, const LeafLayoutStats *stats,
                                      size_t removed_primary_bytes)
@@ -130,7 +131,7 @@ Status MaintenanceBuilder::make_leaf(uint64_t pid, const std::shared_ptr<const P
     if (previous && previous->revision == UINT64_MAX) {
         return Status::resource_exhausted("leaf revision exhausted");
     }
-    auto page              = reserved_shared<PublishedPage>(options.metadata);
+    auto page              = reserved_shared<PageEntry>(options.metadata);
     page->revision         = previous ? previous->revision + 1 : 1;
     page->leaf             = std::move(logical);
     page->allocation_owner = old->allocation_owner;
@@ -147,9 +148,10 @@ Status MaintenanceBuilder::make_leaf(uint64_t pid, const std::shared_ptr<const P
         metrics.page_size_bytes          = *exact_bytes;
         metrics.page_size_estimate_bytes = *exact_bytes;
         if (stats != nullptr) {
-            metrics.kv_known = true;
-            metrics.kv_count = stats->kv_count;
-            metrics.kv_bytes = stats->kv_bytes;
+            metrics.kv_known  = true;
+            metrics.kv_count  = stats->kv_count;
+            metrics.kv_bytes  = stats->kv_bytes;
+            metrics.key_bytes = stats->key_bytes;
         }
         else {
             auto status = summarize_leaf(page->leaf, options.pages, &metrics);

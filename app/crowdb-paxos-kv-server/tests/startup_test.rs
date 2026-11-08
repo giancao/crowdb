@@ -8,7 +8,7 @@ use crowdb_paxos_kv::cluster::group::ProposeResult;
 use crowdb_paxos_kv::cluster::group_election::LeaderElection;
 use crowdb_paxos_kv::cluster::local_replica::PxLocalReplicaRole;
 use crowdb_paxos_kv::common::config::{PaxosKvConfig, WalConfig};
-use crowdb_paxos_kv::kv::CrowdbTreeBackend;
+use crowdb_paxos_kv::kv::CrowdbTreeStoreKind;
 use crowdb_paxos_kv::paxos::roles::{PxBallot, PxLogEntry};
 use crowdb_paxos_kv::wal::record::WALRecord;
 use crowdb_paxos_kv::wal::replay::replay_group;
@@ -52,7 +52,7 @@ async fn incomplete_group_creation_retains_replica_identity_before_wal_is_discov
         PxLocalReplicaRole::Leader,
         &config,
         Arc::new(IoBackend::detect()),
-        CrowdbTreeBackend::MemBlock,
+        CrowdbTreeStoreKind::Mem,
     )
     .await;
     assert!(result.is_err());
@@ -91,7 +91,7 @@ async fn restore_rejects_corrupt_node_config_instead_of_using_cli_replica() {
         PxLocalReplicaRole::Follower,
         &config,
         backend,
-        CrowdbTreeBackend::MemBlock,
+        CrowdbTreeStoreKind::Mem,
     )
     .await
     .unwrap();
@@ -134,7 +134,7 @@ async fn startup_passes_wal_segment_tuning_to_the_group_writer() {
         PxLocalReplicaRole::Follower,
         &config,
         Arc::new(IoBackend::detect()),
-        CrowdbTreeBackend::MemBlock,
+        CrowdbTreeStoreKind::Mem,
     )
     .await
     .unwrap();
@@ -231,7 +231,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowdbTreeBackend::MemBlock,
+        CrowdbTreeStoreKind::Mem,
     )
     .await
     .unwrap();
@@ -296,7 +296,7 @@ async fn create_group_with_wal_crowdb_tree_block_backend_persists_across_restart
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowdbTreeBackend::Block,
+        CrowdbTreeStoreKind::Disk,
     )
     .await
     .unwrap();
@@ -333,7 +333,7 @@ async fn create_group_with_wal_crowdb_tree_block_backend_persists_across_restart
         .unwrap()
         .handle();
     let close = tree.close_result().unwrap();
-    let release = tree.backend_release_service().unwrap();
+    let release = tree.page_store_release_service().unwrap();
     drop(tree);
     drop(group);
     close.wait().await.unwrap();
@@ -346,7 +346,7 @@ async fn create_group_with_wal_crowdb_tree_block_backend_persists_across_restart
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowdbTreeBackend::Block,
+        CrowdbTreeStoreKind::Disk,
     )
     .await
     .unwrap();

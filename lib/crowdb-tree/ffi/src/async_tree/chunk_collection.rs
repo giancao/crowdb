@@ -28,7 +28,7 @@ impl AsyncCrowdbtree {
     /// Continue one finite sweep on this Tree's paid backend lane. Busy or
     /// rejected admission is outer `Err`; accepted progress includes its status.
     /// # Errors
-    /// Returns admission, unsupported-backend, or malformed native result errors.
+    /// Returns admission, unsupported-page store, or malformed native result errors.
     pub async fn collect_chunk_storage(&self) -> Result<ChunkCollectionReport, CtError> {
         let future = {
             let mut raw = std::ptr::null_mut();

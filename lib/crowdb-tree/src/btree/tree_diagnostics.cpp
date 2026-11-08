@@ -62,6 +62,8 @@ TreeSummary Crowdbtree::tree_summary() const
     result.root_version                  = state->commit_seq;
     result.covered_slot                  = state->coverage;
     result.live_kv                       = state->stats.kv_known_count;
+    result.live_key_bytes                = state->stats.key_known_bytes;
+    result.live_value_bytes              = state->stats.kv_known_bytes - result.live_key_bytes;
     result.live_logical_bytes            = state->stats.kv_known_bytes;
     result.reachable_leaf_pages          = state->stats.leaf_pages;
     result.reachable_inner_pages         = state->stats.inner_pages;
@@ -77,9 +79,9 @@ ScanProfile Crowdbtree::scan_profile() const
     return {};
 }
 
-void Crowdbtree::init_metrics(const std::string &prefix, const std::string &backend_label)
+void Crowdbtree::init_metrics(const std::string &prefix, const std::string &page_store_label)
 {
-    (void)backend_label;
+    (void)page_store_label;
     init_core_metrics(prefix);
 }
 

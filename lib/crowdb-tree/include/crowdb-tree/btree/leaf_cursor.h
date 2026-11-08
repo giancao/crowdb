@@ -45,26 +45,21 @@ class LeafChainCursor
     void reset(PageBase *head, uint64_t gc_floor)
     {
         sources_.clear();
-        inframe_order_.clear();
         gc_floor_ = gc_floor;
         valid_    = false;
-        // Rank encodes the position at which a source's entries were visited by
-        // the original fold (BatchDeltas head->tail, then the base's main
-        // entries, then the base's in-frame overlay), so an equal-slot tie can
-        // be broken the same way: lowest rank -- i.e. first visited -- wins.
+        // The first source in chain order wins an equal-slot tie.
         uint32_t node = 0;
         for (PageBase *n = head; n != nullptr; n = n->next, ++node) {
             if (n->type == page_type::kBatchDelta) {
                 const auto &entries = static_cast<BatchDelta *>(n)->entries();
                 if (!entries.empty()) {
                     sources_.push_back({
-                        .kind          = SourceKind::kDelta,
-                        .delta         = &entries,
-                        .leaf          = nullptr,
-                        .inframe_begin = 0,
-                        .idx           = 0,
-                        .count         = static_cast<uint32_t>(entries.size()),
-                        .rank          = 2 * node,
+                        .kind  = SourceKind::kDelta,
+                        .delta = &entries,
+                        .leaf  = nullptr,
+                        .idx   = 0,
+                        .count = static_cast<uint32_t>(entries.size()),
+                        .rank  = node,
                     });
                 }
             }
@@ -73,26 +68,12 @@ class LeafChainCursor
                 LeafFrameView v    = leaf->view();
                 if (v.count() > 0) {
                     sources_.push_back({
-                        .kind          = SourceKind::kBase,
-                        .delta         = nullptr,
-                        .leaf          = leaf,
-                        .inframe_begin = 0,
-                        .idx           = 0,
-                        .count         = v.count(),
-                        .rank          = 2 * node,
-                    });
-                }
-                if (v.delta_count() > 0) {
-                    auto begin = static_cast<uint32_t>(inframe_order_.size());
-                    sort_inframe(v);
-                    sources_.push_back({
-                        .kind          = SourceKind::kInframe,
-                        .delta         = nullptr,
-                        .leaf          = leaf,
-                        .inframe_begin = begin,
-                        .idx           = 0,
-                        .count         = static_cast<uint32_t>(inframe_order_.size()) - begin,
-                        .rank          = (2 * node) + 1,
+                        .kind  = SourceKind::kBase,
+                        .delta = nullptr,
+                        .leaf  = leaf,
+                        .idx   = 0,
+                        .count = v.count(),
+                        .rank  = node,
                     });
                 }
             }
@@ -169,19 +150,16 @@ class LeafChainCursor
     }
 
   private:
-    enum class SourceKind : uint8_t { kDelta, kBase, kInframe };
+    enum class SourceKind : uint8_t { kDelta, kBase };
 
-    // One key-sorted, key-unique stream of the chain. kInframe indexes
-    // inframe_order_ rather than the frame's delta slots directly.
     struct Source
     {
-        SourceKind                     kind          = SourceKind::kDelta;
-        const std::vector<leaf_entry> *delta         = nullptr;
-        const LeafBase                *leaf          = nullptr;
-        uint32_t                       inframe_begin = 0;
-        uint32_t                       idx           = 0;
-        uint32_t                       count         = 0;
-        uint32_t                       rank          = 0;
+        SourceKind                     kind  = SourceKind::kDelta;
+        const std::vector<leaf_entry> *delta = nullptr;
+        const LeafBase                *leaf  = nullptr;
+        uint32_t                       idx   = 0;
+        uint32_t                       count = 0;
+        uint32_t                       rank  = 0;
     };
 
     [[nodiscard]] Slice key_at(const Source &s, uint32_t i) const
@@ -191,8 +169,6 @@ class LeafChainCursor
             return {(*s.delta)[i].key};
         case SourceKind::kBase:
             return s.leaf->view().key(i);
-        case SourceKind::kInframe:
-            return s.leaf->view().delta_key(inframe_order_[s.inframe_begin + i]);
         }
         return {};
     }
@@ -204,8 +180,6 @@ class LeafChainCursor
             return Slice((*s.delta)[i].cell);
         case SourceKind::kBase:
             return s.leaf->view().cell(i);
-        case SourceKind::kInframe:
-            return s.leaf->view().delta_cell(inframe_order_[s.inframe_begin + i]);
         }
         return {};
     }
@@ -243,36 +217,6 @@ class LeafChainCursor
             }
         }
         return lo;
-    }
-
-    // The in-frame overlay (PT12) is appended in slot order, so it is the only
-    // unsorted -- and the only key-duplicating -- input. Sort its indices by
-    // key (ties keeping append order) and keep one winner per key, matching the
-    // fold's rule: highest slot, equal slot resolved by the lower index.
-    // Bounded by Config::max_inframe_delta (default 8).
-    void sort_inframe(const LeafFrameView &v)
-    {
-        size_t   begin = inframe_order_.size();
-        uint32_t dc    = v.delta_count();
-        inframe_order_.reserve(begin + dc);
-        for (uint32_t i = 0; i < dc; ++i) {
-            inframe_order_.push_back(i);
-        }
-        auto first = inframe_order_.begin() + static_cast<ptrdiff_t>(begin);
-        std::stable_sort(first, inframe_order_.end(),
-                         [&v](uint32_t a, uint32_t b) { return v.delta_key(a).compare(v.delta_key(b)) < 0; });
-        size_t out = begin;
-        for (size_t i = begin; i < inframe_order_.size(); ++i) {
-            if (out > begin && v.delta_key(inframe_order_[out - 1]).compare(v.delta_key(inframe_order_[i])) == 0) {
-                if (CellView{v.delta_cell(inframe_order_[i])}.slot() >
-                    CellView{v.delta_cell(inframe_order_[out - 1])}.slot()) {
-                    inframe_order_[out - 1] = inframe_order_[i];
-                }
-                continue;
-            }
-            inframe_order_[out++] = inframe_order_[i];
-        }
-        inframe_order_.resize(out);
     }
 
     // Produce the next live entry: smallest key across the source heads, then
@@ -376,12 +320,11 @@ class LeafChainCursor
         }
     }
 
-    std::vector<Source>   sources_;
-    std::vector<uint32_t> inframe_order_;
-    uint64_t              gc_floor_ = 0;
-    Slice                 key_;
-    Slice                 cell_;
-    bool                  valid_ = false;
+    std::vector<Source> sources_;
+    uint64_t            gc_floor_ = 0;
+    Slice               key_;
+    Slice               cell_;
+    bool                valid_ = false;
 };
 
 } // namespace crowdb::tree

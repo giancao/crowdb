@@ -58,7 +58,7 @@ template <class Key> std::optional<std::string> resident_hint(size_t count, Key 
     return begin < end ? std::optional(key(begin + ((end - begin) / 2)).to_string()) : std::nullopt;
 }
 
-std::optional<std::string> published_hint(const PublishedTreeState &view, const KeyRange &range)
+std::optional<std::string> published_hint(const TreeRoot &view, const KeyRange &range)
 {
     auto pid = view.root_page_id;
     for (size_t depth = 0; depth < 8; ++depth) {

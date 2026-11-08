@@ -52,20 +52,22 @@ c++ -std=c++20 "${include_flags[@]}" "$fixture_dir/chunk.cpp" "${link_libraries[
 
 nm -C "$probe_dir/tree-link-local" >"$probe_dir/tree-link-local.symbols"
 nm -C "$probe_dir/tree-link-chunk" >"$probe_dir/tree-link-chunk.symbols"
-if grep -E 'ChunkRuntimePageStore|RpcChunkTransport|ct_chunk_|ct_rpc_chunk_' "$probe_dir/tree-link-local.symbols" \
+# The generic pack helpers may use PageChunkStoreDomain; only the concrete
+# PageChunkStore and its transport/factory must stay out of the local link.
+if grep -E 'PageChunkStore([^[:alnum:]_]|$)|RpcChunkTransport|ct_page_chunk_store_|ct_chunk_|ct_rpc_chunk_' "$probe_dir/tree-link-local.symbols" \
     >/dev/null; then
     echo "ordinary tree link unexpectedly extracted chunk backend symbols" >&2
-    grep -E 'ChunkRuntimePageStore|RpcChunkTransport|ct_chunk_|ct_rpc_chunk_' "$probe_dir/tree-link-local.symbols" >&2
+    grep -E 'PageChunkStore([^[:alnum:]_]|$)|RpcChunkTransport|ct_page_chunk_store_|ct_chunk_|ct_rpc_chunk_' "$probe_dir/tree-link-local.symbols" >&2
     exit 1
 fi
-if grep -E 'libcrowdb-tree\.a\((chunk_|rpc_chunk_)' "$probe_dir/tree-link-local.map" >/dev/null; then
+if grep -E 'libcrowdb-tree\.a\((chunk_|rpc_chunk_|page_chunk_store)' "$probe_dir/tree-link-local.map" >/dev/null; then
     echo "ordinary tree link unexpectedly extracted a chunk archive member" >&2
     exit 1
 fi
 grep 'libcrowdb-tree.a(c_api.cpp.o)' "$probe_dir/tree-link-local.map" >/dev/null
 grep 'libcrowdb-tree.a(chunk_runtime_c_api.cpp.o)' "$probe_dir/tree-link-chunk.map" >/dev/null
 grep 'libcrowdb-tree.a(rpc_chunk_transport.cpp.o)' "$probe_dir/tree-link-chunk.map" >/dev/null
-grep 'ct_chunk_runtime_page_store_open' "$probe_dir/tree-link-chunk.symbols" >/dev/null
+grep 'ct_page_chunk_store_open' "$probe_dir/tree-link-chunk.symbols" >/dev/null
 grep 'ct_rpc_chunk_transport_open' "$probe_dir/tree-link-chunk.symbols" >/dev/null
 
 "$probe_dir/tree-link-local"

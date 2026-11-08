@@ -12,18 +12,18 @@ mod owned_allocation;
 mod owned_budget;
 pub(crate) use owned_allocation::*;
 pub use owned_budget::*;
-mod backend_release;
-pub(crate) use backend_release::*;
+mod page_store_release;
+pub(crate) use page_store_release::*;
 mod admission;
 pub(crate) use admission::*;
 mod maintenance;
 pub(crate) use maintenance::*;
 mod wait_metrics;
 pub(crate) use wait_metrics::*;
-mod backing_stats;
+mod page_block_stats;
 mod runtime;
 mod state_stats;
-pub(crate) use backing_stats::*;
+pub(crate) use page_block_stats::*;
 pub(crate) use runtime::*;
 pub(crate) use state_stats::*;
 mod chunk_protection;
@@ -290,7 +290,7 @@ pub struct ct_options {
     pub buffer_pool_bytes: u64,
     pub compression: u8,
     pub max_inline_value: u64,
-    pub backend: u8,
+    pub page_store_kind: u8,
     pub block_size: u64,
     pub store_id: u32,
     pub group_id: u32,

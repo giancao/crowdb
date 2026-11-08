@@ -30,7 +30,7 @@ struct HostReadTail
     ~HostReadTail();
 
     detail::HostCompletion         &done;
-    std::shared_ptr<AsyncPageStore> backend;
+    std::shared_ptr<AsyncPageStore> page_store;
 };
 
 // One accepted window. Idle cursor handles keep no I/O reserve or Tree
@@ -44,7 +44,7 @@ struct SnapshotReadWindow
     std::shared_ptr<TreeCore>                      host_core;
     PageLoadBudget                                 budget;
     std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
-    std::shared_ptr<AsyncPageStore>                backend;
+    std::shared_ptr<AsyncPageStore>                page_store;
     std::shared_ptr<PageLoader>                    loader;
 
     SnapshotReadWindow() = default;
@@ -56,8 +56,8 @@ struct SnapshotReadWindow
     void                seal() noexcept;
 };
 
-// A captured L1 header/mapping with no live L0 catalog. Shared backends can
-// detach from the Core; raw backends admit each window through a weak Core.
+// A captured L1 header/mapping with no live L0 catalog. Shared page stores can
+// detach from the Core; raw page stores admit each window through a weak Core.
 class PublishedReadViewContext
 {
     struct State;
@@ -80,7 +80,7 @@ class PublishedReadViewContext
     Status             close_async(void (*complete)(void *), void *context) const noexcept;
     [[nodiscard]] bool closed() const noexcept;
 
-    [[nodiscard]] const std::shared_ptr<const PublishedTreeState>   &view() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const TreeRoot>             &view() const noexcept;
     [[nodiscard]] const std::shared_ptr<TreeRuntimeBinding>         &binding() const noexcept;
     [[nodiscard]] const std::shared_ptr<detail::FlushRuntime::Lane> &lane() const noexcept;
     [[nodiscard]] PageLoadLimits                                     load_limits() const noexcept;
@@ -92,7 +92,7 @@ class PublishedReadViewContext
     friend class TreeCore;
     static Status capture_admitted(const std::shared_ptr<TreeCore>           &core,
                                    std::shared_ptr<PublishedReadViewContext> *out,
-                                   std::shared_ptr<const PublishedTreeState>  captured = {});
+                                   std::shared_ptr<const TreeRoot>            captured = {});
 
     explicit PublishedReadViewContext(std::shared_ptr<State> state) : state_(std::move(state))
     {
@@ -113,8 +113,8 @@ class SnapshotPageLoader final : public PageLoader
     Status begin(std::shared_ptr<PageLoader> loader);
     void   end() noexcept;
     void   load_leaf(BaseRef base, LeafComplete complete) override;
-    void   load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete) override;
-    void   load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
+    void   load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete) override;
+    void   load_overflow(std::shared_ptr<const PageBlockRef> primary, uint64_t head, uint64_t length,
                          ValueComplete complete) override;
 
   private:

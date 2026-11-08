@@ -98,7 +98,7 @@ TEST(FlushReservation, ColdRoutingReserveFollowsCapturedBaseCount)
     EXPECT_EQ(bound(64), empty);
     EXPECT_LT(empty, TestPreparedFlushTree::limits()[static_cast<size_t>(detail::BudgetClass::kRouting)]);
 
-    auto page = std::make_shared<PublishedPage>(*view.mapping.get(0));
+    auto page = std::make_shared<PageEntry>(*view.mapping.get(0));
     auto leaf = std::make_shared<PageState>(*page->leaf);
     for (uint64_t pid = 0; pid < 4; ++pid) {
         leaf->bases.push_back(test_read::cold(pid));
@@ -107,7 +107,7 @@ TEST(FlushReservation, ColdRoutingReserveFollowsCapturedBaseCount)
     const std::array replacements{
         PageReplacement{.page_id = 0, .expected = view.mapping.get(0), .replacement = std::move(page)}
     };
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     view.mapping = view.mapping.replace(replacements, copied);
     EXPECT_GT(bound(4), empty);
     EXPECT_EQ(bound(64), bound(4));
@@ -350,10 +350,10 @@ TEST(FlushReservation, DescendingColdRoutePidsUseHeldCreditForEveryLoadedLevel)
     TestPreparedFlushTree tree(1, true);
     tree.preparation.cache = std::make_shared<SharedPageCache>(PageCacheLimits{.max_pages = 2, .max_waiters = 1});
     const auto before      = tree.publisher.capture();
-    auto       root        = std::make_shared<PublishedPage>();
+    auto       root        = std::make_shared<PageEntry>();
     root->level            = 2;
     root->metrics.leaf     = false;
-    root->inner_backing    = test_read::inner_backing(tree.store, 1, *test_read::inner({}, {2}));
+    root->inner_page_block = test_read::inner_page_block(tree.store, 1, *test_read::inner({}, {2}));
     auto request           = std::make_shared<PublicationRequest>();
     request->transaction   = {.record       = std::make_shared<InstallRecord>(InstallToken{.generation = 1, .batch = 2}),
                               .pages        = {{.page_id = 3, .expected = {}, .replacement = std::move(root)}},
@@ -406,7 +406,7 @@ TEST(FlushReservation, LiveResidencyAndColdProxyPublicationUseHeldCreditUnderCom
         EXPECT_TRUE(operation->result().handoff_status.ok()) << operation->result().handoff_status.to_string();
         EXPECT_TRUE(operation->result().maintenance_status.ok()) << operation->result().maintenance_status.to_string();
         EXPECT_EQ(operation->result().published_coverage, 2U);
-        // Both leaves finish using temporary raw loads and retain their cold backing.
+        // Both leaves finish using temporary raw loads and retain their cold page block.
         EXPECT_EQ(tree.store->reads.load(), 3U);
         EXPECT_EQ(tree.cache->snapshot().misses, 1U);
         const auto view = tree.publisher.capture();

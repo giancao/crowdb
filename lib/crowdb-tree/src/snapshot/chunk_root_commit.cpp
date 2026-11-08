@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/chunk_root_commit.h"
 
-#include "backend/chunk/chunk_physical_registry.h"
 #include "btree/allocation_bound.h"
+#include "page_store/chunk/chunk_physical_registry.h"
 
 #include <algorithm>
 
@@ -13,7 +13,8 @@ namespace
 {
 size_t index_bound(size_t frames, size_t previous)
 {
-    return std::min(frames, previous + ((frames + kChunkIndexFrameLimit - 1) / kChunkIndexFrameLimit));
+    return std::min(frames,
+                    previous + ((frames + kChunkMappingSegmentEntryLimit - 1) / kChunkMappingSegmentEntryLimit));
 }
 
 bool same_state(const ChunkRootIdentity &a, const ChunkRootIdentity &b)
@@ -28,13 +29,14 @@ ChunkRootCommit::ChunkRootCommit(ConstructionKey /*unused*/, std::shared_ptr<All
     : metadata_(std::move(metadata)),
       root_(metadata_),
       manifest_(detail::ReservationAllocator<uint8_t>(metadata_)),
-      index_pins_(detail::ReservationAllocator<std::shared_ptr<const ChunkPackBacking>>(metadata_)),
+      summary_bytes_(OverwriteByteVector<AllocationKind::kMetadata>::allocator_type(metadata_)),
+      index_pins_(detail::ReservationAllocator<std::shared_ptr<const ChunkPageBlock>>(metadata_)),
       references_(std::less<>{}, detail::ReservationAllocator<detail::ChunkStageId>(metadata_))
 {
 }
 
 Status ChunkRootCommit::create(std::shared_ptr<const CapturedDurablePages> pages,
-                               std::shared_ptr<const ChunkBackingDomain>   domain,
+                               std::shared_ptr<const PageChunkStoreDomain> domain,
                                std::shared_ptr<detail::ChunkRuntimeIds> ids, ChunkRootIdentity identity,
                                std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<AllocationBudget> window,
                                std::shared_ptr<ChunkRootCommit> *out, std::shared_ptr<const ChunkRootManifest> previous,
@@ -44,17 +46,18 @@ try {
         identity.tree != domain->tree || identity.owner_epoch != domain->epoch || identity.root_generation == 0 ||
         identity.page_generation != pages->generation || identity.coverage != pages->coverage ||
         identity.root_page_id != pages->root_page_id || identity.next_page_id != pages->next_page_id ||
-        (!pages->frames.empty() && pages->backend_id != domain->backend_id) ||
+        (!pages->frames.empty() && pages->page_store_id != domain->page_store_id) ||
         !allocation_bound(pages->frames.size(), previous ? previous->indexes.size() : 0)) {
         return Status::invalid_argument();
     }
-    auto result               = detail::reserved_shared<ChunkRootCommit>(metadata, ConstructionKey{}, metadata);
-    result->window_           = std::move(window);
-    result->pages_            = std::move(pages);
-    result->domain_           = std::move(domain);
-    result->ids_              = std::move(ids);
-    result->root_.identity    = identity;
-    result->root_.frame_count = result->pages_->frames.size();
+    auto result                = detail::reserved_shared<ChunkRootCommit>(metadata, ConstructionKey{}, metadata);
+    result->window_            = std::move(window);
+    result->pages_             = std::move(pages);
+    result->domain_            = std::move(domain);
+    result->ids_               = std::move(ids);
+    result->root_.identity     = identity;
+    result->root_.frame_count  = result->pages_->frames.size();
+    result->root_.root_summary = result->pages_->root_summary;
     if (previous && baseline && previous->identity.tree == identity.tree &&
         previous->identity.root_generation + 1 == identity.root_generation &&
         previous->identity.snapshot_sequence + 1 == identity.snapshot_sequence &&
@@ -112,15 +115,16 @@ std::optional<size_t> ChunkRootCommit::allocation_bound(size_t frames, size_t pr
         .add(previous_indexes != 0 ? chunk_pin_validation_bound() : 0)
 
         .add_product(frames + indexes, sizeof(ChunkStageId) + (8 * sizeof(void *)))
-        .add_product(indexes, sizeof(ChunkIndexReference) + sizeof(std::shared_ptr<const ChunkPackBacking>) +
-                                  chunk_backing_allocation_bound())
+        .add_product(indexes, sizeof(ChunkMappingSegmentRef) + sizeof(std::shared_ptr<const ChunkPageBlock>) +
+                                  chunk_page_block_allocation_bound())
         .value();
 }
 
 std::optional<size_t> ChunkRootCommit::window_allocation_bound(size_t stored_references) noexcept
 {
-    const auto refs  = std::min(stored_references, kChunkIndexFrameLimit * kChunkIndexReferencesPerFrame);
-    const auto bytes = kChunkIndexHeaderBytes + 4 + (kChunkIndexFrameLimit * kChunkIndexRecordBytes) + (16 * refs);
+    const auto refs = std::min(stored_references, kChunkMappingSegmentEntryLimit * kChunkPageEntryReferenceLimit);
+    const auto bytes =
+        kChunkMappingSegmentHeaderBytes + 4 + (kChunkMappingSegmentEntryLimit * kChunkPageEntryBytes) + (16 * refs);
     return detail::AllocationBound(bytes).add(detail::ChunkFixedPackStore::write_allocation_bound(bytes)).value();
 }
 
@@ -159,6 +163,24 @@ Status ChunkRootCommit::advance()
     switch (stage_) {
     case Stage::Index:
         return index();
+    case Stage::Summaries: {
+        auto status = prepare_summaries();
+        if (status.ok() && root_.summaries) {
+            detail::ChunkStageId pin;
+            detail::ChunkId      unused;
+            status = ids_->next(PagePurpose::kPageIndex, &pin, &unused);
+            if (status.ok()) {
+                status = pin_chunk_page_block(domain_, *root_.summaries, pin, metadata_, &summary_pack_);
+            }
+        }
+        else if (status.ok() && new_summary_pack_) {
+            status = write_chunk_page_block(*new_summary_pack_, summary_bytes_, window_);
+            if (status.ok()) {
+                summary_pack_ = std::move(new_summary_pack_);
+            }
+        }
+        return status.ok() ? install_summaries() : fail(std::move(status));
+    }
     case Stage::Dependencies:
         return dependencies();
     case Stage::Checksum:
@@ -207,6 +229,8 @@ Status ChunkRootCommit::finish(Status status, bool uncertain)
         pending_root_->frame_count        = root_.frame_count;
         pending_root_->stored_references  = root_.stored_references;
         pending_root_->dependency_entries = root_.dependency_entries;
+        pending_root_->root_summary       = root_.root_summary;
+        pending_root_->summaries          = root_.summaries;
         pending_root_->indexes.swap(root_.indexes);
         committed_root_ = std::move(pending_root_);
     }

@@ -4,7 +4,7 @@
 #include "btree/tree_core_batch.h"
 #include "btree/tree_core_checkpoint_internal.h"
 #include "common/test_tree_core_chunk.h"
-#include "crowdb-tree/backend/page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "snapshot/flush_persistence.h"
 #include "snapshot/readable_page_catalog.h"
 #include "snapshot/snapshot_baseline.h"
@@ -16,7 +16,7 @@ namespace
 struct TestPhysicalPages
 {
     Config                        config;
-    std::shared_ptr<MemPageStore> store = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore> store = std::make_shared<PageMemStore>(4096);
     std::shared_ptr<TreeCore>     core;
 
     TestPhysicalPages()
@@ -26,7 +26,7 @@ struct TestPhysicalPages
         host.backend_workers = 1;
         EXPECT_TRUE(TreeRuntime::create(host, &config.runtime).ok());
         config.page_store       = store.get();
-        config.backend_owner    = store;
+        config.page_store_owner = store;
         config.frame_bytes      = 4096;
         config.max_inline_value = 64;
         config.max_key_size     = 6000;
@@ -103,7 +103,7 @@ TEST(TreePhysicalPages, FinalPageAboveSafetyBoundReturnsErrorAndPreservesTheComm
     ASSERT_TRUE(test.core->checkpoint().ok());
     EXPECT_FALSE(primary_write_fits(test.config, kMaxPhysicalPageBytes + 1, 1, false));
     const auto view               = test.core->capture();
-    auto       page               = std::make_shared<PublishedPage>(*view->mapping.get(view->root_page_id));
+    auto       page               = std::make_shared<PageEntry>(*view->mapping.get(view->root_page_id));
     page->metrics.page_size_known = true;
     page->metrics.page_size_bytes = kMaxPhysicalPageBytes + 1;
     auto preparation              = std::make_shared<checkpoint_detail::Preparation>();
@@ -118,7 +118,7 @@ TEST(TreePhysicalPages, FinalPageAboveSafetyBoundReturnsErrorAndPreservesTheComm
                         .gc_floor     = view->gc_floor,
                         .next_page_id = view->next_page_id,
                         .context      = {}},
-                       {}, [&](Status status, std::shared_ptr<const PublishedPage> replacement) {
+                       {}, [&](Status status, std::shared_ptr<const PageEntry> replacement) {
                            ++completions;
                            result = std::move(status);
                            EXPECT_FALSE(replacement);

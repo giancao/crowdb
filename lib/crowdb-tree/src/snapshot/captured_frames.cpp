@@ -3,7 +3,7 @@
 #include "btree/allocation_bound.h"
 #include "btree/page_encode_internal.h"
 #include "captured_frames_internal.h"
-#include "primary_backing.h"
+#include "primary_page_block.h"
 
 #include <algorithm>
 #include <cassert>
@@ -35,8 +35,8 @@ CapturedFrameBuffer::CapturedFrameBuffer(const CapturedFrameLimits &limits)
     resources_.begin(storage_.capacity());
 }
 
-CapturedFrameStream::State::State(std::shared_ptr<const PublishedTreeState> captured,
-                                  std::shared_ptr<PageLoader> transport, std::shared_ptr<detail::FlushRuntime> cpu,
+CapturedFrameStream::State::State(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> transport,
+                                  std::shared_ptr<detail::FlushRuntime>       cpu,
                                   std::shared_ptr<detail::FlushRuntime::Lane> queue, CapturedFrameLimits bounds,
                                   ReserveOverflow reserve)
     : view(std::move(captured)),
@@ -52,16 +52,16 @@ CapturedFrameStream::State::State(std::shared_ptr<const PublishedTreeState> capt
     overflow_end = view ? view->next_page_id : 0;
 }
 
-Status CapturedFrameStream::create(std::shared_ptr<const PublishedTreeState> captured,
-                                   std::shared_ptr<PageLoader> loader, std::shared_ptr<detail::FlushRuntime> runtime,
+Status CapturedFrameStream::create(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> loader,
+                                   std::shared_ptr<detail::FlushRuntime>       runtime,
                                    std::shared_ptr<detail::FlushRuntime::Lane> lane, CapturedFrameLimits limits,
                                    ReserveOverflow reserve_overflow, std::shared_ptr<CapturedFrameStream> *out)
 {
     if (!captured || !runtime || !lane || out == nullptr || limits.max_depth == 0 || limits.max_depth > 64 ||
-        limits.max_pages == 0 || limits.max_pages > MappingView::kPageLimit ||
+        limits.max_pages == 0 || limits.max_pages > MappingTable::kPageLimit ||
         limits.encode.frame_bytes <= kFrameHeaderSize + kFrameTrailerSize || limits.encode.max_sources == 0 ||
         limits.encode.max_entries == 0 || limits.encode.max_work_entries == 0 ||
-        captured->gc_floor > captured->coverage || captured->next_page_id > MappingView::kPageLimit) {
+        captured->gc_floor > captured->coverage || captured->next_page_id > MappingTable::kPageLimit) {
         return Status::invalid_argument("captured frame stream requires a fixed view and bounded work");
     }
     if (captured->pending_handoff || captured->flush_admission_owner != 0 ||
@@ -89,9 +89,9 @@ Status CapturedFrameStream::create(PageEncodeInput input, std::shared_ptr<PageLo
                                    std::shared_ptr<detail::FlushRuntime::Lane> lane, CapturedFrameLimits limits,
                                    ReserveOverflow reserve_overflow, std::shared_ptr<CapturedFrameStream> *out)
 {
-    if (!input.page || input.page_id >= input.next_page_id || input.next_page_id > MappingView::kPageLimit ||
+    if (!input.page || input.page_id >= input.next_page_id || input.next_page_id > MappingTable::kPageLimit ||
         input.gc_floor > input.coverage || !runtime || !lane || out == nullptr || limits.max_depth == 0 ||
-        limits.max_depth > 64 || limits.max_pages == 0 || limits.max_pages > MappingView::kPageLimit ||
+        limits.max_depth > 64 || limits.max_pages == 0 || limits.max_pages > MappingTable::kPageLimit ||
         limits.encode.frame_bytes <= kFrameHeaderSize + kFrameTrailerSize || limits.encode.max_sources == 0 ||
         limits.encode.max_entries == 0 || limits.encode.max_work_entries == 0 || limits.selected_page ||
         (input.page->level != 0 && !input.context.inner_fences)) {
@@ -127,7 +127,7 @@ std::optional<size_t> CapturedFrameStream::allocation_bound(const CapturedFrameL
     return AllocationBound(shared_allocation_bound<State>() + shared_allocation_bound<CapturedFrameStream>() +
                            shared_allocation_bound<State::Load>() + shared_allocation_bound<FinalPageEncodeState>() +
                            shared_allocation_bound<FinalPageEncoder>())
-        .add_product(limits.max_depth, sizeof(State::Path) + shared_allocation_bound<PublishedPage>())
+        .add_product(limits.max_depth, sizeof(State::Path) + shared_allocation_bound<PageEntry>())
         .add_product(2, std::max(*page, limits.page_metadata_bytes))
         .add(limits.encode.max_metadata_bytes)
         .add(shared_allocation_bound<PrimaryReuseOutput>())

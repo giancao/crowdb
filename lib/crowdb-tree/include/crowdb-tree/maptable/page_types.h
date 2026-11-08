@@ -58,7 +58,7 @@ struct PageBase
     // for the root or uninitialized pages.
     uint64_t parent_page_id = kInvalidPageId;
 
-    // Durable backing of THIS base page's current frame bytes (PT6d). `~0ull`
+    // Durable page block of THIS base page's current frame bytes (PT6d). `~0ull`
     // (== kNoAddr above) means dirty/anonymous: the live frame is not
     // yet durable. Set on demand-load (clean) and by snapshot after a write;
     // a freshly built page leaves it dirty. A page is snapshot-clean (and thus

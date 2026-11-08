@@ -667,6 +667,20 @@ crowdb_rpc_status crowdb_rpc_client_send_conn(crowdb_rpc_client_t client, crowdb
 
 // ── Connection ────────────────────────────────────────────────────
 
+crowdb_rpc_conn_t crowdb_rpc_connect_tcp(crowdb_rpc_server_t server, const char *addr, int port)
+{
+    try {
+        if (server == nullptr || addr == nullptr) {
+            return nullptr;
+        }
+        auto conn = server->server->transport()->connect_tcp(addr, port);
+        return conn == nullptr ? nullptr : new crowdb_rpc_conn_s{std::move(conn)};
+    }
+    catch (...) {
+        return nullptr;
+    }
+}
+
 crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *addr, int port)
 {
     try {

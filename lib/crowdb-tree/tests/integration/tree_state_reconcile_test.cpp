@@ -10,20 +10,20 @@ namespace
 {
 using namespace test_read;
 
-std::shared_ptr<PublishedTreeState> sparse_state()
+std::shared_ptr<TreeRoot> sparse_state()
 {
-    auto state = std::make_shared<PublishedTreeState>();
+    auto state = std::make_shared<TreeRoot>();
     auto leaf  = std::make_shared<PageState>();
     leaf->bases.push_back(cold(7));
     auto entry           = published(leaf);
     entry->metrics.dirty = false;
-    const std::array<uint64_t, 3> ids{0, uint64_t{1} << 29, MappingView::kPageLimit - 1};
+    const std::array<uint64_t, 3> ids{0, uint64_t{1} << 29, MappingTable::kPageLimit - 1};
     std::vector<PageReplacement>  changes;
     for (auto pid : ids) {
         changes.push_back({.page_id = pid, .expected = {}, .replacement = entry});
         EXPECT_TRUE(apply_page_metrics(state->stats, nullptr, &entry->metrics));
     }
-    MappingView::CopyStats copies;
+    MappingTable::CopyStats copies;
     state->mapping      = state->mapping.replace(changes, copies);
     state->root_page_id = 0;
     state->stats.height = 1;
@@ -73,8 +73,8 @@ TEST(TreeStateReconciliation, OverlayDescriptorsAreCheckedAgainstTheActualRange)
     auto entry                                 = published(logical);
     entry->metrics.overlay_runs                = 1;
     entry->metrics.overlay_entries             = 2; // Only z belongs to this logical range.
-    auto                                 state = std::make_shared<PublishedTreeState>();
-    MappingView::CopyStats               copies;
+    auto                                 state = std::make_shared<TreeRoot>();
+    MappingTable::CopyStats              copies;
     const std::array<PageReplacement, 1> changes{{{.page_id = 0, .expected = {}, .replacement = entry}}};
     state->mapping = state->mapping.replace(changes, copies);
     ASSERT_TRUE(apply_page_metrics(state->stats, nullptr, &entry->metrics));

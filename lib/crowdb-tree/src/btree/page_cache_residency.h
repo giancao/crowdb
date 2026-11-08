@@ -9,8 +9,8 @@
 namespace crowdb::tree
 {
 struct PageReplacement;
-struct PublishedPage;
-class MappingView;
+struct PageEntry;
+class MappingTable;
 
 // A single live mapping owns this index. Old captures retain data owners only.
 // All updates enter a reserved runtime continuation after preparing their nodes.
@@ -29,11 +29,11 @@ class PageCacheResidency
     ~PageCacheResidency();
     [[nodiscard]] std::shared_ptr<Update> prepare(std::span<const PageReplacement>         pages,
                                                   const std::shared_ptr<AllocationBudget> &metadata) const;
-    [[nodiscard]] std::shared_ptr<Update> prepare_initial(const MappingView                       &mapping,
+    [[nodiscard]] std::shared_ptr<Update> prepare_initial(const MappingTable                      &mapping,
                                                           const std::shared_ptr<AllocationBudget> &metadata) const;
-    [[nodiscard]] std::shared_ptr<Update> prepare_replacement(const MappingView                       &mapping,
+    [[nodiscard]] std::shared_ptr<Update> prepare_replacement(const MappingTable                      &mapping,
                                                               const std::shared_ptr<AllocationBudget> &metadata) const;
-    [[nodiscard]] static size_t           initial_allocation_bound(const MappingView &mapping) noexcept;
+    [[nodiscard]] static size_t           initial_allocation_bound(const MappingTable &mapping) noexcept;
     static void                           publish(std::shared_ptr<Update> update) noexcept;
     [[nodiscard]] std::shared_ptr<Ready>  prepare_ready(const PageCacheKey                      &key,
                                                         const std::shared_ptr<AllocationBudget> &metadata) const;

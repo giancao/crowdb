@@ -3,9 +3,9 @@
 
 // PT6b: buffer pool manager tests.
 #include "buffer_pool_test_support.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/cell.h"
 #include "crowdb-tree/maptable/frame_page.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -99,7 +99,7 @@ class BlockingReadStore final : public PageStore
     }
 
   private:
-    mutable MemPageStore            inner_{1};
+    mutable PageMemStore            inner_{1};
     mutable std::mutex              mu_;
     mutable std::condition_variable cv_;
     PageAddr                        blocked_addr_ = kNoAddr;
@@ -110,7 +110,7 @@ class BlockingReadStore final : public PageStore
 
 TEST(BufferPool, MissLoadsFromStoreAfterEviction)
 {
-    MemPageStore   store(1);
+    PageMemStore   store(1);
     TestBufferPool pool(static_cast<size_t>(2) * kPb, kPb, &store); // 2 frames
 
     // Write 4 pages through the pool; with 2 frames, evictions write dirty pages
@@ -140,7 +140,7 @@ TEST(BufferPool, MissLoadsFromStoreAfterEviction)
 
 TEST(BufferPool, HitDoesNotMiss)
 {
-    MemPageStore   store(1);
+    PageMemStore   store(1);
     TestBufferPool pool(static_cast<size_t>(4) * kPb, kPb, &store);
     {
         TestPoolFrameRef r;
@@ -192,7 +192,7 @@ TEST(BufferPool, UnrelatedHitContinuesWhileMissReadIsBlocked)
 
 TEST(BufferPool, PinnedFramesAreNotEvicted)
 {
-    MemPageStore     store(1);
+    PageMemStore     store(1);
     TestBufferPool   pool(static_cast<size_t>(2) * kPb, kPb, &store); // 2 frames
     TestPoolFrameRef a;
     ASSERT_TRUE(pool.pin_new(0, addr(0), &a).ok());
@@ -209,7 +209,7 @@ TEST(BufferPool, PinnedFramesAreNotEvicted)
 
 TEST(BufferPool, DirtyFlushWritesBack)
 {
-    MemPageStore   store(1);
+    PageMemStore   store(1);
     TestBufferPool pool(static_cast<size_t>(4) * kPb, kPb, &store);
     {
         TestPoolFrameRef r;
@@ -225,7 +225,7 @@ TEST(BufferPool, DirtyFlushWritesBack)
 
 TEST(BufferPool, CorruptPageRejectedOnLoad)
 {
-    MemPageStore   store(1);
+    PageMemStore   store(1);
     TestBufferPool pool(static_cast<size_t>(2) * kPb, kPb, &store);
     for (int i = 0; i < 4; ++i) {
         TestPoolFrameRef r;
@@ -282,7 +282,7 @@ TEST(BufferPool, AcquireFrameFailsWhenFull)
 
 TEST(BufferPool, ManyPagesThroughSmallPool)
 {
-    MemPageStore   store(1);
+    PageMemStore   store(1);
     TestBufferPool pool(static_cast<size_t>(3) * kPb, kPb,
                         &store); // 3 frames, many pages
     const int      N = 200;

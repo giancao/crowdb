@@ -11,16 +11,16 @@ namespace
 TEST(DurablePageSegments, ChangingOneSegmentPreservesTheOtherSegmentAndOldReader)
 {
     ReadablePageFrames original;
-    original.emplace(0, {.page_id = 0, .backing = nullptr});
-    original.emplace(1, {.page_id = 1, .backing = nullptr});
+    original.emplace(0, {.page_id = 0, .page_block = nullptr});
+    original.emplace(1, {.page_id = 1, .page_block = nullptr});
     original.emplace(kMappingSegmentSize,
-                     {.page_id = kMappingSegmentSize, .type = page_type::kInnerBase, .backing = nullptr});
+                     {.page_id = kMappingSegmentSize, .type = page_type::kInnerBase, .page_block = nullptr});
     ReadablePageFrames current;
     current.inherit(original);
     ASSERT_TRUE(current.same_segment(original, 0));
     ASSERT_TRUE(current.same_segment(original, 1));
     current.erase(1);
-    current.emplace(2, {.page_id = 2, .backing = nullptr});
+    current.emplace(2, {.page_id = 2, .page_block = nullptr});
     EXPECT_FALSE(current.same_segment(original, 0));
     EXPECT_TRUE(current.same_segment(original, 1));
     EXPECT_TRUE(original.contains(1));
@@ -43,20 +43,20 @@ std::shared_ptr<const StoredOverflowReferences> heads(uint64_t pid)
 TEST(DurablePageSegments, ReplacingSharedOverflowDropsOnlyUnreachableSuffixes)
 {
     CapturedDurablePages original(nullptr);
-    original.frames.emplace(0, {.page_id = 0, .backing = nullptr, .stored_overflow = heads(3)});
-    original.frames.emplace(1, {.page_id = 1, .backing = nullptr, .stored_overflow = heads(4)});
-    original.frames.emplace(3,
-                            {.page_id = 3, .type = page_type::kOverflowFrame, .next_overflow = 5, .backing = nullptr});
-    original.frames.emplace(4,
-                            {.page_id = 4, .type = page_type::kOverflowFrame, .next_overflow = 5, .backing = nullptr});
-    original.frames.emplace(5, {.page_id = 5, .type = page_type::kOverflowFrame, .backing = nullptr});
+    original.frames.emplace(0, {.page_id = 0, .page_block = nullptr, .stored_overflow = heads(3)});
+    original.frames.emplace(1, {.page_id = 1, .page_block = nullptr, .stored_overflow = heads(4)});
+    original.frames.emplace(
+        3, {.page_id = 3, .type = page_type::kOverflowFrame, .next_overflow = 5, .page_block = nullptr});
+    original.frames.emplace(
+        4, {.page_id = 4, .type = page_type::kOverflowFrame, .next_overflow = 5, .page_block = nullptr});
+    original.frames.emplace(5, {.page_id = 5, .type = page_type::kOverflowFrame, .page_block = nullptr});
     ASSERT_TRUE(original.initialize_overflow_counts().ok());
     CapturedDurablePages current(nullptr);
     current.frames.inherit(original.frames);
     current.overflow_counts_known  = true;
     current.stored_reference_count = original.stored_reference_count;
     CapturedDurablePages replacement(nullptr);
-    replacement.frames.emplace(0, {.page_id = 0, .backing = nullptr});
+    replacement.frames.emplace(0, {.page_id = 0, .page_block = nullptr});
     ASSERT_TRUE(current.replace_primary(replacement).ok());
     EXPECT_FALSE(current.frames.contains(3));
     EXPECT_TRUE(current.frames.contains(4));
@@ -72,12 +72,12 @@ TEST(DurablePageSegments, ReplacingSharedOverflowDropsOnlyUnreachableSuffixes)
 TEST(DurablePageSegments, SharingAnExistingHeadKeepsItsDependencyOwner)
 {
     CapturedDurablePages pages(nullptr);
-    pages.frames.emplace(0, {.page_id = 0, .backing = nullptr, .stored_overflow = heads(2)});
-    pages.frames.emplace(2, {.page_id = 2, .type = page_type::kOverflowFrame, .backing = nullptr});
+    pages.frames.emplace(0, {.page_id = 0, .page_block = nullptr, .stored_overflow = heads(2)});
+    pages.frames.emplace(2, {.page_id = 2, .type = page_type::kOverflowFrame, .page_block = nullptr});
     ASSERT_TRUE(pages.initialize_overflow_counts().ok());
     CapturedDurablePages replacement(nullptr);
-    replacement.frames.emplace(1, {.page_id = 1, .backing = nullptr, .stored_overflow = heads(2)});
-    replacement.frames.emplace(2, {.page_id = 2, .type = page_type::kOverflowFrame, .backing = nullptr});
+    replacement.frames.emplace(1, {.page_id = 1, .page_block = nullptr, .stored_overflow = heads(2)});
+    replacement.frames.emplace(2, {.page_id = 2, .type = page_type::kOverflowFrame, .page_block = nullptr});
     ASSERT_TRUE(pages.replace_primary(replacement).ok());
     EXPECT_EQ(std::as_const(pages.frames).at(2).incoming_references, 2U);
     ASSERT_TRUE(pages.erase_primary(0).ok());

@@ -36,14 +36,14 @@ TEST(PageWriteback, AcceptedWriteUsesActualMemoryAboveTheCeilingWithoutAnIoPermi
     EXPECT_GT(test.credits.account->snapshot().allocated[LoadCredits::kBytes], baseline + retained_bytes);
     test.store->finish();
     EXPECT_EQ(done.values.load(), 1U);
-    EXPECT_TRUE(test.operation->result().backing->reloadable());
+    EXPECT_TRUE(test.operation->result().page_block->reloadable());
     test.operation.reset();
     allocator.deallocate(retained, retained_bytes);
     EXPECT_EQ(test.credits.account->snapshot().allocated[LoadCredits::kBytes], baseline);
     EXPECT_FALSE(detail::ResourceBudget::memory_exhausted(test.credits.account));
 }
 
-TEST(PageWriteback, HeldCreditPaysAlignedCodecAndIoAfterSealAndReturnsReloadableBacking)
+TEST(PageWriteback, HeldCreditPaysAlignedCodecAndIoAfterSealAndReturnsReloadablePageBlock)
 {
     TestWriter test;
     ASSERT_TRUE(test.prepare().ok());
@@ -56,16 +56,16 @@ TEST(PageWriteback, HeldCreditPaysAlignedCodecAndIoAfterSealAndReturnsReloadable
     test.credits.seal();
     ASSERT_TRUE(stdexec::sync_wait(test.operation->sender()));
     test.runtime->drain();
-    const auto backing = test.operation->result().backing;
-    ASSERT_TRUE(backing);
-    EXPECT_TRUE(backing->reloadable());
-    EXPECT_EQ(backing->durability, BackingDurability::kReloadable);
-    EXPECT_EQ(backing->address, 8192U);
+    const auto page_block = test.operation->result().page_block;
+    ASSERT_TRUE(page_block);
+    EXPECT_TRUE(page_block->reloadable());
+    EXPECT_EQ(page_block->durability, PageBlockDurability::kReloadable);
+    EXPECT_EQ(page_block->address, 8192U);
     EXPECT_EQ(test.store->purpose, PagePurpose::kBtreePage);
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
-    std::vector<uint8_t> blob(backing->length);
+    std::vector<uint8_t> blob(page_block->length);
     std::vector<uint8_t> frame(4096);
-    ASSERT_TRUE(test.store->device->read_at(backing->address, blob.data(), blob.size()).ok());
+    ASSERT_TRUE(test.store->device->read_at(page_block->address, blob.data(), blob.size()).ok());
     ASSERT_TRUE(decode_durable_page(blob.data(), blob.size(), frame.data(), frame.size()).ok());
     LeafFrameView decoded(frame.data(), frame.size());
     ASSERT_EQ(decoded.count(), 1U);
@@ -93,7 +93,7 @@ TEST(PageWriteback, CancellationWaitsForWriteAndKeepsItsBufferAndExtentAlive)
     test.store->finish();
     EXPECT_EQ(test.credits.resources->snapshot().write_inflight_bytes, 0U);
     EXPECT_EQ(done.stopped.load(), 1U);
-    EXPECT_FALSE(test.operation->result().backing);
+    EXPECT_FALSE(test.operation->result().page_block);
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     test.operation.reset();
     test.credits.seal();
@@ -111,7 +111,7 @@ TEST(PageWriteback, UnknownSubmissionOutcomeKeepsOwnedCallbackBufferUntilActualC
     test.runtime->drain();
     ASSERT_EQ(done.errors.load(), 1U);
     EXPECT_EQ(done.status.code(), Code::kIoError);
-    EXPECT_FALSE(test.operation->result().backing);
+    EXPECT_FALSE(test.operation->result().page_block);
     test.operation.reset();
     test.credits.seal();
     EXPECT_GT(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
@@ -138,14 +138,14 @@ TEST(PageWriteback, BackendMustBeReloadableAndLegacyIoCreditDoesNotLimitAccepted
     ASSERT_TRUE(stdexec::sync_wait(test.operation->sender()));
     test.runtime->drain();
     EXPECT_EQ(test.store->writes, 1U);
-    EXPECT_TRUE(test.operation->result().backing);
+    EXPECT_TRUE(test.operation->result().page_block);
     test.operation.reset();
     occupied.reset();
     test.credits.seal();
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
 }
 
-TEST(PageWriteback, OverflowDependencyRetainsBackingWithoutRetainingRawInput)
+TEST(PageWriteback, OverflowDependencyRetainsPageBlockWithoutRetainingRawInput)
 {
     TestWriter                test;
     auto                      input      = write_input(4096, true);
@@ -156,13 +156,13 @@ TEST(PageWriteback, OverflowDependencyRetainsBackingWithoutRetainingRawInput)
     ASSERT_TRUE(test.prepare(std::move(input)).ok());
     ASSERT_TRUE(stdexec::sync_wait(test.operation->sender()));
     test.runtime->drain();
-    auto backing = test.operation->result().backing;
-    ASSERT_TRUE(backing);
+    auto page_block = test.operation->result().page_block;
+    ASSERT_TRUE(page_block);
     EXPECT_TRUE(raw.expired());
     test.operation.reset();
     protection.reset();
     EXPECT_FALSE(retained.expired());
-    backing.reset();
+    page_block.reset();
     EXPECT_TRUE(retained.expired());
     test.credits.seal();
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
@@ -188,7 +188,7 @@ TEST(PageWriteback, MissingOverflowProtectionAndCorruptInputNeverAllocateOrWrite
     }
 }
 
-TEST(PageWriteback, WriteErrorNeverProducesBackingAndDropsAllOperationCharges)
+TEST(PageWriteback, WriteErrorNeverProducesPageBlockAndDropsAllOperationCharges)
 {
     TestWriter test;
     test.store->deferred = true;
@@ -199,7 +199,7 @@ TEST(PageWriteback, WriteErrorNeverProducesBackingAndDropsAllOperationCharges)
     test.runtime->drain();
     test.store->finish(Status::io_error());
     EXPECT_EQ(done.errors.load(), 1U);
-    EXPECT_FALSE(test.operation->result().backing);
+    EXPECT_FALSE(test.operation->result().page_block);
     test.operation.reset();
     test.credits.seal();
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
@@ -210,14 +210,14 @@ TEST(PageWriteback, CapturedFrameWritesToFileAndReloadsThroughExistingDurableCod
 {
     crowdb::tree_test::TempDir dir("captured_write_");
     ASSERT_FALSE(dir.path.empty());
-    std::unique_ptr<BlockPageStore> file;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 1, 2, 64 * 1024, 4096, &file).ok());
+    std::unique_ptr<PageDiskStore> file;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 1, 2, 64 * 1024, 4096, &file).ok());
     TestWriter test;
     test.store->device     = std::shared_ptr<PageStore>(std::move(file));
-    auto captured          = std::make_shared<PublishedTreeState>(*view(page({
-                                                                            {.key = "a", .value = "captured"}
+    auto captured          = std::make_shared<TreeRoot>(*view(page({
+                                                                  {.key = "a", .value = "captured"}
     }),
-                                                                        {}, 10));
+                                                              {}, 10));
     captured->next_page_id = 1;
     const PageWriteLimits                limits{.max_frame_bytes = 4096, .compression = compress_algo::kNone};
     std::shared_ptr<CapturedFrameStream> stream;
@@ -248,16 +248,16 @@ TEST(PageWriteback, CapturedFrameWritesToFileAndReloadsThroughExistingDurableCod
     test.runtime->drain();
     EXPECT_EQ(test.store->data, buffer.raw_blob().data());
     ASSERT_TRUE(test.store->device->sync().ok());
-    auto backing = test.operation->result().backing;
-    ASSERT_TRUE(backing);
+    auto page_block = test.operation->result().page_block;
+    ASSERT_TRUE(page_block);
     // This is page persistence/reload evidence, not an anchor checkpoint.
-    std::unique_ptr<BlockPageStore> reopened;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 1, 2, 64 * 1024, 4096, &reopened).ok());
+    std::unique_ptr<PageDiskStore> reopened;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 1, 2, 64 * 1024, 4096, &reopened).ok());
     auto reader    = std::make_shared<TestWriteStore>();
     reader->device = std::shared_ptr<PageStore>(std::move(reopened));
     AsyncStorePageLoader            loader(reader, test.runtime, test.lane);
     std::shared_ptr<const LeafBase> loaded;
-    loader.load_leaf({.identity = 0, .backing = backing}, [&](Status status, auto leaf) {
+    loader.load_leaf({.identity = 0, .page_block = page_block}, [&](Status status, auto leaf) {
         EXPECT_TRUE(status.ok());
         loaded = std::move(leaf);
     });

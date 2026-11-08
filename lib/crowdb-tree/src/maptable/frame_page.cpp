@@ -122,7 +122,7 @@ bool frame_set_fences(uint8_t *f, uint32_t page_bytes, const Slice *lower, const
     if (f == nullptr || page_bytes <= kFrameHeaderSize + kFrameTrailerSize) {
         return false;
     }
-    if (frame_page_type(f) == page_type::kOverflowFrame || (lower == nullptr) != (upper == nullptr)) {
+    if (frame_page_type(f) != page_type::kLeafBase || (lower == nullptr) != (upper == nullptr)) {
         return lower == nullptr && upper == nullptr;
     }
     uint32_t free_lo = frame_u32(f, fh::kFreeLo);
@@ -246,7 +246,8 @@ bool frame_validate(const uint8_t *f, uint32_t page_bytes)
         return false;
     }
     if ((f[fh::kFlags] & ~(kFrameHasLowerFence | kFrameHasUpperFence | kFrameFencePageIds)) != 0 ||
-        frame_has_lower_fence(f) != frame_has_upper_fence(f)) {
+        frame_has_lower_fence(f) != frame_has_upper_fence(f) ||
+        (t == page_type::kInnerBase && frame_has_lower_fence(f) && !frame_fences_are_page_ids(f))) {
         return false;
     }
     if (frame_fences_are_page_ids(f) &&
@@ -272,7 +273,8 @@ bool frame_validate(const uint8_t *f, uint32_t page_bytes)
         return off >= free_hi && off <= body && klen <= body - off && extra <= body - off - klen;
     };
     if (t == page_type::kLeafBase) {
-        if (count > (body - kFrameHeaderSize) / kLeafSlotSize || kFrameHeaderSize + (count * kLeafSlotSize) > free_lo) {
+        if (frame_u32(f, fh::kReservedLeaf) != 0 || count > (body - kFrameHeaderSize) / kLeafSlotSize ||
+            kFrameHeaderSize + (count * kLeafSlotSize) > free_lo) {
             return false;
         }
         LeafFrameView view(f, page_bytes);
@@ -282,35 +284,8 @@ bool frame_validate(const uint8_t *f, uint32_t page_bytes)
                 return false;
             }
         }
-        const uint32_t delta_count = view.delta_count();
-        if (delta_count > (free_hi - free_lo) / kLeafSlotSize) {
-            return false;
-        }
-        for (uint32_t i = 0; i < delta_count; ++i) {
-            if (!valid_record(f + free_lo + (i * kLeafSlotSize), true)) {
-                return false;
-            }
-        }
-        if (frame_has_lower_fence(f)) {
-            if (view.empty()) {
-                return false;
-            }
-            Slice lower = count == 0 ? view.delta_key(0) : view.key(0);
-            Slice upper = count == 0 ? view.delta_key(0) : view.key(count - 1);
-            for (uint32_t i = 0; i < delta_count; ++i) {
-                Slice key = view.delta_key(i);
-                if (key.compare(lower) < 0) {
-                    lower = key;
-                }
-                if (key.compare(upper) > 0) {
-                    upper = key;
-                }
-            }
-            if (frame_lower_fence(f).compare(lower) != 0 || frame_upper_fence(f).compare(upper) != 0) {
-                return false;
-            }
-        }
-        return true;
+        return !frame_has_lower_fence(f) ||
+               (!view.empty() && frame_lower_fence(f) == view.key(0) && frame_upper_fence(f) == view.key(count - 1));
     }
 
     if (count == ~uint32_t{0}) {
@@ -345,11 +320,6 @@ bool frame_validate_key_range(const uint8_t *f, uint32_t page_bytes, const KeyRa
         LeafFrameView view(f, page_bytes);
         for (uint32_t i = 0; i < view.count(); ++i) {
             if (!range.contains(view.key(i))) {
-                return false;
-            }
-        }
-        for (uint32_t i = 0; i < view.delta_count(); ++i) {
-            if (!range.contains(view.delta_key(i))) {
                 return false;
             }
         }
@@ -477,65 +447,6 @@ bool inner_frame_build_span(uint8_t *f, uint32_t page_bytes, uint64_t self_page_
     frame_put_u32(f, fh::kFreeHi, free_hi);
     frame_put_u64(f, fh::kSelfpage_id, self_page_id);
     stamp_trailer(f, page_bytes);
-    return true;
-}
-
-// ── leaf_frame_append_deltas (PT12) ──────────────────────────────────
-
-bool leaf_frame_append_deltas(const uint8_t *src, uint32_t page_bytes, const std::vector<leaf_entry> &entries,
-                              uint8_t *out)
-{
-    std::memcpy(out, src, page_bytes);
-    uint32_t free_lo     = frame_u32(out, fh::kFreeLo); // end of main slot dir
-    uint32_t free_hi     = frame_u32(out, fh::kFreeHi);
-    uint32_t delta_count = frame_u32(out, fh::kDeltaCount);
-
-    // Total bytes needed: one slot per delta (forward) + record bytes (backward).
-    size_t need_slots = entries.size() * kLeafSlotSize;
-    size_t need_recs  = 0;
-    for (const auto &e : entries) {
-        need_recs += e.key.size() + e.cell.size();
-    }
-    uint32_t slot_end =
-        free_lo + ((delta_count + static_cast<uint32_t>(entries.size())) * static_cast<uint32_t>(kLeafSlotSize));
-    if (slot_end + need_recs > free_hi) {
-        return false; // does not fit -> caller folds
-    }
-    (void)need_slots;
-
-    uint32_t cur_hi = free_hi;
-    for (size_t j = 0; j < entries.size(); ++j) {
-        const leaf_entry &e       = entries[j];
-        auto              reclen  = static_cast<uint32_t>(e.key.size() + e.cell.size());
-        uint32_t          rec_off = cur_hi - reclen;
-        const Slice       key(e.key);
-        if (!key.empty()) {
-            std::memcpy(out + rec_off, key.data(), key.size());
-        }
-        if (!e.cell.empty()) {
-            std::memcpy(out + (rec_off + key.size()), e.cell.data(), e.cell.size());
-        }
-        uint8_t *slot = out + (free_lo + ((delta_count + static_cast<uint32_t>(j)) * kLeafSlotSize));
-        frame_put_u32(slot, 0, rec_off);
-        frame_put_u32(slot, 4, static_cast<uint32_t>(e.key.size()));
-        frame_put_u32(slot, 8, static_cast<uint32_t>(e.cell.size()));
-        cur_hi = rec_off;
-    }
-    frame_put_u32(out, fh::kFreeHi, cur_hi);
-    frame_put_u32(out, fh::kDeltaCount, delta_count + static_cast<uint32_t>(entries.size()));
-    LeafFrameView view(out, page_bytes);
-    Slice         lower = view.count() == 0 ? view.delta_key(0) : view.key(0);
-    Slice         upper = view.count() == 0 ? view.delta_key(0) : view.key(view.count() - 1);
-    for (uint32_t index = 0; index < view.delta_count(); ++index) {
-        Slice key = view.delta_key(index);
-        if (key.compare(lower) < 0) {
-            lower = key;
-        }
-        if (key.compare(upper) > 0) {
-            upper = key;
-        }
-    }
-    (void)frame_set_fences(out, page_bytes, &lower, &upper);
     return true;
 }
 

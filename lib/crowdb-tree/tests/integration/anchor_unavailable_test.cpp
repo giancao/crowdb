@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -10,7 +10,7 @@ namespace crowdb::tree
 {
 namespace
 {
-class TestUnavailableAnchorStore : public MemPageStore
+class TestUnavailableAnchorStore : public PageMemStore
 {
   public:
     uint64_t unavailable_slots = 0;
@@ -24,7 +24,7 @@ class TestUnavailableAnchorStore : public MemPageStore
             }
             return Status::unavailable("anchor mirror is temporarily unavailable");
         }
-        return MemPageStore::read_at(off, buf, len);
+        return PageMemStore::read_at(off, buf, len);
     }
 };
 

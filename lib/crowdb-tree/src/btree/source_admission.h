@@ -12,7 +12,7 @@
 
 namespace crowdb::tree
 {
-struct PublishedTreeState;
+struct TreeRoot;
 
 struct SourceCatalog
 {
@@ -260,7 +260,7 @@ class SourceAdmission
     [[nodiscard]] static std::optional<size_t> coverage_allocation_bound(size_t sources) noexcept;
     Status prepare_coverage(uint64_t frontier, const std::shared_ptr<AllocationBudget> &metadata,
                             std::shared_ptr<Coverage> *out);
-    Status install_coverage(const std::shared_ptr<Coverage> &prepared, const PublishedTreeState &published);
+    Status install_coverage(const std::shared_ptr<Coverage> &prepared, const TreeRoot &published);
     [[nodiscard]] static std::optional<size_t> rotation_allocation_bound(size_t sources) noexcept;
     // Prepares all successor owners without closing the active source. The
     // host publishes next() membership before acknowledging installation.

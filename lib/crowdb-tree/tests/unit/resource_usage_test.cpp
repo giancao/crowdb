@@ -1,6 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/resource_budget.h"
+#include "btree/tree_core_access.h"
+#include "c_api_internal.h"
 #include "crowdb-tree/c_api.h"
 #include "crowdb-tree/runtime_c_api.h"
 #include "published_read_test_support.h"
@@ -54,7 +56,9 @@ TEST(ResourceUsage, VersionedHostAndTreeSnapshotsAreNonDraining)
     ct_tree                                                *raw_tree = nullptr;
     ASSERT_EQ(ct_open_with_runtime(&options, runtime.get(), nullptr, &raw_tree), 0);
     std::unique_ptr<ct_tree, decltype(&ct_close)> tree(raw_tree, &ct_close);
-    ct_resource_usage_snapshot_v1                 host{
+    // The non-draining sample can otherwise see the asynchronous open tail.
+    TreeCoreAccess::get(*c_api_tree(raw_tree))->binding()->drain();
+    ct_resource_usage_snapshot_v1 host{
         .struct_size = sizeof(host), .version = 1, .resource_mask = 0, .scope_id = 0, .resources = {}};
     auto local = host;
     ASSERT_EQ(ct_runtime_resource_usage(runtime.get(), &host), 0);

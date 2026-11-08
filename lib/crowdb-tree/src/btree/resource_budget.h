@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/memory_budget.h"
+#include "crowdb-tree/page_store/async_page_store.h"
 #include "crowdb-tree/resource_usage.h"
 #include "stdexec_adapter.h"
 #include "tree_wait_metrics.h"
@@ -244,8 +244,10 @@ class ResourceBudget
     [[nodiscard]] std::shared_ptr<Account> make_account(Limits limits);
     // Charge both the account and its shared control block to host metadata.
     [[nodiscard]] std::shared_ptr<Account> make_account(Limits limits, const std::shared_ptr<AllocationBudget> &budget);
+    // Sets memory_denied on refusal by the actual memory ceiling only.
     [[nodiscard]] static std::optional<Credit> try_reserve(const std::shared_ptr<Account> &account,
-                                                           BudgetClass category, size_t amount) noexcept;
+                                                           BudgetClass category, size_t amount,
+                                                           bool *memory_denied = nullptr) noexcept;
     [[nodiscard]] static size_t capacity(const std::shared_ptr<Account> &account, BudgetClass category) noexcept;
     // Planning hint from admission usage, including both host and Tree limits.
     // A subsequent reservation must still claim the capacity atomically.

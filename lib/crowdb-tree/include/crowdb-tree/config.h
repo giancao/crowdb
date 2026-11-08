@@ -72,11 +72,6 @@ struct Config
     // key comfortably within a single leaf/inner frame alongside its cell.
     size_t max_key_size = 0;
 
-    // Deprecated compatibility fields. New publication does not append an
-    // in-frame delta region; historical delta frames remain readable.
-    bool     inframe_delta     = false;
-    uint32_t max_inframe_delta = 8;
-
     // Soft per-source thresholds. A successful write crossing either bound
     // publishes a fresh writable source while the old source remains readable.
     // Values of zero request rotation after each nonempty write. Independent
@@ -86,7 +81,7 @@ struct Config
 
     // Total MemTable capacity, including one writable source (minimum two).
     // Once the last source reaches a rotation target, ordinary binds wait for
-    // the finite flush and its persistent output on reloadable backends.
+    // the finite flush and its persistent output on reloadable page stores.
     // Accepted/gap repair keeps independent progress credit. Retained values
     // remain charged to their actual allocation owners after source detach;
     // failed persistence preserves the old durable root and replay frontier.
@@ -96,12 +91,12 @@ struct Config
     // Zero keeps the existing rotation and flush policy.
     uint32_t memtable_flush_count = 0;
 
-    // Deprecated compatibility field. Immutable MappingView radix geometry
+    // Deprecated compatibility field. Immutable MappingTable radix geometry
     // and checkpoint metadata layout are fixed by their format.
     uint32_t mapping_segment_slots = 1024;
 
     // ── Persistence ──
-    // Durable backend. Non-owning; nullptr = pure in-memory engine (no
+    // Durable page store. Non-owning; nullptr = pure in-memory engine (no
     // flush with persistent/recovery). When set, flush_with_persistent() writes the materialized L1
     // state and open() recovers it.
     PageStore *page_store = nullptr;
@@ -113,11 +108,11 @@ struct Config
     // `page_store`. This contract is independent of io_uring so RPC-backed
     // stores work on builds without liburing.
     AsyncPageStore *async_page_store = nullptr;
-    // Optional shared owner of both raw backend fields and their reactor.
+    // Optional shared owner of both raw page store fields and their reactor.
     // Detached runtime snapshots keep this owner after the Tree closes.
-    std::shared_ptr<const void> backend_owner;
+    std::shared_ptr<const void> page_store_owner;
 #ifdef CROWDB_HAVE_LIBURING
-    // Optional local reactor used only by BlockAsyncPageStore.
+    // Optional local reactor used only by AsyncPageDiskStore.
     ::crowdb::common::DiskIOUring *async_uring = nullptr;
 #endif
 
@@ -146,10 +141,10 @@ struct Config
     // If empty, logs show "[unnamed]".
     std::string name;
 
-    // Short backend label for metric names (e.g. "file", "block", "mem").
+    // Short page store label for metric names (e.g. "file", "block", "mem").
     // Set by the caller before open(); included in the init_metrics prefix
-    // so C++ metrics are tagged with their storage backend.
-    std::string backend_label;
+    // so C++ metrics are tagged with their storage page store.
+    std::string page_store_label;
 
     // Immutable public key policy. Chunk-KV partitions use a bounded range;
     // ordinary KV trees retain the unbounded default.

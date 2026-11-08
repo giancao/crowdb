@@ -711,7 +711,7 @@ impl PxGroup {
             return Err("snapshot join: invalid transfer configuration".to_string());
         }
         let import_started = std::time::Instant::now();
-        let transport = PxRpcTransport::new();
+        let transport = PxRpcTransport::for_snapshot_join();
         'restart: for attempt in 0..restart_attempts {
             let begin = transport
                 .snapshot_begin(peer_endpoint, self.group_id, chunk_bytes as u32)

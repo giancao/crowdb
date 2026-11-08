@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
 #include "btree/allocation_bound.h"
 #include "crowdb-common/log.h"
+#include "page_store/checkpoint_page_store.h"
 #include "tree_core_internal.h"
 
 namespace crowdb::tree
@@ -16,9 +16,9 @@ void TreeCore::set_flush_handoff_wait_for_tests(std::function<bool(uint64_t, std
 
 void TreeCore::resume_capacity() noexcept
 {
-    if ((!local_backend() && !chunk_backend()) ||
+    if ((!local_page_store() && !page_chunk_store()) ||
         (durable_coverage() >= publisher().capture()->coverage &&
-         (!chunk_backend() || !chunk_backend()->needs_recovery.load(std::memory_order_acquire)))) {
+         (!page_chunk_store() || !page_chunk_store()->needs_recovery.load(std::memory_order_acquire)))) {
         state_->source_rotation->resume_capacity();
     }
 }
@@ -43,7 +43,7 @@ try {
         }
     }
     auto preparation  = state_->preparation;
-    preparation.store = ticket->backend(async_backend());
+    preparation.store = ticket->page_store(async_page_store());
     return state_->flush->prepare(preparation, out);
 }
 catch (const std::bad_alloc &) {
@@ -65,7 +65,7 @@ try {
         return status;
     }
     auto preparation     = state_->preparation;
-    preparation.store    = ticket->backend(async_backend());
+    preparation.store    = ticket->page_store(async_page_store());
     const auto requested = state_->frontier->contiguous().load(std::memory_order_acquire);
     for (;;) {
         const auto                      observed = state_->apply_progress->sequence();

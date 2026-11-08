@@ -50,7 +50,7 @@ pub struct ct_tree_resource_stats_v1 {
     pub read_inflight_bytes: u64,
     pub write_inflight_bytes: u64,
     pub materialize_inflight_bytes: u64,
-    pub allocated_backing_bytes: u64,
+    pub allocated_page_block_bytes: u64,
     pub maintenance_queued: u64,
     pub maintenance_inflight: u64,
 }

@@ -17,7 +17,7 @@ struct MaintenanceWindow
     size_t leaves;
 };
 
-std::optional<MaintenanceWindow> maintenance_window(const MappingView::CopyBounds       &shape,
+std::optional<MaintenanceWindow> maintenance_window(const MappingTable::CopyBounds      &shape,
                                                     const MaintenancePublicationOptions &options) noexcept
 {
     if (options.pages.max_output_pages < 2 || options.max_changed_pages == 0 || options.pages.max_work_entries == 0) {
@@ -35,7 +35,7 @@ std::optional<MaintenanceWindow> maintenance_window(const MappingView::CopyBound
 }
 } // namespace
 
-void limit_page_maintenance_window(const MappingView &mapping, size_t new_runs, size_t reclaim_bytes,
+void limit_page_maintenance_window(const MappingTable &mapping, size_t new_runs, size_t reclaim_bytes,
                                    size_t snapshot_bytes, bool track_residency,
                                    PageMaintenanceOperationOptions *options) noexcept
 {
@@ -66,7 +66,7 @@ void limit_page_maintenance_window(const MappingView &mapping, size_t new_runs, 
     pages.max_output_pages = low;
 }
 
-std::optional<size_t> page_maintenance_snapshot_reserve_bound(const MappingView                     &mapping,
+std::optional<size_t> page_maintenance_snapshot_reserve_bound(const MappingTable                    &mapping,
                                                               const PageMaintenanceOperationOptions &options) noexcept
 {
     const auto window = maintenance_window(mapping.copy_bounds(), options.publication);
@@ -79,7 +79,7 @@ std::optional<size_t> page_maintenance_snapshot_reserve_bound(const MappingView 
     return bytes.value();
 }
 
-std::optional<size_t> page_maintenance_reserve_bound(const MappingView &mapping, size_t new_runs,
+std::optional<size_t> page_maintenance_reserve_bound(const MappingTable &mapping, size_t new_runs,
                                                      const PageMaintenanceOperationOptions &options,
                                                      bool track_residency, bool separate_snapshot_credit) noexcept
 {
@@ -113,13 +113,13 @@ std::optional<size_t> page_maintenance_reserve_bound(const MappingView &mapping,
                           shared_allocation_bound<detail::MaintenanceOperation::Candidates>());
     bytes.add_product(options.max_candidates, sizeof(detail::MaintenanceOperation::Candidate));
     bytes.add(shared_allocation_bound<detail::MaintenanceOperation::Cold>());
-    bytes.add(shared_allocation_bound<PublishedTreeState>());
-    bytes.add(shared_allocation_bound<PublishedPage>());
+    bytes.add(shared_allocation_bound<TreeRoot>());
+    bytes.add(shared_allocation_bound<PageEntry>());
     // Only captured routing pages require cold scratch. Inner pages created
     // by this maintenance window already own resident routes. Retain the full
     // bounded replacement arrays, but charge copied radix paths by that depth.
     const auto cold_depth = std::min<size_t>(publication.max_path_pages, mapping_bounds.max_level);
-    bytes.add_product((3 * cold_depth) + 1, MappingView::path_copy_bound());
+    bytes.add_product((3 * cold_depth) + 1, MappingTable::path_copy_bound());
     bytes.add_product((3 * publication.max_path_pages) + 1, sizeof(PageReplacement));
     bytes.add_product(2 * publication.max_path_pages, sizeof(uint64_t));
     bytes.add(*leaf);
@@ -129,7 +129,7 @@ std::optional<size_t> page_maintenance_reserve_bound(const MappingView &mapping,
     // are covered above, including both inputs of an inner merge. Charge new
     // route entries once across the transaction, not once per changed page.
     bytes.add_product(changed, 3 * (sizeof(uint64_t) + sizeof(OwnedKey)));
-    bytes.add_product(changed, MappingView::path_copy_bound());
+    bytes.add_product(changed, MappingTable::path_copy_bound());
     if (!separate_snapshot_credit) {
         bytes.add_product(changed, PublicationCoordinator::snapshot_change_reserve_bytes());
     }

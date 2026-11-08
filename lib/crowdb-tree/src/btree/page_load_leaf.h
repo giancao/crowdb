@@ -9,7 +9,7 @@
 namespace crowdb::tree
 {
 // Fold the captured frame at its proven slot bound, preserving tombstones and
-// the backing's overflow protection. This does not provide historical reads.
+// the page block's overflow protection. This does not provide historical reads.
 Status decode_loaded_leaf(FrameStore::Bytes &input, std::span<const uint8_t> blob, const BaseRef &base,
                           const PageLoadLimits &limits, const std::shared_ptr<AllocationBudget> &metadata,
                           std::shared_ptr<const LeafBase> *out);

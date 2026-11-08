@@ -12,7 +12,6 @@
 
 pub mod admission;
 pub mod async_tree;
-pub mod backend_release;
 pub mod batch;
 pub mod chunk;
 mod close;
@@ -23,6 +22,7 @@ pub mod error;
 pub mod maintenance;
 mod owner_budget;
 pub mod page;
+pub mod page_store_release;
 pub mod reactor;
 pub mod read_only_view;
 pub mod runtime;
@@ -38,7 +38,6 @@ pub mod write_handle;
 
 pub use admission::{ArmedApply, PreparedApply};
 pub use async_tree::{AsyncCrowdbtree, GetOutcome, OwnedGetOutcome, PinnedGetOutcome, ScanOutcome};
-pub use backend_release::BackendReleaseService;
 pub use batch::{BatchOp, ExtOp, OwnedAllocation, OwnedOp};
 pub use chunk::{
     ChunkRootCatalog, ChunkRpcDiskRoute, ChunkRpcRoute, ChunkRpcTransportOptions, ChunkRuntimeOptions,
@@ -47,13 +46,14 @@ pub use chunk::{
 #[cfg(feature = "chunk-rpc")]
 pub use chunk::{ChunkRpcRouteResolver, OwnedChunkRpcDiskRoute, OwnedChunkRpcTransportOptions};
 pub use config::{
-    Compression, Config, KeyRange, PageStore, PageStoreBackend, SyncMode, TreeBindingConfig,
-    TreeEngineConfig, TreeHostConfig, TreeResourceConfig, TreeRuntimeConfig,
+    Compression, Config, KeyRange, PageStore, PageStoreKind, SyncMode, TreeBindingConfig, TreeEngineConfig,
+    TreeHostConfig, TreeResourceConfig, TreeRuntimeConfig,
 };
 pub use cpp_global_metrics::{cpp_global_metrics_max_name_len, flush_cpp_global_metrics};
 pub use crc::{crc32c, crc32c_update};
 pub use error::CtError;
 pub use maintenance::{CheckpointReport, FlushPhase, FlushReport};
+pub use page_store_release::PageStoreReleaseService;
 pub use reactor::PinnedValue;
 pub use read_only_view::ReadOnlyTreeView;
 pub use runtime::{
@@ -65,9 +65,9 @@ pub use snapshot::{
     OwnedSnapshotChunk, SnapshotChunk, SnapshotExportSession, SnapshotImportSession, SnapshotMetadata,
 };
 pub use stats::{
-    BackingStatsSnapshot, MergeGcStats, RangeRebuildStats, Stats, TreeFlushDispatchStats, TreeHistogramStats,
-    TreeLogicalStats, TreeProgressSnapshot, TreeResourceStats, TreeStatsSnapshot, TreeSummary,
-    TreeWorkCollector, TreeWorkCounters, TreeWorkHistograms, TreeWorkSnapshot, TreeWorkStage,
+    MergeGcStats, PageBlockStatsSnapshot, RangeRebuildStats, Stats, TreeFlushDispatchStats,
+    TreeHistogramStats, TreeLogicalStats, TreeProgressSnapshot, TreeResourceStats, TreeStatsSnapshot,
+    TreeSummary, TreeWorkCollector, TreeWorkCounters, TreeWorkHistograms, TreeWorkSnapshot, TreeWorkStage,
     TreeWorkStageAge, TreeWorkStageStats, TREE_WORK_CAUSE_NAMES, TREE_WORK_COUNTER_NAMES,
     TREE_WORK_STAGE_NAMES,
 };

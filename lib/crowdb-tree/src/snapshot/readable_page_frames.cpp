@@ -8,7 +8,7 @@
 
 namespace crowdb::tree
 {
-struct ReadablePageFrames::Segment
+struct ReadablePageFrames::MappingSegment
 {
     static constexpr bool observe_retirement = true;
 
@@ -95,12 +95,12 @@ bool ReadablePageFrames::same_segment(const ReadablePageFrames &other, uint64_t 
     return a != segments_.end() && b != other.segments_.end() && a->second == b->second;
 }
 
-ReadablePageFrames::Segment &ReadablePageFrames::mutable_segment(uint64_t segment)
+ReadablePageFrames::MappingSegment &ReadablePageFrames::mutable_segment(uint64_t segment)
 {
     detail::BudgetMemoryResource::Scope scope(resource_, metadata_);
     auto [position, inserted] = segments_.try_emplace(segment);
     if (inserted || !position->second.unique()) {
-        auto next = detail::reserved_shared<Segment>(metadata_);
+        auto next = detail::reserved_shared<MappingSegment>(metadata_);
         if (!inserted) {
             detail::BudgetMemoryResource::Scope entries(next->resource, metadata_);
             next->frames.insert(position->second->frames.begin(), position->second->frames.end());
@@ -204,7 +204,7 @@ size_t ReadablePageFrames::erase(uint64_t pid)
 size_t ReadablePageFrames::segment_allocation_bound() noexcept
 {
     // PMR nodes carry an allocation lease in addition to map linkage.
-    return detail::shared_allocation_bound<Segment>() +
+    return detail::shared_allocation_bound<MappingSegment>() +
            (kMappingSegmentSize * (sizeof(value_type) + (8 * sizeof(void *)) + sizeof(AllocationLease)));
 }
 

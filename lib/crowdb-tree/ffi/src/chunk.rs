@@ -146,7 +146,7 @@ pub trait RootCatalogStore: Send + Sync + 'static {
 }
 
 impl ChunkRootCatalog {
-    /// Persistent intent/pin schema; the complete backend must also support fenced IO and drain.
+    /// Persistent intent/pin schema; the complete page store must also support fenced IO and drain.
     #[must_use]
     pub fn supports_protection_schema(&self) -> bool {
         unsafe { sys::ct_root_catalog_protection_capabilities(self.ptr.as_ptr()) & 1 != 0 }
@@ -487,7 +487,7 @@ impl PageStore {
         Ok(offset)
     }
 
-    /// Returns the root-catalog manifest generation currently backing this
+    /// Returns the root-catalog manifest generation currently page block this
     /// page-store view. This is distinct from the tree snapshot sequence.
     pub fn chunk_manifest_generation(&self) -> Result<u64, CtError> {
         let mut generation = 0;

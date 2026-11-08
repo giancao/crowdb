@@ -3,14 +3,14 @@
 #pragma once
 
 #include "btree/allocation_reservation.h"
-#include "crowdb-tree/backend/async_page_store.h"
+#include "crowdb-tree/page_store/async_page_store.h"
 #include "crowdb-tree/resource_usage.h"
 
 namespace crowdb::tree
 {
 // Tracks accepted Tree operations through the last transport owner, including
 // submissions whose acceptance is unknown. CPU drain alone cannot establish
-// that a host-owned backend is safe to destroy.
+// that a host-owned page store is safe to destroy.
 class TreeOperationLifetime
 {
     struct State;
@@ -23,10 +23,10 @@ class TreeOperationLifetime
         Ticket(const Ticket &)            = delete;
         Ticket &operator=(const Ticket &) = delete;
 
-        // The backend remains host-owned. A loader/writeback holds this alias
+        // The page store remains host-owned. A loader/writeback holds this alias
         // through every callback ticket, so close_and_drain cannot finish while
-        // the backend could still access its buffer or callback context.
-        [[nodiscard]] std::shared_ptr<AsyncPageStore> backend(AsyncPageStore *store);
+        // the page store could still access its buffer or callback context.
+        [[nodiscard]] std::shared_ptr<AsyncPageStore> page_store(AsyncPageStore *store);
 
       private:
         friend class TreeOperationLifetime;

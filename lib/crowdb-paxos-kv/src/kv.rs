@@ -28,7 +28,7 @@ mod maintenance;
 mod op;
 
 pub use admission::{AdmittedApply, ApplyAdmissionError, ApplyAdmissionResult};
-pub use crowdb_tree_engine::{CrowdbTreeBackend, CrowdbTreeConfig, CrowdbTreeEngine, CrowdbTreeStats};
+pub use crowdb_tree_engine::{CrowdbTreeConfig, CrowdbTreeEngine, CrowdbTreeStats, CrowdbTreeStoreKind};
 pub use kv_engine::{
     KVEngine, ScanDirection, SnapshotChunk, SnapshotExporter, SnapshotFormat, SnapshotImporter,
     SnapshotMetadata, SnapshotViewEntry,

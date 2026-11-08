@@ -8,7 +8,7 @@
 
 namespace crowdb::tree::detail
 {
-Status ReclaimAdmission::acquire_window(const MappingView &mapping, MaintenancePublicationOptions *publication,
+Status ReclaimAdmission::acquire_window(const MappingTable &mapping, MaintenancePublicationOptions *publication,
                                         std::shared_ptr<AllocationReservation> *out) const
 {
     if (publication == nullptr || out == nullptr || *out) {
@@ -106,7 +106,7 @@ Status bind_flush_reservations(PublicationCoordinator &publisher, const FlushPre
     auto loads = preparation.loads;
 
     batch->loader = reserved_shared<AsyncStorePageLoader>(reserved.routing, preparation.store, preparation.runtime,
-                                                          lane, loads, OverflowBackingResolver{},
+                                                          lane, loads, OverflowPageBlockResolver{},
                                                           PageLoadBudget{.bytes        = reserved.routing,
                                                                          .work_metrics = publisher.work_metrics(),
                                                                          .backend      = reserved.backend,
@@ -124,11 +124,11 @@ Status bind_flush_reservations(PublicationCoordinator &publisher, const FlushPre
     return Status::Ok();
 }
 
-Status prepare_flush_reservations(PublicationCoordinator &publisher, const PublishedTreeState &view,
-                                  const SourceCatalog &sources, const FlushPreparationOptions &preparation,
-                                  size_t control_bytes, std::shared_ptr<FlushRuntime::Lane> lane,
-                                  FlushBatchOptions *batch, FlushBatch::Maintenance *maintenance,
-                                  FlushReservations *out, std::optional<WriteFootprint> stable_active)
+Status prepare_flush_reservations(PublicationCoordinator &publisher, const TreeRoot &view, const SourceCatalog &sources,
+                                  const FlushPreparationOptions &preparation, size_t control_bytes,
+                                  std::shared_ptr<FlushRuntime::Lane> lane, FlushBatchOptions *batch,
+                                  FlushBatch::Maintenance *maintenance, FlushReservations *out,
+                                  std::optional<WriteFootprint> stable_active)
 {
     if (!lane || batch == nullptr || maintenance == nullptr || *maintenance || out == nullptr) {
         return Status::invalid_argument("flush preparation requires fresh owned progress consumers");

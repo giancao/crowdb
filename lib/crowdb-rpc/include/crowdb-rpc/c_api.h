@@ -351,6 +351,7 @@ crowdb_rpc_status crowdb_rpc_client_send_conn(crowdb_rpc_client_t client, crowdb
 
 // ── Connection (for client-side use) ──────────────────────────────
 crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *addr, int port);
+crowdb_rpc_conn_t crowdb_rpc_connect_tcp(crowdb_rpc_server_t server, const char *addr, int port);
 
 typedef struct crowdb_rpc_connect_s *crowdb_rpc_connect_t;
 // An immediate TCP connection or failure sets out_conn and returns NULL.

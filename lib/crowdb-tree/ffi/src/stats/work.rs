@@ -172,10 +172,10 @@ unsafe impl Send for TreeWorkCollector {}
 unsafe impl Sync for TreeWorkCollector {}
 
 impl TreeWorkCollector {
-    /// Samples backing counters after Tree close without retaining storage owners.
-    pub fn backing_stats(&self) -> Result<super::BackingStatsSnapshot, CtError> {
-        super::backing::sample(|out| unsafe {
-            sys::ct_work_metrics_collector_backing_stats(self.handle.as_ptr(), out)
+    /// Samples page block counters after Tree close without retaining storage owners.
+    pub fn page_block_stats(&self) -> Result<super::PageBlockStatsSnapshot, CtError> {
+        super::page_block::sample(|out| unsafe {
+            sys::ct_work_metrics_collector_page_block_stats(self.handle.as_ptr(), out)
         })
     }
 

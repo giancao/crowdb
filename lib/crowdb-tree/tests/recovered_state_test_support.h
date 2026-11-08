@@ -18,15 +18,15 @@ struct TestRecoveredGraph
     std::shared_ptr<CapturedDurablePages>       pages =
         detail::reserved_shared<CapturedDurablePages>(credits.credits.reservation(), credits.credits.reservation());
     std::shared_ptr<AsyncStorePageLoader> loader = std::make_shared<AsyncStorePageLoader>(
-        store, runtime, lane, PageLoadLimits{}, OverflowBackingResolver{}, credits.credits);
+        store, runtime, lane, PageLoadLimits{}, OverflowPageBlockResolver{}, credits.credits);
     std::shared_ptr<RecoveredStateOperation> operation;
 
     TestRecoveredGraph()
     {
-        pages->root_page_id = 0;
-        pages->coverage     = 10;
-        pages->generation   = 3;
-        pages->backend_id   = 9;
+        pages->root_page_id  = 0;
+        pages->coverage      = 10;
+        pages->generation    = 3;
+        pages->page_store_id = 9;
     }
 
     void add(uint64_t pid, const std::vector<uint8_t> &raw)
@@ -34,15 +34,15 @@ struct TestRecoveredGraph
         ASSERT_TRUE(frame_validate(raw.data(), raw.size()));
         auto &blob = store->blobs[pid];
         encode_durable_page(raw.data(), raw.size(), compress_algo::kNone, &blob);
-        auto backing        = std::make_shared<BackingRef>();
-        backing->backend_id = 9;
-        backing->address    = pid;
-        backing->length     = blob.size();
-        backing->owner      = std::make_shared<int>(1);
+        auto page_block           = std::make_shared<PageBlockRef>();
+        page_block->page_store_id = 9;
+        page_block->address       = pid;
+        page_block->length        = blob.size();
+        page_block->owner         = std::make_shared<int>(1);
         DurableCapturedFrame frame{.page_id     = pid,
                                    .type        = frame_page_type(raw.data()),
                                    .frame_bytes = static_cast<uint32_t>(raw.size()),
-                                   .backing     = backing};
+                                   .page_block  = page_block};
         if (frame.type == page_type::kLeafBase) {
             ASSERT_TRUE(capture_stored_overflow(LeafFrameView(raw.data(), raw.size()), 4096,
                                                 credits.credits.reservation(), &frame.stored_overflow)

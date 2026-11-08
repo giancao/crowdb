@@ -40,7 +40,7 @@ impl TestDefaultMetadata {
                 data_root: path.join("data"),
                 wal_root: path.join("wal"),
                 wal_backend: "file".into(),
-                crowtree_backend: "mem-block".into(),
+                crowtree_store_kind: "mem-block".into(),
                 ..PaxosKvConfig::for_tests()
             };
             let registry = Arc::new(PaxosKvStoreRegistry::with_config(config));

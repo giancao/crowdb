@@ -8,10 +8,10 @@
 
 namespace crowdb::tree
 {
-Status FlushController::State::prepare_covered(const FlushPreparationOptions                   &preparation,
-                                               const std::shared_ptr<const PublishedTreeState> &view,
-                                               const std::shared_ptr<const SourceCatalog>      &catalog,
-                                               std::shared_ptr<FlushOperation>                 *out)
+Status FlushController::State::prepare_covered(const FlushPreparationOptions              &preparation,
+                                               const std::shared_ptr<const TreeRoot>      &view,
+                                               const std::shared_ptr<const SourceCatalog> &catalog,
+                                               std::shared_ptr<FlushOperation>            *out)
 try {
     if (preparation.persistent || !preparation.store || !catalog->active_budget || options.loader ||
         preparation.maintenance.prepaid || preparation.maintenance.acquire ||

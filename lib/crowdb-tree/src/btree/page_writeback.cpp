@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_bound.h"
-#include "backend/chunk/chunk_backing.h"
-#include "backend/local/scheduled_page_store.h"
+#include "page_store/chunk/chunk_page_block.h"
+#include "page_store/local/scheduled_page_store.h"
 #include "page_writeback_internal.h"
 
 #include <bit>
@@ -21,7 +21,7 @@ std::optional<size_t> PageWriteOperation::allocation_bound(PageWriteLimits limit
     }
     return detail::AllocationBound(
                detail::shared_allocation_bound<State>() + detail::shared_allocation_bound<PageWriteOperation>() +
-               detail::shared_allocation_bound<BackingRef>() + detail::shared_allocation_bound<State::Protection>())
+               detail::shared_allocation_bound<PageBlockRef>() + detail::shared_allocation_bound<State::Protection>())
         .add(limits.padded_blob_bytes(limits.max_frame_bytes))
         .add(limits.buffer_alignment - 1)
         .add(durable_encode_scratch_bytes(limits.compression))
@@ -29,13 +29,13 @@ std::optional<size_t> PageWriteOperation::allocation_bound(PageWriteLimits limit
                  ? detail::ChunkFixedPackStore::write_allocation_bound(limits.padded_blob_bytes(limits.max_frame_bytes))
                  : std::optional<size_t>{0})
         .add(limits.chunk_backed ? detail::shared_allocation_bound<detail::AllocationReservation>() : 0)
-        .add(limits.chunk_backed ? chunk_backing_allocation_bound() : 0)
+        .add(limits.chunk_backed ? chunk_page_block_allocation_bound() : 0)
         .value();
 }
 
 size_t PageWriteOperation::retained_allocation_bound() noexcept
 {
-    return detail::shared_allocation_bound<BackingRef>() + detail::shared_allocation_bound<State::Protection>();
+    return detail::shared_allocation_bound<PageBlockRef>() + detail::shared_allocation_bound<State::Protection>();
 }
 
 PageWriteOperation::State::State(PageWriteInput source, PageWriteLimits bounds, PageLoadBudget credits)
@@ -47,7 +47,7 @@ PageWriteOperation::State::State(PageWriteInput source, PageWriteLimits bounds, 
            decltype(blob)::allocator_type(budget.bytes)),
       scratch(durable_encode_scratch_bytes(limits.compression),
               detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(budget.bytes)),
-      backing(detail::reserved_shared<BackingRef>(budget.bytes)),
+      page_block(detail::reserved_shared<PageBlockRef>(budget.bytes)),
       protection(detail::reserved_shared<Protection>(budget.bytes))
 {
     const auto bytes = limits.padded_blob_bytes(limits.max_frame_bytes);
@@ -59,7 +59,7 @@ PageWriteOperation::State::State(PageWriteInput source, PageWriteLimits bounds, 
         aligned = {static_cast<uint8_t *>(address), bytes};
     }
     protection->dependencies = input.reload_dependencies;
-    backing->owner           = protection;
+    page_block->owner        = protection;
     if (limits.chunk_backed && budget.reservation()) {
         const auto bound = detail::ChunkFixedPackStore::write_allocation_bound(bytes);
         if (!bound || !budget.bytes) {
@@ -178,8 +178,8 @@ void PageWriteOperation::State::written(void *context, Status status) noexcept
     if (state->io_complete.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    if (status.ok() && state->backing->chunk) {
-        state->backing->physical_metrics = state->backing->chunk->physical_metrics;
+    if (status.ok() && state->page_block->chunk) {
+        state->page_block->physical_metrics = state->page_block->chunk->physical_metrics;
     }
     state->io_resources.reset();
     state->finish(std::move(status));
@@ -196,7 +196,7 @@ void PageWriteOperation::State::finish(Status status) noexcept
     const bool cancelled = stopped.load(std::memory_order_acquire);
     report.status        = cancelled ? Status::unavailable() : std::move(status);
     if (report.status.ok()) {
-        report.backing = backing;
+        report.page_block = page_block;
     }
     input.owner.reset();
     input.info.dependencies.reset();

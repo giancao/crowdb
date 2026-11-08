@@ -119,7 +119,7 @@ void LocalCheckpointOperation::State::pump()
         }
         if (encoder->complete()) {
             image->anchor.segdir_crc = encoder->crc();
-            io(true, 0, 0, Stage::BeforeAnchor);
+            prepare_summaries();
         }
         else {
             stage = Stage::DirectoryWrite;
@@ -128,6 +128,19 @@ void LocalCheckpointOperation::State::pump()
         break;
     case Stage::BeforeAnchor:
         anchor();
+        break;
+    case Stage::SummariesReserved:
+        image->summaries             = reserved;
+        image->anchor.summaries_addr = reserved.address;
+        summaries_window();
+        break;
+    case Stage::SummariesWritten:
+        if (summary_offset >= image->anchor.summaries_len) {
+            io(true, 0, 0, Stage::BeforeAnchor);
+        }
+        else {
+            summaries_window();
+        }
         break;
     case Stage::AnchorWritten:
         io(true, 0, 0, Stage::Commit);

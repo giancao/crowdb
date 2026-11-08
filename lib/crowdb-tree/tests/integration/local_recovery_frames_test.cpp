@@ -54,7 +54,7 @@ void expect_failure(TestRecovery &test, Code code = Code::kCorruption, LocalReco
 
 TEST(LocalRecoveryFrames, RejectsBlobCrcFrameCrcSelfPidAndPageTypeCorruption)
 {
-    for (size_t mode = 0; mode < 4; ++mode) {
+    for (size_t mode = 0; mode < 5; ++mode) {
         TestRecovery test;
         test.checkpoint();
         if (mode == 0) {
@@ -70,7 +70,7 @@ TEST(LocalRecoveryFrames, RejectsBlobCrcFrameCrcSelfPidAndPageTypeCorruption)
                 raw[fh::kType] = 0xFF;
             }
             else {
-                frame_put_u64(raw.data(), fh::kSelfpage_id, 9);
+                frame_put_u64(raw.data(), fh::kSelfpage_id, mode == 4 ? kInvalidPageId : 9);
             }
             write_frame(test, 0, std::move(raw), mode != 1);
         }
@@ -167,7 +167,7 @@ TEST(LocalRecoveryFrames, DependencyStepsAndReferenceCountAreBounded)
     }
 }
 
-TEST(LocalRecoveryFrames, LeafBackingAloneKeepsItsPrimaryAndActualOverflowChainAfterRegistryEnds)
+TEST(LocalRecoveryFrames, LeafPageBlockAloneKeepsItsPrimaryAndActualOverflowChainAfterRegistryEnds)
 {
     TestRecovery test;
     test.checkpoint(std::string(6000, 'o'));
@@ -180,11 +180,11 @@ TEST(LocalRecoveryFrames, LeafBackingAloneKeepsItsPrimaryAndActualOverflowChainA
     auto pages  = test.operation->result().latest;
     ASSERT_TRUE(pages);
     const auto                             count = pages->frames.size();
-    auto                                   leaf  = pages->frames.at(0).backing;
+    auto                                   leaf  = pages->frames.at(0).page_block;
     std::vector<std::weak_ptr<const void>> overflow;
     for (const auto &[pid, frame] : pages->frames) {
         if (pid != 0) {
-            overflow.push_back(frame.backing->owner);
+            overflow.push_back(frame.page_block->owner);
         }
     }
     pages.reset();
@@ -215,13 +215,13 @@ TEST(LocalRecoveryFrames, RecoveredOverflowCanBeReusedAndDoesNotRetainItsOldPrim
     ASSERT_EQ(recovered.values.load(), 1U) << recovered.status.to_string();
     auto                      inherited   = test.operation->result().latest;
     auto                      ledger      = test.operation->result().ledger;
-    std::weak_ptr<const void> old_primary = inherited->frames.at(0).backing->owner;
+    std::weak_ptr<const void> old_primary = inherited->frames.at(0).page_block->owner;
     auto                      leaf        = std::make_shared<PageState>();
     leaf->bases.push_back(
-        {.identity = 1,
-         .max_slot = inherited->coverage,
-         .resident = std::shared_ptr<const LeafBase>(LeafBase::from_frame_copy(raw.data(), raw.size())),
-         .backing  = inherited->frames.at(0).backing});
+        {.identity   = 1,
+         .max_slot   = inherited->coverage,
+         .resident   = std::shared_ptr<const LeafBase>(LeafBase::from_frame_copy(raw.data(), raw.size())),
+         .page_block = inherited->frames.at(0).page_block});
     auto captured          = captured_leaf(leaf);
     captured->next_page_id = inherited->next_page_id;
     std::shared_ptr<CapturedWriteOperation> writer;
@@ -242,11 +242,11 @@ TEST(LocalRecoveryFrames, RecoveredOverflowCanBeReusedAndDoesNotRetainItsOldPrim
     EXPECT_EQ(writer->result().reused_frames, inherited->frames.size() - 1);
     for (const auto &[pid, frame] : inherited->frames) {
         if (pid != 0) {
-            const auto &adopted = pages->frames.at(pid).backing;
-            EXPECT_NE(adopted, frame.backing);
-            EXPECT_EQ(adopted->physical_owner, frame.backing->physical_owner);
-            EXPECT_EQ(adopted->address, frame.backing->address);
-            EXPECT_EQ(adopted->length, frame.backing->length);
+            const auto &adopted = pages->frames.at(pid).page_block;
+            EXPECT_NE(adopted, frame.page_block);
+            EXPECT_EQ(adopted->physical_owner, frame.page_block->physical_owner);
+            EXPECT_EQ(adopted->address, frame.page_block->address);
+            EXPECT_EQ(adopted->length, frame.page_block->length);
         }
     }
     writer.reset();

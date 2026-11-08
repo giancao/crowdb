@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/captured_write_internal.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 namespace crowdb::tree
 {
@@ -49,7 +49,7 @@ bool CapturedWriteOperation::State::submit_overflow(DurableCapturedFrame value, 
     };
     auto sender = operation->sender() | stdexec::then([item, operation]() noexcept {
                       const auto &written       = operation->result();
-                      item->frame.backing       = written.backing;
+                      item->frame.page_block    = written.page_block;
                       item->frame.logical_bytes = written.logical_bytes;
                       item->physical_bytes      = written.physical_bytes;
                   }) |
@@ -88,7 +88,7 @@ void CapturedWriteOperation::State::collect_overflow()
         }
         // Each completed write still owns its protected extent. The primary
         // carries those owners and the complete overflow map into publication.
-        dependencies->owners.push_back(item->frame.backing->physical_owner);
+        dependencies->owners.push_back(item->frame.page_block->physical_owner);
         auto status = install_written(std::move(item->frame), item->physical_bytes);
         if (!status.ok()) {
             finish(std::move(status));
@@ -169,7 +169,7 @@ PageWriteOperation::ReserveExtent CapturedWriteOperation::State::reserve_page(bo
 void CapturedWriteOperation::State::received_write()
 {
     const auto &written      = write->result();
-    descriptor.backing       = written.backing;
+    descriptor.page_block    = written.page_block;
     descriptor.logical_bytes = written.logical_bytes;
     auto status              = install_written(descriptor, written.physical_bytes);
     if (!status.ok()) {
@@ -182,16 +182,16 @@ void CapturedWriteOperation::State::received_write()
 Status CapturedWriteOperation::State::install_written(DurableCapturedFrame value, uint64_t physical_bytes)
 {
     if (value.type == page_type::kOverflowFrame) {
-        overflow_backing->pages.emplace(value.page_id, OverflowBackingPage{.backing       = value.backing,
-                                                                           .next          = value.next_overflow,
-                                                                           .bytes         = value.overflow_bytes,
-                                                                           .frame_bytes   = value.frame_bytes,
-                                                                           .logical_bytes = value.logical_bytes});
+        overflow_page_block->pages.emplace(value.page_id, OverflowPageBlock{.page_block    = value.page_block,
+                                                                            .next          = value.next_overflow,
+                                                                            .bytes         = value.overflow_bytes,
+                                                                            .frame_bytes   = value.frame_bytes,
+                                                                            .logical_bytes = value.logical_bytes});
     }
     else if (value.type == page_type::kLeafBase) {
-        auto primary      = detail::reserved_shared<BackingRef>(budget.bytes, *value.backing);
-        primary->overflow = overflow_backing;
-        value.backing     = std::move(primary);
+        auto primary      = detail::reserved_shared<PageBlockRef>(budget.bytes, *value.page_block);
+        primary->overflow = overflow_page_block;
+        value.page_block  = std::move(primary);
     }
     auto status = insert(std::move(value), false);
     if (status.ok()) {
@@ -205,7 +205,7 @@ void CapturedWriteOperation::State::finish_frame()
 {
     if (descriptor.type != page_type::kOverflowFrame) {
         dependencies.reset();
-        overflow_backing.reset();
+        overflow_page_block.reset();
     }
     write.reset();
     frame.reset();

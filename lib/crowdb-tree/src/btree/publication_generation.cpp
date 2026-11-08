@@ -10,13 +10,13 @@
 
 namespace crowdb::tree
 {
-std::optional<size_t> PublicationCoordinator::replacement_allocation_bound(const MappingView &mapping,
-                                                                           size_t             sources) noexcept
+std::optional<size_t> PublicationCoordinator::replacement_allocation_bound(const MappingTable &mapping,
+                                                                           size_t              sources) noexcept
 {
     using detail::shared_allocation_bound;
     detail::AllocationBound bound(sizeof(Root) + shared_allocation_bound<Replacement>() +
-                                  shared_allocation_bound<CheckpointLedger>() +
-                                  shared_allocation_bound<PublishedTreeState>() + PublishedSources::allocation_bound());
+                                  shared_allocation_bound<CheckpointLedger>() + shared_allocation_bound<TreeRoot>() +
+                                  PublishedSources::allocation_bound());
     bound.add_product(sources, sizeof(std::shared_ptr<MemTable>));
     // Each pending member has a red-black node plus the resource charge header.
     size_t pages = 0;
@@ -46,7 +46,7 @@ try {
         return Status::invalid_argument("replacement inheritance differs from its local source catalog");
     }
     auto prepared             = detail::reserved_shared<Replacement>(bootstrap.metadata);
-    prepared->state           = detail::reserved_shared<PublishedTreeState>(bootstrap.metadata, *bootstrap.initial);
+    prepared->state           = detail::reserved_shared<TreeRoot>(bootstrap.metadata, *bootstrap.initial);
     auto &state               = *prepared->state;
     state.gc_floor            = 0;
     state.checkpoint_token    = 0;

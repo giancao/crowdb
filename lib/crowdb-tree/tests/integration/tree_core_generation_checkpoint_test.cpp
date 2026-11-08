@@ -8,12 +8,12 @@ namespace crowdb::tree
 {
 namespace
 {
-struct TestGenerationBackend
+struct TestGenerationPageStore
 {
-    std::shared_ptr<MemPageStore>   device = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore>   device = std::make_shared<PageMemStore>(4096);
     test_write::TestCheckpointStore store;
 
-    TestGenerationBackend()
+    TestGenerationPageStore()
     {
         store.device = device;
     }
@@ -21,12 +21,12 @@ struct TestGenerationBackend
 
 TEST(TreeCoreGenerationCheckpoint, ClearPersistsZeroCoverageWithoutInvalidatingOldOwnedViews)
 {
-    auto   backend = std::make_shared<TestGenerationBackend>();
+    auto   backend = std::make_shared<TestGenerationPageStore>();
     Config config;
     ASSERT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
     config.page_store                           = backend->device.get();
     config.async_page_store                     = &backend->store;
-    config.backend_owner                        = backend;
+    config.page_store_owner                     = backend;
     config.frame_bytes                          = 4096;
     config.max_inline_value                     = 64;
     config.runtime_binding.limits.io_operations = 1;

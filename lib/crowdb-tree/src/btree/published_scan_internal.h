@@ -15,8 +15,8 @@ struct PublishedScan::State : published_read_detail::ReadPump
         bool                              done = false;
     };
 
-    State(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> transport,
-          PageKeyRange selection, bool descending, PublishedReadLimits bounds, PublishedScanOptions options);
+    State(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> transport, PageKeyRange selection,
+          bool descending, PublishedReadLimits bounds, PublishedScanOptions options);
     Status                                 &status() override;
     void                                    begin() override;
     bool                                    advance() override;

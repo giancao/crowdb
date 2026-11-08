@@ -5,14 +5,14 @@
 #include "btree/flush_operation.h"
 #include "btree/page_cache.h"
 #include "btree/published_read.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "runtime/tree_operation_lifetime.h"
 #include "runtime/tree_runtime_binding.h"
 
 namespace crowdb::tree
 {
-struct BackingStatsSampler;
+struct PageBlockStatsSampler;
 
 namespace checkpoint_detail
 {
@@ -21,10 +21,10 @@ struct Preparation;
 
 namespace detail
 {
-class ChunkRuntimePageStore;
+class PageChunkStore;
 } // namespace detail
-struct LocalBackendState;
-class CheckpointBackend;
+struct LocalPageStoreState;
+class CheckpointPageStore;
 class CheckpointOperation;
 class ChunkCollectionOperation;
 class LocalCompactionOperation;
@@ -40,9 +40,9 @@ struct SplitSourceSession;
 
 struct TreeCoreBootstrap
 {
-    std::shared_ptr<const PublishedTreeState> initial;
-    std::shared_ptr<LocalBackendState>        local;
-    std::shared_ptr<CheckpointBackend>        chunk = nullptr;
+    std::shared_ptr<const TreeRoot>      initial;
+    std::shared_ptr<LocalPageStoreState> local;
+    std::shared_ptr<CheckpointPageStore> chunk = nullptr;
 };
 
 // Borrowed inputs are copied into the operation before async submission.
@@ -66,7 +66,7 @@ struct CoreScanOptions
 using ScanComplete = std::function<void(Status, ScanPackedBuf, size_t, bool)>;
 
 // Stable owner across immutable publication/source generations. The public
-// facade retains it until accepted operations and all backend aliases drain.
+// facade retains it until accepted operations and all page store aliases drain.
 class PublishedReadViewContext;
 
 class TreeCore : public std::enable_shared_from_this<TreeCore>
@@ -152,8 +152,8 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     Status prepare_writeback(std::shared_ptr<CheckpointOperation> *out);
     Status capture_read_only_view(std::shared_ptr<PublishedReadViewContext> *out);
     Status acquire_snapshot_window(const std::shared_ptr<AllocationBudget>        &metadata,
-                                   std::shared_ptr<TreeOperationLifetime::Ticket> *ticket, AsyncPageStore **backend);
-    Status reserve_snapshot_ids(const PublishedTreeState &expected, uint64_t count,
+                                   std::shared_ptr<TreeOperationLifetime::Ticket> *ticket, AsyncPageStore **page_store);
+    Status reserve_snapshot_ids(const TreeRoot &expected, uint64_t count,
                                 const std::shared_ptr<detail::AllocationReservation> &metadata);
     Status prepare_compaction(const LocalCompactionOptions &options, std::shared_ptr<LocalCompactionOperation> *out);
     Status compact_sparse_blocks(MergeGcStats *out);
@@ -166,36 +166,36 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
 
     // This boundary is host-only, never called from an accepted callback.
     // The facade gives up further access after an accepted consuming close.
-    // The caller retains the shared runtime and backend release driver.
-    [[nodiscard]] bool                                       close_async(AsyncCompletion complete) noexcept;
-    void                                                     close_and_drain() noexcept;
-    void                                                     close_facade() noexcept;
-    [[nodiscard]] bool                                       closed() const noexcept;
-    [[nodiscard]] const Config                              &config() const noexcept;
-    [[nodiscard]] const std::shared_ptr<TreeRuntimeBinding> &binding() const noexcept;
-    [[nodiscard]] const std::shared_ptr<ApplyDispatcher>    &cpu_progress() const noexcept;
-    [[nodiscard]] const std::shared_ptr<SharedPageCache>    &cache() const noexcept;
-    [[nodiscard]] const std::shared_ptr<LocalBackendState>  &local_backend() const noexcept;
-    [[nodiscard]] const std::shared_ptr<CheckpointBackend>  &chunk_backend() const noexcept;
-    [[nodiscard]] uint64_t                                   durable_coverage() const noexcept;
-    [[nodiscard]] uint64_t                                   snapshot_sequence() const noexcept;
-    [[nodiscard]] AsyncPageStore                            *async_backend() const noexcept;
-    [[nodiscard]] PageLoadLimits                             load_limits() const noexcept;
-    [[nodiscard]] const PublishedReadLimits                 &read_limits() const noexcept;
-    [[nodiscard]] const std::shared_ptr<AllocationBudget>   &accepted_allocations() const noexcept;
-    [[nodiscard]] std::shared_ptr<const PublishedTreeState>  capture() const;
-    [[nodiscard]] PublicationCoordinator                    &publisher() const noexcept;
-    [[nodiscard]] TreeOperationLifetime                     &operation_lifetime() const noexcept;
-    [[nodiscard]] TreeStatsSnapshot                          state_stats() const;
-    [[nodiscard]] BackingStatsSnapshot                       backing_stats() const noexcept;
-    [[nodiscard]] BackingStatsSampler                        backing_sampler() const noexcept;
-    [[nodiscard]] uint64_t                                   contiguous_slot() const noexcept;
-    [[nodiscard]] uint64_t                                   max_seen_slot() const noexcept;
-    [[nodiscard]] size_t                                     memtable_count() const;
-    [[nodiscard]] SourceMemoryStats                          source_stats() const;
-    [[nodiscard]] std::array<ResourceUsage, 7>               admission_resource_usage() const noexcept;
-    [[nodiscard]] size_t                                     frozen_table_count() const;
-    Status                                                   enable_work_histogram(uint32_t stage);
+    // The caller retains the shared runtime and page store release driver.
+    [[nodiscard]] bool                                        close_async(AsyncCompletion complete) noexcept;
+    void                                                      close_and_drain() noexcept;
+    void                                                      close_facade() noexcept;
+    [[nodiscard]] bool                                        closed() const noexcept;
+    [[nodiscard]] const Config                               &config() const noexcept;
+    [[nodiscard]] const std::shared_ptr<TreeRuntimeBinding>  &binding() const noexcept;
+    [[nodiscard]] const std::shared_ptr<ApplyDispatcher>     &cpu_progress() const noexcept;
+    [[nodiscard]] const std::shared_ptr<SharedPageCache>     &cache() const noexcept;
+    [[nodiscard]] const std::shared_ptr<LocalPageStoreState> &local_page_store() const noexcept;
+    [[nodiscard]] const std::shared_ptr<CheckpointPageStore> &page_chunk_store() const noexcept;
+    [[nodiscard]] uint64_t                                    durable_coverage() const noexcept;
+    [[nodiscard]] uint64_t                                    snapshot_sequence() const noexcept;
+    [[nodiscard]] AsyncPageStore                             *async_page_store() const noexcept;
+    [[nodiscard]] PageLoadLimits                              load_limits() const noexcept;
+    [[nodiscard]] const PublishedReadLimits                  &read_limits() const noexcept;
+    [[nodiscard]] const std::shared_ptr<AllocationBudget>    &accepted_allocations() const noexcept;
+    [[nodiscard]] std::shared_ptr<const TreeRoot>             capture() const;
+    [[nodiscard]] PublicationCoordinator                     &publisher() const noexcept;
+    [[nodiscard]] TreeOperationLifetime                      &operation_lifetime() const noexcept;
+    [[nodiscard]] TreeStatsSnapshot                           state_stats() const;
+    [[nodiscard]] PageBlockStatsSnapshot                      page_block_stats() const noexcept;
+    [[nodiscard]] PageBlockStatsSampler                       page_block_sampler() const noexcept;
+    [[nodiscard]] uint64_t                                    contiguous_slot() const noexcept;
+    [[nodiscard]] uint64_t                                    max_seen_slot() const noexcept;
+    [[nodiscard]] size_t                                      memtable_count() const;
+    [[nodiscard]] SourceMemoryStats                           source_stats() const;
+    [[nodiscard]] std::array<ResourceUsage, 7>                admission_resource_usage() const noexcept;
+    [[nodiscard]] size_t                                      frozen_table_count() const;
+    Status                                                    enable_work_histogram(uint32_t stage);
 
   private:
     Status prepare_checkpoint_state(const CheckpointOptions                         &options,
@@ -205,7 +205,7 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
                                   std::shared_ptr<TreeOperationLifetime::Ticket> accepted);
     void   get_impl(Slice key, std::function<void(Status, GetView)> complete, bool dispatch);
     void   scan_impl(CoreScanOptions options, ScanComplete complete, bool dispatch);
-    friend class detail::ChunkRuntimePageStore;
+    friend class detail::PageChunkStore;
     static Status open_chunk(const Config &config, std::shared_ptr<TreeCore> *out);
     static Status open_chunk_async(const Config &config, PageStore::RuntimeOpenComplete complete);
     friend class TreeApplyOperation;
@@ -213,13 +213,11 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     friend class PreparedSplitOverlay;
     // Candidate already owns a fully validated immutable graph. Null creates
     // a new empty generation. All failures precede old-source closure.
-    Status install_generation(std::shared_ptr<const PublishedTreeState> candidate,
-                              const SplitGeneration                    *split = nullptr);
+    Status install_generation(std::shared_ptr<const TreeRoot> candidate, const SplitGeneration *split = nullptr);
     Status prepare_readable(std::shared_ptr<const ReadablePageCatalog>            catalog,
                             const std::shared_ptr<detail::AllocationReservation> &credit,
-                            std::shared_ptr<const PublishedTreeState>            *out);
-    Status capture_read_only_view(std::shared_ptr<const PublishedTreeState>  view,
-                                  std::shared_ptr<PublishedReadViewContext> *out);
+                            std::shared_ptr<const TreeRoot>                      *out);
+    Status capture_read_only_view(std::shared_ptr<const TreeRoot> view, std::shared_ptr<PublishedReadViewContext> *out);
     Status install_split_baseline(const SplitSourceSession &session, uint64_t identity, uint64_t end);
     // Caller holds both split gates and the source ingress.
     Status install_split_overlay_guarded(TreeCore &source, uint64_t journal_frontier);

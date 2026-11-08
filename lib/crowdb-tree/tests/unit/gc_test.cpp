@@ -4,10 +4,10 @@
 // R129: tombstone folding is part of snapshot preparation; the standalone
 // resident-tree GC sweep is removed. These tests verify the watermark
 // contract and that snapshot folding drops eligible tombstones.
-#include "backend/local/local_backend_state.h"
-#include "crowdb-tree/backend/block_page_store.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "crowdb-tree/page_store/page_store.h"
+#include "page_store/local/local_page_store_state.h"
 #include "runtime_tree_access.h"
 #include "test_tmp.h"
 
@@ -56,7 +56,7 @@ TEST(Gc, SetWatermarkTakesMinAndIsMonotonic)
 // a second snapshot does fold it (proving the first one didn't).
 TEST(Gc, SnapshotFoldingBelowWatermarkPreservesTombstone)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     Crowdbtree t(opt);
@@ -88,7 +88,7 @@ TEST(Gc, SnapshotFoldingBelowWatermarkPreservesTombstone)
 // eligible tombstones.
 TEST(Gc, SnapshotFoldsEligibleTombstoneInCleanLeaf)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store    = &store;
     opt.max_delta_len = 4;
@@ -125,7 +125,7 @@ TEST(Gc, SnapshotFoldsEligibleTombstoneInCleanLeaf)
 // a page store so the snapshot path exercises the durable write.
 TEST(Gc, SnapshotFoldingReclaimsTombstoneAfterOpen)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store    = &store;
     opt.max_delta_len = 4;
@@ -156,7 +156,7 @@ TEST(Gc, SnapshotFoldingReclaimsTombstoneAfterOpen)
 // snapshot write (R129 §5: non-block stores return a no-op result).
 TEST(Gc, CompactSparseBlocksNoOpOnMemStore)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     Crowdbtree t(opt);
@@ -177,8 +177,8 @@ TEST(Gc, NormalSnapshotDoesNotRelocateSparseBlocks)
 {
     crowdb::tree_test::TempDir tmp("snapshot_no_relocate_");
     ASSERT_FALSE(tmp.path.empty());
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, 8 * 1024, 1, &store).ok());
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, 8 * 1024, 1, &store).ok());
     store->set_sync_mode(SyncMode::kSkip);
     Config opt;
     opt.page_store                    = store.get();
@@ -201,9 +201,9 @@ TEST(Gc, CompactSparseBlocksProtectsAnchorBlock)
 {
     crowdb::tree_test::TempDir tmp("anchorblk_");
     ASSERT_FALSE(tmp.path.empty());
-    constexpr uint64_t              blk = 8 * 1024;
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+    constexpr uint64_t             blk = 8 * 1024;
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
     Config opt;
     opt.page_store                    = store.get();
     opt.leaf_split_bytes              = 256;
@@ -212,7 +212,7 @@ TEST(Gc, CompactSparseBlocksProtectsAnchorBlock)
     {
         Crowdbtree t(opt);
         // This fixture drives relocation explicitly instead of racing checkpoint cleanup.
-        auto local = RuntimeTreeAccess_for_tests::core(t).local_backend();
+        auto local = RuntimeTreeAccess_for_tests::core(t).local_page_store();
         local->gc_active.store(true);
         for (int i = 0; i < 50; ++i) {
             ASSERT_TRUE(t.apply(i + 1, put_one("k" + std::to_string(i), "v")).ok());
@@ -241,8 +241,8 @@ TEST(Gc, CompactSparseBlocksProtectsAnchorBlock)
         }
     }
     // Reopen — anchor must be intact.
-    std::unique_ptr<BlockPageStore> store2;
-    ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store2).ok());
+    std::unique_ptr<PageDiskStore> store2;
+    ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store2).ok());
     Config opt2;
     opt2.page_store       = store2.get();
     opt2.leaf_split_bytes = 256;
@@ -264,9 +264,9 @@ TEST(Gc, CompactSparseBlocksRespectsByteBudget)
 {
     crowdb::tree_test::TempDir tmp("budget_");
     ASSERT_FALSE(tmp.path.empty());
-    constexpr uint64_t              blk = 64 * 1024;
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+    constexpr uint64_t             blk = 64 * 1024;
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
     store->set_sync_mode(SyncMode::kSkip);
     Config opt;
     opt.page_store       = store.get();
@@ -279,7 +279,7 @@ TEST(Gc, CompactSparseBlocksRespectsByteBudget)
     opt.merge_gc_max_relocation_bytes = blk / 4;
     Crowdbtree t(opt);
     // This fixture drives relocation explicitly instead of racing checkpoint cleanup.
-    auto local = RuntimeTreeAccess_for_tests::core(t).local_backend();
+    auto local = RuntimeTreeAccess_for_tests::core(t).local_page_store();
     local->gc_active.store(true);
 
     // Write enough data to span multiple blocks.
@@ -336,9 +336,9 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
 {
     crowdb::tree_test::TempDir tmp("integ_");
     ASSERT_FALSE(tmp.path.empty());
-    constexpr uint64_t              blk = 64 * 1024;
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+    constexpr uint64_t             blk = 64 * 1024;
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
     store->set_sync_mode(SyncMode::kSkip);
     Config opt;
     opt.page_store = store.get();
@@ -352,7 +352,7 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
     opt.merge_gc_max_relocation_bytes = 8 * 1024 * 1024;
     Crowdbtree t(opt);
     // This fixture drives relocation explicitly instead of racing checkpoint cleanup.
-    auto local = RuntimeTreeAccess_for_tests::core(t).local_backend();
+    auto local = RuntimeTreeAccess_for_tests::core(t).local_page_store();
     local->gc_active.store(true);
 
     uint64_t slot = 0;

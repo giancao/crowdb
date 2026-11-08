@@ -10,13 +10,13 @@ use crowdb_chunk_stream::{
     memory::MemoryStreamStore, ChunkStream, StreamConfig, StreamName, StreamPurpose, StreamRecord,
     StreamRecordState,
 };
-use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
+use crowdb_tree_ffi::chunk::test_util::TestPageChunkStore;
 use crowdb_tree_ffi::Config;
 use root_catalog::TestCatalogLoad;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-fn config(backend: &TestChunkBackend) -> Config {
+fn config(backend: &TestPageChunkStore) -> Config {
     Config {
         page_store: Some(backend.page_store(0).unwrap()),
         ..backend.config()
@@ -26,7 +26,7 @@ fn config(backend: &TestChunkBackend) -> Config {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn range_rebuild_keeps_the_runtime_available_during_catalog_io() {
     let observed = Arc::new(TestCatalogLoad::default());
-    let source_backend = TestChunkBackend::new(91, 1).unwrap();
+    let source_backend = TestPageChunkStore::new(91, 1).unwrap();
     let source = CrowdbPartitionTree::open(91, &config(&source_backend)).unwrap();
     source
         .apply(
@@ -51,7 +51,7 @@ async fn range_rebuild_keeps_the_runtime_available_during_catalog_io() {
             .await
             .unwrap();
     }
-    let mut child_backend = TestChunkBackend::new(92, 1).unwrap();
+    let mut child_backend = TestPageChunkStore::new(92, 1).unwrap();
     let hook = observed.clone();
     child_backend
         .on_root_load_for_tests(move || hook.wait_for_async_progress())
@@ -94,7 +94,7 @@ async fn range_rebuild_keeps_the_runtime_available_during_catalog_io() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn native_recovery_keeps_the_runtime_available_during_catalog_io() {
     let observed = Arc::new(TestCatalogLoad::default());
-    let mut backend = TestChunkBackend::new(93, 1).unwrap();
+    let mut backend = TestPageChunkStore::new(93, 1).unwrap();
     let hook = observed.clone();
     backend
         .on_root_load_for_tests(move || hook.wait_for_async_progress())

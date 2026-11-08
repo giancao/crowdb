@@ -125,7 +125,7 @@ Status MaintenanceBuilder::partition_inner(uint64_t pid, uint32_t level, const I
                                  inner.children.begin() + static_cast<ptrdiff_t>(end));
         content->separators.assign(inner.separators.begin() + static_cast<ptrdiff_t>(begin),
                                    inner.separators.begin() + static_cast<ptrdiff_t>(end - 1));
-        auto       page = reserved_shared<PublishedPage>(options.metadata);
+        auto       page = reserved_shared<PageEntry>(options.metadata);
         const auto old  = view->mapping.get(output_pid);
         if (old && old->revision == UINT64_MAX) {
             return Status::resource_exhausted("inner revision exhausted");

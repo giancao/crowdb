@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -17,13 +17,13 @@ std::shared_ptr<InstallRecord> checkpoint_record(uint64_t sequence)
     return std::make_shared<InstallRecord>(InstallToken{.generation = 1, .batch = 1, .range = 0, .sequence = sequence});
 }
 
-std::shared_ptr<PublishedPage> checkpoint_leaf(uint64_t content = 1, uint64_t route = 1, uint64_t representation = 1)
+std::shared_ptr<PageEntry> checkpoint_leaf(uint64_t content = 1, uint64_t route = 1, uint64_t representation = 1)
 {
     auto state               = std::make_shared<PageState>();
     state->content_id        = content;
     state->route_generation  = route;
     state->representation_id = representation;
-    auto page                = std::make_shared<PublishedPage>();
+    auto page                = std::make_shared<PageEntry>();
     page->leaf               = std::move(state);
     page->metrics.dirty      = true;
     return page;
@@ -54,7 +54,7 @@ PublicationResult checkpoint(PublicationCoordinator &publisher, CheckpointAction
     return publish_checkpoint(publisher, std::move(transaction));
 }
 
-void seed_checkpoint(PublicationCoordinator &publisher, const std::shared_ptr<PublishedPage> &page)
+void seed_checkpoint(PublicationCoordinator &publisher, const std::shared_ptr<PageEntry> &page)
 {
     ASSERT_TRUE(publish_checkpoint(publisher, {.record       = checkpoint_record(0),
                                                .pages        = {{.page_id = 0, .expected = {}, .replacement = page}},
@@ -134,7 +134,7 @@ TEST(PublicationCheckpoint, L1FenceAllowsNewSourcesAndRejectsChangedPages)
 
 TEST(PublicationCheckpoint, ExhaustedL1SequenceStillAllowsSourcesButRejectsGraphMutation)
 {
-    auto initial    = std::make_shared<PublishedTreeState>();
+    auto initial    = std::make_shared<TreeRoot>();
     initial->l1_seq = UINT64_MAX;
     PublicationCoordinator publisher{
         4, 1, {},

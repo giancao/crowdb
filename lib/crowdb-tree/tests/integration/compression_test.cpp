@@ -5,9 +5,9 @@
 // blobs; reopen/demand-load/eviction decode them transparently; a tampered
 // stored byte fails CRC on reload.
 #include "btree/tree_core_access.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
 #include "crowdb-tree/maptable/compressor.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -57,7 +57,7 @@ void fill_buf(Crowdbtree *t, int K, std::map<std::string, std::string> *oracle)
 
 TEST(Compression, CheckpointReopenWithCompressedPages)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.compression      = compress_algo::kLz4;
@@ -89,7 +89,7 @@ TEST(Compression, CheckpointReopenWithCompressedPages)
     // When LZ4 is linked, the compressed image should be smaller than an
     // uncompressed snapshot of the same tree.
     if (lz4_available()) {
-        MemPageStore raw_store(1);
+        PageMemStore raw_store(1);
         Config       raw_opt = opt;
         raw_opt.page_store   = &raw_store;
         raw_opt.compression  = compress_algo::kNone;
@@ -103,7 +103,7 @@ TEST(Compression, CheckpointReopenWithCompressedPages)
 
 TEST(Compression, EvictionReloadOfCompressedPages)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.compression      = compress_algo::kLz4;
@@ -129,7 +129,7 @@ TEST(Compression, EvictionReloadOfCompressedPages)
 
 TEST(Compression, CrcTamperRejectedOnReopen)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store  = &store;
     opt.compression = compress_algo::kLz4;

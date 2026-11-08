@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/range_rebuild.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "runtime/default_runtime.h"
 
 #include <gtest/gtest.h>
@@ -17,7 +17,7 @@ TEST(RangeRuntimeBinding, UnfundedDefaultDestinationKeepsCallerBindingAndOutput)
     ASSERT_TRUE(TreeRuntime::create({}, &source_options.runtime).ok());
     Crowdbtree source(source_options);
     ASSERT_TRUE(source.put("key", "value").ok());
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       destination_options;
     destination_options.page_store                      = &store;
     destination_options.runtime_binding.lifecycle_bytes = 1;
@@ -43,7 +43,7 @@ TEST(RangeRuntimeBinding, BothCopyPathsUseTheProcessHostAndCallerLimits)
     ASSERT_NE(process_options.runtime, source_options.runtime);
     for (const bool bounded : {false, true}) {
         SCOPED_TRACE(bounded);
-        MemPageStore store(1);
+        PageMemStore store(1);
         Config       destination_options;
         destination_options.frame_bytes                         = 4096;
         destination_options.page_store                          = &store;

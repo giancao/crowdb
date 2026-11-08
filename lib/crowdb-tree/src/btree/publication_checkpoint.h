@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "published_state.h"
+#include "tree_root.h"
 
 namespace crowdb::tree
 {
 class CheckpointPendingMetrics;
-Status validate_checkpoint(const PublicationTransaction &transaction, const PublishedTreeState &current,
+Status validate_checkpoint(const PublicationTransaction &transaction, const TreeRoot &current,
                            const CheckpointPendingMetrics &pending);
 } // namespace crowdb::tree

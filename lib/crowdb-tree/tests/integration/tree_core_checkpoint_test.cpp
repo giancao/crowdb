@@ -13,7 +13,7 @@ namespace
 struct TestPublicCheckpoint
 {
     std::shared_ptr<TreeRuntime>    runtime;
-    std::shared_ptr<MemPageStore>   device = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore>   device = std::make_shared<PageMemStore>(4096);
     test_write::TestCheckpointStore store;
     Config                          config;
     std::unique_ptr<Crowdbtree>     tree;
@@ -117,7 +117,7 @@ TEST(TreeCoreCheckpoint, ActualWritebackCheckpointReuseAndColdReadKeepSeparateCa
     ASSERT_TRUE(status.ok()) << status.to_string();
     const auto checkpoint = work->counters.snapshot()[static_cast<size_t>(TreeWorkCause::Checkpoint)];
     EXPECT_EQ(checkpoint[static_cast<size_t>(TreeWorkCounter::ReusedFrames)], written);
-    EXPECT_GT(checkpoint[static_cast<size_t>(TreeWorkCounter::ReusedBackingBytes)], 0U);
+    EXPECT_GT(checkpoint[static_cast<size_t>(TreeWorkCounter::ReusedPageBlockBytes)], 0U);
     EXPECT_GT(checkpoint[static_cast<size_t>(TreeWorkCounter::WriteBytes)], 0U);
     EXPECT_EQ(checkpoint[static_cast<size_t>(TreeWorkCounter::EncodedFrameBytes)], 0U);
     EXPECT_EQ(work->counters.snapshot()[static_cast<size_t>(TreeWorkCause::CachePressure)]

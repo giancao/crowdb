@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core.h"
-#include "crowdb-tree/backend/async_page_store.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/maptable/frame_page.h"
-#include "snapshot/primary_backing.h"
+#include "crowdb-tree/page_store/async_page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
+#include "snapshot/primary_page_block.h"
 
 #include <gtest/gtest.h>
 
@@ -17,9 +17,9 @@ namespace crowdb::tree
 #ifdef CROWDB_TREE_TEST_UTIL
 namespace
 {
-struct TestPipelineStore : MemPageStore, AsyncPageStore
+struct TestPipelineStore : PageMemStore, AsyncPageStore
 {
-    TestPipelineStore() : MemPageStore(4096)
+    TestPipelineStore() : PageMemStore(4096)
     {
     }
 
@@ -66,7 +66,7 @@ struct TestPipelineStore : MemPageStore, AsyncPageStore
         if (read_blocked.load() && notify_other_read.exchange(false)) {
             other_read.release();
         }
-        complete.complete(MemPageStore::read_at(address, static_cast<uint8_t *>(data), bytes));
+        complete.complete(PageMemStore::read_at(address, static_cast<uint8_t *>(data), bytes));
         return 0;
     }
 
@@ -74,7 +74,7 @@ struct TestPipelineStore : MemPageStore, AsyncPageStore
     {
         if (read_blocked.exchange(false)) {
             auto read = std::move(held_read);
-            read.complete.complete(MemPageStore::read_at(read.address, static_cast<uint8_t *>(read.data), read.bytes));
+            read.complete.complete(PageMemStore::read_at(read.address, static_cast<uint8_t *>(read.data), read.bytes));
         }
     }
 
@@ -98,7 +98,7 @@ struct TestPipelineStore : MemPageStore, AsyncPageStore
                 if (pause_write.exchange(false)) {
                     if (hold_overflow) {
                         auto result =
-                            MemPageStore::write_typed_at(purpose, address, static_cast<const uint8_t *>(data), bytes);
+                            PageMemStore::write_typed_at(purpose, address, static_cast<const uint8_t *>(data), bytes);
                         if (!result.ok()) {
                             complete.complete(std::move(result));
                             return 0;
@@ -146,7 +146,7 @@ struct TestPipelineStore : MemPageStore, AsyncPageStore
 
     Status write_typed_at(PagePurpose purpose, uint64_t address, const uint8_t *data, size_t bytes) override
     {
-        const auto status = MemPageStore::write_typed_at(purpose, address, data, bytes);
+        const auto status = PageMemStore::write_typed_at(purpose, address, data, bytes);
         if (status.ok() && purpose == PagePurpose::kBtreePage) {
             writes.fetch_add(1, std::memory_order_relaxed);
             if (notify_write.exchange(false, std::memory_order_acq_rel)) {
@@ -173,7 +173,7 @@ TEST_P(TestSiblingWrites, JoinsReverseCompletionAndRetriesOnlyTheFailedPage)
     auto store              = std::make_shared<TestPipelineStore>();
     config.page_store       = store.get();
     config.async_page_store = store.get();
-    config.backend_owner    = store;
+    config.page_store_owner = store;
     config.frame_bytes      = 4096;
     config.leaf_split_bytes = 400;
     config.max_inline_value = 32;
@@ -194,8 +194,8 @@ TEST_P(TestSiblingWrites, JoinsReverseCompletionAndRetriesOnlyTheFailedPage)
     for (uint64_t pid = 0; pid < before->next_page_id; ++pid) {
         const auto page = before->mapping.get(pid);
         if (page && page->leaf && page->leaf->range.contains("t")) {
-            ASSERT_TRUE(page->primary && page->primary->frame.backing);
-            store->counted_read_address.store(page->primary->frame.backing->address);
+            ASSERT_TRUE(page->primary && page->primary->frame.page_block);
+            store->counted_read_address.store(page->primary->frame.page_block->address);
         }
     }
     ASSERT_NE(store->counted_read_address.load(), UINT64_MAX);
@@ -263,7 +263,7 @@ TEST_P(TestLocalOverflowWrites, JoinsBeforeThePrimaryAndDrainsOnFailure)
     auto store              = std::make_shared<TestPipelineStore>();
     config.page_store       = store.get();
     config.async_page_store = store.get();
-    config.backend_owner    = store;
+    config.page_store_owner = store;
     config.frame_bytes      = 4096;
     config.max_inline_value = 32;
     std::shared_ptr<TreeCore> core;
@@ -305,14 +305,14 @@ TEST_P(TestLocalOverflowWrites, JoinsBeforeThePrimaryAndDrainsOnFailure)
 
 INSTANTIATE_TEST_SUITE_P(PersistentFlushPipeline, TestLocalOverflowWrites, ::testing::Bool());
 
-TEST(PersistentFlushPipeline, SplitLeavesReadTheirSharedColdBackingOnce)
+TEST(PersistentFlushPipeline, SplitLeavesReadTheirSharedColdPageBlockOnce)
 {
     Config config;
     ASSERT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
     auto store              = std::make_shared<TestPipelineStore>();
     config.page_store       = store.get();
     config.async_page_store = store.get();
-    config.backend_owner    = store;
+    config.page_store_owner = store;
     config.frame_bytes      = 4096;
     config.leaf_split_bytes = 400;
     config.max_inline_value = 32;
@@ -329,8 +329,8 @@ TEST(PersistentFlushPipeline, SplitLeavesReadTheirSharedColdBackingOnce)
     const auto before = core->capture();
     const auto root   = before->mapping.get(before->root_page_id);
     ASSERT_TRUE(root->leaf && root->primary);
-    const auto backing = root->primary->frame.backing;
-    ASSERT_TRUE(backing);
+    const auto page_block = root->primary->frame.page_block;
+    ASSERT_TRUE(page_block);
     Batch inserts;
     for (const char key : std::string_view("bcdefuvwxy")) {
         inserts.ops.push_back({.key = std::string(1, key), .kind = OpKind::kPut, .value = std::string(32, 'x')});
@@ -344,13 +344,13 @@ TEST(PersistentFlushPipeline, SplitLeavesReadTheirSharedColdBackingOnce)
         const auto page = split->mapping.get(pid);
         if (page && page->leaf && (page->leaf->range.contains("a") || page->leaf->range.contains("z"))) {
             ASSERT_EQ(page->leaf->bases.size(), 1U);
-            EXPECT_EQ(page->leaf->bases.front().backing, backing);
+            EXPECT_EQ(page->leaf->bases.front().page_block, page_block);
             EXPECT_FALSE(page->leaf->bases.front().resident);
             ++clipped_leaves;
         }
     }
     ASSERT_EQ(clipped_leaves, 2U);
-    store->counted_read_address.store(backing->address);
+    store->counted_read_address.store(page_block->address);
     ASSERT_TRUE(core->checkpoint().ok());
     EXPECT_EQ(store->counted_reads.load(), 1U);
     EXPECT_EQ(core->durable_coverage(), 2U);
@@ -364,7 +364,7 @@ TEST(PersistentFlushPipeline, FinalPageWritesWhileAnUnrelatedSubtreeStillWaitsAt
     ASSERT_TRUE(TreeRuntime::create(host, &config.runtime).ok());
     auto store                         = std::make_shared<TestPipelineStore>();
     config.page_store                  = store.get();
-    config.backend_owner               = store;
+    config.page_store_owner            = store;
     config.frame_bytes                 = 4096;
     config.leaf_split_bytes            = 400;
     config.max_inline_value            = 32;
@@ -470,7 +470,7 @@ TEST(PersistentFlushPipeline, AColdReadDoesNotBlockOtherReadsOrReadyPageWrites)
     auto store                         = std::make_shared<TestPipelineStore>();
     config.page_store                  = store.get();
     config.async_page_store            = store.get();
-    config.backend_owner               = store;
+    config.page_store_owner            = store;
     config.frame_bytes                 = 4096;
     config.leaf_split_bytes            = 400;
     config.max_inline_value            = 32;
@@ -503,8 +503,8 @@ TEST(PersistentFlushPipeline, AColdReadDoesNotBlockOtherReadsOrReadyPageWrites)
     std::function<void()> resume_handoff;
     core->set_flush_handoff_wait_for_tests([&](uint64_t pid, std::function<void()> ready) {
         const auto page = view->mapping.get(pid);
-        if (page && page->primary && page->primary->frame.backing && arm_read.exchange(false)) {
-            store->blocked_address.store(page->primary->frame.backing->address);
+        if (page && page->primary && page->primary->frame.page_block && arm_read.exchange(false)) {
+            store->blocked_address.store(page->primary->frame.page_block->address);
             store->pause_read.store(true);
             return false;
         }

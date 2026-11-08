@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -14,9 +14,9 @@ namespace crowdb::tree
 {
 namespace
 {
-std::shared_ptr<const PublishedPage> leaf(uint64_t revision)
+std::shared_ptr<const PageEntry> leaf(uint64_t revision)
 {
-    auto result           = std::make_shared<PublishedPage>();
+    auto result           = std::make_shared<PageEntry>();
     result->revision      = revision;
     result->leaf          = std::make_shared<PageState>();
     result->metrics.dirty = true;
@@ -45,7 +45,7 @@ PublicationResult publish(PublicationCoordinator &coordinator, PublicationTransa
 
 TEST(Publication, PersistentMappingCopiesEachTouchedSegmentOnce)
 {
-    MappingView                  initial;
+    MappingTable                 initial;
     auto                         a = leaf(1);
     auto                         b = leaf(2);
     auto                         c = leaf(3);
@@ -54,8 +54,8 @@ TEST(Publication, PersistentMappingCopiesEachTouchedSegmentOnce)
         {.page_id = 2,  .expected = {}, .replacement = b},
         {.page_id = 65, .expected = {}, .replacement = c}
     };
-    MappingView::CopyStats copied;
-    auto                   next = initial.replace(changes, copied);
+    MappingTable::CopyStats copied;
+    auto                    next = initial.replace(changes, copied);
     EXPECT_FALSE(initial.get(1));
     EXPECT_EQ(next.get(1), a);
     EXPECT_EQ(next.get(65), c);
@@ -70,13 +70,13 @@ TEST(Publication, PersistentMappingCopiesEachTouchedSegmentOnce)
     EXPECT_EQ(later.get(1), a);
     EXPECT_EQ(later.get(2), c);
     EXPECT_EQ(copied.segments, 1U);
-    EXPECT_FALSE(later.get(MappingView::kPageLimit));
+    EXPECT_FALSE(later.get(MappingTable::kPageLimit));
 }
 
 TEST(Publication, DescriptorBoundsFollowOnlyChangedRadixPathsAndShrinkAfterCoalescing)
 {
     auto small       = leaf(1);
-    auto large       = std::make_shared<PublishedPage>();
+    auto large       = std::make_shared<PageEntry>();
     auto large_state = std::make_shared<PageState>();
     large_state->bases.resize(16);
     large_state->overlays.resize(128);
@@ -86,9 +86,9 @@ TEST(Publication, DescriptorBoundsFollowOnlyChangedRadixPathsAndShrinkAfterCoale
         {.page_id = 65,                .expected = {}, .replacement = large},
         {.page_id = uint64_t{1} << 24, .expected = {}, .replacement = small}
     };
-    MappingView::CopyStats copied;
-    auto                   before = MappingView{}.replace(changes, copied);
-    const auto             bounds = before.copy_bounds();
+    MappingTable::CopyStats copied;
+    auto                    before = MappingTable{}.replace(changes, copied);
+    const auto              bounds = before.copy_bounds();
     EXPECT_EQ(bounds.leaf_pages, 3U);
     EXPECT_EQ(bounds.max_leaf_bases, 16U);
     EXPECT_EQ(bounds.max_leaf_append_bytes, bounds.max_leaf_bytes);

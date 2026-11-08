@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/backing_io.h"
-#include "backend/chunk/chunk_backing.h"
+#include "page_store/chunk/chunk_page_block.h"
+#include "page_store/page_block_io.h"
 #include "page_writeback_internal.h"
 
 #include <algorithm>
@@ -128,21 +128,21 @@ void PageWriteOperation::State::submit_write()
     }
     auto chunk = extent.chunk.lock();
     if (static_cast<bool>(chunk) != limits.chunk_backed ||
-        (chunk && (extent.address != 0 || !chunk_backing_matches(*chunk, extent.backend_id, extent.length)))) {
+        (chunk && (extent.address != 0 || !chunk_page_block_matches(*chunk, extent.page_store_id, extent.length)))) {
         finish(Status::invalid_argument("backend reservation differs from its admitted storage capability"));
         return;
     }
-    protection->extent        = std::move(extent.owner);
-    backing->physical_owner   = protection->extent;
-    backing->physical_metrics = extent.physical_metrics.lock();
-    backing->backend_id       = extent.backend_id;
-    backing->address          = extent.address;
-    backing->length           = extent.length;
-    backing->content_id       = extent.content_id;
-    backing->generation       = extent.generation;
+    protection->extent           = std::move(extent.owner);
+    page_block->physical_owner   = protection->extent;
+    page_block->physical_metrics = extent.physical_metrics.lock();
+    page_block->page_store_id    = extent.page_store_id;
+    page_block->address          = extent.address;
+    page_block->length           = extent.length;
+    page_block->content_id       = extent.content_id;
+    page_block->generation       = extent.generation;
     if (chunk) {
-        backing->storage = BackingStorage::kChunkPack;
-        backing->chunk   = chunk;
+        page_block->storage = PageBlockStorage::kChunkPack;
+        page_block->chunk   = chunk;
     }
     if (stopped.load(std::memory_order_acquire)) {
         finish(Status::unavailable());
@@ -162,7 +162,7 @@ void PageWriteOperation::State::submit_write()
                             .cause       = budget.cause});
         return;
     }
-    store->submit_typed_write(PagePurpose::kBtreePage, backing->address, bytes.data(), bytes.size(),
+    store->submit_typed_write(PagePurpose::kBtreePage, page_block->address, bytes.data(), bytes.size(),
                               {.context     = this,
                                .complete_fn = &State::written,
                                .owner       = std::move(self),

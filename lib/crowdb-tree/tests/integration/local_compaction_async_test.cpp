@@ -69,9 +69,9 @@ struct TestCompletion
 
 TEST(LocalCompactionAsync, BlockedBackendLeavesSingleCpuFreeForResidentReads)
 {
-    tree_test::TempDir              directory("async_compact_cpu_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
+    tree_test::TempDir             directory("async_compact_cpu_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
     config.page_store  = store.get();
@@ -123,9 +123,9 @@ TEST(LocalCompactionAsync, BlockedBackendLeavesSingleCpuFreeForResidentReads)
 
 TEST(LocalCompactionAsync, StopBeforeStartCompletesOnceAndReleasesTheSelectionGate)
 {
-    tree_test::TempDir              directory("async_compact_cancel_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
+    tree_test::TempDir             directory("async_compact_cancel_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
     config.page_store                      = store.get();
@@ -138,7 +138,7 @@ TEST(LocalCompactionAsync, StopBeforeStartCompletesOnceAndReleasesTheSelectionGa
     operation->observe_completion([&observed](const MergeGcStats &) { observed.fetch_add(1); });
     operation->request_stop();
     EXPECT_EQ(detail::wait_snapshot_operation(operation).code(), Code::kUnavailable);
-    EXPECT_FALSE(core->local_backend()->gc_active.load());
+    EXPECT_FALSE(core->local_page_store()->gc_active.load());
     EXPECT_EQ(detail::wait_snapshot_operation(operation).code(), Code::kUnavailable);
     EXPECT_EQ(operation->result().blocks_selected, 0U);
     EXPECT_EQ(observed.load(), 1U);
@@ -151,9 +151,9 @@ TEST(LocalCompactionAsync, StopBeforeStartCompletesOnceAndReleasesTheSelectionGa
 
 TEST(LocalCompactionAsync, PendingRetirementLeavesBackendWorkerFree)
 {
-    tree_test::TempDir              directory("async_compact_retirement_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
+    tree_test::TempDir             directory("async_compact_retirement_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
     config.page_store = store.get();
@@ -179,7 +179,7 @@ TEST(LocalCompactionAsync, PendingRetirementLeavesBackendWorkerFree)
     auto                 retirement = core->accepted_allocations()->retirement_started();
     ASSERT_NE(retirement.finish, nullptr);
     stdexec::start(connection);
-    // Make sure the compaction's first backend step is queued before the probe.
+    // Make sure the compaction's first page store step is queued before the probe.
     binding->lane()->drain();
     binding->backend_progress()->request(probe->node, probe);
     const auto ready   = backend_ready.wait_for(std::chrono::seconds(2));
@@ -189,7 +189,7 @@ TEST(LocalCompactionAsync, PendingRetirementLeavesBackendWorkerFree)
     EXPECT_EQ(pending, std::future_status::timeout);
     ASSERT_EQ(completed.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_TRUE(completed.get().ok());
-    EXPECT_FALSE(core->local_backend()->gc_active.load(std::memory_order_acquire));
+    EXPECT_FALSE(core->local_page_store()->gc_active.load(std::memory_order_acquire));
     operation.reset();
 }
 } // namespace

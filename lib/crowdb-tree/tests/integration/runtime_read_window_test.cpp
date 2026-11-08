@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core.h"
-#include "crowdb-tree/backend/page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -14,9 +14,9 @@ TEST(RuntimeReadWindow, DefaultFrameGeometryReadsColdInnerAndLeafWindowsWithinIt
     host.workers         = 1;
     host.backend_workers = 1;
     ASSERT_TRUE(TreeRuntime::create(host, &config.runtime).ok());
-    const auto store                            = std::make_shared<MemPageStore>(4096);
+    const auto store                            = std::make_shared<PageMemStore>(4096);
     config.page_store                           = store.get();
-    config.backend_owner                        = store;
+    config.page_store_owner                     = store;
     config.runtime_binding.limits.io_operations = 1;
     std::shared_ptr<TreeCore> core;
     auto                      status = TreeCore::open(config, &core);

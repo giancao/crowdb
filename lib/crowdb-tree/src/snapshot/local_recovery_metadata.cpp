@@ -1,6 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "crowdb-common/crc32c.h"
 #include "crowdb-tree/maptable/mapping_slot.h"
+#include "snapshot/index_summary_codec.h"
 #include "snapshot/local_recovery_internal.h"
 
 #include <algorithm>
@@ -32,8 +34,15 @@ void LocalRecoveryOperation::State::next_anchor()
 
 void LocalRecoveryOperation::State::anchor_read()
 {
+    const auto bytes = window->bytes.first(read_bytes);
+    if (event_status.code() != Code::kNotFound && bytes.size() >= 2 * sizeof(uint32_t) &&
+        frame_u32(bytes.data(), 0) == snapshot::kAnchorMagic &&
+        frame_u32(bytes.data(), sizeof(uint32_t)) != snapshot::kFormatVersion) {
+        finish(Status::not_supported("unsupported local anchor format"));
+        return;
+    }
     snapshot::CommitAnchor anchor;
-    if (event_status.code() == Code::kNotFound || !snapshot::decode_anchor(window->bytes.first(read_bytes), &anchor)) {
+    if (event_status.code() == Code::kNotFound || !snapshot::decode_anchor(bytes, &anchor)) {
         ++slot;
         stage = Stage::NextAnchor;
         wake();
@@ -46,17 +55,78 @@ void LocalRecoveryOperation::State::anchor_read()
         finish(Status::corruption());
         return;
     }
-    image               = detail::reserved_shared<ProtectedCheckpoint>(budget.bytes, budget.bytes);
-    image->anchor       = anchor;
-    pages               = detail::reserved_shared<CapturedDurablePages>(budget.bytes, budget.bytes);
-    pages->root_page_id = anchor.root_page_id;
-    pages->next_page_id = anchor.next_page_id;
-    pages->coverage     = anchor.last_applied_slot;
-    pages->generation   = anchor.snapshot_seq;
-    pages->backend_id   = domain.backend_id;
-    directory_offset    = 0;
-    segment_index       = 0;
+    image                = detail::reserved_shared<ProtectedCheckpoint>(budget.bytes, budget.bytes);
+    image->anchor        = anchor;
+    pages                = detail::reserved_shared<CapturedDurablePages>(budget.bytes, budget.bytes);
+    pages->root_page_id  = anchor.root_page_id;
+    pages->next_page_id  = anchor.next_page_id;
+    pages->coverage      = anchor.last_applied_slot;
+    pages->root_summary  = anchor.root_summary;
+    pages->generation    = anchor.snapshot_seq;
+    pages->page_store_id = domain.page_store_id;
+    directory_offset     = 0;
+    segment_index        = 0;
+    summaries_offset     = 0;
+    summaries_crc        = 0;
+    if (anchor.summaries_len == 0) {
+        if (anchor.summaries_addr != 0 || anchor.summaries_crc != 0) {
+            finish(Status::corruption("unexpected empty index summary reference"));
+            return;
+        }
+        protect_directory();
+        return;
+    }
+    if (anchor.summaries_len % snapshot::kIndexSummaryRecordBytes != 0 ||
+        anchor.summaries_len / snapshot::kIndexSummaryRecordBytes >= anchor.inner_count ||
+        anchor.inner_count > limits.max_frames) {
+        finish(Status::corruption("invalid index summary length"));
+        return;
+    }
+    protect(anchor.summaries_addr, round_up_to_iu(anchor.summaries_len, domain.iu_size), Stage::SummariesProtected);
+}
+
+void LocalRecoveryOperation::State::protect_directory()
+{
+    const auto &anchor = image->anchor;
     protect(anchor.segdir_addr, round_up_to_iu(anchor.segdir_len, domain.iu_size), Stage::DirectoryProtected);
+}
+
+void LocalRecoveryOperation::State::read_summaries()
+{
+    const auto &anchor = image->anchor;
+    const auto  bytes =
+        std::min<uint64_t>(metadata_window, round_up_to_iu(anchor.summaries_len, domain.iu_size) - summaries_offset);
+    read(anchor.summaries_addr + summaries_offset, bytes, Stage::SummariesRead);
+}
+
+void LocalRecoveryOperation::State::summaries_read()
+{
+    const auto &anchor  = image->anchor;
+    const auto  logical = std::min<uint64_t>(read_bytes, anchor.summaries_len - summaries_offset);
+    summaries_crc       = common::crc32c_update(summaries_crc, window->bytes.data(), logical);
+    for (size_t offset = 0; offset < logical; offset += snapshot::kIndexSummaryRecordBytes) {
+        uint32_t     pid;
+        IndexSummary summary;
+        if (!snapshot::decode_index_summary(window->bytes.data() + offset, &pid, &summary) ||
+            pid >= anchor.next_page_id || pid == anchor.root_page_id ||
+            (!summaries.empty() && pid <= summaries.back().pid)) {
+            finish(Status::corruption("invalid index summary record"));
+            return;
+        }
+        summaries.push_back({.pid = pid, .summary = summary});
+    }
+    summaries_offset += logical;
+    if (summaries_offset != anchor.summaries_len) {
+        read_summaries();
+        return;
+    }
+    if (summaries_crc != anchor.summaries_crc) {
+        finish(Status::corruption("invalid index summary checksum"));
+        return;
+    }
+    pages->index_summaries = IndexSummaries{}.merge(summaries, budget.bytes);
+    summaries.clear();
+    protect_directory();
 }
 
 void LocalRecoveryOperation::State::read_directory()
@@ -123,9 +193,9 @@ void LocalRecoveryOperation::State::segment()
 
 void LocalRecoveryOperation::State::segment_read()
 {
-    SegmentImageHeader header;
-    auto               status = snapshot::decode_segment_into(window->bytes.first(read_bytes), &header, words);
-    const auto        &entry  = directory[segment_index];
+    MappingSegmentImageHeader header;
+    auto                      status = snapshot::decode_segment_into(window->bytes.first(read_bytes), &header, words);
+    const auto               &entry  = directory[segment_index];
     if (!status.ok() || header.seg_idx != entry.seg_idx || header.generation != entry.generation ||
         header.slot_count != kMappingSegmentSize || header.body_crc != entry.image_crc) {
         finish(Status::corruption());
@@ -174,18 +244,18 @@ void LocalRecoveryOperation::State::page_extent()
 
 void LocalRecoveryOperation::State::page_protected()
 {
-    auto backing              = detail::reserved_shared<BackingRef>(budget.bytes);
-    backing->backend_id       = recovered.backend_id;
-    backing->generation       = recovered.generation;
-    backing->content_id       = recovered.identity;
-    backing->address          = recovered.address;
-    backing->length           = recovered.length;
-    backing->durability       = BackingDurability::kCheckpointCommitted;
-    backing->owner            = recovered.owner;
-    backing->physical_owner   = recovered.owner;
-    backing->physical_metrics = recovered.physical_metrics.lock();
-    const auto pid            = (uint64_t{directory[segment_index].seg_idx} * kMappingSegmentSize) + word_index;
-    pages->frames.emplace(pid, DurableCapturedFrame{.page_id = pid, .backing = std::move(backing)});
+    auto page_block              = detail::reserved_shared<PageBlockRef>(budget.bytes);
+    page_block->page_store_id    = recovered.page_store_id;
+    page_block->generation       = recovered.generation;
+    page_block->content_id       = recovered.identity;
+    page_block->address          = recovered.address;
+    page_block->length           = recovered.length;
+    page_block->durability       = PageBlockDurability::kCheckpointCommitted;
+    page_block->owner            = recovered.owner;
+    page_block->physical_owner   = recovered.owner;
+    page_block->physical_metrics = recovered.physical_metrics.lock();
+    const auto pid               = (uint64_t{directory[segment_index].seg_idx} * kMappingSegmentSize) + word_index;
+    pages->frames.emplace(pid, DurableCapturedFrame{.page_id = pid, .page_block = std::move(page_block)});
     ++word_index;
     stage = Stage::PageExtent;
     wake();

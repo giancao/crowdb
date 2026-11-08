@@ -2,14 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 
 // PT3-PT5: snapshot + recovery + durable round-trip integration tests.
-#include "backend/local/block_account.h"
-#include "backend/local/local_backend_state.h"
-#include "backend/local/local_block_gc.h"
 #include "btree/allocation_bound.h"
 #include "compaction_fault_store.h"
-#include "crowdb-tree/backend/block_page_store.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "crowdb-tree/page_store/page_store.h"
+#include "page_store/local/block_account.h"
+#include "page_store/local/local_block_gc.h"
+#include "page_store/local/local_page_store_state.h"
 #include "runtime_tree_access.h"
 #include "test_tmp.h"
 
@@ -124,7 +124,7 @@ class BlockingPageStore : public PageStore
 
 TEST(Persist, LazyRecoveryDemandLoadsOnAccess)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;   // consolidate into base frames
@@ -163,7 +163,7 @@ TEST(Persist, LazyRecoveryDemandLoadsOnAccess)
 
 TEST(Persist, CheckpointThenReopenRestoresKeys)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
 
@@ -191,7 +191,7 @@ TEST(Persist, CheckpointThenReopenRestoresKeys)
 
 TEST(Persist, TreeSummaryTracksPublishedRootAndRejectsUnknownAsZero)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     Crowdbtree t(opt);
@@ -220,7 +220,7 @@ TEST(Persist, TreeSummaryTracksPublishedRootAndRejectsUnknownAsZero)
 
 TEST(Persist, TreeSummaryAggregatesPersistedInnerPages)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.leaf_split_bytes = 256;
@@ -256,7 +256,7 @@ TEST(Persist, TreeSummaryAggregatesPersistedInnerPages)
 // the wipe itself, independent of durability.
 TEST(Persist, ClearWipesLiveTree)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     Crowdbtree t(opt);
@@ -295,7 +295,7 @@ TEST(Persist, ClearWipesLiveTree)
 // must not resurrect the pre-clear keys.
 TEST(Persist, ClearThenSnapshotReopenIsEmpty)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
 
@@ -328,7 +328,7 @@ TEST(Persist, ClearThenSnapshotReopenIsEmpty)
 
 TEST(Persist, MultiLevelTreeSurvivesAndComparesEqual)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 1;
@@ -357,7 +357,7 @@ TEST(Persist, MultiLevelTreeSurvivesAndComparesEqual)
 
 TEST(Persist, ReapplyOldSlotsIsNoOp)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     {
@@ -381,7 +381,7 @@ TEST(Persist, ReapplyOldSlotsIsNoOp)
 
 TEST(Persist, FreshOpenWithNoSuperblock)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     std::unique_ptr<Crowdbtree> t;
@@ -399,7 +399,7 @@ TEST(Persist, FreshOpenWithNoSuperblock)
 
 TEST(Persist, CorruptNewestSuperblockFallsBackToPrevious)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     {
@@ -434,8 +434,8 @@ TEST(Persist, FileBackendRoundTrip)
 
     std::map<std::string, std::string> oracle;
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -464,8 +464,8 @@ TEST(Persist, FileBackendRoundTrip)
 
     // Reopen in a brand-new store + engine.
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         Config opt;
         opt.page_store = store.get();
         std::unique_ptr<Crowdbtree> t;
@@ -489,10 +489,10 @@ TEST(Persist, FileBackendRoundTrip)
 }
 
 // plan-tree #22: same round-trip as FileBackendRoundTrip, but against the
-// O_DIRECT BlockPageStore -- proves a real Crowdbtree engine's actual
+// O_DIRECT PageDiskStore -- proves a real Crowdbtree engine's actual
 // snapshot/recovery write/read pattern (superblocks, manifest, page
 // frames -- whatever offsets/lengths persist.cpp happens to use) round-trips
-// correctly through BlockPageStore's alignment handling, not just the
+// correctly through PageDiskStore's alignment handling, not just the
 // synthetic offsets exercised directly in page_store_test.cpp.
 TEST(Persist, BlockDeviceBackendRoundTrip)
 {
@@ -502,8 +502,8 @@ TEST(Persist, BlockDeviceBackendRoundTrip)
 
     std::map<std::string, std::string> oracle;
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 4096, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 4096, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -532,8 +532,8 @@ TEST(Persist, BlockDeviceBackendRoundTrip)
 
     // Reopen in a brand-new store + engine.
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 4096, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 4096, &store).ok());
         Config opt;
         opt.page_store = store.get();
         std::unique_ptr<Crowdbtree> t;
@@ -559,7 +559,7 @@ TEST(Persist, BlockDeviceBackendRoundTrip)
 // for this finite persistent flush to finish.
 TEST(Persist, WriteMutexNotHeldDuringSnapshotIo)
 {
-    MemPageStore      mem(1);
+    PageMemStore      mem(1);
     BlockingPageStore store(&mem);
     Config            opt;
     opt.page_store = &store;
@@ -592,7 +592,7 @@ TEST(Persist, WriteMutexNotHeldDuringSnapshotIo)
     EXPECT_EQ(t.durable_coverage(), 1U) << "durable snapshot frontier remains the prepared snapshot frontier";
 }
 
-// Task 6: Array-of-blocks BlockPageStore integration test. Snapshot with
+// Task 6: Array-of-blocks PageDiskStore integration test. Snapshot with
 // enough data to span multiple block files, reopen, recover, and verify all
 // data is intact. Uses small block_size (8 KiB) to force multi-block with
 // modest data volume.
@@ -605,8 +605,8 @@ TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
     constexpr uint64_t                 blk = 8 * 1024; // 8 KiB blocks
     std::map<std::string, std::string> oracle;
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -637,8 +637,8 @@ TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
 
     // Reopen with a fresh store + engine, verify all data
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store = store.get();
         std::unique_ptr<Crowdbtree> t;
@@ -669,8 +669,8 @@ TEST(Persist, ArrayOfBlocksDumpVerification)
 
     constexpr uint64_t blk = 8 * 1024;
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -702,8 +702,8 @@ TEST(Persist, BlockCompactionSparseBlockDeleted)
 
     // Phase 1: write enough data to fill 3+ blocks
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -731,8 +731,8 @@ TEST(Persist, BlockCompactionSparseBlockDeleted)
     }
 
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -765,8 +765,8 @@ TEST(Persist, BlockCompactionSparseBlockDeleted)
 
     // Phase 3: reopen and verify data integrity
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store = store.get();
         std::unique_ptr<Crowdbtree> t;
@@ -793,8 +793,8 @@ TEST(Persist, BlockCompactionGapFiltering)
 
     // Write data, snapshot, then delete most and snapshot again
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -852,8 +852,8 @@ TEST(Persist, BlockCompactionGapFiltering)
 // block_size, no gap filtering, no block deletion.
 TEST(Persist, BlockCompactionSingleMediumUnaffected)
 {
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_mem(1, &store).ok());
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_mem(1, &store).ok());
     EXPECT_EQ(store->block_size(), 0U); // single-medium: no block concept
 
     Config opt;
@@ -887,8 +887,8 @@ TEST(Persist, SnapshotFoldingSyncDeletionParity)
 
     std::map<std::string, std::string> oracle;
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -935,8 +935,8 @@ TEST(Persist, SnapshotFoldingSyncDeletionParity)
 
     // Reopen and verify durable state matches oracle.
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store = store.get();
         std::unique_ptr<Crowdbtree> t;
@@ -973,8 +973,8 @@ TEST(Persist, CompactSparseBlocksRestartSafety)
     }
 
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store                    = store.get();
         opt.frame_bytes                   = 4096;
@@ -982,7 +982,7 @@ TEST(Persist, CompactSparseBlocksRestartSafety)
         opt.merge_gc_block_free_threshold = 0.30;
         opt.merge_gc_max_relocation_bytes = 8 * 1024 * 1024;
         Crowdbtree t(opt);
-        auto       local = RuntimeTreeAccess_for_tests::core(t).local_backend();
+        auto       local = RuntimeTreeAccess_for_tests::core(t).local_page_store();
         local->gc_active.store(true);
 
         uint64_t slot = 0;
@@ -1037,8 +1037,8 @@ TEST(Persist, CompactSparseBlocksRestartSafety)
 
     // Reopen after compaction — anchor and data must be intact.
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store  = store.get();
         opt.frame_bytes = 4096;
@@ -1061,14 +1061,14 @@ namespace
 {
 void prepare_sparse_compaction(const std::string &path, const std::set<std::string> &kept_keys)
 {
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8192, 1, &store).ok());
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(path, 0, 0, 8192, 1, &store).ok());
     Config opt;
     opt.page_store       = store.get();
     opt.frame_bytes      = 4096;
     opt.leaf_split_bytes = 256;
     Crowdbtree t(opt);
-    auto       local = RuntimeTreeAccess_for_tests::core(t).local_backend();
+    auto       local = RuntimeTreeAccess_for_tests::core(t).local_page_store();
     local->gc_active.store(true);
     uint64_t slot = 0;
     for (int i = 0; i < 200; ++i) {
@@ -1089,9 +1089,9 @@ void prepare_sparse_compaction(const std::string &path, const std::set<std::stri
     ASSERT_TRUE(t.flush_with_persistent().ok());
 }
 
-void remove_free_compaction_blocks(TreeCore &core, BlockPageStore &store)
+void remove_free_compaction_blocks(TreeCore &core, PageDiskStore &store)
 {
-    const auto &local = core.local_backend();
+    const auto &local = core.local_page_store();
     core.publisher().reclaim();
     core.binding()->account()->drain_retirements();
     const auto initial_blocks = local->ledger->stats().address_high_water / store.block_size();
@@ -1156,8 +1156,8 @@ TEST_P(CompactSparseBlocksFailureInjectionTest, ReopenFromPriorAnchorIsClean)
     ASSERT_NO_FATAL_FAILURE(prepare_sparse_compaction(tmp.path, kept_keys));
 
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
         TestCompactionFaultStore faulty(*store);
         Config                   opt;
         opt.page_store                    = store.get();
@@ -1168,7 +1168,7 @@ TEST_P(CompactSparseBlocksFailureInjectionTest, ReopenFromPriorAnchorIsClean)
         opt.merge_gc_max_relocation_bytes = 8 * 1024 * 1024;
         Crowdbtree t(opt);
         auto      &core  = RuntimeTreeAccess_for_tests::core(t);
-        auto       local = core.local_backend();
+        auto       local = core.local_page_store();
         local->gc_active.store(true);
         ASSERT_NO_FATAL_FAILURE(remove_free_compaction_blocks(core, *store));
         const auto initial_blocks = local->ledger->stats().address_high_water / blk;
@@ -1197,8 +1197,8 @@ TEST_P(CompactSparseBlocksFailureInjectionTest, ReopenFromPriorAnchorIsClean)
     }
 
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
         Config opt;
         opt.page_store  = store.get();
         opt.frame_bytes = 4096;
@@ -1232,8 +1232,8 @@ TEST(Persist, LeafInnerCountSurvivesSnapshotOpen)
     uint64_t expected_leaves = 0;
     uint64_t expected_inners = 0;
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 8 * 1024, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, 8 * 1024, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256; // small leaves → many splits
@@ -1255,8 +1255,8 @@ TEST(Persist, LeafInnerCountSurvivesSnapshotOpen)
 
     // Reopen: counts must be restored from the anchor.
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 8 * 1024, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, 8 * 1024, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -1278,8 +1278,8 @@ TEST(Persist, OpenEmptyTreeCounts)
 {
     crowdb::tree_test::TempDir tmp("empty_");
     ASSERT_FALSE(tmp.path.empty());
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, 8 * 1024, 1, &store).ok());
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(tmp.path, 0, 0, 8 * 1024, 1, &store).ok());
     Config opt;
     opt.page_store = store.get();
     std::unique_ptr<Crowdbtree> t;

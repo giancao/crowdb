@@ -55,7 +55,7 @@ struct ct_tree_resource_stats_v1
     uint64_t read_inflight_bytes;
     uint64_t write_inflight_bytes;
     uint64_t materialize_inflight_bytes;
-    uint64_t allocated_backing_bytes;
+    uint64_t allocated_page_block_bytes;
     uint64_t maintenance_queued;
     uint64_t maintenance_inflight;
 };

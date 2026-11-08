@@ -274,15 +274,16 @@ Status apply_source_batch(const Config &config, SourceAdmission &sources, ApplyF
     }
     // Waiting for flush must not retain the source payloads it needs to retire.
     catalog.reset();
-    const auto bytes     = detail::shared_allocation_bound<detail::AllocationReservation>() +
-                           TreeOperationLifetime::ticket_allocation_bound() +
-                           (count * (sizeof(size_t) + sizeof(SourceAdmission::Writer::Prepared)));
-    const auto completed = frontier.contiguous().load(std::memory_order_acquire);
-    const bool fills_gap = supplied_slot && *supplied_slot > completed && *supplied_slot <= frontier.max_seen();
-    const auto category  = fills_gap ? detail::BudgetClass::kGapRepair : detail::BudgetClass::kAdmittedWriter;
-    auto       reserved  = detail::ResourceBudget::try_reserve(options.account, category, bytes);
+    const auto bytes         = detail::shared_allocation_bound<detail::AllocationReservation>() +
+                               TreeOperationLifetime::ticket_allocation_bound() +
+                               (count * (sizeof(size_t) + sizeof(SourceAdmission::Writer::Prepared)));
+    const auto completed     = frontier.contiguous().load(std::memory_order_acquire);
+    const bool fills_gap     = supplied_slot && *supplied_slot > completed && *supplied_slot <= frontier.max_seen();
+    const auto category      = fills_gap ? detail::BudgetClass::kGapRepair : detail::BudgetClass::kAdmittedWriter;
+    bool       memory_denied = false;
+    auto       reserved      = detail::ResourceBudget::try_reserve(options.account, category, bytes, &memory_denied);
     if (!reserved) {
-        if (rotation != nullptr) {
+        if (!memory_denied && rotation != nullptr) {
             (void)rotation->request_pressure();
         }
         return Status::unavailable("batch ingress credit unavailable");

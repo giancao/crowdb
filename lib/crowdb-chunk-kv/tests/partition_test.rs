@@ -15,7 +15,7 @@ use crowdb_chunk_stream::{
     ChunkId, ChunkStream, CursorAdvance, StreamChunkStore, StreamConfig, StreamMetadataStore, StreamName,
     StreamRecord, StreamRecordState, StreamRegistry,
 };
-use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
+use crowdb_tree_ffi::chunk::test_util::TestPageChunkStore;
 
 fn request(sequence: u64) -> RequestId {
     RequestId {
@@ -548,7 +548,7 @@ async fn chunk_root_checkpoint_supplies_the_wal_replay_offset() {
     )
     .await
     .unwrap();
-    let mut backend = TestChunkBackend::new(45, 4).unwrap();
+    let mut backend = TestPageChunkStore::new(45, 4).unwrap();
     let page_store = backend.page_store(0).unwrap();
     let config = PartitionConfig {
         retained_results: 1,
@@ -2153,8 +2153,8 @@ async fn native_online_split_rebuilds_one_child_from_the_exact_parent_manifest()
     )
     .await
     .unwrap();
-    let parent_backend = TestChunkBackend::new(190, 18).unwrap();
-    let child_backend = TestChunkBackend::new(192, 19).unwrap();
+    let parent_backend = TestPageChunkStore::new(190, 18).unwrap();
+    let child_backend = TestPageChunkStore::new(192, 19).unwrap();
     let parent = Partition::open_native(
         PartitionId { high: 120, low: 120 },
         PartitionRange {

@@ -9,10 +9,10 @@
 
 namespace crowdb::tree::snapshot
 {
-// Bounded encoders for the existing segment v1/v2, directory v1 and anchor v3
+// Bounded encoders for the existing mapping segment v1/v2, directory v1 and anchor v3
 // formats. Output ownership/alignment and IU padding belong to the caller.
-Status encode_segment_into(const SegmentImageHeader &header, std::span<const uint64_t> words, std::span<uint8_t> output,
-                           uint32_t *body_crc);
+Status encode_segment_into(const MappingSegmentImageHeader &header, std::span<const uint64_t> words,
+                           std::span<uint8_t> output, uint32_t *body_crc);
 Status encode_anchor_into(const CommitAnchor &anchor, std::span<uint8_t> output);
 
 class DirectoryEncoder

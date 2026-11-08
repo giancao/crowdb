@@ -19,14 +19,14 @@ void initialize(PublicationCoordinator &publisher, std::vector<std::shared_ptr<M
     left->right_sibling = 1;
     auto right          = std::make_shared<PageState>();
     right->range.lower  = "m";
-    auto first          = std::make_shared<PublishedPage>();
+    auto first          = std::make_shared<PageEntry>();
     first->leaf         = left;
-    auto second         = std::make_shared<PublishedPage>();
+    auto second         = std::make_shared<PageEntry>();
     second->leaf        = right;
     auto index          = std::make_shared<InnerPageState>();
     index->separators   = {"m"};
     index->children     = {0, 1};
-    auto root           = std::make_shared<PublishedPage>();
+    auto root           = std::make_shared<PageEntry>();
     root->inner         = index;
     root->level         = 1;
     root->metrics.leaf  = false;
@@ -268,13 +268,13 @@ TEST(ParallelFlush, ColdLeafAcceptsOverlayWithoutMaterializingBase)
                               table({{"a", 1}}
                               )
     });
-    auto original   = publisher.capture()->mapping.get(0);
-    auto leaf       = std::make_shared<PageState>(*original->leaf);
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = 4096;
-    backing->owner  = std::make_shared<uint8_t>(0);
-    leaf->bases.push_back({.identity = 1, .range = leaf->range, .max_slot = 0, .backing = backing});
-    auto proxy           = std::make_shared<PublishedPage>(*original);
+    auto original      = publisher.capture()->mapping.get(0);
+    auto leaf          = std::make_shared<PageState>(*original->leaf);
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = 4096;
+    page_block->owner  = std::make_shared<uint8_t>(0);
+    leaf->bases.push_back({.identity = 1, .range = leaf->range, .max_slot = 0, .page_block = page_block});
+    auto proxy           = std::make_shared<PageEntry>(*original);
     proxy->leaf          = leaf;
     auto request         = std::make_shared<PublicationRequest>();
     request->transaction = {
@@ -286,7 +286,7 @@ TEST(ParallelFlush, ColdLeafAcceptsOverlayWithoutMaterializingBase)
     ASSERT_TRUE(stdexec::sync_wait(batch->sender()).has_value());
     runtime.drain();
     auto current = publisher.capture()->mapping.get(0)->leaf;
-    EXPECT_EQ(current->bases.front().backing, backing);
+    EXPECT_EQ(current->bases.front().page_block, page_block);
     EXPECT_FALSE(current->bases.front().resident);
     EXPECT_EQ(current->lookup("a").cell.value.to_string(), "a1");
     EXPECT_EQ(current->lookup("b").state, LogicalLookupState::kNeedsBase);
@@ -602,13 +602,13 @@ TEST(ParallelFlush, NoOpFrontierPreservesUnchangedRouting)
     auto                   lane = std::make_shared<detail::FlushRuntime::Lane>(32);
     PublicationCoordinator publisher;
     initialize(publisher, {table({})});
-    auto lower                  = std::make_shared<PublishedPage>();
+    auto lower                  = std::make_shared<PageEntry>();
     auto lower_route            = std::make_shared<InnerPageState>();
     lower_route->children       = {2};
     lower->inner                = std::move(lower_route);
     lower->level                = 2;
     lower->metrics.leaf         = false;
-    auto upper                  = std::make_shared<PublishedPage>();
+    auto upper                  = std::make_shared<PageEntry>();
     auto upper_route            = std::make_shared<InnerPageState>();
     upper_route->children       = {3};
     upper->inner                = std::move(upper_route);

@@ -1,6 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "crowdb-common/crc32c.h"
 #include "crowdb-tree/maptable/mapping_slot.h"
+#include "snapshot/index_summary_codec.h"
 #include "snapshot/local_checkpoint_internal.h"
 
 #include <algorithm>
@@ -9,14 +11,14 @@ namespace crowdb::tree
 {
 Status LocalCheckpointOperation::State::pack_frame(const DurableCapturedFrame &frame, uint64_t *word)
 {
-    const auto &domain  = registry->ledger_->limits();
-    const auto &backing = frame.backing;
-    if (!backing || backing->storage != BackingStorage::kDurableBlob || !backing->reloadable() ||
-        backing->backend_id != domain.backend_id || backing->generation != domain.generation ||
-        backing->address < domain.region_begin || backing->address % iu != 0 || backing->length % iu != 0 ||
-        backing->address > UINT64_MAX - backing->length || backing->address / iu > slot_word::kMaxIuIndex ||
-        backing->length / iu > slot_word::kMaxIuCount || frame.logical_bytes == 0 ||
-        frame.logical_bytes > backing->length || frame.page_id >= image->pages->next_page_id) {
+    const auto &domain     = registry->ledger_->limits();
+    const auto &page_block = frame.page_block;
+    if (!page_block || page_block->storage != PageBlockStorage::kDurableBlob || !page_block->reloadable() ||
+        page_block->page_store_id != domain.page_store_id || page_block->generation != domain.generation ||
+        page_block->address < domain.region_begin || page_block->address % iu != 0 || page_block->length % iu != 0 ||
+        page_block->address > UINT64_MAX - page_block->length || page_block->address / iu > slot_word::kMaxIuIndex ||
+        page_block->length / iu > slot_word::kMaxIuCount || frame.logical_bytes == 0 ||
+        frame.logical_bytes > page_block->length || frame.page_id >= image->pages->next_page_id) {
         return Status::corruption();
     }
     if (frame.type == page_type::kLeafBase) {
@@ -28,7 +30,7 @@ Status LocalCheckpointOperation::State::pack_frame(const DurableCapturedFrame &f
     else if (frame.type != page_type::kOverflowFrame || frame.page_id == image->pages->root_page_id) {
         return Status::corruption();
     }
-    *word = slot_word::pack_unloaded(backing->address / iu, static_cast<uint32_t>(backing->length / iu));
+    *word = slot_word::pack_unloaded(page_block->address / iu, static_cast<uint32_t>(page_block->length / iu));
     return Status::Ok();
 }
 
@@ -79,10 +81,10 @@ void LocalCheckpointOperation::State::segment()
             return;
         }
         if (same) {
-            same = old != previous->pages->frames.end() && old->first == pid && old->second.backing &&
+            same = old != previous->pages->frames.end() && old->first == pid && old->second.page_block &&
                    words[pid % kMappingSegmentSize] ==
-                       slot_word::pack_unloaded(old->second.backing->address / iu,
-                                                static_cast<uint32_t>(old->second.backing->length / iu));
+                       slot_word::pack_unloaded(old->second.page_block->address / iu,
+                                                static_cast<uint32_t>(old->second.page_block->length / iu));
             if (same) {
                 ++old;
             }
@@ -105,10 +107,10 @@ void LocalCheckpointOperation::State::segment()
         }
     }
     reused_segments = false;
-    const SegmentImageHeader header{.seg_idx    = static_cast<uint32_t>(index),
-                                    .generation = image->anchor.snapshot_seq,
-                                    .slot_count = kMappingSegmentSize,
-                                    .live_count = live};
+    const MappingSegmentImageHeader header{.seg_idx    = static_cast<uint32_t>(index),
+                                           .generation = image->anchor.snapshot_seq,
+                                           .slot_count = kMappingSegmentSize,
+                                           .live_count = live};
     segment_entry = {.seg_idx    = header.seg_idx,
                      .generation = header.generation,
                      .image_len  = static_cast<uint32_t>(segment_image_encoded_size(header.slot_count))};
@@ -124,12 +126,22 @@ void LocalCheckpointOperation::State::segment()
 
 void LocalCheckpointOperation::State::finish_segments()
 {
+    image->anchor.root_summary = image->pages->root_summary;
+    const bool reuse_summaries = previous && image->pages->index_summaries.same(previous->pages->index_summaries) &&
+                                 !limits.exclusion.overlaps(previous->summaries.address, previous->summaries.length);
+    if (reuse_summaries) {
+        image->summaries             = previous->summaries;
+        image->anchor.summaries_addr = previous->anchor.summaries_addr;
+        image->anchor.summaries_len  = previous->anchor.summaries_len;
+        image->anchor.summaries_crc  = previous->anchor.summaries_crc;
+    }
     if (previous && reused_segments && directory.size() == previous->metadata->segments.size() &&
         snapshot::DirectoryEncoder(directory).logical_bytes() == previous->anchor.segdir_len &&
         !limits.exclusion.overlaps(previous->anchor.segdir_addr, round_up_to_iu(previous->anchor.segdir_len, iu))) {
         const auto &pages = *image->pages;
         const auto &old   = *previous->pages;
-        unchanged         = !(limits.retire_previous_anchor && registry->needs_anchor_retirement()) &&
+        unchanged         = reuse_summaries && image->anchor.root_summary == previous->anchor.root_summary &&
+                            !(limits.retire_previous_anchor && registry->needs_anchor_retirement()) &&
                             pages.coverage == old.coverage && pages.generation == old.generation &&
                             pages.root_page_id == old.root_page_id && pages.next_page_id == old.next_page_id &&
                             image->anchor.leaf_count == previous->anchor.leaf_count &&
@@ -142,12 +154,58 @@ void LocalCheckpointOperation::State::finish_segments()
         image->anchor.segdir_addr = previous->anchor.segdir_addr;
         image->anchor.segdir_len  = previous->anchor.segdir_len;
         image->anchor.segdir_crc  = previous->anchor.segdir_crc;
-        io(true, 0, 0, Stage::BeforeAnchor);
+        prepare_summaries();
         return;
     }
     encoder.emplace(directory);
     image->anchor.segdir_len = encoder->logical_bytes();
     reserve(round_up_to_iu(encoder->logical_bytes(), iu), Stage::DirectoryReserved);
+}
+
+void LocalCheckpointOperation::State::prepare_summaries()
+{
+    const auto count = image->pages->index_summaries.size();
+    if (count == 0 || image->summaries.owner) {
+        io(true, 0, 0, Stage::BeforeAnchor);
+        return;
+    }
+    if (count > UINT32_MAX / snapshot::kIndexSummaryRecordBytes) {
+        finish(Status::resource_exhausted("index summary length exceeds the anchor field"));
+        return;
+    }
+    image->anchor.summaries_len = static_cast<uint32_t>(count * snapshot::kIndexSummaryRecordBytes);
+    reserve(round_up_to_iu(image->anchor.summaries_len, iu), Stage::SummariesReserved);
+}
+
+void LocalCheckpointOperation::State::summaries_window()
+{
+    struct Output
+    {
+        std::span<uint8_t> bytes;
+        size_t             written = 0;
+    } output{.bytes = window->bytes};
+
+    image->pages->index_summaries.visit_from(
+        summary_pid, &output, +[](void *raw, uint32_t pid, IndexSummary summary) {
+            auto &out = *static_cast<Output *>(raw);
+            if (out.bytes.size() - out.written < snapshot::kIndexSummaryRecordBytes) {
+                return false;
+            }
+            snapshot::encode_index_summary(out.bytes.data() + out.written, pid, summary);
+            out.written += snapshot::kIndexSummaryRecordBytes;
+            return true;
+        });
+    if (output.written == 0) {
+        finish(Status::internal_error("missing index summaries"));
+        return;
+    }
+    image->anchor.summaries_crc =
+        common::crc32c_update(image->anchor.summaries_crc, output.bytes.data(), output.written);
+    const auto bytes = round_up_to_iu(output.written, iu);
+    std::ranges::fill(output.bytes.subspan(output.written, bytes - output.written), uint8_t{0});
+    const auto address = image->anchor.summaries_addr + summary_offset;
+    summary_offset += output.written;
+    io(false, address, bytes, Stage::SummariesWritten);
 }
 
 void LocalCheckpointOperation::State::directory_window()

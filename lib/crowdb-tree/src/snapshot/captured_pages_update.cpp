@@ -96,7 +96,7 @@ Status CapturedDurablePages::replace_primary(const CapturedDurablePages &page)
                 added.incoming_references = 0;
                 frames.emplace(pid, std::move(added));
             }
-            else if (std::as_const(frames).at(pid).backing != frame.backing) {
+            else if (std::as_const(frames).at(pid).page_block != frame.page_block) {
                 const auto &old = std::as_const(frames).at(pid);
                 if (old.type != frame.type || old.frame_bytes != frame.frame_bytes ||
                     old.next_overflow != frame.next_overflow || old.overflow_bytes != frame.overflow_bytes) {

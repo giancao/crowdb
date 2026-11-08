@@ -29,13 +29,12 @@ PublicationResult publish(PublicationCoordinator &publisher, PublicationTransact
     return future.get();
 }
 
-std::shared_ptr<PublishedPage> inner(uint32_t level, std::vector<uint64_t> children,
-                                     std::vector<std::string> separators)
+std::shared_ptr<PageEntry> inner(uint32_t level, std::vector<uint64_t> children, std::vector<std::string> separators)
 {
     auto route = std::make_shared<InnerPageState>();
     route->children.assign(children.begin(), children.end());
     route->separators.assign(separators.begin(), separators.end());
-    auto page          = std::make_shared<PublishedPage>();
+    auto page          = std::make_shared<PageEntry>();
     page->revision     = 1;
     page->level        = level;
     page->inner        = std::move(route);
@@ -74,7 +73,7 @@ struct MergeTree
             std::shared_ptr<const OverlayBatch> run;
             EXPECT_TRUE(builder.finish(i + 1, &run).ok());
             leaf->overlays.push_back(std::move(run));
-            auto page      = std::make_shared<PublishedPage>();
+            auto page      = std::make_shared<PageEntry>();
             page->revision = 1;
             page->leaf     = std::move(leaf);
             seed.pages.push_back({.page_id = i, .expected = {}, .replacement = page});
@@ -156,7 +155,7 @@ TEST(MaintenanceInnerMerge, ChangedSiblingInvalidatesWholePreparedTransaction)
     const auto before = tree.publisher.capture();
     auto       plan   = build_inner_merge_publication(before, 2, token(1), tree.options);
     ASSERT_TRUE(plan.status.ok());
-    auto changed = std::make_shared<PublishedPage>(*before->mapping.get(10));
+    auto changed = std::make_shared<PageEntry>(*before->mapping.get(10));
     ++changed->revision;
     ASSERT_TRUE(publish(tree.publisher,
                         {.record = token(2),
@@ -180,14 +179,14 @@ class TestInnerLoader final : public PageLoader
         complete(Status::internal_error(), {});
     }
 
-    void load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete) override
+    void load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete) override
     {
         ++calls;
-        if (fail_sibling && backing->address == 11) {
+        if (fail_sibling && page_block->address == 11) {
             complete(Status::io_error("injected sibling failure"), {});
             return;
         }
-        complete(Status::Ok(), frames.at(backing->address));
+        complete(Status::Ok(), frames.at(page_block->address));
     }
 };
 
@@ -201,13 +200,13 @@ void cold_repair(bool fail)
     for (const uint64_t pid : {10, 11, 20}) {
         const auto old = before->mapping.get(pid);
         loader->frames.emplace(pid, old->inner);
-        auto page = std::make_shared<PublishedPage>(*old);
+        auto page = std::make_shared<PageEntry>(*old);
         page->inner.reset();
-        auto backing        = std::make_shared<BackingRef>();
-        backing->address    = pid;
-        backing->length     = 512;
-        backing->owner      = std::make_shared<int>(1);
-        page->inner_backing = std::move(backing);
+        auto page_block        = std::make_shared<PageBlockRef>();
+        page_block->address    = pid;
+        page_block->length     = 512;
+        page_block->owner      = std::make_shared<int>(1);
+        page->inner_page_block = std::move(page_block);
         evict.pages.push_back({.page_id = pid, .expected = old, .replacement = std::move(page)});
     }
     ASSERT_TRUE(publish(tree.publisher, std::move(evict)).status.ok());

@@ -18,10 +18,10 @@ std::optional<size_t> RecoveredStateOperation::allocation_bound(size_t frames, s
                                                                 size_t max_key_bytes) noexcept
 {
     using detail::shared_allocation_bound;
-    const auto page = detail::AllocationBound(shared_allocation_bound<PublishedPage>())
+    const auto page = detail::AllocationBound(shared_allocation_bound<PageEntry>())
                           .add(PageState::allocation_bound())
                           .add(sizeof(BaseRef))
-                          .add(MappingView::path_copy_bound())
+                          .add(MappingTable::path_copy_bound())
                           .add_product(2, OwnedKey::allocation_overhead())
                           .add_product(2, max_key_bytes)
                           .value();
@@ -30,7 +30,7 @@ std::optional<size_t> RecoveredStateOperation::allocation_bound(size_t frames, s
     }
     return detail::AllocationBound(shared_allocation_bound<State>() +
                                    shared_allocation_bound<RecoveredStateOperation>() +
-                                   shared_allocation_bound<PublishedTreeState>() + PublishedSources::allocation_bound())
+                                   shared_allocation_bound<TreeRoot>() + PublishedSources::allocation_bound())
         .add(shared_allocation_bound<SnapshotBaseline>())
         .add(detail::FlushRuntime::progress_allocation_bound())
         .add_product(frames, shared_allocation_bound<State::Load>())
@@ -55,7 +55,7 @@ Status RecoveredStateOperation::create(std::shared_ptr<const CapturedDurablePage
         baseline->pages                 = std::move(captured);
         baseline->coverage              = baseline->pages->coverage;
         baseline->generation            = (*out)->state_->building->generation;
-        baseline->backend_id            = baseline->pages->backend_id;
+        baseline->page_store_id         = baseline->pages->page_store_id;
         (*out)->state_->building->snapshot_baseline = std::move(baseline);
     }
     return status;
@@ -71,7 +71,7 @@ Status RecoveredStateOperation::create_readable(std::shared_ptr<const ReadablePa
     if (!captured || !loader || !runtime || !lane || out == nullptr || limits.max_pages == 0 || limits.max_depth == 0 ||
         limits.max_depth > 64 || limits.max_children == 0 || limits.max_children > 4096 ||
         limits.max_leaf_entries == 0 || limits.max_step_entries == 0 ||
-        captured->next_page_id > MappingView::kPageLimit) {
+        captured->next_page_id > MappingTable::kPageLimit) {
         return Status::invalid_argument();
     }
     if (captured->frames.size() > limits.max_pages) {
@@ -85,11 +85,12 @@ Status RecoveredStateOperation::create_readable(std::shared_ptr<const ReadablePa
         state->lane     = std::move(lane);
         state->limits   = limits;
         state->path.reserve(limits.max_depth);
-        state->building = detail::reserved_shared<PublishedTreeState>(metadata, metadata, state->captured->coverage);
-        state->building->root_page_id = state->captured->root_page_id;
-        state->building->next_page_id = state->captured->next_page_id;
-        state->building->generation   = state->captured->generation == 0 ? 1 : state->captured->generation;
-        state->building->coverage     = state->captured->coverage;
+        state->building = detail::reserved_shared<TreeRoot>(metadata, metadata, state->captured->coverage);
+        state->building->root_page_id    = state->captured->root_page_id;
+        state->building->next_page_id    = state->captured->next_page_id;
+        state->building->generation      = state->captured->generation == 0 ? 1 : state->captured->generation;
+        state->building->coverage        = state->captured->coverage;
+        state->building->index_summaries = state->captured->index_summaries;
         state->building->summary.emplace();
         state->building->summary->covered_slot = state->captured->coverage;
         state->position                        = state->captured->frames.begin();

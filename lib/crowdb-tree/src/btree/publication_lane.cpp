@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "publication_lane.h"
 
-#include "published_state.h"
+#include "tree_root.h"
 
 namespace crowdb::tree
 {

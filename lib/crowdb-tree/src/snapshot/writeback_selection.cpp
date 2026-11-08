@@ -2,15 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 #include "writeback_selection.h"
 
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 namespace crowdb::tree
 {
 namespace
 {
-bool resident_child_fences(const PublishedPage &page, uint64_t pid, InnerEncodeFences *out)
+bool resident_child_fences(const PageEntry &page, uint64_t pid, InnerEncodeFences *out)
 {
-    auto backing = page.inner_backing;
+    auto page_block = page.inner_page_block;
     if (page.level == 0) {
         if (!page.leaf || !page.leaf->overlays.empty() || page.leaf->bases.size() != 1) {
             return false;
@@ -19,20 +19,20 @@ bool resident_child_fences(const PublishedPage &page, uint64_t pid, InnerEncodeF
         if (base.range.lower != page.leaf->range.lower || base.range.upper != page.leaf->range.upper) {
             return false;
         }
-        backing = base.backing;
+        page_block = base.page_block;
     }
-    if (!backing || backing->storage != BackingStorage::kResidentFrame || !backing->readable() ||
-        backing->resident_frame.size() < kFrameHeaderSize + kFrameTrailerSize) {
+    if (!page_block || page_block->storage != PageBlockStorage::kResidentFrame || !page_block->readable() ||
+        page_block->resident_frame.size() < kFrameHeaderSize + kFrameTrailerSize) {
         return false;
     }
     // Import verified the entire graph before publishing this immutable raw
     // frame. Header access borrows its existing owner and performs no I/O.
-    const auto *frame = backing->resident_frame.data();
+    const auto *frame = page_block->resident_frame.data();
     if (frame_u64(frame, fh::kSelfpage_id) != pid) {
         return false;
     }
     if (page.level == 0 && frame_page_type(frame) == page_type::kLeafBase) {
-        const bool nonempty = frame_u32(frame, fh::kSlotCount) != 0 || frame_u32(frame, fh::kDeltaCount) != 0;
+        const bool nonempty = frame_u32(frame, fh::kSlotCount) != 0;
         *out                = nonempty ? InnerEncodeFences{.lower_leaf = pid, .upper_leaf = pid} : InnerEncodeFences{};
         return true;
     }
@@ -43,12 +43,12 @@ bool resident_child_fences(const PublishedPage &page, uint64_t pid, InnerEncodeF
     return true;
 }
 
-bool child_fences(const PublishedPage &page, uint64_t pid, InnerEncodeFences *out)
+bool child_fences(const PageEntry &page, uint64_t pid, InnerEncodeFences *out)
 {
     if (page.metrics.dirty) {
         return false;
     }
-    if (!page.primary || !page.primary->frame.backing) {
+    if (!page.primary || !page.primary->frame.page_block) {
         return resident_child_fences(page, pid, out);
     }
     const auto &proof = *page.primary;
@@ -58,27 +58,27 @@ bool child_fences(const PublishedPage &page, uint64_t pid, InnerEncodeFences *ou
     }
     const auto &summary = *frame.summary;
     if (page.level == 0) {
-        if (!page.leaf || !can_reuse_primary(page, pid, page.leaf->range, proof.gc_floor, frame.backing->backend_id,
-                                             frame.frame_bytes)) {
+        if (!page.leaf || !can_reuse_primary(page, pid, page.leaf->range, proof.gc_floor,
+                                             frame.page_block->page_store_id, frame.frame_bytes)) {
             return false;
         }
         *out = summary.encoded_entries != 0 ? InnerEncodeFences{.lower_leaf = pid, .upper_leaf = pid}
                                             : InnerEncodeFences{};
         return true;
     }
-    if (!summary.inner_fences || frame.page_id != pid || frame.backing != page.inner_backing ||
-        !frame.backing->reloadable()) {
+    if (!summary.inner_fences || frame.page_id != pid || frame.page_block != page.inner_page_block ||
+        !frame.page_block->reloadable()) {
         return false;
     }
     const auto fences = *summary.inner_fences;
-    if (page.inner && !can_reuse_inner_primary(page, pid, fences, frame.backing->backend_id, frame.frame_bytes)) {
+    if (page.inner && !can_reuse_inner_primary(page, pid, fences, frame.page_block->page_store_id, frame.frame_bytes)) {
         return false;
     }
     *out = fences;
     return true;
 }
 
-Status check_inner(const PublishedPage &page, size_t max_children)
+Status check_inner(const PageEntry &page, size_t max_children)
 {
     if (page.level == 0 || page.leaf || !page.inner || page.inner->children.empty() ||
         page.inner->children.size() != page.inner->separators.size() + 1) {
@@ -90,8 +90,7 @@ Status check_inner(const PublishedPage &page, size_t max_children)
     return Status::Ok();
 }
 
-Status missing_child(const PublishedTreeState &view, const PublishedPage &page, size_t max_children,
-                     std::optional<uint64_t> *out)
+Status missing_child(const TreeRoot &view, const PageEntry &page, size_t max_children, std::optional<uint64_t> *out)
 {
     auto status = check_inner(page, max_children);
     if (!status.ok()) {
@@ -113,8 +112,7 @@ Status missing_child(const PublishedTreeState &view, const PublishedPage &page, 
 }
 } // namespace
 
-Status select_writeback_page(const PublishedTreeState &view, const CapturedFrameLimits &limits,
-                             std::optional<uint64_t> *out)
+Status select_writeback_page(const TreeRoot &view, const CapturedFrameLimits &limits, std::optional<uint64_t> *out)
 {
     *out = view.mapping.oldest_writeback_page();
     for (size_t depth = 0; out->has_value() && depth < limits.max_depth; ++depth) {
@@ -136,8 +134,7 @@ Status select_writeback_page(const PublishedTreeState &view, const CapturedFrame
                             : Status::Ok();
 }
 
-Status writeback_inner_fences(const PublishedTreeState &view, const PublishedPage &page, size_t max_children,
-                              InnerEncodeFences *out)
+Status writeback_inner_fences(const TreeRoot &view, const PageEntry &page, size_t max_children, InnerEncodeFences *out)
 {
     auto status = check_inner(page, max_children);
     if (!status.ok()) {

@@ -11,9 +11,9 @@ namespace crowdb::tree::detail
 {
 struct MaintenancePathEntry
 {
-    uint64_t                             pid   = 0;
-    size_t                               child = 0;
-    std::shared_ptr<const PublishedPage> page;
+    uint64_t                         pid   = 0;
+    size_t                           child = 0;
+    std::shared_ptr<const PageEntry> page;
 };
 
 using MaintenancePath = ReservedVector<MaintenancePathEntry>;
@@ -33,26 +33,26 @@ struct MaintenanceChildren
 class MaintenanceBuilder
 {
   public:
-    MaintenanceBuilder(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<InstallRecord> record,
+    MaintenanceBuilder(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<InstallRecord> record,
                        const MaintenancePublicationOptions &limits, InlineFunction<Status(uint64_t *)> allocate = {});
     [[nodiscard]] Status validate() const;
     Status               path_to(uint64_t pid, MaintenancePath *path) const;
     Status               guard_path(const MaintenancePath &path);
     Status               allocate_pid(uint64_t *pid);
-    Status               replace(uint64_t pid, std::shared_ptr<const PublishedPage> replacement);
+    Status               replace(uint64_t pid, std::shared_ptr<const PageEntry> replacement);
     Status               propagate(const MaintenancePath &path, size_t removed_children, MaintenanceChildren children,
                                    uint32_t child_level);
     Status               shrink_root();
     Status               merge_underfull(const MaintenancePath &path, bool *changed);
-    Status make_leaf(uint64_t pid, const std::shared_ptr<const PublishedPage> &old,
+    Status make_leaf(uint64_t pid, const std::shared_ptr<const PageEntry> &old,
                      std::shared_ptr<const PageState> logical, std::optional<size_t> exact_bytes,
                      std::shared_ptr<const void> second_owner = {}, const LeafLayoutStats *stats = nullptr,
                      size_t removed_primary_bytes = 0);
     Status finish(MaintenancePublicationResult *result);
-    [[nodiscard]] std::shared_ptr<const PublishedPage> lookup(uint64_t pid) const;
+    [[nodiscard]] std::shared_ptr<const PageEntry> lookup(uint64_t pid) const;
 
-    const std::shared_ptr<const PublishedTreeState> view;
-    MaintenancePublicationOptions                   options;
+    const std::shared_ptr<const TreeRoot> view;
+    MaintenancePublicationOptions         options;
 
     Status partition_inner(uint64_t pid, uint32_t level, const InnerPageState &inner, MaintenanceChildren *output);
     Status grow_root(MaintenanceChildren children, uint32_t child_level);
@@ -73,9 +73,9 @@ class MaintenanceBuilder
     size_t                                                                         inner_merges_ = 0;
 };
 
-Status build_flush_leaf_outputs(MaintenanceBuilder &builder, uint64_t pid,
-                                const std::shared_ptr<const PublishedPage> &old, const struct SplitWindowLayout &layout,
-                                bool keep_loaded_bases, MaintenanceChildren *children);
+Status build_flush_leaf_outputs(MaintenanceBuilder &builder, uint64_t pid, const std::shared_ptr<const PageEntry> &old,
+                                const struct SplitWindowLayout &layout, bool keep_loaded_bases,
+                                MaintenanceChildren *children);
 
 Status next_page_version(const PageState &left, const PageState *right, PageVersion *version);
 Status summarize_leaf(const std::shared_ptr<const PageState> &page, const PageMaintenanceLimits &limits,
@@ -88,7 +88,7 @@ struct MaintenanceLeafMerge
     std::optional<LeafLayoutStats> statistics;
 };
 
-MaintenanceLeafMerge plan_published_leaf_merge(const PublishedPage &left, const PublishedPage &right,
+MaintenanceLeafMerge plan_published_leaf_merge(const PageEntry &left, const PageEntry &right,
                                                const LeafMergeInput &input, const PageMaintenanceLimits &limits,
                                                PageVersion version, uint64_t first_run_id);
 } // namespace crowdb::tree::detail

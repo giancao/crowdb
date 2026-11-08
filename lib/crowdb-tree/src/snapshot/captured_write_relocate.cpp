@@ -7,20 +7,20 @@ namespace crowdb::tree
 bool captured_write_detail::same_durable_frame(const DurableCapturedFrame &left,
                                                const DurableCapturedFrame &right) noexcept
 {
-    if (!left.backing || !right.backing || left.page_id != right.page_id || left.type != right.type ||
+    if (!left.page_block || !right.page_block || left.page_id != right.page_id || left.type != right.type ||
         left.frame_bytes != right.frame_bytes || left.logical_bytes != right.logical_bytes ||
         left.next_overflow != right.next_overflow || left.overflow_bytes != right.overflow_bytes) {
         return false;
     }
-    if (left.backing == right.backing) {
+    if (left.page_block == right.page_block) {
         return true;
     }
-    const auto &a = *left.backing;
-    const auto &b = *right.backing;
-    return a.physical_owner && a.physical_owner == b.physical_owner && a.backend_id == b.backend_id &&
+    const auto &a = *left.page_block;
+    const auto &b = *right.page_block;
+    return a.physical_owner && a.physical_owner == b.physical_owner && a.page_store_id == b.page_store_id &&
            a.storage == b.storage && a.address == b.address && a.length == b.length && a.content_id == b.content_id &&
            a.generation == b.generation && a.checksum == b.checksum && a.encoding == b.encoding &&
-           same_chunk_backing(a.chunk, b.chunk);
+           same_chunk_page_block(a.chunk, b.chunk);
 }
 
 void CapturedWriteOperation::State::use_relocated_dependency(DurableCapturedFrame value)
@@ -31,7 +31,7 @@ void CapturedWriteOperation::State::use_relocated_dependency(DurableCapturedFram
         return;
     }
     const auto original = resident_sources.find(value.page_id);
-    if (original == resident_sources.end() || original->second.backing != value.backing ||
+    if (original == resident_sources.end() || original->second.page_block != value.page_block ||
         found->second.next_overflow != value.next_overflow || found->second.overflow_bytes != value.overflow_bytes ||
         found->second.frame_bytes != value.frame_bytes) {
         finish(Status::corruption("relocation encountered conflicting overflow identities"));
@@ -48,12 +48,13 @@ void CapturedWriteOperation::State::begin_relocated_read(DurableCapturedFrame va
         ((limits.write.max_frame_bytes + kDurableBlobHeader + limits.write.iu_size - 1) / limits.write.iu_size) *
         limits.write.iu_size;
 
-    OverflowBackingPage source{.backing       = value.backing,
-                               .next          = value.next_overflow,
-                               .bytes         = value.overflow_bytes,
-                               .frame_bytes   = value.frame_bytes,
-                               .logical_bytes = value.logical_bytes};
-    resident_sources.emplace(value.page_id, ResidentSource{.backing = value.backing, .dependencies = dependencies});
+    OverflowPageBlock source{.page_block    = value.page_block,
+                             .next          = value.next_overflow,
+                             .bytes         = value.overflow_bytes,
+                             .frame_bytes   = value.frame_bytes,
+                             .logical_bytes = value.logical_bytes};
+    resident_sources.emplace(value.page_id,
+                             ResidentSource{.page_block = value.page_block, .dependencies = dependencies});
     resident_dependency = std::move(value);
     auto status = NativeFrameRead::create(resident_dependency.page_id, std::move(source), store, runtime, lane, loads,
                                           budget, &relocation_read);
@@ -97,18 +98,18 @@ void CapturedWriteOperation::State::reuse_durable_dependency(DurableCapturedFram
             finish(Status::corruption("captured write encountered conflicting reused overflow identities"));
             return;
         }
-        if (found->second.backing->owner == dependencies) {
+        if (found->second.page_block->owner == dependencies) {
             attach_dependency(found->second, false);
             return;
         }
     }
-    if (!value.backing->physical_owner) {
+    if (!value.page_block->physical_owner) {
         finish(Status::not_supported("dependency rebind requires independent physical extent ownership"));
         return;
     }
-    auto backing   = detail::reserved_shared<BackingRef>(budget.bytes, *value.backing);
-    backing->owner = dependencies;
-    value.backing  = std::move(backing);
+    auto page_block   = detail::reserved_shared<PageBlockRef>(budget.bytes, *value.page_block);
+    page_block->owner = dependencies;
+    value.page_block  = std::move(page_block);
     if (found == pages->frames.end()) {
         auto status = insert(value, true);
         if (!status.ok()) {
@@ -121,14 +122,14 @@ void CapturedWriteOperation::State::reuse_durable_dependency(DurableCapturedFram
 
 Status CapturedWriteOperation::State::rebind_primary()
 {
-    if (!descriptor.backing->physical_owner) {
+    if (!descriptor.page_block->physical_owner) {
         return Status::not_supported("relocation requires independent primary extent ownership");
     }
-    auto backing = detail::reserved_shared<BackingRef>(budget.bytes, *descriptor.backing);
-    dependencies->owners.push_back(backing->physical_owner);
-    backing->owner     = dependencies;
-    backing->overflow  = overflow_backing;
-    descriptor.backing = std::move(backing);
+    auto page_block = detail::reserved_shared<PageBlockRef>(budget.bytes, *descriptor.page_block);
+    dependencies->owners.push_back(page_block->physical_owner);
+    page_block->owner     = dependencies;
+    page_block->overflow  = overflow_page_block;
+    descriptor.page_block = std::move(page_block);
     return Status::Ok();
 }
 } // namespace crowdb::tree

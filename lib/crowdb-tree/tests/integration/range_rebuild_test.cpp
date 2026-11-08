@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/range_rebuild.h"
 #include "crowdb-tree/c_api.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "runtime_tree_access.h"
 
 #include <gtest/gtest.h>
@@ -69,7 +69,7 @@ TEST(RangeRebuild, UnboundedVolatileSourceBuildsIntoAnotherSharedHost)
     ASSERT_TRUE(source.put("z", "two").ok());
     std::shared_ptr<TreeRuntime> runtime;
     ASSERT_TRUE(TreeRuntime::create({}, &runtime).ok());
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       config;
     config.runtime    = runtime;
     config.page_store = &store;
@@ -82,7 +82,7 @@ TEST(RangeRebuild, UnboundedVolatileSourceBuildsIntoAnotherSharedHost)
 
 TEST(RangeRebuild, AdjacentChildrenHaveExactUnionAndEmptyIntersection)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       source_options;
     source_options.page_store       = &source_store;
     source_options.frame_bytes      = 4096;
@@ -96,8 +96,8 @@ TEST(RangeRebuild, AdjacentChildrenHaveExactUnionAndEmptyIntersection)
     ASSERT_TRUE(source.flush_with_persistent().ok());
     const auto expected = live_entries(source);
 
-    MemPageStore left_store(1);
-    MemPageStore right_store(1);
+    PageMemStore left_store(1);
+    PageMemStore right_store(1);
     Config       left_options  = source_options;
     Config       right_options = source_options;
     left_options.page_store    = &left_store;
@@ -142,7 +142,7 @@ TEST(RangeRebuild, ResidentSourceWithoutPageStoreBuildsDurableChild)
     ASSERT_TRUE(source.put(Slice("z"), Slice("right")).ok());
     ASSERT_TRUE(source.flush().ok());
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     Config       destination_options = source_options;
     destination_options.page_store   = &destination_store;
     std::unique_ptr<Crowdbtree> destination;
@@ -156,7 +156,7 @@ TEST(RangeRebuild, ResidentSourceWithoutPageStoreBuildsDurableChild)
 
 TEST(RangeRebuild, OversizedSourceLeafSplitsIntoFixedDestinationFrames)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store       = &source_store;
     options.frame_bytes      = 65536;
@@ -174,7 +174,7 @@ TEST(RangeRebuild, OversizedSourceLeafSplitsIntoFixedDestinationFrames)
         return frame_page_type(frame.frame.data()) == page_type::kLeafBase && frame.frame.size() > 4096;
     }));
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     options.page_store       = &destination_store;
     options.frame_bytes      = 4096;
     options.leaf_split_bytes = 3000;
@@ -330,7 +330,7 @@ TEST(RangeRebuild, NativeIteratorKeepsPendingLeafAcrossSplit)
 
 TEST(RangeRebuild, ConcurrentWorkersPublishIndependentTrees)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       source_options;
     source_options.page_store = &source_store;
     Crowdbtree source(source_options);
@@ -340,9 +340,9 @@ TEST(RangeRebuild, ConcurrentWorkersPublishIndependentTrees)
     ASSERT_TRUE(source.flush().ok());
     ASSERT_TRUE(source.flush_with_persistent().ok());
 
-    MemPageStore low_store(1);
-    MemPageStore high_store(1);
-    auto         worker = [&source, &source_options](MemPageStore *store, KeyRange range) {
+    PageMemStore low_store(1);
+    PageMemStore high_store(1);
+    auto         worker = [&source, &source_options](PageMemStore *store, KeyRange range) {
         Config options     = source_options;
         options.page_store = store;
         std::unique_ptr<Crowdbtree> result;
@@ -364,7 +364,7 @@ TEST(RangeRebuild, ConcurrentWorkersPublishIndependentTrees)
 
 TEST(RangeRebuild, WhollyContainedTreeCopiesIntoIndependentPaidFrames)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store       = &source_store;
     options.frame_bytes      = 4096;
@@ -376,7 +376,7 @@ TEST(RangeRebuild, WhollyContainedTreeCopiesIntoIndependentPaidFrames)
     ASSERT_TRUE(source.flush().ok());
     ASSERT_TRUE(source.flush_with_persistent().ok());
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     options.page_store = &destination_store;
     std::unique_ptr<Crowdbtree> destination;
     RangeRebuildStats           stats;
@@ -391,7 +391,7 @@ TEST(RangeRebuild, WhollyContainedTreeCopiesIntoIndependentPaidFrames)
 
 TEST(RangeRebuild, CopiesOnlyOverflowChainsReferencedByTheChildRange)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store       = &source_store;
     options.frame_bytes      = 4096;
@@ -406,7 +406,7 @@ TEST(RangeRebuild, CopiesOnlyOverflowChainsReferencedByTheChildRange)
     ASSERT_TRUE(source.flush().ok());
     ASSERT_TRUE(source.flush_with_persistent().ok());
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     options.page_store = &destination_store;
     std::unique_ptr<Crowdbtree> destination;
     RangeRebuildStats           stats;
@@ -425,7 +425,7 @@ TEST(RangeRebuild, CopiesOnlyOverflowChainsReferencedByTheChildRange)
 
 TEST(RangeRebuild, RewrittenRootHasAnIndependentValidPageIdNamespace)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store       = &source_store;
     options.frame_bytes      = 4096;
@@ -442,7 +442,7 @@ TEST(RangeRebuild, RewrittenRootHasAnIndependentValidPageIdNamespace)
     uint64_t                 source_highwater = 0;
     ASSERT_TRUE(source.collect_native_frames(&source_frames, &source_root, &source_slot, &source_highwater).ok());
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     options.page_store = &destination_store;
     std::unique_ptr<Crowdbtree> destination;
     ASSERT_TRUE(
@@ -461,7 +461,7 @@ TEST(RangeRebuild, RewrittenRootHasAnIndependentValidPageIdNamespace)
 
 TEST(RangeRebuild, EmptyAndUnboundedEndpointsUseTheSameHalfOpenPredicate)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store = &source_store;
     Crowdbtree                     source(options);
@@ -472,7 +472,7 @@ TEST(RangeRebuild, EmptyAndUnboundedEndpointsUseTheSameHalfOpenPredicate)
     ASSERT_TRUE(source.flush().ok());
 
     auto rebuild_keys = [&source, &options](KeyRange range) {
-        MemPageStore destination_store(1);
+        PageMemStore destination_store(1);
         Config       destination_options = options;
         destination_options.page_store   = &destination_store;
         std::unique_ptr<Crowdbtree> destination;
@@ -499,7 +499,7 @@ TEST(RangeRebuild, EmptyAndUnboundedEndpointsUseTheSameHalfOpenPredicate)
 
 TEST(RangeRebuild, EmptyRangeSkipsEveryRootChildWithoutExaminingLeaves)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store       = &source_store;
     options.frame_bytes      = 4096;
@@ -510,7 +510,7 @@ TEST(RangeRebuild, EmptyRangeSkipsEveryRootChildWithoutExaminingLeaves)
     }
     ASSERT_TRUE(source.flush().ok());
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     options.page_store = &destination_store;
     std::unique_ptr<Crowdbtree> destination;
     RangeRebuildStats           stats;
@@ -522,15 +522,13 @@ TEST(RangeRebuild, EmptyRangeSkipsEveryRootChildWithoutExaminingLeaves)
     EXPECT_TRUE(live_entries(*destination).empty());
 }
 
-TEST(RangeRebuild, InFrameDeltaKeysTombstonesAndOverflowValuesSurviveFiltering)
+TEST(RangeRebuild, OverwritesTombstonesAndOverflowValuesSurviveFiltering)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
-    options.page_store        = &source_store;
-    options.frame_bytes       = 4096;
-    options.inframe_delta     = true;
-    options.max_inframe_delta = 16;
-    options.max_inline_value  = 64;
+    options.page_store       = &source_store;
+    options.frame_bytes      = 4096;
+    options.max_inline_value = 64;
     Crowdbtree source(options);
     Batch      seed;
     seed.ops.push_back({.key = "a", .kind = OpKind::kPut, .value = "old-a"});
@@ -547,7 +545,7 @@ TEST(RangeRebuild, InFrameDeltaKeysTombstonesAndOverflowValuesSurviveFiltering)
     ASSERT_TRUE(source.apply(2, delta).ok());
     ASSERT_TRUE(source.flush().ok());
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     options.page_store = &destination_store;
     std::unique_ptr<Crowdbtree> destination;
     ASSERT_TRUE(
@@ -562,7 +560,7 @@ TEST(RangeRebuild, InFrameDeltaKeysTombstonesAndOverflowValuesSurviveFiltering)
 
 TEST(RangeRebuild, ChildMutationDoesNotChangeTheSourceTree)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store = &source_store;
     Crowdbtree source(options);
@@ -570,7 +568,7 @@ TEST(RangeRebuild, ChildMutationDoesNotChangeTheSourceTree)
     ASSERT_TRUE(source.put(Slice("z"), Slice("outside")).ok());
     ASSERT_TRUE(source.flush().ok());
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     options.page_store = &destination_store;
     std::unique_ptr<Crowdbtree> destination;
     ASSERT_TRUE(
@@ -585,7 +583,7 @@ TEST(RangeRebuild, ChildMutationDoesNotChangeTheSourceTree)
 
 TEST(RangeRebuild, NativeInstallRejectsCrossingSiblingAndMissingChildReferences)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store       = &source_store;
     options.frame_bytes      = 4096;
@@ -612,7 +610,7 @@ TEST(RangeRebuild, NativeInstallRejectsCrossingSiblingAndMissingChildReferences)
     frame_put_u64(leaf->frame.data(), fh::kRightSibling, kInvalidPageId);
     frame_restamp_crc(leaf->frame.data(), static_cast<uint32_t>(leaf->frame.size()));
 
-    MemPageStore sibling_store(1);
+    PageMemStore sibling_store(1);
     options.page_store = &sibling_store;
     Crowdbtree sibling_destination(options);
     EXPECT_EQ(sibling_destination.install_snapshot_native(std::move(broken_sibling), root, slot, highwater).code(),
@@ -626,7 +624,7 @@ TEST(RangeRebuild, NativeInstallRejectsCrossingSiblingAndMissingChildReferences)
     frame_put_u64(inner->frame.data(), kFrameHeaderSize, highwater + 100);
     frame_restamp_crc(inner->frame.data(), static_cast<uint32_t>(inner->frame.size()));
 
-    MemPageStore child_store(1);
+    PageMemStore child_store(1);
     options.page_store = &child_store;
     Crowdbtree child_destination(options);
     EXPECT_EQ(child_destination.install_snapshot_native(std::move(broken_child), root, slot, highwater).code(),
@@ -635,7 +633,7 @@ TEST(RangeRebuild, NativeInstallRejectsCrossingSiblingAndMissingChildReferences)
 
 TEST(RangeRebuild, NativeInstallRejectsSelfConsistentButFalseFenceKeys)
 {
-    MemPageStore source_store(1);
+    PageMemStore source_store(1);
     Config       options;
     options.page_store       = &source_store;
     options.frame_bytes      = 4096;
@@ -661,7 +659,7 @@ TEST(RangeRebuild, NativeInstallRejectsSelfConsistentButFalseFenceKeys)
     frame_restamp_crc(inner->frame.data(), static_cast<uint32_t>(inner->frame.size()));
     ASSERT_TRUE(frame_validate(inner->frame.data(), static_cast<uint32_t>(inner->frame.size())));
 
-    MemPageStore destination_store(1);
+    PageMemStore destination_store(1);
     options.page_store = &destination_store;
     Crowdbtree destination(options);
     EXPECT_EQ(destination.install_snapshot_native(std::move(frames), root, slot, highwater).code(), Code::kCorruption);
@@ -674,18 +672,20 @@ TEST(RangeRebuild, NativeInstallRejectsKeyHiddenBehindEmptyFirstChild)
     // first non-empty descendant and reject the key below the root separator.
     std::vector<NativeFrame> frames;
     frames.push_back(make_inner_frame(1, {2, 3}, {"m"}));
+    frame_set_inner_fence_pages(frames.back().frame.data(), frames.back().frame.size(), 2, 5);
     frames.push_back(make_leaf_frame(2, 4,
                                      {
                                          {"b", "left"},
     }));
     frames.push_back(make_inner_frame(3, {4, 5}, {"t"}));
+    frame_set_inner_fence_pages(frames.back().frame.data(), frames.back().frame.size(), 5, 5);
     frames.push_back(make_leaf_frame(4, 5, {}));
     frames.push_back(make_leaf_frame(5, kInvalidPageId,
                                      {
                                          {"a", "hidden"},
     }));
 
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       options;
     options.page_store  = &store;
     options.frame_bytes = 4096;
@@ -693,7 +693,7 @@ TEST(RangeRebuild, NativeInstallRejectsKeyHiddenBehindEmptyFirstChild)
     EXPECT_EQ(destination.install_snapshot_native(std::move(frames), 1, 1, 6).code(), Code::kCorruption);
 }
 
-TEST(RangeRebuild, NativeInstallUpgradesLegacyInnerFramesWithoutFences)
+TEST(RangeRebuild, NativeInstallRejectsNonemptyIndexWithoutFences)
 {
     std::vector<NativeFrame> frames;
     frames.push_back(make_inner_frame(1, {2, 3}, {"m"}));
@@ -707,18 +707,34 @@ TEST(RangeRebuild, NativeInstallUpgradesLegacyInnerFramesWithoutFences)
     }));
     ASSERT_FALSE(frame_has_lower_fence(frames.front().frame.data()));
 
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       options;
     options.page_store  = &store;
     options.frame_bytes = 4096;
     Crowdbtree destination(options);
-    ASSERT_TRUE(destination.install_snapshot_native(std::move(frames), 1, 1, 4).ok());
-    EXPECT_EQ(live_entries(destination).size(), 2U);
+    EXPECT_EQ(destination.install_snapshot_native(std::move(frames), 1, 1, 4).code(), Code::kCorruption);
+}
+
+TEST(RangeRebuild, NativeInstallRejectsUnassignedSelfPid)
+{
+    auto leaf    = make_leaf_frame(kInvalidPageId, kInvalidPageId,
+                                   {
+                                       {"a", "value"}
+    });
+    leaf.page_id = 0;
+    ASSERT_TRUE(frame_validate(leaf.frame.data(), leaf.frame.size()));
+
+    PageMemStore store(1);
+    Config       options;
+    options.page_store  = &store;
+    options.frame_bytes = 4096;
+    Crowdbtree destination(options);
+    EXPECT_EQ(destination.install_snapshot_native({std::move(leaf)}, 0, 1, 1).code(), Code::kCorruption);
 }
 
 TEST(RangeRebuild, RecoveredTreeValidatesBeforeFirstRangePruning)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       options;
     options.page_store       = &store;
     options.frame_bytes      = 4096;
@@ -736,7 +752,7 @@ TEST(RangeRebuild, RecoveredTreeValidatesBeforeFirstRangePruning)
     ASSERT_TRUE(Crowdbtree::open(options, &recovered).ok());
     const KeyRange range = KeyRange::bounded(std::string("k1040"), std::string("k1060"));
 
-    MemPageStore first_store(1);
+    PageMemStore first_store(1);
     Config       child_options = options;
     child_options.page_store   = &first_store;
     std::unique_ptr<Crowdbtree> first;
@@ -744,7 +760,7 @@ TEST(RangeRebuild, RecoveredTreeValidatesBeforeFirstRangePruning)
     ASSERT_TRUE(rebuild_range(*recovered, range, child_options, &first, &first_stats).ok());
     EXPECT_GT(first_stats.subtrees_skipped, 0U);
 
-    MemPageStore second_store(1);
+    PageMemStore second_store(1);
     child_options.page_store = &second_store;
     std::unique_ptr<Crowdbtree> second;
     RangeRebuildStats           second_stats;
@@ -755,7 +771,7 @@ TEST(RangeRebuild, RecoveredTreeValidatesBeforeFirstRangePruning)
 
 TEST(RangeRebuild, LazyRecoveryRetainsPhysicalPagesWhileEnforcingTheNarrowedRange)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       options;
     options.page_store = &store;
     {

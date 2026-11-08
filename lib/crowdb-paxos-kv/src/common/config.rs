@@ -70,7 +70,7 @@ impl Default for PaxosConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ServerConfig {
-    /// static: number of crowdb-rpc I/O worker threads serving this process.
+    /// static: number of socket I/O workers per client or peer transport.
     #[serde(default = "default_rpc_workers")]
     pub rpc_workers: u32,
     /// static: per-layer graceful-shutdown timeout in milliseconds.
@@ -466,10 +466,10 @@ pub struct PaxosKvConfig {
     /// `--wal-backend`.
     #[serde(skip)]
     pub wal_backend: String,
-    /// static: crowtree storage backend label. `#[serde(skip)]` — set
+    /// static: crowtree page store label. `#[serde(skip)]` — set
     /// from `--kv-backend`.
     #[serde(skip)]
-    pub crowtree_backend: String,
+    pub crowtree_store_kind: String,
     /// static: skip durable fdatasync. `#[serde(skip)]` — set from
     /// `--no-fsync`.
     #[serde(skip)]
@@ -540,8 +540,8 @@ impl BaseConfig for PaxosKvConfig {
         if self.wal_backend.is_empty() {
             self.wal_backend = "block-device".to_string();
         }
-        if self.crowtree_backend.is_empty() {
-            self.crowtree_backend = "block".to_string();
+        if self.crowtree_store_kind.is_empty() {
+            self.crowtree_store_kind = "block".to_string();
         }
         if self.log_dir.is_empty() {
             self.log_dir = "log".to_string();
@@ -570,7 +570,7 @@ impl Default for PaxosKvConfig {
             config_root: PathBuf::from("conf"),
             data_root: PathBuf::from("ctdata"),
             wal_backend: "block-device".to_string(),
-            crowtree_backend: "block".to_string(),
+            crowtree_store_kind: "block".to_string(),
             wal_skip_fsync: false,
             log_dir: "log".to_string(),
             node_root: None,

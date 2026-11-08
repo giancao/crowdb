@@ -9,16 +9,16 @@ namespace crowdb::tree
 TEST(GraphSummary, CountsEachValidatedGraphFrameAndItsFullCapacity)
 {
     TreeSummary       summary;
-    ReadablePageFrame leaf{.type = page_type::kLeafBase, .frame_bytes = 4096, .backing = {}};
+    ReadablePageFrame leaf{.type = page_type::kLeafBase, .frame_bytes = 4096, .page_block = {}};
     leaf.summary.emplace();
     leaf.summary->live_counts_known = true;
     leaf.summary->live_keys         = 3;
     leaf.summary->live_key_bytes    = 9;
     leaf.summary->live_value_bytes  = 10000;
     ASSERT_TRUE(add_graph_summary(summary, leaf));
-    ASSERT_TRUE(add_graph_summary(summary, {.type = page_type::kInnerBase, .frame_bytes = 2048, .backing = {}}));
-    ASSERT_TRUE(add_graph_summary(summary, {.type = page_type::kOverflowFrame, .frame_bytes = 4096, .backing = {}}));
-    ASSERT_TRUE(add_graph_summary(summary, {.type = page_type::kOverflowFrame, .frame_bytes = 4096, .backing = {}}));
+    ASSERT_TRUE(add_graph_summary(summary, {.type = page_type::kInnerBase, .frame_bytes = 2048, .page_block = {}}));
+    ASSERT_TRUE(add_graph_summary(summary, {.type = page_type::kOverflowFrame, .frame_bytes = 4096, .page_block = {}}));
+    ASSERT_TRUE(add_graph_summary(summary, {.type = page_type::kOverflowFrame, .frame_bytes = 4096, .page_block = {}}));
     EXPECT_EQ(summary.live_kv, 3U);
     EXPECT_EQ(summary.live_key_bytes, 9U);
     EXPECT_EQ(summary.live_value_bytes, 10000U);
@@ -33,7 +33,7 @@ TEST(GraphSummary, UnknownOrOverflowingReceiptLeavesEveryCounterUnchanged)
 {
     TreeSummary summary;
     summary.live_value_bytes = UINT64_MAX;
-    ReadablePageFrame leaf{.type = page_type::kLeafBase, .frame_bytes = 4096, .backing = {}};
+    ReadablePageFrame leaf{.type = page_type::kLeafBase, .frame_bytes = 4096, .page_block = {}};
     EXPECT_FALSE(add_graph_summary(summary, leaf));
     leaf.summary.emplace();
     leaf.summary->live_counts_known = true;

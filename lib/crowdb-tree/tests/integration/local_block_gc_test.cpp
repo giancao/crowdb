@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/local_block_gc.h"
 #include "btree/tree_core.h"
 #include "btree/tree_core_access.h"
 #include "extent_ledger_test_support.h"
 #include "local_checkpoint_test_support.h"
+#include "page_store/local/local_block_gc.h"
 #include "test_tmp.h"
 
 #include <future>
@@ -21,14 +21,14 @@ namespace
 {
 struct TestBlockGc
 {
-    tree_test::TempDir              directory{"block_gc_"};
-    std::unique_ptr<BlockPageStore> store;
-    LedgerFixture                   ledger;
+    tree_test::TempDir             directory{"block_gc_"};
+    std::unique_ptr<PageDiskStore> store;
+    LedgerFixture                  ledger;
 
     explicit TestBlockGc(uint64_t size = 6 * 4096, uint64_t block_size = 4096)
-        : ledger({.backend_id = 1, .file_size = size, .address_limit = size})
+        : ledger({.page_store_id = 1, .file_size = size, .address_limit = size})
     {
-        EXPECT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, block_size, 1, &store).ok());
+        EXPECT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, block_size, 1, &store).ok());
         const std::vector<uint8_t> bytes(size, 42);
         EXPECT_TRUE(store->write_at(0, bytes.data(), bytes.size()).ok());
     }
@@ -108,7 +108,7 @@ TEST(LocalBlockGc, KernelUnlinkKeepsLeaseThroughCompletionAndRestoresFailedEntry
     if (!uring.valid()) {
         GTEST_SKIP() << "io_uring unavailable";
     }
-    BlockAsyncPageStore      async(test.store.get(), &uring);
+    AsyncPageDiskStore       async(test.store.get(), &uring);
     const auto               metadata = test.ledger.credits.credits.reservation();
     const LocalBlockGcLimits limits{.max_blocks = 1};
     constexpr uint64_t       index  = 2;
@@ -202,11 +202,11 @@ TEST(LocalBlockGc, KernelUnlinkKeepsLeaseThroughCompletionAndRestoresFailedEntry
 
 TEST(LocalBlockGc, PublicCheckpointReclaimsCrashTailWithoutLosingRecovery)
 {
-    tree_test::TempDir              dir("checkpoint_gc_");
-    std::unique_ptr<BlockPageStore> opened;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 2, 3, 8192, 4096, &opened).ok());
-    std::shared_ptr<BlockPageStore> device = std::move(opened);
-    const uint8_t                   orphan = 37;
+    tree_test::TempDir             dir("checkpoint_gc_");
+    std::unique_ptr<PageDiskStore> opened;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 2, 3, 8192, 4096, &opened).ok());
+    std::shared_ptr<PageDiskStore> device = std::move(opened);
+    const uint8_t                  orphan = 37;
     ASSERT_TRUE(device->write_at((31 * 8192) - 1, &orphan, 1).ok());
     test_write::TestCheckpointStore store;
     store.device = device;
@@ -237,9 +237,9 @@ TEST(LocalBlockGc, PublicCheckpointReclaimsCrashTailWithoutLosingRecovery)
 
 TEST(LocalBlockGc, PublicAsyncCheckpointCleanupDrainsBeforeRawBackendClose)
 {
-    tree_test::TempDir              dir("async_checkpoint_gc_");
-    std::unique_ptr<BlockPageStore> device;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 4, 5, 8192, 4096, &device).ok());
+    tree_test::TempDir             dir("async_checkpoint_gc_");
+    std::unique_ptr<PageDiskStore> device;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 4, 5, 8192, 4096, &device).ok());
     constexpr uint64_t first_orphan_block = 64;
     constexpr uint64_t last_dense_block   = 130;
     constexpr uint64_t sparse_block       = 1 << 20;

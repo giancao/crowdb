@@ -19,7 +19,7 @@ pub enum BatchOp<'a> {
 }
 
 /// One operation for [`Crowdbtree::apply_batch_external`]. The key and value
-/// are copied during the call. A `Bytes` slice has unknown backing capacity;
+/// are copied during the call. A `Bytes` slice has unknown page block capacity;
 /// its length is never treated as the retained allocation's capacity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtOp {
@@ -54,7 +54,7 @@ impl Crowdbtree {
         check(unsafe { sys::ct_apply_batch_slices(self.as_ptr(), slot, refs.as_ptr(), refs.len() as u64) })
     }
 
-    /// Atomically apply operations consuming their `Bytes` owners. Backing
+    /// Atomically apply operations consuming their `Bytes` owners. PageBlock
     /// capacity and identity are unknown for arbitrary `Bytes`, so values are
     /// copied into owned cells during this call. This prevents a small slice
     /// from retaining an unaccounted large allocation until a later flush.

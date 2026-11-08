@@ -301,7 +301,7 @@ impl Crowdbtree {
         Ok((generation, last_applied))
     }
 
-    /// Run one bounded pass that replaces shared immutable backend objects
+    /// Run one bounded pass that replaces shared immutable page store objects
     /// with objects owned by this tree's lineage.
     pub fn materialize_ownership(&self) -> Result<(u64, bool), CtError> {
         let mut bytes_written = 0;

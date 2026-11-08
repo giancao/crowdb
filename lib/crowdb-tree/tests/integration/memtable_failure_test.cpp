@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crowdb-tree/backend/page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "crowdb-tree/snapshot/snapshot_io.h"
 #include "memtable_access.h"
 
@@ -98,7 +98,7 @@ TEST(MemTableFailure, FailureBeforeSecondPreparedKeyReturnsItsPermitForRetry)
 
 TEST(MemTableFailure, FailedPublicationPreservesAtomicOldSnapshotAndRepairableSources)
 {
-    MemPageStore store;
+    PageMemStore store;
     Config       options;
     options.page_store = &store;
     Crowdbtree tree(options);

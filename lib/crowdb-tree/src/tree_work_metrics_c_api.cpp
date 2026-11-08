@@ -2,10 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 #include "crowdb-tree/tree_work_metrics_c_api.h"
 
-#include "btree/backing_stats_sampler.h"
+#include "btree/page_block_stats_sampler.h"
 #include "btree/tree_core_access.h"
 #include "c_api_internal.h"
-#include "tree_backing_stats_c_api_internal.h"
+#include "tree_page_block_stats_c_api_internal.h"
 #include "tree_wait_metrics_c_api_internal.h"
 #include "tree_work_histograms_c_api_internal.h"
 
@@ -21,7 +21,7 @@ struct ct_work_metrics_collector
     std::shared_ptr<AllocationBudget>     metadata;
     std::shared_ptr<TreeWorkMetrics>      metrics;
     std::shared_ptr<TreeMetricsCollector> owner;
-    BackingStatsSampler                   backing;
+    PageBlockStatsSampler                 page_block;
     std::shared_ptr<TreeResourceMetrics>  resources;
     std::atomic_flag                      capturing = ATOMIC_FLAG_INIT;
     uint64_t                              sequence  = 0;
@@ -117,12 +117,12 @@ try {
     MetadataAllocator<ct_work_metrics_collector> allocator(budget);
     auto                                        *collector = allocator.allocate(1);
     std::construct_at(collector);
-    collector->backing   = core->backing_sampler();
-    collector->resources = core->binding()->resource_metrics();
-    collector->metadata  = budget;
-    collector->metrics   = metrics;
-    collector->owner     = std::move(owner);
-    *out                 = collector;
+    collector->page_block = core->page_block_sampler();
+    collector->resources  = core->binding()->resource_metrics();
+    collector->metadata   = budget;
+    collector->metrics    = metrics;
+    collector->owner      = std::move(owner);
+    *out                  = collector;
     return 0;
 }
 catch (const std::bad_alloc &) {
@@ -225,10 +225,10 @@ int32_t ct_work_metrics_collector_ages(ct_work_metrics_collector *collector, ct_
     return 0;
 }
 
-int32_t ct_work_metrics_collector_backing_stats(ct_work_metrics_collector *collector, ct_backing_stats_v1 *out)
+int32_t ct_work_metrics_collector_page_block_stats(ct_work_metrics_collector *collector, ct_page_block_stats_v1 *out)
 {
     return collector == nullptr ? static_cast<int32_t>(Code::kInvalidArgument)
-                                : copy_backing_stats(collector->backing.snapshot(), out);
+                                : copy_page_block_stats(collector->page_block.snapshot(), out);
 }
 
 int32_t ct_work_counters_totals(ct_tree *tree, ct_tree_work_counters_v1 *out)

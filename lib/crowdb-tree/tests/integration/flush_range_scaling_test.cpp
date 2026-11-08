@@ -23,7 +23,7 @@ void seed_wide_tree(PublicationCoordinator &publisher, const std::shared_ptr<Mem
             leaf->range.upper   = "k" + std::to_string(10001 + index);
             leaf->right_sibling = index + 1;
         }
-        auto page  = std::make_shared<PublishedPage>();
+        auto page  = std::make_shared<PageEntry>();
         page->leaf = leaf;
         level.emplace_back(index, leaf->range.lower);
         request->transaction.pages.push_back({.page_id = index, .replacement = page});
@@ -45,7 +45,7 @@ void seed_wide_tree(PublicationCoordinator &publisher, const std::shared_ptr<Mem
                     inner->separators.push_back(*lower);
                 }
             }
-            auto page          = std::make_shared<PublishedPage>();
+            auto page          = std::make_shared<PageEntry>();
             page->level        = depth;
             page->metrics.leaf = false;
             page->inner        = std::move(inner);

@@ -8,7 +8,7 @@ namespace crowdb::tree::detail
 {
 template <class T> class AccountControlAllocator;
 
-// Stable allocation owner for backend metadata that can outlive a Tree. New
+// Stable allocation owner for page store metadata that can outlive a Tree. New
 // capacity is admitted against both its current Tree account and host limit.
 class AllocationAccount final : public AllocationBudget
 {
@@ -18,7 +18,7 @@ class AllocationAccount final : public AllocationBudget
     // Only controls and continuations of already-admitted work use this owner.
     static Status create_ongoing(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category,
                                  std::shared_ptr<AllocationAccount> *out);
-    // Legacy backend construction records physical capacity before a Tree
+    // Legacy page store construction records physical capacity before a Tree
     // exists. First rebind admits every retained byte before runtime use.
     static Status      create_unbound(std::shared_ptr<AllocationAccount> *out);
     [[nodiscard]] bool claim(size_t bytes) noexcept override;
@@ -54,13 +54,13 @@ class AllocationAccount final : public AllocationBudget
         return allocated_.load(std::memory_order_acquire);
     }
 
-    // Transfer already-admitted operation credit into stable backend ownership.
+    // Transfer already-admitted operation credit into stable page store ownership.
     // Both forms preserve host admission; a different Tree must have quota.
     bool adopt_allocated(ResourceBudget::Credit *credit) noexcept;
     bool claim_from(AllocationReservation &source, size_t bytes) noexcept;
     void release_to(AllocationReservation &source, size_t bytes) noexcept;
 
-    // Caller excludes backend growth while reopening a Tree. Existing owners
+    // Caller excludes page store growth while reopening a Tree. Existing owners
     // may free concurrently. Refusal leaves the original account usable.
     Status rebind(std::shared_ptr<ResourceBudget::Account> account);
 
@@ -97,7 +97,7 @@ class AllocationAccount final : public AllocationBudget
     void          destroy_control(void *storage, size_t bytes, size_t alignment) noexcept;
 
     // Bound payload accounts use the immutable host service across same-host
-    // ownership transfers. Unbound backend accounts do not observe payloads.
+    // ownership transfers. Unbound page store accounts do not observe payloads.
     const std::shared_ptr<RetirementQueue>   retirement_;
     const std::weak_ptr<TreeWorkMetrics>     work_;
     const std::weak_ptr<TreeResourceMetrics> resources_;

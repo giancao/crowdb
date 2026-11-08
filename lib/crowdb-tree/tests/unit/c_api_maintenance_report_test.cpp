@@ -24,8 +24,8 @@ class MaintenanceReportCAbi : public testing::Test
         options.workers = 1;
         ASSERT_EQ(ct_runtime_create(&options, &runtime), 0);
         ct_options config{};
-        config.backend       = CT_BACKEND_MEM_BLOCK;
-        ct_page_store *store = nullptr;
+        config.page_store_kind = CT_PAGE_STORE_MEM;
+        ct_page_store *store   = nullptr;
         ASSERT_EQ(ct_page_store_open_mem(4096, &store), 0);
         std::unique_ptr<ct_page_store, decltype(&ct_page_store_free)> owned_store(store, &ct_page_store_free);
         config.page_store       = store;

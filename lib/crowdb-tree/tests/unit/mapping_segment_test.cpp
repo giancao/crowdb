@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// #14a: standalone mapping-table segment struct.
+// #14a: standalone mapping segment struct.
 #include "crowdb-tree/maptable/mapping_slot.h"
 #include "mapping_segment_test_support.h"
 

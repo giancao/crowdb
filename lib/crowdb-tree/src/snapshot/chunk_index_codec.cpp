@@ -7,7 +7,7 @@ namespace crowdb::tree
 {
 namespace
 {
-bool valid_frame(const ChunkIndexFrame &frame)
+bool valid_frame(const ChunkPageEntry &frame)
 {
     if (frame.page_id == kInvalidPageId || frame.frame_bytes < kFrameHeaderSize + kFrameTrailerSize ||
         frame.logical_bytes == 0 || frame.logical_bytes > frame.pack.length ||
@@ -26,23 +26,23 @@ bool valid_frame(const ChunkIndexFrame &frame)
 
 Status frame_size(const DurableCapturedFrame &frame, const ChunkRootIdentity &identity, size_t *bytes)
 {
-    if (!frame.backing || frame.backing->storage != BackingStorage::kChunkPack || !frame.backing->reloadable() ||
-        frame.backing->chunk->domain->tree != identity.tree ||
+    if (!frame.page_block || frame.page_block->storage != PageBlockStorage::kChunkPack ||
+        !frame.page_block->reloadable() || frame.page_block->chunk->domain->tree != identity.tree ||
         (frame.type == page_type::kLeafBase && !frame.stored_overflow)) {
         return Status::invalid_argument("Chunk index needs owned same-tree pack references");
     }
     const auto refs = frame.stored_overflow ? frame.stored_overflow->size() : 0;
-    if (refs > kChunkIndexReferencesPerFrame || (frame.type != page_type::kLeafBase && refs != 0)) {
+    if (refs > kChunkPageEntryReferenceLimit || (frame.type != page_type::kLeafBase && refs != 0)) {
         return Status::resource_exhausted("Chunk index stored-reference bound exceeded");
     }
-    ChunkIndexFrame geometry{.page_id                = frame.page_id,
-                             .type                   = frame.type,
-                             .frame_bytes            = frame.frame_bytes,
-                             .logical_bytes          = frame.logical_bytes,
-                             .next_overflow          = frame.next_overflow,
-                             .overflow_bytes         = frame.overflow_bytes,
-                             .pack                   = frame.backing->chunk->pack,
-                             .stored_reference_words = {}};
+    ChunkPageEntry geometry{.page_id                = frame.page_id,
+                            .type                   = frame.type,
+                            .frame_bytes            = frame.frame_bytes,
+                            .logical_bytes          = frame.logical_bytes,
+                            .next_overflow          = frame.next_overflow,
+                            .overflow_bytes         = frame.overflow_bytes,
+                            .pack                   = frame.page_block->chunk->pack,
+                            .stored_reference_words = {}};
     if (!valid_frame(geometry)) {
         return Status::invalid_argument("Chunk index frame geometry is invalid");
     }
@@ -53,20 +53,20 @@ Status frame_size(const DurableCapturedFrame &frame, const ChunkRootIdentity &id
             }
         }
     }
-    *bytes = kChunkIndexRecordBytes + (refs * 16);
+    *bytes = kChunkPageEntryBytes + (refs * 16);
     return Status::Ok();
 }
 } // namespace
 
-Status encode_chunk_index(const ChunkRootIdentity &identity, uint64_t ordinal,
-                          std::span<const DurableCapturedFrame *const> frames, ChunkMetadataBytes *out)
+Status encode_chunk_mapping_segment(const ChunkRootIdentity &identity, uint64_t ordinal,
+                                    std::span<const DurableCapturedFrame *const> frames, ChunkMetadataBytes *out)
 try {
     using namespace chunk_codec;
     if (out == nullptr || !out->empty() || identity.tree == 0 || identity.root_generation == 0 || frames.empty() ||
-        frames.size() > kChunkIndexFrameLimit) {
+        frames.size() > kChunkMappingSegmentEntryLimit) {
         return Status::invalid_argument();
     }
-    size_t   size     = kChunkIndexHeaderBytes + 4;
+    size_t   size     = kChunkMappingSegmentHeaderBytes + 4;
     uint64_t previous = 0;
     for (size_t i = 0; i < frames.size(); ++i) {
         if (frames[i] == nullptr || frames[i]->page_id >= identity.next_page_id ||
@@ -87,19 +87,19 @@ try {
     for (size_t i = 0; i < std::size(header); ++i) {
         put(bytes, i, header[i]);
     }
-    size_t offset = kChunkIndexHeaderBytes;
+    size_t offset = kChunkMappingSegmentHeaderBytes;
     for (const auto *frame : frames) {
-        auto           record = bytes.subspan(offset, kChunkIndexRecordBytes);
+        auto           record = bytes.subspan(offset, kChunkPageEntryBytes);
         const uint64_t words[]{frame->page_id,       static_cast<uint32_t>(frame->type),
                                frame->frame_bytes,   frame->logical_bytes,
                                frame->next_overflow, frame->overflow_bytes};
         for (size_t i = 0; i < std::size(words); ++i) {
             put(record, i, words[i]);
         }
-        pack(record.subspan(48), frame->backing->chunk->pack);
+        pack(record.subspan(48), frame->page_block->chunk->pack);
         const auto refs = frame->stored_overflow ? frame->stored_overflow->size() : 0;
         put(record, 15, refs);
-        offset += kChunkIndexRecordBytes;
+        offset += kChunkPageEntryBytes;
         if (frame->stored_overflow) {
             for (const auto &ref : *frame->stored_overflow) {
                 put(bytes.subspan(offset, 16), 0, ref.head);
@@ -115,42 +115,42 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted();
 }
 
-Status decode_chunk_index_header(std::span<const uint8_t> bytes, const ChunkRootIdentity &identity, uint64_t ordinal,
-                                 uint64_t *count, size_t *offset)
+Status decode_chunk_mapping_segment_header(std::span<const uint8_t> bytes, const ChunkRootIdentity &identity,
+                                           uint64_t ordinal, uint64_t *count, size_t *offset)
 {
     using namespace chunk_codec;
     if (count == nullptr || offset == nullptr) {
         return Status::invalid_argument();
     }
-    if (bytes.size() > kChunkIndexWindowBytes || !verified(bytes, kChunkIndexHeaderBytes) ||
+    if (bytes.size() > kChunkMappingSegmentWindowBytes || !verified(bytes, kChunkMappingSegmentHeaderBytes) ||
         word(bytes, 0) != kIndexMagic || word(bytes, 1) != 1 || word(bytes, 2) != identity.tree ||
         word(bytes, 3) == 0 || word(bytes, 3) > identity.root_generation ||
         (word(bytes, 3) == identity.root_generation && word(bytes, 4) != ordinal) || word(bytes, 5) == 0 ||
-        word(bytes, 5) > kChunkIndexFrameLimit) {
+        word(bytes, 5) > kChunkMappingSegmentEntryLimit) {
         return Status::corruption("Chunk index checksum, format or identity mismatch");
     }
     *count  = word(bytes, 5);
-    *offset = kChunkIndexHeaderBytes;
+    *offset = kChunkMappingSegmentHeaderBytes;
     return Status::Ok();
 }
 
-Status decode_chunk_index_frame(std::span<const uint8_t> bytes, size_t *offset, ChunkIndexFrame *out)
+Status decode_chunk_page_entry(std::span<const uint8_t> bytes, size_t *offset, ChunkPageEntry *out)
 {
     using namespace chunk_codec;
-    if (offset == nullptr || out == nullptr || *offset < kChunkIndexHeaderBytes || *offset > bytes.size()) {
+    if (offset == nullptr || out == nullptr || *offset < kChunkMappingSegmentHeaderBytes || *offset > bytes.size()) {
         return Status::invalid_argument();
     }
-    if (bytes.size() - *offset < kChunkIndexRecordBytes + 4) {
+    if (bytes.size() - *offset < kChunkPageEntryBytes + 4) {
         return Status::corruption("Chunk index record is truncated");
     }
-    const auto record = bytes.subspan(*offset, kChunkIndexRecordBytes);
+    const auto record = bytes.subspan(*offset, kChunkPageEntryBytes);
     if (word(record, 1) > UINT8_MAX || word(record, 2) > UINT32_MAX || word(record, 3) > UINT32_MAX ||
-        word(record, 5) > UINT32_MAX || word(record, 15) > kChunkIndexReferencesPerFrame ||
+        word(record, 5) > UINT32_MAX || word(record, 15) > kChunkPageEntryReferenceLimit ||
         !unpack(record.subspan(48), PagePurpose::kBtreePage, &out->pack)) {
         return Status::corruption("Chunk index frame fields exceed their encoded widths");
     }
     const auto reference_bytes = word(record, 15) * 16;
-    if (reference_bytes > bytes.size() - *offset - kChunkIndexRecordBytes - 4) {
+    if (reference_bytes > bytes.size() - *offset - kChunkPageEntryBytes - 4) {
         return Status::corruption("Chunk index stored references are truncated");
     }
     out->page_id                = word(record, 0);
@@ -159,7 +159,7 @@ Status decode_chunk_index_frame(std::span<const uint8_t> bytes, size_t *offset, 
     out->logical_bytes          = static_cast<uint32_t>(word(record, 3));
     out->next_overflow          = word(record, 4);
     out->overflow_bytes         = static_cast<uint32_t>(word(record, 5));
-    out->stored_reference_words = bytes.subspan(*offset + kChunkIndexRecordBytes, reference_bytes);
+    out->stored_reference_words = bytes.subspan(*offset + kChunkPageEntryBytes, reference_bytes);
     if (!valid_frame(*out)) {
         return Status::corruption("Chunk index frame geometry is invalid");
     }
@@ -169,7 +169,7 @@ Status decode_chunk_index_frame(std::span<const uint8_t> bytes, size_t *offset, 
             return Status::corruption("Chunk index stored reference is invalid");
         }
     }
-    *offset += kChunkIndexRecordBytes + reference_bytes;
+    *offset += kChunkPageEntryBytes + reference_bytes;
     return Status::Ok();
 }
 } // namespace crowdb::tree

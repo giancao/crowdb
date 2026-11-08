@@ -174,7 +174,7 @@ void FlushOperation::State::stage_done(Stage stage, Status status) noexcept
     }
 }
 
-Status FlushOperation::State::acknowledge(const PublishedTreeState &view)
+Status FlushOperation::State::acknowledge(const TreeRoot &view)
 {
     if (source_acknowledged) {
         return Status::Ok();
@@ -221,8 +221,7 @@ Status FlushOperation::State::acknowledge(const PublishedTreeState &view)
     return Status::Ok();
 }
 
-void FlushOperation::State::maintain(std::shared_ptr<const PublishedTreeState> view,
-                                     FlushBatch::MaintenanceComplete           done)
+void FlushOperation::State::maintain(std::shared_ptr<const TreeRoot> view, FlushBatch::MaintenanceComplete done)
 {
     if (options.persistent && maintenance) {
         auto self       = shared_from_this();
@@ -231,9 +230,6 @@ void FlushOperation::State::maintain(std::shared_ptr<const PublishedTreeState> v
             const auto current = self->publisher.capture();
             if (!current->checkpoint_inflight && current->flush_admission_owner == 0) {
                 auto acknowledged = self->acknowledge(*current);
-                if (acknowledged.ok() && !result.ok()) {
-                    self->replaceable.store(true, std::memory_order_release);
-                }
                 if (result.ok()) {
                     result = std::move(acknowledged);
                 }

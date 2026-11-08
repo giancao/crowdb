@@ -252,7 +252,7 @@ async fn add_group_owned(
         initial_role,
         &state.config,
         state.wal_backend.clone(),
-        state.crowtree_backend,
+        state.crowtree_store_kind,
         state.tree_runtime.clone(),
     )
     .await
@@ -401,7 +401,7 @@ pub(super) async fn join_snapshot(
         PxLocalReplicaRole::Follower,
         &state.config,
         state.wal_backend.clone(),
-        state.crowtree_backend,
+        state.crowtree_store_kind,
         state.tree_runtime.clone(),
     )
     .await
@@ -877,7 +877,7 @@ async fn recreate_wiped_group(
         PxLocalReplicaRole::Follower,
         &state.config,
         state.wal_backend.clone(),
-        state.crowtree_backend,
+        state.crowtree_store_kind,
         state.tree_runtime.clone(),
     )
     .await

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "btree/page_load.h"
 #include "crowdb-tree/snapshot/native_frame.h"
 #include "stdexec_adapter.h"
@@ -22,7 +22,7 @@ class NativeFrameRead
     struct State;
 
   public:
-    static Status create(uint64_t pid, OverflowBackingPage page, std::shared_ptr<AsyncPageStore> store,
+    static Status create(uint64_t pid, OverflowPageBlock page, std::shared_ptr<AsyncPageStore> store,
                          std::shared_ptr<detail::FlushRuntime>       runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadLimits limits, PageLoadBudget budget,
                          std::shared_ptr<NativeFrameRead> *out);

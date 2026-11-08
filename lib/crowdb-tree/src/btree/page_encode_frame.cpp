@@ -96,6 +96,14 @@ void encode_primary(FinalPageEncodeState &state, uint8_t *output)
     std::memset(output, 0, kFrameHeaderSize);
     output[fh::kFormatVersion] = static_cast<uint8_t>(kFrameVersion);
     frame_put_u64(output, fh::kSelfpage_id, state.pid);
+    if (state.summary.live_counts_known) {
+        frame_put_u64(output, fh::kSummaryLiveKv, state.summary.live_keys);
+        frame_put_u64(output, fh::kSummaryLiveKeyBytes, state.summary.live_key_bytes);
+        frame_put_u64(output, fh::kSummaryLiveValueBytes, state.summary.live_value_bytes);
+        frame_put_u64(output, fh::kSummaryLiveLogicalBytes,
+                      state.summary.live_key_bytes + state.summary.live_value_bytes);
+        output[fh::kSummaryFlags] = 1;
+    }
     if (state.page->level == 0) {
         encode_leaf(state, output);
     }

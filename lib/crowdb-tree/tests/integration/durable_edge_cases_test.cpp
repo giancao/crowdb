@@ -4,8 +4,8 @@
 // Edge-case durability: empty values, binary keys/values with NULs, an oversized
 // key (heap fallback), and zero/boundary-sized overflow values — all through the
 // compression + overflow + snapshot + reopen path.
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -48,7 +48,7 @@ void check_all(Crowdbtree *t, const std::map<std::string, std::string> &oracle)
 
 TEST(DurableEdgeCases, EmptyAndBinaryValuesReopen)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt = edge_opts(&store);
 
     std::map<std::string, std::string> oracle;
@@ -80,7 +80,7 @@ TEST(DurableEdgeCases, EmptyAndBinaryValuesReopen)
 
 TEST(DurableEdgeCases, OversizedKeyRejectedNormalKeysDurable)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt = edge_opts(&store);
 
     // plan-tree #15: a key larger than max_key_size (default frame_bytes/2) is now
@@ -112,7 +112,7 @@ TEST(DurableEdgeCases, OversizedKeyRejectedNormalKeysDurable)
 
 TEST(DurableEdgeCases, OverflowChunkBoundarySizes)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt = edge_opts(&store);
 
     // Values exactly at, one below, and one above an overflow chunk boundary.

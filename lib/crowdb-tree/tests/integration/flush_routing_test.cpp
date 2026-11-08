@@ -18,9 +18,9 @@ class RoutingLoader final : public PageLoader
     InnerComplete      pending;
     size_t             calls = 0;
 
-    void load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete) override
+    void load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete) override
     {
-        EXPECT_TRUE(backing->reloadable());
+        EXPECT_TRUE(page_block->reloadable());
         ++calls;
         pending = std::move(complete);
         entered.set_value();
@@ -50,19 +50,19 @@ void seed(PublicationCoordinator &publisher)
     left->range.upper  = "m";
     auto right         = std::make_shared<PageState>();
     right->range.lower = "m";
-    auto backing       = std::make_shared<BackingRef>();
-    backing->length    = 4096;
-    backing->owner     = std::make_shared<int>(0);
-    right->bases.push_back({.range = right->range, .max_slot = 0, .backing = backing});
-    auto first          = std::make_shared<PublishedPage>();
-    first->leaf         = left;
-    auto second         = std::make_shared<PublishedPage>();
-    second->leaf        = right;
-    auto root           = std::make_shared<PublishedPage>();
-    root->level         = 1;
-    root->metrics.leaf  = false;
-    root->inner_backing = backing;
-    auto table          = std::make_shared<MemTable>();
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = 4096;
+    page_block->owner  = std::make_shared<int>(0);
+    right->bases.push_back({.range = right->range, .max_slot = 0, .page_block = page_block});
+    auto first             = std::make_shared<PageEntry>();
+    first->leaf            = left;
+    auto second            = std::make_shared<PageEntry>();
+    second->leaf           = right;
+    auto root              = std::make_shared<PageEntry>();
+    root->level            = 1;
+    root->metrics.leaf     = false;
+    root->inner_page_block = page_block;
+    auto table             = std::make_shared<MemTable>();
     ASSERT_TRUE(table->upsert("z", 1, encode_cell_buf(1, OpKind::kPut, "payload")));
     table->close();
     auto sources = std::make_shared<PublishedSources>();

@@ -2,22 +2,22 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/writeback_rebase.h"
 #include "snapshot/captured_rebase_internal.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 namespace crowdb::tree
 {
 namespace
 {
-bool captured_receipt_is_unchanged(const PublishedPage &page, const DurableCapturedFrame &receipt)
+bool captured_receipt_is_unchanged(const PageEntry &page, const DurableCapturedFrame &receipt)
 {
-    if (!page.primary || page.primary->frame.backing != receipt.backing) {
+    if (!page.primary || page.primary->frame.page_block != receipt.page_block) {
         return false;
     }
     if (page.level != 0) {
-        return page.inner_backing == receipt.backing;
+        return page.inner_page_block == receipt.page_block;
     }
     return page.leaf && page.leaf->overlays.empty() && page.leaf->bases.size() == 1 &&
-           page.leaf->bases.front().backing == receipt.backing;
+           page.leaf->bases.front().page_block == receipt.page_block;
 }
 } // namespace
 
@@ -41,11 +41,11 @@ void CapturedRebaseOperation::State::finish_batch(TreeOutcome outcome)
 
 void CapturedRebaseOperation::State::prepare_batch()
 {
-    const auto segment = next->first / MappingView::kFanout;
+    const auto segment = next->first / MappingTable::kFanout;
     const auto live    = publisher.capture();
     // One fixed mapping segment bounds both CPU work and radix copies. Each
-    // segment is visited once, even when only a subset of its receipts change.
-    for (; next != pages->frames.end() && next->first / MappingView::kFanout == segment; ++next) {
+    // mapping segment is visited once, even when only a subset of its receipts change.
+    for (; next != pages->frames.end() && next->first / MappingTable::kFanout == segment; ++next) {
         const auto &receipt = next->second;
         if (receipt.type == page_type::kOverflowFrame) {
             continue;
@@ -58,8 +58,8 @@ void CapturedRebaseOperation::State::prepare_batch()
             }
             continue;
         }
-        const auto                           current = live->mapping.get(receipt.page_id);
-        std::shared_ptr<const PublishedPage> replacement;
+        const auto                       current = live->mapping.get(receipt.page_id);
+        std::shared_ptr<const PageEntry> replacement;
         const auto status = live->generation != captured->generation
                               ? Status::unavailable()
                               : build_writeback_rebase(original, current, receipt, captured->coverage, metadata,
@@ -84,14 +84,14 @@ void CapturedRebaseOperation::State::defer(uint64_t pid, Status status)
     }
 }
 
-void CapturedRebaseOperation::State::add_replacement(uint64_t pid, std::shared_ptr<const PublishedPage> current,
-                                                     std::shared_ptr<const PublishedPage> replacement)
+void CapturedRebaseOperation::State::add_replacement(uint64_t pid, std::shared_ptr<const PageEntry> current,
+                                                     std::shared_ptr<const PageEntry> replacement)
 {
     if (!request) {
         request                     = detail::reserved_shared<PublicationRequest>(metadata, metadata);
         request->transaction.record = detail::reserved_shared<InstallRecord>(
             metadata, InstallToken{.generation = captured->generation, .sequence = pid});
-        request->transaction.pages.reserve(MappingView::kFanout);
+        request->transaction.pages.reserve(MappingTable::kFanout);
     }
     request->transaction.pages.push_back(
         {.page_id = pid, .expected = std::move(current), .replacement = std::move(replacement)});

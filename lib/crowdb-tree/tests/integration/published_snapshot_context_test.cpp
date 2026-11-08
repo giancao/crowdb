@@ -15,12 +15,12 @@ namespace crowdb::tree
 {
 namespace
 {
-struct TestSnapshotBackend
+struct TestSnapshotPageStore
 {
-    std::shared_ptr<MemPageStore>   device = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore>   device = std::make_shared<PageMemStore>(4096);
     test_write::TestCheckpointStore store;
 
-    TestSnapshotBackend()
+    TestSnapshotPageStore()
     {
         store.device = device;
     }
@@ -28,10 +28,10 @@ struct TestSnapshotBackend
 
 struct TestSnapshotContext
 {
-    std::shared_ptr<TreeRuntime>         runtime;
-    std::shared_ptr<TestSnapshotBackend> backend = std::make_shared<TestSnapshotBackend>();
-    Config                               config;
-    std::shared_ptr<TreeCore>            core;
+    std::shared_ptr<TreeRuntime>           runtime;
+    std::shared_ptr<TestSnapshotPageStore> backend = std::make_shared<TestSnapshotPageStore>();
+    Config                                 config;
+    std::shared_ptr<TreeCore>              core;
 
     explicit TestSnapshotContext(bool owned, TreeRuntimeOptions options = {})
     {
@@ -43,7 +43,7 @@ struct TestSnapshotContext
         config.max_inline_value                     = 64;
         config.runtime_binding.limits.io_operations = 1;
         if (owned) {
-            config.backend_owner = backend;
+            config.page_store_owner = backend;
         }
     }
 
@@ -93,7 +93,7 @@ TEST(PublishedReadViewContext, SharedBackendAndDomainOutliveCoreWithoutPinningRe
     status = PublishedReadViewContext::capture(test.core, &snapshot);
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_TRUE(snapshot->detached());
-    std::weak_ptr<LocalBackendState> old_local = test.core->local_backend();
+    std::weak_ptr<LocalPageStoreState> old_local = test.core->local_page_store();
     test.core.reset();
     EXPECT_TRUE(old_local.expired());
     EXPECT_EQ(test.open().code(), Code::kUnavailable);
@@ -112,7 +112,7 @@ TEST(PublishedReadViewContext, SharedBackendAndDomainOutliveCoreWithoutPinningRe
     snapshot.reset();
     // A completion can notify this host before its native worker drops the
     // callback owner. Let the fixture's workers finish before claiming the
-    // same backend authority again.
+    // same page store authority again.
     binding->cpu()->drain();
     binding->backend_cpu()->drain();
     status = test.open();
@@ -185,7 +185,7 @@ TEST(PublishedReadViewContext, LastViewReleaseOnItsLaneLeavesAnAcceptedWindowUsa
 
     auto read = std::make_shared<Read>();
     auto done = read->done.get_future();
-    window.backend->submit_read(
+    window.page_store->submit_read(
         0, read->bytes.data(), read->bytes.size(),
         {
             .context     = read.get(),

@@ -166,7 +166,7 @@ void MaintenanceOperation::initialize()
         return;
     }
     if (!view->mapping.get(view->root_page_id) || view->next_page_id == 0 ||
-        view->next_page_id > MappingView::kPageLimit) {
+        view->next_page_id > MappingTable::kPageLimit) {
         finish(Status::corruption("maintenance root is missing"));
         return;
     }
@@ -190,14 +190,14 @@ void MaintenanceOperation::initialize()
     schedule();
 }
 
-std::shared_ptr<const PublishedTreeState> MaintenanceOperation::capture_l1()
+std::shared_ptr<const TreeRoot> MaintenanceOperation::capture_l1()
 {
     if (target_view) {
         return target_view;
     }
     auto current = factory->publisher.capture();
     dirty        = current->stats.dirty_pages;
-    auto view    = reserved_shared<PublishedTreeState>(publication.metadata, *current);
+    auto view    = reserved_shared<TreeRoot>(publication.metadata, *current);
     view->sources.reset();
     return view;
 }
@@ -225,7 +225,7 @@ void MaintenanceOperation::collect()
             (page->level != 0 &&
              (page->leaf || (page->inner ? page->inner->children.empty() ||
                                                page->inner->separators.size() + 1 != page->inner->children.size()
-                                         : !page->inner_backing || !page->inner_backing->readable())))) {
+                                         : !page->inner_page_block || !page->inner_page_block->readable())))) {
             finish(Status::corruption("maintenance found an invalid page shape"));
             return;
         }

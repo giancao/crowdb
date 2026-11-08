@@ -22,7 +22,7 @@ template <class T> T get(std::span<const uint8_t> input, size_t offset)
 
 } // namespace
 
-Status decode_segment_into(std::span<const uint8_t> input, SegmentImageHeader *header, std::span<uint64_t> words)
+Status decode_segment_into(std::span<const uint8_t> input, MappingSegmentImageHeader *header, std::span<uint64_t> words)
 {
     if (header == nullptr) {
         return Status::invalid_argument();
@@ -31,12 +31,12 @@ Status decode_segment_into(std::span<const uint8_t> input, SegmentImageHeader *h
         get<uint32_t>(input, 28) != common::crc32c(input.data(), 28)) {
         return Status::corruption();
     }
-    const SegmentImageHeader decoded{.format_version = get<uint16_t>(input, 4),
-                                     .flags          = get<uint16_t>(input, 6),
-                                     .seg_idx        = get<uint32_t>(input, 8),
-                                     .generation     = get<uint64_t>(input, 12),
-                                     .slot_count     = get<uint32_t>(input, 20),
-                                     .live_count     = get<uint32_t>(input, 24)};
+    const MappingSegmentImageHeader decoded{.format_version = get<uint16_t>(input, 4),
+                                            .flags          = get<uint16_t>(input, 6),
+                                            .seg_idx        = get<uint32_t>(input, 8),
+                                            .generation     = get<uint64_t>(input, 12),
+                                            .slot_count     = get<uint32_t>(input, 20),
+                                            .live_count     = get<uint32_t>(input, 24)};
     if (decoded.format_version != 1 || decoded.flags != 0 || decoded.live_count > decoded.slot_count ||
         input.size() < segment_image_encoded_size(decoded.slot_count)) {
         return Status::corruption();

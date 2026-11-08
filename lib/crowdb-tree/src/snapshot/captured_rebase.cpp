@@ -4,19 +4,21 @@
 #include "btree/page_cache_residency.h"
 #include "btree/writeback_rebase.h"
 #include "snapshot/captured_rebase_internal.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 #include <algorithm>
 
 namespace crowdb::tree
 {
-Status CapturedRebaseOperation::create(
-    PublicationCoordinator &publisher, std::shared_ptr<const PublishedTreeState> captured,
-    std::shared_ptr<const CapturedDurablePages> pages, std::shared_ptr<detail::FlushRuntime> runtime,
-    std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<AllocationBudget> metadata,
-    std::shared_ptr<CapturedRebaseOperation> *out, size_t max_sources,
-    std::shared_ptr<WritebackMetrics> writeback_metrics, std::shared_ptr<ApplyDispatcher> cpu_progress,
-    std::shared_ptr<PublicationLane> publication, TreeWorkCause cause)
+Status CapturedRebaseOperation::create(PublicationCoordinator &publisher, std::shared_ptr<const TreeRoot> captured,
+                                       std::shared_ptr<const CapturedDurablePages> pages,
+                                       std::shared_ptr<detail::FlushRuntime>       runtime,
+                                       std::shared_ptr<detail::FlushRuntime::Lane> lane,
+                                       std::shared_ptr<AllocationBudget>           metadata,
+                                       std::shared_ptr<CapturedRebaseOperation> *out, size_t max_sources,
+                                       std::shared_ptr<WritebackMetrics> writeback_metrics,
+                                       std::shared_ptr<ApplyDispatcher>  cpu_progress,
+                                       std::shared_ptr<PublicationLane> publication, TreeWorkCause cause)
 try {
     if (!captured || !pages || !runtime || !lane || out == nullptr || *out || max_sources == 0 ||
         captured->generation != pages->generation || captured->coverage != pages->coverage) {
@@ -68,9 +70,9 @@ std::optional<size_t> CapturedRebaseOperation::allocation_bound(size_t primary_f
     if (max_sources == 0) {
         return {};
     }
-    const auto per_page = detail::AllocationBound(detail::shared_allocation_bound<PublishedPage>())
-                              .add(shared_allocation_bound<PublishedPage>() + PageState::allocation_bound() +
-                                   shared_allocation_bound<PrimaryBackingMetadata>() + sizeof(BaseRef))
+    const auto per_page = detail::AllocationBound(detail::shared_allocation_bound<PageEntry>())
+                              .add(shared_allocation_bound<PageEntry>() + PageState::allocation_bound() +
+                                   shared_allocation_bound<PrimaryPageBlockMetadata>() + sizeof(BaseRef))
                               .add_product(max_sources, sizeof(std::shared_ptr<const OverlayBatch>))
                               .add(track_residency ? PageCacheResidency::page_allocation_bound(1) : 0)
                               .value();
@@ -83,9 +85,9 @@ std::optional<size_t> CapturedRebaseOperation::allocation_bound(size_t primary_f
                shared_allocation_bound<CapturedRebaseOperation>() + detail::FlushRuntime::progress_allocation_bound())
         .add_product(primary_frames, *per_page)
         .add_product(std::min(primary_frames, rebase_batches),
-                     MappingView::path_copy_bound() + PublicationCoordinator::empty_commit_reserve_bytes() +
+                     MappingTable::path_copy_bound() + PublicationCoordinator::empty_commit_reserve_bytes() +
                          shared_allocation_bound<PublicationRequest>() + shared_allocation_bound<InstallRecord>() +
-                         (MappingView::kFanout * sizeof(PageReplacement)))
+                         (MappingTable::kFanout * sizeof(PageReplacement)))
         .value();
 }
 

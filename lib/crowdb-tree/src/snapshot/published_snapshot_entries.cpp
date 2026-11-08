@@ -218,7 +218,7 @@ Status PublishedSnapshotEntries::next_impl(Complete complete, std::shared_ptr<Tr
             return status;
         }
         if (host_core != nullptr) {
-            // A borrowed backend must release its final Core on the host
+            // A borrowed page store must release its final Core on the host
             // after the read ticket and callback have finished.
             *host_core = std::move(window.host_core);
         }

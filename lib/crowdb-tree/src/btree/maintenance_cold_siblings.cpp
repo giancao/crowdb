@@ -5,7 +5,7 @@
 
 namespace crowdb::tree::detail
 {
-std::shared_ptr<const PublishedPage> MaintenanceOperation::cold_page(uint64_t pid) const
+std::shared_ptr<const PageEntry> MaintenanceOperation::cold_page(uint64_t pid) const
 {
     for (const auto &page : cold->replacements) {
         if (page.page_id == pid) {
@@ -18,9 +18,9 @@ std::shared_ptr<const PublishedPage> MaintenanceOperation::cold_page(uint64_t pi
 bool MaintenanceOperation::load_cold_inner(uint64_t pid)
 {
     const auto page = cold_page(pid);
-    if (!page || !page->inner_backing || !page->inner_backing->readable() ||
+    if (!page || !page->inner_page_block || !page->inner_page_block->readable() ||
         cold->replacements.size() >= 3 * publication.max_path_pages) {
-        finish(Status::corruption("maintenance cold inner exceeds its captured backing bound"));
+        finish(Status::corruption("maintenance cold inner exceeds its captured page_block bound"));
         return false;
     }
     cold->loading_inner = true;
@@ -28,7 +28,7 @@ bool MaintenanceOperation::load_cold_inner(uint64_t pid)
     cold->waiting       = true;
     cold->ready.store(false, std::memory_order_release);
     auto self = shared_from_this();
-    loader->load_inner(page->inner_backing, [self, pending = cold](Status status, auto inner) {
+    loader->load_inner(page->inner_page_block, [self, pending = cold](Status status, auto inner) {
         pending->status       = std::move(status);
         pending->loaded_inner = std::move(inner);
         pending->ready.store(true, std::memory_order_release);

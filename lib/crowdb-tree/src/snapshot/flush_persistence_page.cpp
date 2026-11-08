@@ -1,14 +1,14 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
-#include "backend/local/extent_writeback.h"
 #include "btree/allocation_bound.h"
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "btree/page_cache.h"
 #include "btree/writeback_rebase.h"
 #include "crowdb-common/log.h"
+#include "page_store/checkpoint_page_store.h"
+#include "page_store/local/extent_writeback.h"
 #include "snapshot/flush_persistence.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 #include <algorithm>
 #include <bit>
@@ -18,7 +18,7 @@ namespace crowdb::tree
 {
 namespace
 {
-size_t final_frame_bytes(const PublishedPage &page, size_t normal)
+size_t final_frame_bytes(const PageEntry &page, size_t normal)
 {
     const auto required = std::max(page.metrics.page_size_known ? page.metrics.page_size_bytes : 0,
                                    page.primary ? size_t{page.primary->frame.frame_bytes} : 0);
@@ -81,7 +81,7 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
     Status                                  status;
     std::optional<TreeMetricsOperation>     metrics;
     LeafDecode                              decode_bases;
-    std::shared_ptr<const PublishedPage>    replacement;
+    std::shared_ptr<const PageEntry>        replacement;
     ApplyDispatcher::Node                   node{&Page::run, this};
     std::shared_ptr<Page>                   next_resident_page;
     bool                                    has_resident_overflow = false;
@@ -94,8 +94,8 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
                         tree_metrics_now_ns());
         has_resident_overflow =
             input.page->leaf && std::ranges::any_of(input.page->leaf->bases, [](const BaseRef &base) {
-                return base.backing && base.backing->storage == BackingStorage::kResidentFrame &&
-                       base.backing->overflow;
+                return base.page_block && base.page_block->storage == PageBlockStorage::kResidentFrame &&
+                       base.page_block->overflow;
             });
         if (has_resident_overflow) {
             resume(Status::Ok());
@@ -132,10 +132,10 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
             limits.frames.encode.max_sources =
                 std::max<size_t>(1, input.page->leaf->bases.size() + input.page->leaf->overlays.size());
         }
-        limits.frames.max_depth        = 1;
-        limits.frames.reuse_backend_id = preparation.core->local_backend()
-                                           ? preparation.core->local_backend()->ledger->limits().backend_id
-                                           : preparation.core->chunk_backend()->backend_identity();
+        limits.frames.max_depth           = 1;
+        limits.frames.reuse_page_store_id = preparation.core->local_page_store()
+                                              ? preparation.core->local_page_store()->ledger->limits().page_store_id
+                                              : preparation.core->page_chunk_store()->page_store_identity();
         if (!work.loader) {
             auto result = preparation.work(*owner->initial_, nullptr, &work);
             if (!result.ok()) {
@@ -145,7 +145,7 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         }
         if (input.page->leaf &&
             std::ranges::any_of(input.page->leaf->bases, [](const BaseRef &base) { return !base.resident; })) {
-            auto page  = detail::reserved_shared<PublishedPage>(work.budget.bytes, *input.page);
+            auto page  = detail::reserved_shared<PageEntry>(work.budget.bytes, *input.page);
             auto leaf  = detail::reserved_shared<PageState>(work.budget.bytes, *page->leaf, work.budget.bytes);
             page->leaf = leaf;
             input.page = std::move(page);
@@ -177,7 +177,7 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         const auto &config = preparation.core->config();
         limits.frames.retain_overflow_buffers =
             limits.write.chunk_backed || config.async_page_store != nullptr ||
-            (config.page_store != nullptr && typeid(*config.page_store) == typeid(MemPageStore));
+            (config.page_store != nullptr && typeid(*config.page_store) == typeid(PageMemStore));
         auto result = CapturedFrameStream::create(input, work.loader, preparation.core->binding()->cpu(),
                                                   preparation.core->binding()->lane(), limits.frames, reserve, &stream);
         if (!result.ok()) {
@@ -189,7 +189,7 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         pages->generation   = owner->initial_->generation;
         pages->root_page_id = input.page_id;
         pages->next_page_id = input.next_page_id;
-        auto chunk          = preparation.core->chunk_backend();
+        auto chunk          = preparation.core->page_chunk_store();
         auto inherited      = owner->inherited_;
         if (owns_resident_write) {
             if (owner->pages_) {
@@ -201,10 +201,10 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
             work.budget.cpu_progress.reset();
         }
         result = CapturedWriteOperation::create(
-            stream, pages, preparation.ticket->backend(preparation.core->async_backend()),
+            stream, pages, preparation.ticket->page_store(preparation.core->async_page_store()),
             preparation.core->binding()->cpu(), preparation.core->binding()->lane(), limits, work.budget,
             chunk ? chunk->reserve(work.budget.bytes)
-                  : extent_write_reservation(preparation.core->local_backend()->ledger, work.budget.bytes),
+                  : extent_write_reservation(preparation.core->local_page_store()->ledger, work.budget.bytes),
             std::move(inherited), &write);
         if (!result.ok()) {
             finish(std::move(result));
@@ -264,7 +264,7 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         }
         attempt.reset();
         if (!status.ok()) {
-            if (write && write->result().primary_io_failed && owner->preparation_->core->local_backend() &&
+            if (write && write->result().primary_io_failed && owner->preparation_->core->local_page_store() &&
                 owner->preparation_->core->config().async_page_store != nullptr &&
                 limits.frames.exclusion.length == 0 && !retried) {
                 // The failed local write reached terminal completion. Its
@@ -307,10 +307,6 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         auto receipt = found->second;
         if (input.children_summary && receipt.summary) {
             receipt.summary->oldest_tombstone_slot = input.children_summary->oldest_tombstone_slot;
-            receipt.summary->live_counts_known     = input.children_summary->live_counts_known;
-            receipt.summary->live_keys             = input.children_summary->live_keys;
-            receipt.summary->live_key_bytes        = input.children_summary->live_key_bytes;
-            receipt.summary->live_value_bytes      = input.children_summary->live_value_bytes;
         }
         auto status = build_writeback_rebase(input.page, input.page, receipt, input.coverage, work.budget.bytes,
                                              &replacement, limits.frames.encode.max_sources, input.gc_floor);
@@ -361,7 +357,7 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         finish(Status::Ok(), std::move(replacement));
     }
 
-    void finish(Status result, std::shared_ptr<const PublishedPage> replacement = {}) noexcept
+    void finish(Status result, std::shared_ptr<const PageEntry> replacement = {}) noexcept
     {
         if (owns_resident_write) {
             if (auto next = std::move(next_resident_page)) {
@@ -390,33 +386,29 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
 void FlushPersistence::write(PageEncodeInput input, FlushBatchOptions::ReserveOverflow reserve,
                              FlushBatchOptions::PersistComplete done)
 try {
-    const auto  backend     = preparation_->core->local_backend()
-                                ? preparation_->core->local_backend()->ledger->limits().backend_id
-                                : preparation_->core->chunk_backend()->backend_identity();
+    const auto  backend     = preparation_->core->local_page_store()
+                                ? preparation_->core->local_page_store()->ledger->limits().page_store_id
+                                : preparation_->core->page_chunk_store()->page_store_identity();
     const auto &limits      = preparation_->options.write.frames;
     const auto  frame_bytes = final_frame_bytes(*input.page, limits.encode.frame_bytes);
     if (frame_bytes > kMaxPhysicalPageBytes) {
         done(Status::invalid_argument("final page exceeds the physical page safety bound"), {});
         return;
     }
-    const bool same_summary =
+    const bool same_gc_evidence =
         !input.children_summary ||
         (input.page->primary && input.page->primary->frame.summary &&
-         input.page->primary->frame.summary->live_counts_known == input.children_summary->live_counts_known &&
-         input.page->primary->frame.summary->live_keys == input.children_summary->live_keys &&
-         input.page->primary->frame.summary->live_key_bytes == input.children_summary->live_key_bytes &&
-         input.page->primary->frame.summary->live_value_bytes == input.children_summary->live_value_bytes &&
          input.page->primary->frame.summary->oldest_tombstone_slot == input.children_summary->oldest_tombstone_slot);
-    if (same_summary && limits.exclusion.length == 0 && inherited_ && input.page->primary &&
+    if (same_gc_evidence && limits.exclusion.length == 0 && inherited_ && input.page->primary &&
         inherited_->frames.contains(input.page_id) &&
-        input.page->primary->frame.backing == inherited_->frames.at(input.page_id).backing &&
-        !limits.exclusion.overlaps(*inherited_->frames.at(input.page_id).backing) &&
+        input.page->primary->frame.page_block == inherited_->frames.at(input.page_id).page_block &&
+        !limits.exclusion.overlaps(*inherited_->frames.at(input.page_id).page_block) &&
         (input.page->leaf ? can_reuse_primary(*input.page, input.page_id, input.context.range, input.gc_floor, backend,
                                               static_cast<uint32_t>(frame_bytes))
                           : input.context.inner_fences &&
                                 can_reuse_inner_primary(*input.page, input.page_id, *input.context.inner_fences,
                                                         backend, static_cast<uint32_t>(frame_bytes)))) {
-        done(Status::Ok(), input.page);
+        done(Status::Ok(), {});
         return;
     }
     auto page     = detail::reserved_shared<Page>(preparation_->work_allocations);

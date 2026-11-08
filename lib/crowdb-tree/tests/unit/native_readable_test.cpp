@@ -16,9 +16,9 @@ struct TestNativeReadable
 {
     std::shared_ptr<TreeRuntime>          runtime;
     std::shared_ptr<TreeRuntimeBinding>   binding;
-    std::shared_ptr<std::vector<uint8_t>> raw     = std::make_shared<std::vector<uint8_t>>(4096);
-    std::shared_ptr<BackingRef>           backing = std::make_shared<BackingRef>();
-    OverflowBackingPage                   descriptor;
+    std::shared_ptr<std::vector<uint8_t>> raw        = std::make_shared<std::vector<uint8_t>>(4096);
+    std::shared_ptr<PageBlockRef>         page_block = std::make_shared<PageBlockRef>();
+    OverflowPageBlock                     descriptor;
     PageLoadLimits                        limits;
     std::shared_ptr<TreeWorkMetrics>      metrics = std::make_shared<TreeWorkMetrics>();
 
@@ -29,12 +29,12 @@ struct TestNativeReadable
         const std::string value(100, 'r');
         overflow_frame_build(raw->data(), raw->size(), 1, kInvalidPageId,
                              reinterpret_cast<const uint8_t *>(value.data()), value.size());
-        backing->storage        = BackingStorage::kResidentFrame;
-        backing->durability     = BackingDurability::kResident;
-        backing->resident_frame = *raw;
-        backing->owner          = raw;
-        descriptor              = {
-            .backing = backing, .next = kInvalidPageId, .bytes = 100, .frame_bytes = 4096, .logical_bytes = 4096};
+        page_block->storage        = PageBlockStorage::kResidentFrame;
+        page_block->durability     = PageBlockDurability::kResident;
+        page_block->resident_frame = *raw;
+        page_block->owner          = raw;
+        descriptor                 = {
+            .page_block = page_block, .next = kInvalidPageId, .bytes = 100, .frame_bytes = 4096, .logical_bytes = 4096};
         limits.max_blob_bytes  = 8192;
         limits.max_frame_bytes = 4096;
     }
@@ -82,7 +82,7 @@ TEST(NativeReadable, RawOverflowNeedsNoBackendOrIoCreditAndRetainsExactOwner)
     EXPECT_FALSE(retained.inherited);
     std::weak_ptr<std::vector<uint8_t>> weak = test.raw;
     test.descriptor                          = {};
-    test.backing.reset();
+    test.page_block.reset();
     test.raw.reset();
     read.reset();
     test.binding->drain();
@@ -120,12 +120,12 @@ TEST(NativeReadable, RawOverflowChecksCrcSelfPidAndPhysicalTopology)
 TEST(NativeReadable, LayoutAcceptsResidentCatalogWithoutDurableDomainIdentity)
 {
     TestNativeReadable test;
-    auto               view = std::make_shared<PublishedTreeState>();
+    auto               view = std::make_shared<TreeRoot>();
     view->next_page_id      = 2;
-    auto catalog            = std::make_shared<OverflowBackingSet>(nullptr);
+    auto catalog            = std::make_shared<OverflowPageBlockSet>(nullptr);
     catalog->pages.emplace(1, test.descriptor);
     const std::vector<ReusedOverflowDependency> references{
-        {.head = 1, .bytes = 100, .owner = catalog, .backing = catalog}
+        {.head = 1, .bytes = 100, .owner = catalog, .page_block = catalog}
     };
     NativeLayoutPlanner planner(view, {}, {}, 7, 9);
     ASSERT_TRUE(planner.accept({.page_id = 0, .summary = {}, .reused_overflow = references, .owner = catalog}).ok());

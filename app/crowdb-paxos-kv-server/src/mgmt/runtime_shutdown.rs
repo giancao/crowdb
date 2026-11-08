@@ -4,20 +4,20 @@ use super::{err_json, ErrorResponse, RegistryArc};
 use axum::{http::StatusCode, Json};
 use crowdb_paxos_kv::cluster::group::PxGroup;
 use crowdb_paxos_kv::kv::CrowdbTreeEngine;
-use crowdb_tree_ffi::{BackendReleaseService, TreeClose};
+use crowdb_tree_ffi::{PageStoreReleaseService, TreeClose};
 use std::future::Future;
 use std::time::Duration;
 
 use super::system_bootstrap::ManagementError;
 
-pub(super) fn tree_close(group: &PxGroup) -> Option<(TreeClose, Option<BackendReleaseService>)> {
+pub(super) fn tree_close(group: &PxGroup) -> Option<(TreeClose, Option<PageStoreReleaseService>)> {
     let engine = group.local_replica().learner.engine();
     let tree = engine.as_any().downcast_ref::<CrowdbTreeEngine>()?.handle();
-    Some((tree.close_result()?, tree.backend_release_service()))
+    Some((tree.close_result()?, tree.page_store_release_service()))
 }
 
 pub(super) async fn wait_tree_close(
-    close: Option<(TreeClose, Option<BackendReleaseService>)>,
+    close: Option<(TreeClose, Option<PageStoreReleaseService>)>,
 ) -> Result<(), ManagementError> {
     if let Some((close, release)) = close {
         close.wait().await.map_err(|error| {

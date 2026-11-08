@@ -22,7 +22,7 @@ TEST(CapturedFrameWindow, WarmAndColdOversizedLeavesUseExactPrepaidDescriptorBou
         })
                              ->overlays.front();
         logical->overlays.assign(8192, run);
-        auto captured          = std::make_shared<PublishedTreeState>(*view(logical, {}, 10));
+        auto captured          = std::make_shared<TreeRoot>(*view(logical, {}, 10));
         captured->next_page_id = 1;
         LoadCredits credits;
         credits.credits.reservation()->seal();

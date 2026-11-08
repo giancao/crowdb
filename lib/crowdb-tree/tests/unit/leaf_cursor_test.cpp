@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Lazy leaf-chain cursor. Covers key ordering, highest-slot-wins across
-// BatchDeltas / base / in-frame deltas, equal-slot tie-breaks in each rank
+// BatchDeltas and base, equal-slot tie-breaks in chain order
 // position, tombstone GC drop, seek, and equivalence with a reference fold of
 // the whole chain (the eager algorithm the cursor replaced).
 #include "crowdb-tree/btree/cell.h"
@@ -50,25 +50,6 @@ void free_chain(PageBase *head)
     }
 }
 
-// A LeafBase carrying `deltas` as an in-frame delta overlay (PT12) over
-// `sorted_entries`, built the same way apply_batch's in-frame path does.
-LeafBase *base_with_inframe(const std::vector<leaf_entry> &sorted_entries, const std::vector<leaf_entry> &deltas)
-{
-    // LeafBase::build sizes the frame to fit exactly, leaving no room for the
-    // overlay, so build the frame at a fixed page size first (as a real leaf
-    // frame is, out of the buffer pool) and COW-append the deltas into it.
-    constexpr uint32_t   kPageBytes = 4096;
-    std::vector<uint8_t> frame(kPageBytes);
-    LeafFrameBuilder     b(frame.data(), kPageBytes);
-    for (const auto &e : sorted_entries) {
-        EXPECT_TRUE(b.try_append_sorted(Slice(e.key), e.cell.slice()));
-    }
-    b.finish(1, kInvalidPageId);
-    std::vector<uint8_t> out(kPageBytes);
-    EXPECT_TRUE(leaf_frame_append_deltas(frame.data(), kPageBytes, deltas, out.data()));
-    return LeafBase::from_frame_copy(out.data(), kPageBytes);
-}
-
 // (key, slot, value-or-empty-for-tombstone) of everything the cursor yields.
 struct resolved_entry
 {
@@ -96,8 +77,7 @@ std::vector<resolved_entry> drain(PageBase *head, uint64_t gc_floor)
 }
 
 // Reference fold: the eager whole-chain algorithm the cursor replaced --
-// BatchDeltas head to tail, then the base's main entries, then its in-frame
-// overlay, first-seen-wins unless a strictly higher slot supersedes.
+// BatchDeltas head to tail, then the base's entries, first-seen-wins unless a strictly higher slot supersedes.
 std::vector<resolved_entry> reference_fold(PageBase *head, uint64_t gc_floor)
 {
     std::map<Slice, Slice> resolved;
@@ -120,9 +100,6 @@ std::vector<resolved_entry> reference_fold(PageBase *head, uint64_t gc_floor)
             LeafFrameView v = static_cast<LeafBase *>(node)->view();
             for (uint32_t i = 0; i < v.count(); ++i) {
                 consider(v.key(i), v.cell(i));
-            }
-            for (uint32_t i = 0; i < v.delta_count(); ++i) {
-                consider(v.delta_key(i), v.delta_cell(i));
             }
         }
     }
@@ -216,41 +193,6 @@ TEST(LeafCursor, EqualSlotTieBreaksToTheEarlierChainPosition)
     free_chain(d1);
 }
 
-TEST(LeafCursor, EqualSlotBaseBeatsInframeDelta)
-{
-    // Base main entries are visited before the in-frame overlay, so on an equal
-    // slot the base wins (only a strictly higher slot supersedes).
-    LeafBase *leaf = base_with_inframe(entries(entry("a", 7, "base")), entries(entry("a", 7, "inframe")));
-    auto      got  = drain(leaf, 0);
-    ASSERT_EQ(got.size(), 1U);
-    EXPECT_EQ(got[0].value, "base");
-    free_chain(leaf);
-}
-
-TEST(LeafCursor, InframeDeltaOverlaySortsAndWins)
-{
-    // Appended out of key order and with a duplicate key: the overlay is sorted
-    // and deduped, and its higher slots shadow the base.
-    LeafBase *leaf =
-        base_with_inframe(entries(entry("a", 1, "a1"), entry("c", 1, "c1")),
-                          entries(entry("d", 5, "d5"), entry("a", 6, "a6"), entry("a", 9, "a9"), entry("b", 7, "b7")));
-    auto got = drain(leaf, 0);
-    EXPECT_EQ(keys_of(got), (std::vector<std::string>{"a", "b", "c", "d"}));
-    EXPECT_EQ(got[0].value, "a9"); // highest slot among the duplicate overlay keys
-    EXPECT_EQ(got[2].value, "c1"); // untouched base entry
-    free_chain(leaf);
-}
-
-TEST(LeafCursor, EqualSlotInframeDuplicateKeepsTheEarlierAppend)
-{
-    LeafBase *leaf =
-        base_with_inframe(entries(entry("z", 1, "z1")), entries(entry("a", 5, "first"), entry("a", 5, "second")));
-    auto got = drain(leaf, 0);
-    ASSERT_EQ(got.size(), 2U);
-    EXPECT_EQ(got[0].value, "first");
-    free_chain(leaf);
-}
-
 TEST(LeafCursor, TombstonesKeptUntilGcFloor)
 {
     auto *base = LeafBase::build(entries(entry("a", 1, "a1"), tomb("b", 5), entry("c", 6, "c6")));
@@ -330,14 +272,7 @@ TEST(LeafCursor, MatchesReferenceFoldOnRandomChains)
             return out;
         };
 
-        // In-frame deltas may repeat keys and are appended out of order.
-        std::vector<leaf_entry> inframe;
-        for (int i = 0, n = n_d(rng); i < n; ++i) {
-            std::string k(1, static_cast<char>('a' + key_d(rng)));
-            auto        slot = static_cast<uint64_t>(slot_d(rng));
-            inframe.push_back(entry(k, slot, k + "#" + std::to_string(slot)));
-        }
-        PageBase *head = inframe.empty() ? LeafBase::build(make(n_d(rng))) : base_with_inframe(make(n_d(rng)), inframe);
+        PageBase *head = LeafBase::build(make(n_d(rng)));
         for (int i = 0, n = n_d(rng); i < n; ++i) {
             head = BatchDelta::build(static_cast<uint64_t>(slot_d(rng)), make(n_d(rng)), head);
         }

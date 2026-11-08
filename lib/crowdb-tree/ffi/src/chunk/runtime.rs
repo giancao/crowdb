@@ -59,7 +59,7 @@ impl PageStore {
         };
         let mut out = std::ptr::null_mut();
         check(unsafe {
-            sys::ct_chunk_runtime_page_store_open(
+            sys::ct_page_chunk_store_open(
                 runtime.as_ptr(),
                 &raw,
                 catalog.ptr.as_ptr(),

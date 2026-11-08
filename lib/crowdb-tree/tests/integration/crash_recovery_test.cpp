@@ -5,10 +5,10 @@
 // IU alignment). Verifies two-generation fallback (a corrupted newest snapshot
 // falls back intact to the previous committed image) and that demand-load
 // corruption of the committed image is surfaced via the latched io_failed flag.
-#include "crowdb-tree/backend/block_page_store.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
 #include "crowdb-tree/maptable/mapping_persist.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "runtime_tree_access.h"
 #include "snapshot/commit_anchor.h"
 #include "test_tmp.h"
@@ -56,7 +56,7 @@ constexpr uint64_t kSbBytes = 4096;
 // written.
 TEST(CrashRecovery, FaultInjectedWriteFailureLeavesPreviousGenerationIntact)
 {
-    MemPageStore    mem(1);
+    PageMemStore    mem(1);
     FaultyPageStore store(&mem);
     Config          opt;
     opt.page_store = &store;
@@ -93,11 +93,11 @@ TEST(CrashRecovery, FaultInjectedWriteFailureLeavesPreviousGenerationIntact)
     }
 }
 
-// A committed anchor whose segment image fails CRC is media corruption;
+// A committed anchor whose mapping segment image fails CRC is media corruption;
 // recovery must not silently fall back to an older logical image.
 TEST(CrashRecovery, CorruptSegmentImageFailsReopenEvenThoughAnchorCommitted)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       options;
     options.page_store = &store;
     std::unique_ptr<Crowdbtree> tree;
@@ -132,7 +132,7 @@ TEST(CrashRecovery, CorruptSegmentImageFailsReopenEvenThoughAnchorCommitted)
 // fully-intact image, including the multi-frame overflow values.
 TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.compression      = compress_algo::kLz4;
@@ -182,7 +182,7 @@ TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression)
 // Same two-generation fallback on an aligned (iu=4096) block device.
 TEST(CrashRecovery, AlignedTwoGenerationFallback)
 {
-    MemPageStore store(4096);
+    PageMemStore store(4096);
     Config       opt;
     opt.page_store       = &store;
     opt.frame_bytes      = 4096;
@@ -225,7 +225,7 @@ TEST(CrashRecovery, AlignedTwoGenerationFallback)
 // fault: the read degrades to a miss but io_failed() latches true.
 TEST(CrashRecovery, DemandLoadCorruptionLatched)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     uint64_t     off     = 0;
     opt.page_store       = &store;
@@ -240,12 +240,12 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched)
         }
         ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         RuntimeTreeAccess_for_tests::capture(t)->mapping.visit(
-            &off, [](void *raw, uint64_t, const std::shared_ptr<const PublishedPage> &page) {
+            &off, [](void *raw, uint64_t, const std::shared_ptr<const PageEntry> &page) {
                 auto &offset = *static_cast<uint64_t *>(raw);
                 if (offset == 0 && page->leaf && !page->leaf->bases.empty()) {
-                    const auto &backing = page->leaf->bases.front().backing;
-                    if (backing && backing->length > 1) {
-                        offset = backing->address + (backing->length / 2);
+                    const auto &page_block = page->leaf->bases.front().page_block;
+                    if (page_block && page_block->length > 1) {
+                        offset = page_block->address + (page_block->length / 2);
                     }
                 }
             });
@@ -289,8 +289,8 @@ TEST(CrashRecovery, FileTornSuperblockFallsBack)
 
     std::map<std::string, std::string> gen1;
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         Config opt;
         opt.page_store       = store.get();
         opt.frame_bytes      = 4096;
@@ -314,16 +314,16 @@ TEST(CrashRecovery, FileTornSuperblockFallsBack)
 
     // Tear the gen2 superblock (slot B at offset 4096) as a crash would.
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         std::vector<uint8_t> garbage(4096, 0x77);
         ASSERT_TRUE(store->write_at(4096, garbage.data(), garbage.size()).ok());
         ASSERT_TRUE(store->sync().ok());
     }
 
     {
-        std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
+        std::unique_ptr<PageDiskStore> store;
+        ASSERT_TRUE(PageDiskStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         Config opt;
         opt.page_store  = store.get();
         opt.frame_bytes = 4096;

@@ -12,12 +12,12 @@ namespace crowdb::tree
 {
 namespace
 {
-struct TestViewBackend
+struct TestViewPageStore
 {
-    std::shared_ptr<MemPageStore>   device = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore>   device = std::make_shared<PageMemStore>(4096);
     test_write::TestCheckpointStore store;
 
-    TestViewBackend()
+    TestViewPageStore()
     {
         store.device = device;
     }
@@ -25,9 +25,9 @@ struct TestViewBackend
 
 struct TestSnapshotView
 {
-    Config                           config;
-    std::shared_ptr<TestViewBackend> backend;
-    std::unique_ptr<Crowdbtree>      tree;
+    Config                             config;
+    std::shared_ptr<TestViewPageStore> backend;
+    std::unique_ptr<Crowdbtree>        tree;
 
     explicit TestSnapshotView(bool storage = true, bool owned = true)
     {
@@ -35,11 +35,11 @@ struct TestSnapshotView
         config.frame_bytes      = 4096;
         config.max_inline_value = 64;
         if (storage) {
-            backend                 = std::make_shared<TestViewBackend>();
+            backend                 = std::make_shared<TestViewPageStore>();
             config.page_store       = backend->device.get();
             config.async_page_store = &backend->store;
             if (owned) {
-                config.backend_owner = backend;
+                config.page_store_owner = backend;
             }
         }
     }

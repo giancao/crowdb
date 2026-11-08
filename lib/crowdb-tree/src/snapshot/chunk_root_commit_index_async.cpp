@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/backing_io.h"
-#include "backend/local/scheduled_page_store.h"
 #include "chunk_root_commit.h"
 #include "crowdb-common/log.h"
+#include "page_store/local/scheduled_page_store.h"
+#include "page_store/page_block_io.h"
 
 namespace crowdb::tree
 {
@@ -16,16 +16,16 @@ struct ChunkRootCommit::IndexFlow : std::enable_shared_from_this<IndexFlow>
         {
         }
 
-        IndexFlow                                                      *owner = nullptr;
-        std::array<const DurableCapturedFrame *, kChunkIndexFrameLimit> frames{};
-        size_t                                                          count = 0;
-        ChunkMetadataBytes                                              bytes;
-        std::shared_ptr<ChunkPackBacking>                               written;
-        std::shared_ptr<const ChunkPackBacking>                         result;
-        std::optional<ChunkIndexReference>                              previous;
-        detail::ChunkStageId                                            pin;
-        detail::CallbackComplete                                        complete = nullptr;
-        void                                                           *context  = nullptr;
+        IndexFlow                                                               *owner = nullptr;
+        std::array<const DurableCapturedFrame *, kChunkMappingSegmentEntryLimit> frames{};
+        size_t                                                                   count = 0;
+        ChunkMetadataBytes                                                       bytes;
+        std::shared_ptr<ChunkPageBlock>                                          written;
+        std::shared_ptr<const ChunkPageBlock>                                    result;
+        std::optional<ChunkMappingSegmentRef>                                    previous;
+        detail::ChunkStageId                                                     pin;
+        detail::CallbackComplete                                                 complete = nullptr;
+        void                                                                    *context  = nullptr;
 
         static void submit(void *raw, detail::CallbackComplete done, void *context) noexcept
         {
@@ -37,8 +37,8 @@ struct ChunkRootCommit::IndexFlow : std::enable_shared_from_this<IndexFlow>
                 const AsyncCompletion callback{
                     .context = raw, .complete_fn = &Job::finished, .allocations = root.metadata_};
                 if (self.previous) {
-                    submit_pin_chunk_backing(root.domain_, self.previous->pack, self.pin, root.metadata_, &self.result,
-                                             callback);
+                    submit_pin_chunk_page_block(root.domain_, self.previous->pack, self.pin, root.metadata_,
+                                                &self.result, callback);
                 }
                 else {
                     submit_chunk_write(*self.owner->store, self.written, self.bytes, root.window_, callback);
@@ -109,9 +109,9 @@ struct ChunkRootCommit::IndexFlow : std::enable_shared_from_this<IndexFlow>
 
     Status prepare_one()
     {
-        auto job                            = detail::reserved_shared<Job>(root->metadata_, root->window_);
-        job->owner                          = this;
-        const ChunkIndexReference *previous = nullptr;
+        auto job                               = detail::reserved_shared<Job>(root->metadata_, root->window_);
+        job->owner                             = this;
+        const ChunkMappingSegmentRef *previous = nullptr;
         if (root->previous_) {
             while (root->previous_index_ < root->previous_->indexes.size() &&
                    root->previous_->indexes[root->previous_index_].last_page < root->page_->first) {
@@ -143,10 +143,11 @@ struct ChunkRootCommit::IndexFlow : std::enable_shared_from_this<IndexFlow>
             job->previous = *previous;
         }
         else {
-            status = encode_chunk_index(root->root_.identity, jobs.size(), selected, &job->bytes);
+            status = encode_chunk_mapping_segment(root->root_.identity, jobs.size(), selected, &job->bytes);
             if (status.ok()) {
-                status = prepare_chunk_backing(root->domain_, job->pin, chunk, static_cast<uint32_t>(job->bytes.size()),
-                                               PagePurpose::kPageIndex, root->metadata_, &job->written);
+                status =
+                    prepare_chunk_page_block(root->domain_, job->pin, chunk, static_cast<uint32_t>(job->bytes.size()),
+                                             PagePurpose::kPageIndex, root->metadata_, &job->written);
             }
             if (!status.ok()) {
                 return status;
@@ -182,7 +183,7 @@ struct ChunkRootCommit::IndexFlow : std::enable_shared_from_this<IndexFlow>
                 for (const auto &job : jobs) {
                     for (size_t index = 0; index < job->count; ++index) {
                         const auto &frame = *job->frames[index];
-                        root->references_.insert(frame.backing->chunk->pack.stage);
+                        root->references_.insert(frame.page_block->chunk->pack.stage);
                         root->root_.stored_references += frame.stored_overflow ? frame.stored_overflow->size() : 0;
                     }
                     if (root->root_.stored_references > detail::kMaxCandidateReferences) {
@@ -206,7 +207,7 @@ struct ChunkRootCommit::IndexFlow : std::enable_shared_from_this<IndexFlow>
         }
         if (status.ok()) {
             root->page_  = root->pages_->frames.begin();
-            root->stage_ = Stage::Dependencies;
+            root->stage_ = Stage::Summaries;
         }
         else {
             status = root->fail(std::move(status));

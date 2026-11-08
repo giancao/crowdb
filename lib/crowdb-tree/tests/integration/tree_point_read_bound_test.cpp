@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
 #include "btree/tree_core_read_internal.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -55,10 +55,10 @@ TEST(TreePointReadBound, MaximumL0ValueBorrowsPayloadWithSmallRoutingAllowance)
 
 TEST(TreePointReadBound, ColdKnownAndUnknownSummariesBothUseActualAllocation)
 {
-    auto   store = std::make_shared<MemPageStore>(4096);
+    auto   store = std::make_shared<PageMemStore>(4096);
     Config config;
     config.page_store                           = store.get();
-    config.backend_owner                        = store;
+    config.page_store_owner                     = store;
     config.frame_bytes                          = 4096;
     config.max_inline_value                     = 64;
     config.runtime_binding.limits.routing_bytes = 32ULL * 1024 * 1024;
@@ -78,7 +78,7 @@ TEST(TreePointReadBound, ColdKnownAndUnknownSummariesBothUseActualAllocation)
     status = core->get("key", &value);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(value.value().to_string(), large);
-    auto unknown                    = std::make_shared<PublishedTreeState>(*view);
+    auto unknown                    = std::make_shared<TreeRoot>(*view);
     unknown->stats.kv_unknown_pages = 1;
     unknown->stats.kv_known_bytes   = 0;
     core_read_detail::ReadPreparation prepared;

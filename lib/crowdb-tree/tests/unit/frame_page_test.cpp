@@ -185,22 +185,17 @@ TEST(FramePage, InnerBuildRejectsOversize)
     EXPECT_FALSE(inner_frame_build(frame.data(), pb, 1, children, seps));
 }
 
-TEST(FramePage, InnerReachabilityFencesAreChecksummedAndBoundsChecked)
+TEST(FramePage, RejectsByteFencesOnIndexFrames)
 {
-    const uint32_t        pb = 4096;
-    std::vector<uint8_t>  frame(pb);
-    std::vector<uint64_t> children   = {10, 11};
-    std::string           separator  = "m";
-    std::vector<Slice>    separators = {Slice(separator)};
-    ASSERT_TRUE(inner_frame_build(frame.data(), pb, 3, children, separators));
-    Slice lower("a");
-    Slice upper("z");
-    ASSERT_TRUE(frame_set_fences(frame.data(), pb, &lower, &upper));
-    ASSERT_TRUE(frame_validate(frame.data(), pb));
-    EXPECT_EQ(frame_lower_fence(frame.data()).to_string(), "a");
-    EXPECT_EQ(frame_upper_fence(frame.data()).to_string(), "z");
-
-    frame_put_u32(frame.data(), fh::kLowerFenceOff, pb);
+    const uint32_t       pb = 4096;
+    std::vector<uint8_t> frame(pb);
+    ASSERT_TRUE(inner_frame_build(frame.data(), pb, 3, {10, 11}, {"m"}));
+    const auto key_offset = frame_u32(frame.data(), fh::kFreeHi);
+    frame[fh::kFlags]     = kFrameHasLowerFence | kFrameHasUpperFence;
+    frame_put_u32(frame.data(), fh::kLowerFenceOff, key_offset);
+    frame_put_u32(frame.data(), fh::kLowerFenceLen, 1);
+    frame_put_u32(frame.data(), fh::kUpperFenceOff, key_offset);
+    frame_put_u32(frame.data(), fh::kUpperFenceLen, 1);
     frame_restamp_crc(frame.data(), pb);
     EXPECT_FALSE(frame_validate(frame.data(), pb));
 }
@@ -242,48 +237,18 @@ TEST(FramePage, OverflowBuildViewRoundTrip)
     EXPECT_EQ(v.payload().to_string(), payload);
 }
 
-TEST(FramePage, InFrameDeltaOverlay)
+TEST(FramePage, RejectsLeafWithAnInFrameDeltaCount)
 {
-    const uint32_t       pb = 4096;
-    std::vector<uint8_t> base(pb);
-    LeafFrameBuilder     b(base.data(), pb);
-    ASSERT_TRUE(b.try_append_sorted(Slice("a"), Slice(make_cell(1, "A1"))));
-    ASSERT_TRUE(b.try_append_sorted(Slice("b"), Slice(make_cell(1, "B1"))));
-    b.finish(1, kInvalidPageId);
-    ASSERT_EQ(LeafFrameView(base.data(), pb).delta_count(), 0U);
-
-    // COW-append two deltas: overwrite "a", insert "c".
-    std::vector<leaf_entry> deltas;
-    deltas.push_back({.key = "a", .cell = make_cell_buf(5, "A5")});
-    deltas.push_back({.key = "c", .cell = make_cell_buf(5, "C5")});
-    std::vector<uint8_t> out(pb);
-    ASSERT_TRUE(leaf_frame_append_deltas(base.data(), pb, deltas, out.data()));
-    ASSERT_TRUE(frame_validate(out.data(), pb));
-    LeafFrameView v(out.data(), pb);
-    EXPECT_EQ(v.count(), 2U);       // main entries unchanged
-    EXPECT_EQ(v.delta_count(), 2U); // deltas appended
-
-    CellView c;
-    ASSERT_TRUE(v.lookup(Slice("a"), &c)); // delta shadows base
-    EXPECT_EQ(c.value().to_string(), "A5");
-    ASSERT_TRUE(v.lookup(Slice("b"), &c)); // untouched base entry
-    EXPECT_EQ(c.value().to_string(), "B1");
-    ASSERT_TRUE(v.lookup(Slice("c"), &c)); // delta-only key
-    EXPECT_EQ(c.value().to_string(), "C5");
-    EXPECT_FALSE(v.lookup(Slice("zz"), &c));
-}
-
-TEST(FramePage, InFrameDeltaRejectsWhenFull)
-{
-    const uint32_t       pb = 256; // tiny frame
-    std::vector<uint8_t> base(pb);
-    LeafFrameBuilder     b(base.data(), pb);
-    ASSERT_TRUE(b.try_append_sorted(Slice("a"), Slice(make_cell(1, "A"))));
-    b.finish(1, kInvalidPageId);
-    std::vector<leaf_entry> big;
-    big.push_back({.key = std::string(400, 'k'), .cell = make_cell_buf(2, std::string(400, 'v'))});
-    std::vector<uint8_t> out(pb);
-    EXPECT_FALSE(leaf_frame_append_deltas(base.data(), pb, big, out.data()));
+    constexpr uint32_t   bytes = 4096;
+    std::vector<uint8_t> frame(bytes);
+    LeafFrameBuilder     builder(frame.data(), bytes);
+    const auto           cell = make_cell_buf(1, "value");
+    ASSERT_TRUE(builder.try_append_sorted("k", cell.slice()));
+    builder.finish(1, kInvalidPageId);
+    ASSERT_TRUE(frame_validate(frame.data(), bytes));
+    frame_put_u32(frame.data(), fh::kReservedLeaf, 1);
+    frame_restamp_crc(frame.data(), bytes);
+    EXPECT_FALSE(frame_validate(frame.data(), bytes));
 }
 
 TEST(FramePage, OverflowPartialChunkAndCrc)

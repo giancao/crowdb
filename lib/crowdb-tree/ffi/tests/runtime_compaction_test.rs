@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 use crowdb_tree_ffi::{
-    AsyncCrowdbtree, CompactionOptions, Config, CtError, PageStoreBackend, TreeRuntime, TreeRuntimeOptions,
+    AsyncCrowdbtree, CompactionOptions, Config, CtError, PageStoreKind, TreeRuntime, TreeRuntimeOptions,
 };
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ async fn explicit_block_pass_is_send_and_runs_with_bounded_operation_slots() {
     let mut config = Config {
         runtime: Some(runtime),
         path: Some(directory.path().to_string_lossy().into_owned()),
-        backend: PageStoreBackend::Block,
+        page_store_kind: PageStoreKind::Disk,
         block_size: 64 * 1024,
         frame_bytes: 4096,
         ..Default::default()
@@ -31,7 +31,7 @@ async fn explicit_block_pass_is_send_and_runs_with_bounded_operation_slots() {
     assert_eq!(report.status, Ok(()));
     assert_eq!(report.blocks_selected, 0);
     assert_eq!(tree.handle().durable_coverage(), 0);
-    let service = tree.handle().backend_release_service().unwrap();
+    let service = tree.handle().page_store_release_service().unwrap();
     drop(tree);
     drop(config);
     service.shutdown().await;
@@ -48,7 +48,7 @@ async fn explicit_policy_rejects_invalid_threshold_and_skips_volatile_backend() 
     let tree = AsyncCrowdbtree::open(&Config {
         runtime: Some(Arc::new(TreeRuntime::new(TreeRuntimeOptions::default()).unwrap())),
         path: Some(directory.path().to_string_lossy().into_owned()),
-        backend: PageStoreBackend::Block,
+        page_store_kind: PageStoreKind::Disk,
         block_size: 64 * 1024,
         ..Default::default()
     })
@@ -71,7 +71,7 @@ async fn explicit_policy_rejects_invalid_threshold_and_skips_volatile_backend() 
         .unwrap();
     assert_eq!(report.status, Ok(()));
     assert_eq!(report.blocks_deleted, 0);
-    let service = tree.handle().backend_release_service().unwrap();
+    let service = tree.handle().page_store_release_service().unwrap();
     drop(tree);
     service.shutdown().await;
 }

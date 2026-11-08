@@ -8,7 +8,9 @@ namespace
 {
 bool anchors_differ(const std::array<std::shared_ptr<const ProtectedCheckpoint>, 2> &anchors)
 {
-    return anchors[0] && anchors[1] && anchors[0]->anchor.segdir_addr != anchors[1]->anchor.segdir_addr;
+    return anchors[0] && anchors[1] &&
+           (anchors[0]->anchor.segdir_addr != anchors[1]->anchor.segdir_addr ||
+            anchors[0]->anchor.summaries_addr != anchors[1]->anchor.summaries_addr);
 }
 } // namespace
 
@@ -36,7 +38,8 @@ Status LocalCheckpointRegistry::create(std::shared_ptr<ExtentLedger> ledger, std
                 (anchor.snapshot_seq % 2 == 0 ? 1U : 0U) != slot || anchor.magic != snapshot::kAnchorMagic ||
                 anchor.format_version != snapshot::kFormatVersion ||
                 anchor.last_applied_slot != image->pages->coverage ||
-                (!image->pages->frames.empty() && image->pages->backend_id != registry->ledger_->limits().backend_id)) {
+                (!image->pages->frames.empty() &&
+                 image->pages->page_store_id != registry->ledger_->limits().page_store_id)) {
                 return Status::invalid_argument();
             }
             if (anchor.snapshot_seq > registry->sequence_.load()) {

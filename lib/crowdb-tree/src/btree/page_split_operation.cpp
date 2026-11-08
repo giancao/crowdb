@@ -9,7 +9,7 @@ namespace crowdb::tree
 {
 Status PageSplitOperation::create(PublicationCoordinator &publisher, detail::FlushRuntime &runtime,
                                   std::shared_ptr<detail::FlushRuntime::Lane> lane,
-                                  std::shared_ptr<const PublishedTreeState> view, uint64_t pid,
+                                  std::shared_ptr<const TreeRoot> view, uint64_t pid,
                                   PageMaintenanceOperationOptions options, std::shared_ptr<PageLoader> loader,
                                   std::shared_ptr<ApplyDispatcher> progress, std::shared_ptr<const void> resources,
                                   TreeWorkCause cause, std::shared_ptr<PageSplitOperation> *out)
@@ -22,7 +22,7 @@ try {
     }
     auto credit = std::exchange(options.prepaid, {});
     if (view->sources && !view->sources->tables.empty()) {
-        auto fixed     = detail::reserved_shared<PublishedTreeState>(credit, *view);
+        auto fixed     = detail::reserved_shared<TreeRoot>(credit, *view);
         auto sources   = detail::reserved_shared<PublishedSources>(credit, credit);
         sources->floor = fixed->coverage;
         fixed->sources = std::move(sources);
@@ -53,8 +53,8 @@ catch (const std::bad_alloc &) {
 size_t PageSplitOperation::control_allocation_bound() noexcept
 {
     // The maintenance reserve already includes its factory and operation.
-    return detail::shared_allocation_bound<PageSplitOperation>() +
-           detail::shared_allocation_bound<PublishedTreeState>() + detail::shared_allocation_bound<PublishedSources>();
+    return detail::shared_allocation_bound<PageSplitOperation>() + detail::shared_allocation_bound<TreeRoot>() +
+           detail::shared_allocation_bound<PublishedSources>();
 }
 
 detail::CallbackSender PageSplitOperation::sender() noexcept
@@ -82,7 +82,7 @@ std::span<const uint64_t> PageSplitOperation::output_leaf_pids() const noexcept
     return state_->outputs;
 }
 
-const std::shared_ptr<const PublishedTreeState> &PageSplitOperation::captured_view() const noexcept
+const std::shared_ptr<const TreeRoot> &PageSplitOperation::captured_view() const noexcept
 {
     return state_->target_view;
 }

@@ -60,7 +60,7 @@ class Crowdbtree
     Crowdbtree(const Crowdbtree &)            = delete;
     Crowdbtree &operator=(const Crowdbtree &) = delete;
 
-    // Recover durable state or initialize an empty backend.
+    // Recover durable state or initialize an empty page store.
     static Status open(const Config &opt, std::unique_ptr<Crowdbtree> *out);
     // Finite source handoff, frame writes, durable root commit, and publication reconciliation.
     Status flush_with_persistent(uint64_t *out_last_applied = nullptr, uint64_t *out_persistent_sequence = nullptr);
@@ -201,21 +201,21 @@ class Crowdbtree
     // Physical frames written by the latest successful durable checkpoint; excludes reused frames.
     [[nodiscard]] uint64_t last_snapshot_pages_written() const;
 
-    // Deprecated dirty-segment observation. Use actual written-frame counts; returns zero.
+    // Deprecated dirty mapping segment observation. Use actual written-frame counts; returns zero.
     [[nodiscard]] uint64_t last_snapshot_segments_written() const
     {
         return 0;
     }
 
-    [[nodiscard]] EngineStats          stats() const;
-    [[nodiscard]] TreeStatsSnapshot    tree_state_stats() const;
-    [[nodiscard]] BackingStatsSnapshot backing_stats() const noexcept;
-    [[nodiscard]] TreeSummary          tree_summary() const;
+    [[nodiscard]] EngineStats            stats() const;
+    [[nodiscard]] TreeStatsSnapshot      tree_state_stats() const;
+    [[nodiscard]] PageBlockStatsSnapshot page_block_stats() const noexcept;
+    [[nodiscard]] TreeSummary            tree_summary() const;
 
     // Deprecated empty compatibility profile; use the work metrics collector.
     [[nodiscard]] ScanProfile scan_profile() const;
 
-    void init_metrics(const std::string &prefix, const std::string &backend_label);
+    void init_metrics(const std::string &prefix, const std::string &page_store_label);
 
     std::string flush_metrics_str(double window_secs, const char *timestamp, size_t width = 0, size_t count_w = 0,
                                   size_t tps_w = 0);

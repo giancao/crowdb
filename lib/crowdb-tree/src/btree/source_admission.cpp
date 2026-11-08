@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_account.h"
 #include "allocation_bound.h"
-#include "published_state.h"
 #include "source_admission_internal.h"
+#include "tree_root.h"
 
 #include <algorithm>
 #include <utility>
@@ -319,7 +319,7 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted("split coverage preparation failed");
 }
 
-Status SourceAdmission::install_coverage(const std::shared_ptr<Coverage> &prepared, const PublishedTreeState &published)
+Status SourceAdmission::install_coverage(const std::shared_ptr<Coverage> &prepared, const TreeRoot &published)
 {
     AdminGuard admin(state_->admin);
     if (!admin.held()) {

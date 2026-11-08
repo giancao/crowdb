@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/local/extent_ledger.h"
 #include "crowdb-tree/maptable/mapping_persist.h"
+#include "page_store/local/extent_ledger.h"
 #include "snapshot/captured_write.h"
 #include "snapshot/commit_anchor.h"
 
@@ -58,6 +58,7 @@ struct ProtectedCheckpoint
     snapshot::CommitAnchor                      anchor;
     std::shared_ptr<const CapturedDurablePages> pages;
     std::shared_ptr<CheckpointMetadata>         metadata;
+    ProtectedExtent                             summaries;
 };
 
 class LocalCheckpointOperation;
@@ -113,9 +114,9 @@ class LocalCheckpointRegistry
 
 struct LocalCheckpointLimits
 {
-    size_t           max_segments = 1U << 16;
-    BackingExclusion exclusion{};
-    bool             retire_previous_anchor = false;
+    size_t             max_segments = 1U << 16;
+    PageBlockExclusion exclusion{};
+    bool               retire_previous_anchor = false;
 };
 
 struct LocalCheckpointResult
@@ -124,7 +125,7 @@ struct LocalCheckpointResult
     std::shared_ptr<const ProtectedCheckpoint> checkpoint;
 };
 
-// Writes the existing segment/directory/anchor format through one aligned
+// Writes the existing mapping segment/directory/anchor format through one aligned
 // metadata window. The page barrier precedes the anchor, and durable coverage
 // advances only after the anchor barrier. Cancellation after touching the
 // anchor completes that barrier and reports the actual commit outcome.

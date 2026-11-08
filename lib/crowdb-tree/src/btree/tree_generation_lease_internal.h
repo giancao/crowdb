@@ -16,7 +16,7 @@ struct TreeGenerationPreparation
     detail::ReservedUnique<SourceAdmission>              sources;
     detail::ReservedUnique<FlushController>              flush;
     std::shared_ptr<PublicationCoordinator::Replacement> publication;
-    std::shared_ptr<const PublishedTreeState>            expected;
+    std::shared_ptr<const TreeRoot>                      expected;
     std::shared_ptr<PublishedSources>                    inherited;
     uint64_t                                             previous_generation = 0;
     uint64_t                                             coverage            = 0;

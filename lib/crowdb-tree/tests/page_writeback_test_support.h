@@ -3,7 +3,7 @@
 #pragma once
 
 #include "btree/page_writeback.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
 #include "load_budget_test_support.h"
 #include "published_read_test_support.h"
 
@@ -16,7 +16,7 @@ using namespace test_read;
 class TestWriteStore final : public AsyncPageStore
 {
   public:
-    std::shared_ptr<PageStore> device              = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageStore> device              = std::make_shared<PageMemStore>(4096);
     bool                       reloadable          = true;
     bool                       deferred            = false;
     bool                       throw_after_capture = false;
@@ -116,7 +116,7 @@ struct TestWriter
         return PageWriteOperation::create(
             store, runtime, lane, std::move(input), limits, credits.credits,
             [this](uint64_t length, PageWriteOperation::ExtentComplete done) {
-                ReservedWriteExtent reserved{.backend_id       = 1,
+                ReservedWriteExtent reserved{.page_store_id    = 1,
                                              .address          = next_address,
                                              .length           = length,
                                              .content_id       = 10,

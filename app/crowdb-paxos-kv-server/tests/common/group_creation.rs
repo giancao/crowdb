@@ -27,7 +27,7 @@ impl TestGroupCreation {
             data_root: root.path().join("data"),
             wal_root: root.path().join("wal"),
             config_root: root.path().join("config"),
-            crowtree_backend: "mem-block".into(),
+            crowtree_store_kind: "mem-block".into(),
             wal_backend: "file".into(),
             ..PaxosKvConfig::for_tests()
         };

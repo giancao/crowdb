@@ -9,12 +9,12 @@
 
 namespace crowdb::tree
 {
-NativeLayoutPlanner::NativeLayoutPlanner(std::shared_ptr<const PublishedTreeState> view, NativeLayoutLimits limits,
-                                         std::shared_ptr<detail::AllocationReservation> metadata, uint64_t backend_id,
-                                         uint64_t incarnation)
+NativeLayoutPlanner::NativeLayoutPlanner(std::shared_ptr<const TreeRoot> view, NativeLayoutLimits limits,
+                                         std::shared_ptr<detail::AllocationReservation> metadata,
+                                         uint64_t page_store_id, uint64_t incarnation)
     : view_(std::move(view)),
       limits_(limits),
-      backend_id_(backend_id),
+      page_store_id_(page_store_id),
       incarnation_(incarnation),
       old_(metadata),
       primary_(std::less<>{}, detail::ReservationAllocator<uint64_t>(std::move(metadata)))
@@ -23,21 +23,21 @@ NativeLayoutPlanner::NativeLayoutPlanner(std::shared_ptr<const PublishedTreeStat
 
 std::optional<size_t> NativeLayoutPlanner::allocation_bound(uint64_t next_page_id, NativeLayoutLimits limits) noexcept
 {
-    if (next_page_id > MappingView::kPageLimit || limits.max_frames == 0 ||
-        limits.max_frames > MappingView::kPageLimit || limits.max_dependency_steps == 0) {
+    if (next_page_id > MappingTable::kPageLimit || limits.max_frames == 0 ||
+        limits.max_frames > MappingTable::kPageLimit || limits.max_dependency_steps == 0) {
         return {};
     }
     // Primary and old-overflow PIDs are disjoint. The larger map-node bound
     // therefore also covers every primary set node without counting twice.
     return detail::AllocationBound(detail::shared_allocation_bound<NativeLayoutPlanner>())
         .add_product(std::min(next_page_id, limits.max_frames),
-                     detail::shared_allocation_bound<OverflowBackingSet::Entry>())
+                     detail::shared_allocation_bound<OverflowPageBlockSet::Entry>())
         .value();
 }
 
 Status NativeLayoutPlanner::accept(CapturedFrameResult::Plan page)
 {
-    if (!view_ || page_ || limits_.max_frames == 0 || limits_.max_frames > MappingView::kPageLimit ||
+    if (!view_ || page_ || limits_.max_frames == 0 || limits_.max_frames > MappingTable::kPageLimit ||
         limits_.max_dependency_steps == 0) {
         return Status::invalid_argument("native layout has no bounded idle captured view");
     }
@@ -57,7 +57,7 @@ Status NativeLayoutPlanner::accept(CapturedFrameResult::Plan page)
     return Status::Ok();
 }
 
-Status NativeLayoutPlanner::include(uint64_t pid, const OverflowBackingPage &page)
+Status NativeLayoutPlanner::include(uint64_t pid, const OverflowPageBlock &page)
 {
     if (pid >= view_->next_page_id || primary_.contains(pid) || view_->mapping.get(pid)) {
         return Status::corruption("native overflow PID aliases a primary or exceeds its namespace");
@@ -66,13 +66,15 @@ Status NativeLayoutPlanner::include(uint64_t pid, const OverflowBackingPage &pag
     if (found != old_.pages.end()) {
         const auto &old = found->second;
         if (old.next != page.next || old.bytes != page.bytes || old.frame_bytes != page.frame_bytes ||
-            old.logical_bytes != page.logical_bytes || old.backing->backend_id != page.backing->backend_id ||
-            old.backing->generation != page.backing->generation || old.backing->address != page.backing->address ||
-            old.backing->length != page.backing->length || old.backing->encoding != page.backing->encoding ||
-            old.backing->storage != page.backing->storage ||
-            !same_chunk_backing(old.backing->chunk, page.backing->chunk) ||
-            old.backing->resident_frame.data() != page.backing->resident_frame.data() ||
-            old.backing->resident_frame.size() != page.backing->resident_frame.size()) {
+            old.logical_bytes != page.logical_bytes ||
+            old.page_block->page_store_id != page.page_block->page_store_id ||
+            old.page_block->generation != page.page_block->generation ||
+            old.page_block->address != page.page_block->address || old.page_block->length != page.page_block->length ||
+            old.page_block->encoding != page.page_block->encoding ||
+            old.page_block->storage != page.page_block->storage ||
+            !same_chunk_page_block(old.page_block->chunk, page.page_block->chunk) ||
+            old.page_block->resident_frame.data() != page.page_block->resident_frame.data() ||
+            old.page_block->resident_frame.size() != page.page_block->resident_frame.size()) {
             return Status::corruption("one native PID names conflicting captured extents");
         }
     }
@@ -98,7 +100,7 @@ Status NativeLayoutPlanner::step()
         return Status::resource_exhausted("native overflow dependency work exceeds its bound");
     }
     const auto &reference = page_->reused_overflow[reference_];
-    if (!reference.backing) {
+    if (!reference.page_block) {
         return Status::unavailable("native overflow has no typed physical descriptors");
     }
     if (remaining_ == 0) {
@@ -108,24 +110,24 @@ Status NativeLayoutPlanner::step()
         pid_       = reference.head;
         remaining_ = reference.bytes;
     }
-    const auto found = reference.backing->pages.find(pid_);
-    if (found == reference.backing->pages.end()) {
+    const auto found = reference.page_block->pages.find(pid_);
+    if (found == reference.page_block->pages.end()) {
         return Status::corruption("native overflow is missing from its primary dependency catalog");
     }
     const auto &old = found->second;
-    if (!old.backing || !old.backing->readable() || old.backing->encoding != 0 || old.bytes == 0 ||
+    if (!old.page_block || !old.page_block->readable() || old.page_block->encoding != 0 || old.bytes == 0 ||
         old.frame_bytes <= kFrameHeaderSize + kFrameTrailerSize || old.bytes > overflow_chunk_cap(old.frame_bytes) ||
         old.bytes > remaining_ || old.next == pid_ || ((old.next == kInvalidPageId) != (old.bytes == remaining_))) {
         return Status::corruption("native overflow descriptor disagrees with its logical chain");
     }
-    if (old.backing->storage == BackingStorage::kResidentFrame) {
-        if (old.backing->durability != BackingDurability::kResident ||
-            old.backing->resident_frame.size() != old.frame_bytes || old.logical_bytes != old.frame_bytes) {
+    if (old.page_block->storage == PageBlockStorage::kResidentFrame) {
+        if (old.page_block->durability != PageBlockDurability::kResident ||
+            old.page_block->resident_frame.size() != old.frame_bytes || old.logical_bytes != old.frame_bytes) {
             return Status::corruption("native resident overflow has inconsistent physical geometry");
         }
     }
-    else if (old.backing->backend_id != backend_id_ || old.backing->generation != incarnation_ ||
-             old.logical_bytes < kDurableBlobHeader || old.logical_bytes > old.backing->length) {
+    else if (old.page_block->page_store_id != page_store_id_ || old.page_block->generation != incarnation_ ||
+             old.logical_bytes < kDurableBlobHeader || old.logical_bytes > old.page_block->length) {
         return Status::corruption("native durable overflow has inconsistent domain or blob geometry");
     }
     auto status = include(pid_, old);
@@ -146,8 +148,8 @@ Status NativeLayoutPlanner::finish()
     if (!view_ || pending()) {
         return Status::invalid_argument("native layout is not complete");
     }
-    if (view_->next_page_id > MappingView::kPageLimit ||
-        new_overflow_ > MappingView::kPageLimit - view_->next_page_id) {
+    if (view_->next_page_id > MappingTable::kPageLimit ||
+        new_overflow_ > MappingTable::kPageLimit - view_->next_page_id) {
         return Status::resource_exhausted("native overflow namespace exhausted");
     }
     return Status::Ok();

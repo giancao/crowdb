@@ -22,7 +22,7 @@ class FlushPersistence : public std::enable_shared_from_this<FlushPersistence>
 
     void               write(PageEncodeInput input, FlushBatchOptions::ReserveOverflow reserve,
                              FlushBatchOptions::PersistComplete done);
-    void               commit(std::shared_ptr<const PublishedTreeState> view, FlushBatch::MaintenanceComplete done);
+    void               commit(std::shared_ptr<const TreeRoot> view, FlushBatch::MaintenanceComplete done);
     [[nodiscard]] bool selected(uint64_t pid, const PageKeyRange &range) const;
     [[nodiscard]] std::optional<CheckpointResult> result() const;
 
@@ -30,7 +30,7 @@ class FlushPersistence : public std::enable_shared_from_this<FlushPersistence>
     friend struct Page;
     friend struct Commit;
     std::shared_ptr<checkpoint_detail::Preparation>                   preparation_;
-    std::shared_ptr<const PublishedTreeState>                         initial_;
+    std::shared_ptr<const TreeRoot>                                   initial_;
     std::shared_ptr<const CapturedDurablePages>                       inherited_;
     std::shared_ptr<CapturedDurablePages>                             pages_;
     Page                                                             *last_resident_page_ = nullptr;

@@ -4,6 +4,7 @@
 
 #include "crowdb-common/crc32c.h"
 #include "crowdb-tree/maptable/mapping_slot.h"
+#include "snapshot/index_summary_codec.h"
 
 #include <algorithm>
 #include <array>
@@ -20,8 +21,8 @@ template <class T> void put(std::span<uint8_t> output, size_t offset, T value)
 }
 } // namespace
 
-Status encode_segment_into(const SegmentImageHeader &header, std::span<const uint64_t> words, std::span<uint8_t> output,
-                           uint32_t *body_crc)
+Status encode_segment_into(const MappingSegmentImageHeader &header, std::span<const uint64_t> words,
+                           std::span<uint8_t> output, uint32_t *body_crc)
 {
     if (words.size() != header.slot_count || header.live_count > header.slot_count || body_crc == nullptr ||
         output.size() < segment_image_encoded_size(header.slot_count)) {
@@ -66,7 +67,13 @@ Status encode_anchor_into(const CommitAnchor &anchor, std::span<uint8_t> output)
     put(output, 56, anchor.segdir_crc);
     put(output, 60, anchor.leaf_count);
     put(output, 68, anchor.inner_count);
-    put(output, 76, common::crc32c(output.data(), 76));
+    put(output, 76, anchor.summaries_addr);
+    put(output, 84, anchor.summaries_len);
+    put(output, 88, anchor.summaries_crc);
+    if (anchor.root_summary) {
+        encode_index_summary(output.data() + 92, 1, *anchor.root_summary);
+    }
+    put(output, kAnchorChecksumOffset, common::crc32c(output.data(), kAnchorChecksumOffset));
     return Status::Ok();
 }
 

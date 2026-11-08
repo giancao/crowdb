@@ -84,9 +84,9 @@ bool PublishedScan::State::fill_leaf()
         leaf = walker.leaf();
     }
     while (report.work < limits.max_work) {
-        if (auto backing = walker.needs_inner()) {
+        if (auto page_block = walker.needs_inner()) {
             loading_index = true;
-            load_inner(std::move(backing));
+            load_inner(std::move(page_block));
             return false;
         }
         if (!leaf) {

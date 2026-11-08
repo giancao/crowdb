@@ -1,14 +1,14 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_backend_state.h"
-#include "backend/chunk/chunk_protocol_operation.h"
-#include "backend/chunk/chunk_write_queue.h"
 #include "btree/allocation_account.h"
 #include "btree/apply_dispatcher.h"
-#include "btree/backing_identity.h"
+#include "btree/page_block_identity.h"
 #include "btree/tree_core.h"
 #include "btree/tree_core_geometry.h"
 #include "host_completion.h"
+#include "page_store/chunk/chunk_protocol_operation.h"
+#include "page_store/chunk/chunk_write_queue.h"
+#include "page_store/chunk/page_chunk_store_state.h"
 #include "runtime/tree_runtime_internal.h"
 #include "snapshot/chunk_root_recovery.h"
 #include "snapshot/recovered_state.h"
@@ -26,17 +26,17 @@ struct RootLoad : std::enable_shared_from_this<RootLoad>
     {
     }
 
-    std::shared_ptr<const ChunkBackingDomain> domain;
-    std::shared_ptr<AllocationBudget>         metadata;
-    std::shared_ptr<ScheduledPageStore>       cpu;
-    AsyncCompletion                           completion;
-    detail::ChunkRootBytes                    bytes;
-    ChunkRootManifest                         root;
-    uint64_t                                  generation        = 0;
-    uint64_t                                  latest_generation = 0;
-    bool                                      loaded_current    = false;
-    bool                                      absent            = false;
-    bool                                      done              = false;
+    std::shared_ptr<const PageChunkStoreDomain> domain;
+    std::shared_ptr<AllocationBudget>           metadata;
+    std::shared_ptr<ScheduledPageStore>         cpu;
+    AsyncCompletion                             completion;
+    detail::ChunkRootBytes                      bytes;
+    ChunkRootManifest                           root;
+    uint64_t                                    generation        = 0;
+    uint64_t                                    latest_generation = 0;
+    bool                                        loaded_current    = false;
+    bool                                        absent            = false;
+    bool                                        done              = false;
 
     void submit_step(bool stopped, std::shared_ptr<ScheduledPageStore> store, AsyncCompletion complete)
     {
@@ -128,11 +128,11 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
 
     using Connection = stdexec::connect_result_t<detail::CallbackSender, Receiver>;
 
-    ChunkOpen(Config config, std::shared_ptr<TreeRuntimeBinding> binding, std::shared_ptr<ChunkBackendState> backend,
-              PageStore::RuntimeOpenComplete complete)
+    ChunkOpen(Config config, std::shared_ptr<TreeRuntimeBinding> binding,
+              std::shared_ptr<PageChunkStoreState> page_store_state, PageStore::RuntimeOpenComplete complete)
         : config(std::move(config)),
           binding(std::move(binding)),
-          backend(std::move(backend)),
+          page_store_state(std::move(page_store_state)),
           complete(std::move(complete))
     {
     }
@@ -199,19 +199,20 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
 
     void load_root()
     {
-        auto       *facade   = backend->facade;
+        auto       *facade   = page_store_state->facade;
         const auto &metadata = binding->lifecycle_budget();
-        auto        status   = facade->make_domain(detail::allocate_backend_identity(), metadata, &backend->domain);
+        auto status = facade->make_domain(detail::allocate_page_store_identity(), metadata, &page_store_state->domain);
         if (status.ok()) {
             status = facade->prepare_writer(metadata);
         }
         if (status.ok()) {
-            backend->writer_session = facade->take_writer();
-            status                  = detail::ChunkRuntimeIds::create(backend->domain->epoch, metadata, &backend->ids);
+            page_store_state->writer_session = facade->take_writer();
+            status = detail::ChunkRuntimeIds::create(page_store_state->domain->epoch, metadata, &page_store_state->ids);
         }
         if (status.ok()) {
-            status = ScheduledPageStore::create(facade, nullptr, config.backend_owner, binding, metadata,
-                                                binding->backend_lane(), &backend->store, {}, &ChunkWriteQueue::create);
+            status = ScheduledPageStore::create(facade, nullptr, config.page_store_owner, binding, metadata,
+                                                binding->backend_lane(), &page_store_state->store, {},
+                                                &ChunkWriteQueue::create);
         }
         if (!status.ok()) {
             finish(std::move(status));
@@ -226,15 +227,15 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
         }
         budget.bytes        = std::move(allocations);
         budget.cpu_progress = binding->backend_progress();
-        lifetime.emplace(metadata, backend->store);
+        lifetime.emplace(metadata, page_store_state->store);
         status = lifetime->acquire(budget.bytes, &ticket);
         if (!status.ok()) {
             finish(std::move(status));
             return;
         }
-        store            = ticket->backend(backend->store.get());
+        store            = ticket->page_store(page_store_state->store.get());
         root             = detail::reserved_shared<RootLoad>(budget.bytes, budget.bytes);
-        root->domain     = backend->domain;
+        root->domain     = page_store_state->domain;
         root->generation = facade->options().open_generation;
         start_protocol(root, [loaded = root] { return loaded->done; }, &ChunkOpen::recover_packs);
     }
@@ -247,9 +248,9 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
         }
         identity               = root->root.identity;
         limits.max_frame_bytes = std::max(limits.max_frame_bytes, physical_frame_capacity(config));
-        limits.max_blob_bytes  = round_up_to_iu(limits.max_frame_bytes + kDurableBlobHeader, backend->iu_size);
-        auto status            = ChunkRootRecovery::create(std::move(root->root), backend->domain, backend->ids, limits,
-                                                           budget.bytes, budget.bytes, &recovery);
+        limits.max_blob_bytes  = round_up_to_iu(limits.max_frame_bytes + kDurableBlobHeader, page_store_state->iu_size);
+        auto status = ChunkRootRecovery::create(std::move(root->root), page_store_state->domain, page_store_state->ids,
+                                                limits, budget.bytes, budget.bytes, &recovery);
         root.reset();
         if (!status.ok()) {
             finish(std::move(status));
@@ -265,7 +266,7 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
         loads.max_blob_bytes       = limits.max_blob_bytes;
         loads.max_chunk_blob_bytes = limits.max_blob_bytes;
         auto loader                = detail::reserved_shared<AsyncStorePageLoader>(
-            budget.bytes, store, binding->cpu(), binding->lane(), loads, OverflowBackingResolver{}, budget);
+            budget.bytes, store, binding->cpu(), binding->lane(), loads, OverflowPageBlockResolver{}, budget);
         RecoveredStateLimits graph_limits;
         graph_limits.max_pages = std::max<size_t>(1, recovery->pages()->frames.size());
         auto status = RecoveredStateOperation::create(recovery->pages(), loader, binding->cpu(), binding->lane(),
@@ -279,10 +280,10 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
 
     void publish_graph()
     {
-        initial                  = graph->result().state;
-        backend->max_frame_bytes = recovery->max_frame_bytes();
-        backend->max_blob_bytes  = recovery->max_blob_bytes();
-        backend->recovered(identity, recovery->take_manifest());
+        initial                           = graph->result().state;
+        page_store_state->max_frame_bytes = recovery->max_frame_bytes();
+        page_store_state->max_blob_bytes  = recovery->max_blob_bytes();
+        page_store_state->recovered(identity, recovery->take_manifest());
         finish(Status::Ok());
     }
 
@@ -315,9 +316,9 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
         std::shared_ptr<TreeCore> opened;
         try {
             if (outcome.ok()) {
-                outcome = TreeCore::create(std::move(config), binding,
-                                           {.initial = std::move(initial), .local = {}, .chunk = std::move(backend)},
-                                           &opened, true);
+                outcome = TreeCore::create(
+                    std::move(config), binding,
+                    {.initial = std::move(initial), .local = {}, .chunk = std::move(page_store_state)}, &opened, true);
             }
         }
         catch (const std::bad_alloc &) {
@@ -326,14 +327,14 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
         catch (...) {
             outcome = Status::internal_error();
         }
-        backend.reset();
+        page_store_state.reset();
         auto done = std::move(complete);
         done(std::move(outcome), std::move(opened));
     }
 
     Config                                         config;
     std::shared_ptr<TreeRuntimeBinding>            binding;
-    std::shared_ptr<ChunkBackendState>             backend;
+    std::shared_ptr<PageChunkStoreState>           page_store_state;
     PageStore::RuntimeOpenComplete                 complete;
     ApplyDispatcher::Node                          ready{&ChunkOpen::run, this};
     Step                                           next = nullptr;
@@ -347,7 +348,7 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
     std::shared_ptr<ChunkProtocolOperation>        protocol;
     std::shared_ptr<ChunkRootRecovery>             recovery;
     std::shared_ptr<RecoveredStateOperation>       graph;
-    std::shared_ptr<const PublishedTreeState>      initial;
+    std::shared_ptr<const TreeRoot>                initial;
     std::shared_ptr<Connection>                    connected;
     ChunkRootIdentity                              identity;
     ChunkRecoveryLimits                            limits;
@@ -355,8 +356,8 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
 
 Status submit_chunk_open(const Config &config, PageStore::RuntimeOpenComplete complete)
 try {
-    auto *facade = dynamic_cast<detail::ChunkRuntimePageStore *>(config.page_store);
-    if (!complete || facade == nullptr || !facade->supported() || !config.backend_owner ||
+    auto *facade = dynamic_cast<detail::PageChunkStore *>(config.page_store);
+    if (!complete || facade == nullptr || !facade->supported() || !config.page_store_owner ||
         config.async_page_store != nullptr) {
         return Status::invalid_argument();
     }
@@ -373,10 +374,10 @@ try {
     if (!status.ok()) {
         return status;
     }
-    auto chunk           = detail::reserved_shared<ChunkBackendState>(binding->lifecycle_budget());
-    chunk->facade        = facade;
-    chunk->backend_owner = config.backend_owner;
-    chunk->iu_size       = facade->iu_size();
+    auto chunk              = detail::reserved_shared<PageChunkStoreState>(binding->lifecycle_budget());
+    chunk->facade           = facade;
+    chunk->page_store_owner = config.page_store_owner;
+    chunk->iu_size          = facade->iu_size();
     if (!facade->try_claim_runtime_domain()) {
         return Status::unavailable();
     }

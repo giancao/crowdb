@@ -19,7 +19,7 @@ void CheckpointOperation::State::preflight()
     fixed_generation = current->generation;
     structure_l1_seq.reset();
     if (current->pending_handoff || current->flush_admission_owner != 0 || current->checkpoint_inflight ||
-        backend_needs_recovery()) {
+        page_store_needs_recovery()) {
         finish(Status::unavailable());
         return;
     }
@@ -45,7 +45,7 @@ void CheckpointOperation::State::preflight()
     capture_request->transaction.record     = detail::reserved_shared<InstallRecord>(control_metadata, record);
     finish_request->transaction.record      = detail::reserved_shared<InstallRecord>(finish_metadata, record);
     capture_request->transaction.checkpoint = {.action = CheckpointAction::Capture, .token = report.checkpoint_token};
-    auto fixed                              = detail::reserved_shared<PublishedTreeState>(control_metadata, *current);
+    auto fixed                              = detail::reserved_shared<TreeRoot>(control_metadata, *current);
     // Source writers may continue above this frontier. The immutable L1 map
     // and Capture's expected L1 sequence keep this layout proof exact.
     auto sources   = detail::reserved_shared<PublishedSources>(control_metadata, control_metadata);
@@ -101,15 +101,15 @@ void CheckpointOperation::State::begin_layout()
         finish(Status::resource_exhausted());
         return;
     }
-    options.write.frames.max_depth        = depth;
-    options.write.frames.reuse_backend_id = backend_identity();
-    auto limits                           = options.write.frames;
-    limits.max_depth                      = depth;
-    limits.plan_only                      = true;
-    limits.encode.metadata                = budget.bytes;
-    planner     = detail::reserved_unique<CapturedLayoutPlanner>(budget.bytes, view->next_page_id, backend_identity(),
-                                                                 options.write, options.metadata.max_segments,
-                                                                 inherited_pages(), budget.bytes);
+    options.write.frames.max_depth           = depth;
+    options.write.frames.reuse_page_store_id = page_store_identity();
+    auto limits                              = options.write.frames;
+    limits.max_depth                         = depth;
+    limits.plan_only                         = true;
+    limits.encode.metadata                   = budget.bytes;
+    planner = detail::reserved_unique<CapturedLayoutPlanner>(budget.bytes, view->next_page_id, page_store_identity(),
+                                                             options.write, options.metadata.max_segments,
+                                                             inherited_pages(), budget.bytes);
     auto status = CapturedFrameStream::create(view, loader, runtime, lane, std::move(limits), {}, &planning_stream);
     if (!status.ok()) {
         finish(std::move(status));

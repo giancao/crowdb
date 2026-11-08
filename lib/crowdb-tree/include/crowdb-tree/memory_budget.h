@@ -81,7 +81,7 @@ struct RetirementNode
 enum class AllocationKind : uint8_t { kUnknown, kPayload, kFrame, kMetadata, kIo, kScratch, kCount };
 
 // Allocation owners can outlive the Tree and every source catalog. Claims
-// fail without waiting. Reservations consume admitted credit; stable backend
+// fail without waiting. Reservations consume admitted credit; stable page store
 // accounts admit new capacity against both their current Tree and host quota.
 class AllocationBudget
 {

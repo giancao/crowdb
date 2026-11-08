@@ -5,7 +5,7 @@
 
 namespace crowdb::tree
 {
-Status TreeCore::install_generation(std::shared_ptr<const PublishedTreeState> candidate, const SplitGeneration *split)
+Status TreeCore::install_generation(std::shared_ptr<const TreeRoot> candidate, const SplitGeneration *split)
 {
     std::shared_ptr<TreeGenerationLease> prepared;
     auto status = TreeGenerationLease::prepare(*this, std::move(candidate), split, &prepared);

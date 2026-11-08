@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -22,9 +22,9 @@ std::shared_ptr<InstallRecord> metric_record(uint64_t sequence, uint64_t generat
         InstallToken{.generation = generation, .batch = 1, .range = sequence, .sequence = 0});
 }
 
-std::shared_ptr<PublishedPage> metric_page(uint64_t revision)
+std::shared_ptr<PageEntry> metric_page(uint64_t revision)
 {
-    auto page              = std::make_shared<PublishedPage>();
+    auto page              = std::make_shared<PageEntry>();
     page->revision         = revision;
     page->leaf             = std::make_shared<PageState>();
     page->metrics.dirty    = revision % 2 != 0;

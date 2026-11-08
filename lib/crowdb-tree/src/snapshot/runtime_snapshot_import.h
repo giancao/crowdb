@@ -8,7 +8,7 @@
 namespace crowdb::tree
 {
 // A private staging stream holds byte admission but no accepted Tree ticket,
-// backend alias, or IO permit while it waits for the caller's next chunk.
+// page store alias, or IO permit while it waits for the caller's next chunk.
 class RuntimeSnapshotImport
 {
   public:

@@ -10,7 +10,7 @@ struct ReclaimAdmission
     PublicationCoordinator                  *publisher;
     std::shared_ptr<ResourceBudget::Account> account;
     PageMaintenanceOperationOptions          options;
-    Status acquire_window(const MappingView &mapping, MaintenancePublicationOptions *publication,
+    Status acquire_window(const MappingTable &mapping, MaintenancePublicationOptions *publication,
                           std::shared_ptr<AllocationReservation> *out) const;
 };
 } // namespace crowdb::tree::detail

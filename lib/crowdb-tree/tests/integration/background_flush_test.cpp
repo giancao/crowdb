@@ -4,8 +4,8 @@
 // Explicit flush() drains the MemTable into L1 without a background thread.
 // The upper-layer maintenance loop (run_pass) is responsible for calling
 // flush() periodically.
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -26,7 +26,7 @@ Batch put_one(const std::string &k, const std::string &v)
 
 TEST(ExplicitFlush, NoAutoFlushWithoutExplicitCall)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
 
@@ -40,7 +40,7 @@ TEST(ExplicitFlush, NoAutoFlushWithoutExplicitCall)
 
 TEST(ExplicitFlush, FlushDrainsMemTable)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
 
@@ -63,7 +63,7 @@ TEST(ExplicitFlush, SafeAcrossOpenRecovery)
 {
     // Reopen a store with prior durable state: recovery must complete before
     // any external access, and the recovered state must be correct.
-    MemPageStore store(1);
+    PageMemStore store(1);
     {
         Config opt;
         opt.page_store = &store;

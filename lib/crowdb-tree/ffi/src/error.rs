@@ -57,7 +57,7 @@ pub(crate) fn take_buf(mut buf: sys::ct_buf) -> Vec<u8> {
 /// be a borrowed pointer into a still-live frame (zero-copy
 /// fast path, ) that must never be passed to
 /// `ct_free_buf`. The underlying `ct_future` (and, with it, any epoch guard
-/// backing that borrow) is released separately, immediately afterward, via
+/// page block that borrow) is released separately, immediately afterward, via
 /// `ct_future_free` -- see `try_poll_ct_future`.
 pub(crate) fn copy_buf(buf: sys::ct_buf) -> Vec<u8> {
     if buf.data.is_null() || buf.len == 0 {

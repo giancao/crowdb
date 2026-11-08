@@ -1,12 +1,12 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Combined stress: compression + overflow + in-frame deltas + a small buffer
+// Combined stress: compression + overflow + a small buffer
 // pool (forces eviction) + periodic snapshots, validated against an in-mem
 // oracle live and after reopen. Plus a focused test that an overflow chain whose
 // pages were evicted is still fully retired on overwrite (no leak; ASan covers).
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -52,15 +52,13 @@ std::string make_val(size_t n, uint32_t seed)
 
 TEST(KitchenSink, AllFeaturesRandomizedReopen)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store        = &store;
     opt.compression       = compress_algo::kLz4;
     opt.frame_bytes       = 4096;
     opt.buffer_pool_bytes = static_cast<size_t>(64) * 1024; // ~16 frames -> eviction under pressure
     opt.max_inline_value  = 80;                             // mix inline + overflow
-    opt.inframe_delta     = true;
-    opt.max_inframe_delta = 6;
     opt.max_delta_len     = 3;
     opt.leaf_split_bytes  = 1024;
 
@@ -78,7 +76,7 @@ TEST(KitchenSink, AllFeaturesRandomizedReopen)
                 oracle.erase(key);
             }
             else {
-                // ~1/3 large (overflow), else small (inline / in-frame delta).
+                // ~1/3 large (overflow), else small (inline).
                 size_t      n = ((rng() % 3) == 0) ? (200 + static_cast<size_t>(rng() % 9000))
                                                    : (1 + static_cast<size_t>(rng() % 60));
                 std::string v = make_val(n, static_cast<uint32_t>(slot));
@@ -126,7 +124,7 @@ TEST(KitchenSink, AllFeaturesRandomizedReopen)
 
 TEST(KitchenSink, OverwriteEvictedOverflowChainNoLeak)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.frame_bytes      = 4096;

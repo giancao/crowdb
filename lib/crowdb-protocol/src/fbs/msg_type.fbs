@@ -81,6 +81,8 @@ enum FBMsgType : int16 {
     ESnapshotAbortResponse = 1025,
     EPeerConnectionRegistration = 1026,
     EPeerConnectionResponse = 1027,
+    EPeerListenerRequest = 1028,
+    EPeerListenerResponse = 1029,
     // kv client-facing service (range 1100s, see kv_client.fbs — R117)
     EKvSetRequest = 1100,
     EKvResponse = 1101,

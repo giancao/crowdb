@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crowdb_protocol::kv_consensus_fb::{
     FBPeerConnectionRegistration, FBPeerConnectionRegistrationArgs, FBPeerConnectionResponse,
-    FBPeerConnectionResponseArgs,
+    FBPeerConnectionResponseArgs, FBPeerListenerRequest, FBPeerListenerRequestArgs, FBPeerListenerResponse,
+    FBPeerListenerResponseArgs,
 };
 use crowdb_rpc_ffi::{Connection, ServerRequest};
 
@@ -16,8 +17,46 @@ use super::{
 
 const REGISTER_PEER: u16 = FBMsgType::EPeerConnectionRegistration.0 as u16;
 const PEER_RESPONSE: u16 = FBMsgType::EPeerConnectionResponse.0 as u16;
+const LISTENER_REQUEST: u16 = FBMsgType::EPeerListenerRequest.0 as u16;
+const LISTENER_RESPONSE: u16 = FBMsgType::EPeerListenerResponse.0 as u16;
 
 impl PxRpcTransport {
+    pub(crate) fn for_snapshot_join() -> Self {
+        Self {
+            discover_peer_listener: true,
+            ..Self::new()
+        }
+    }
+
+    #[cfg(feature = "test-util")]
+    #[must_use]
+    pub fn with_peer_discovery_for_tests() -> Self {
+        Self::for_snapshot_join()
+    }
+
+    pub(crate) fn register_listener_discovery(server: &Arc<RpcServer>, port: u16) {
+        server.register_owned_handler(LISTENER_REQUEST, move |request| {
+            if flatbuffers::root::<FBPeerListenerRequest>(request.control()).is_err() {
+                return;
+            }
+            let mut builder = FlatBufferBuilder::new();
+            let response = FBPeerListenerResponse::create(
+                &mut builder,
+                &FBPeerListenerResponseArgs {
+                    id: request.request_id,
+                    rpc_create_nano: request.rpc_create_nano,
+                    port,
+                },
+            );
+            builder.finish(response, None);
+            let _ = request.reply(
+                Buffer::from_bytes(builder.finished_data()),
+                None,
+                LISTENER_RESPONSE,
+            );
+        });
+    }
+
     pub(crate) fn on_listener(server: Arc<RpcServer>, store: &Arc<PxKvStore>) -> Arc<Self> {
         let transport = Arc::new(Self::with_server(
             server,
@@ -38,6 +77,10 @@ impl PxRpcTransport {
 
     pub(super) async fn connect_peer(&self, endpoint: &str) -> Result<SelectedConnection, PxReplicaError> {
         let (host, port) = parse_endpoint(endpoint).map_err(PxReplicaError::Internal)?;
+        let port = match self.peer_listener_port(&host, port).await {
+            Ok(port) => port,
+            Err(error) => return self.connections.get(endpoint).ok_or(error),
+        };
         let identity = self.peer_identity(endpoint);
         let sequence = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -79,6 +122,60 @@ impl PxRpcTransport {
         self.connections
             .get(endpoint)
             .ok_or_else(|| rpc_error_to_px(RpcError::ConnectionClosed))
+    }
+
+    pub(super) async fn connect_snapshot_peer(
+        &self,
+        endpoint: &str,
+    ) -> Result<SelectedConnection, PxReplicaError> {
+        let (host, port) = parse_endpoint(endpoint).map_err(PxReplicaError::Internal)?;
+        let port = self.peer_listener_port(&host, port).await?;
+        let connection = self
+            .server
+            .connect_native_route(&host, port)
+            .await
+            .map_err(rpc_error_to_px)?;
+        self.rpc.attach(&connection);
+        self.connections
+            .publish_peer_connections(endpoint, u128::MAX, 0, &[connection]);
+        self.connections
+            .get(endpoint)
+            .ok_or_else(|| rpc_error_to_px(RpcError::ConnectionClosed))
+    }
+
+    async fn peer_listener_port(&self, host: &str, port: i32) -> Result<i32, PxReplicaError> {
+        let connection = self.server.connect_tcp(host, port).map_err(rpc_error_to_px)?;
+        self.rpc.attach(&connection);
+        let id = self.next_id();
+        let mut builder = FlatBufferBuilder::new();
+        let request = FBPeerListenerRequest::create(
+            &mut builder,
+            &FBPeerListenerRequestArgs {
+                id,
+                rpc_create_nano: 0,
+            },
+        );
+        builder.finish(request, None);
+        let response = self
+            .rpc
+            .call(
+                &self.server,
+                &connection,
+                id,
+                Buffer::from_bytes(builder.finished_data()),
+                None,
+                LISTENER_REQUEST,
+            )
+            .map_err(rpc_error_to_px)?
+            .await
+            .map_err(rpc_error_to_px)?;
+        response
+            .control
+            .as_ref()
+            .and_then(|buffer| flatbuffers::root::<FBPeerListenerResponse>(buffer.bytes()).ok())
+            .filter(|reply| reply.id() == id && reply.port() != 0)
+            .map(|reply| i32::from(reply.port()))
+            .ok_or_else(|| PxReplicaError::Transport("Paxos peer listener discovery returned no port".into()))
     }
 
     async fn confirm_peer(

@@ -48,5 +48,5 @@ fn standalone_stats_sample_the_same_runtime_state() {
     let progress = tree.progress_stats().unwrap();
     assert_eq!(progress.instance_generation, state.instance_generation);
     assert_eq!(progress.commit_seq, state.commit_seq);
-    tree.backing_stats().unwrap();
+    tree.page_block_stats().unwrap();
 }

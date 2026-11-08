@@ -35,7 +35,7 @@ struct ct_future_impl
     // since there is exactly one writer-then-reader handoff per future.
     std::atomic<bool> done{false};
     ct_status         status = static_cast<ct_status>(crowdb::tree::Code::kOk);
-    // kGet only. Retains the immutable allocation backing the borrowed bytes.
+    // kGet only. Retains the immutable allocation page block the borrowed bytes.
     // ct_future_poll deliberately does *not* delete the handle for a kGet
     // future (see its updated doc comment in c_api.h); the caller must
     // always follow up with ct_future_free once done reading out_value.

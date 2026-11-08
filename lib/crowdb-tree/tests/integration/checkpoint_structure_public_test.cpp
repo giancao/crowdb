@@ -13,7 +13,7 @@ namespace
 {
 struct TestCheckpointContinuation
 {
-    MemPageStore store{1};
+    PageMemStore store{1};
 
     static Config config(PageStore *store)
     {
@@ -40,7 +40,7 @@ struct TestCheckpointContinuation
     Status large_leaf() const
     {
         auto before                = core.capture();
-        auto replacement           = std::make_shared<PublishedPage>();
+        auto replacement           = std::make_shared<PageEntry>();
         replacement->revision      = before->mapping.get(0)->revision + 1;
         replacement->leaf          = test_read::page({
             {.key = "a", .value = std::string(80, 'a')},
@@ -114,20 +114,19 @@ struct TestCheckpointContinuation
         limits.publication.pages.max_metadata_bytes  = 1024 * 1024;
         limits.publication.max_inner_bytes           = 4096;
         return CheckpointOperation::create(
-            preparation, core.publisher(), core.local_backend(), preparation->ticket->backend(core.async_backend()),
-            core.binding()->cpu(), core.binding()->lane(), preparation->options,
-            {.bytes = credit, .io = {}, .cpu_progress = progress}, preparation->finish, {},
+            preparation, core.publisher(), core.local_page_store(),
+            preparation->ticket->page_store(core.async_page_store()), core.binding()->cpu(), core.binding()->lane(),
+            preparation->options, {.bytes = credit, .io = {}, .cpu_progress = progress}, preparation->finish, {},
             [preparation, handoffs](std::shared_ptr<FlushOperation> *out) {
                 ++*handoffs;
                 return preparation->core->prepare_flush(out, preparation->ticket);
             },
-            [preparation](const PublishedTreeState &view, const CapturedWritePlan *plan, CheckpointWork *out) {
+            [preparation](const TreeRoot &view, const CapturedWritePlan *plan, CheckpointWork *out) {
                 return preparation->work(view, plan, out);
             },
             &operation, {}, {}, {}, {}, {},
-            [preparation, before_split = std::move(before_split)](std::shared_ptr<const PublishedTreeState> view,
-                                                                  uint64_t                                  pid,
-                                                                  std::shared_ptr<PageSplitOperation>      *out) {
+            [preparation, before_split = std::move(before_split)](std::shared_ptr<const TreeRoot> view, uint64_t pid,
+                                                                  std::shared_ptr<PageSplitOperation> *out) {
                 auto status = before_split();
                 return status.ok() ? preparation->structure(std::move(view), pid, out) : status;
             });
@@ -197,7 +196,7 @@ TEST(CheckpointContinuation, FailedStructureAdmissionPreservesThePreviousDurable
     EXPECT_EQ(test.core.durable_coverage(), 1U);
     EXPECT_EQ(test.core.snapshot_sequence(), sequence);
     EXPECT_FALSE(test.core.capture()->checkpoint_inflight);
-    EXPECT_FALSE(test.core.local_backend()->checkpoints->needs_recovery());
+    EXPECT_FALSE(test.core.local_page_store()->checkpoints->needs_recovery());
 }
 } // namespace
 } // namespace crowdb::tree

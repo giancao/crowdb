@@ -8,7 +8,7 @@ namespace crowdb::tree
 void TreeApplyOperation::State::start_pressure()
 {
     auto core = weak_core.lock();
-    if (!core || (!core->local_backend() && !core->chunk_backend()) || !replay_input) {
+    if (!core || (!core->local_page_store() && !core->page_chunk_store()) || !replay_input) {
         finish(Status::invalid_argument("chosen replay pressure requires an owned local backend"));
         return;
     }

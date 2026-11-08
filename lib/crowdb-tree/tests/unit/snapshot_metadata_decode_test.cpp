@@ -65,8 +65,8 @@ TEST(SnapshotMetadataDecode, SegmentMatchesLocalFormatAndIgnoresIuPadding)
         const std::vector<uint64_t> expected{0, word, slot_word::pack_unloaded(9, 1), 0};
         auto                        input = segment(expected, 2);
         input.resize(4096, 0xAA);
-        std::array<uint64_t, 5> words{42, 42, 42, 42, 42};
-        SegmentImageHeader      header;
+        std::array<uint64_t, 5>   words{42, 42, 42, 42, 42};
+        MappingSegmentImageHeader header;
         ASSERT_TRUE(decode_segment_into(input, &header, words).ok());
         EXPECT_TRUE(std::equal(expected.begin(), expected.end(), words.begin()));
         EXPECT_EQ(words.back(), 42U);
@@ -77,15 +77,15 @@ TEST(SnapshotMetadataDecode, SegmentMatchesLocalFormatAndIgnoresIuPadding)
         EXPECT_EQ(header.format_version, 1U);
         EXPECT_EQ(header.body_crc, common::crc32c(input.data() + 32, expected.size() * sizeof(uint64_t)));
     }
-    SegmentImageHeader header;
+    MappingSegmentImageHeader header;
     EXPECT_TRUE(decode_segment_into(segment({}, 0), &header, {}).ok());
 }
 
 TEST(SnapshotMetadataDecode, SegmentTruncationAndOutputCapacityAreCheckedWithoutPartialWrites)
 {
-    const auto              input = segment({0, slot_word::pack_unloaded(1, 1)}, 1);
-    std::array<uint64_t, 2> words{42, 42};
-    SegmentImageHeader      header{.seg_idx = 99};
+    const auto                input = segment({0, slot_word::pack_unloaded(1, 1)}, 1);
+    std::array<uint64_t, 2>   words{42, 42};
+    MappingSegmentImageHeader header{.seg_idx = 99};
     for (size_t length = 0; length < input.size(); ++length) {
         EXPECT_EQ(decode_segment_into(std::span(input).first(length), &header, words).code(), Code::kCorruption);
         EXPECT_EQ(header.seg_idx, 99U);
@@ -98,9 +98,9 @@ TEST(SnapshotMetadataDecode, SegmentTruncationAndOutputCapacityAreCheckedWithout
 
 TEST(SnapshotMetadataDecode, SegmentRejectsMagicCrcVersionFlagsCountsAndIllegalWords)
 {
-    const auto              valid = segment({slot_word::pack_unloaded(1, 1)}, 1);
-    std::array<uint64_t, 1> words{42};
-    SegmentImageHeader      header{.seg_idx = 99};
+    const auto                valid = segment({slot_word::pack_unloaded(1, 1)}, 1);
+    std::array<uint64_t, 1>   words{42};
+    MappingSegmentImageHeader header{.seg_idx = 99};
     for (const size_t offset : {0U, 28U, 32U, 40U}) {
         auto input = valid;
         input[offset] ^= 1;
@@ -233,37 +233,42 @@ TEST(SnapshotMetadataDecode, DirectoryRejectsHeaderBodyTrailerCrcAndReservedEntr
 
 TEST(SnapshotMetadataDecode, AnchorSpanDecoderChecksLengthMagicFormatAndCrcWithoutChangingFailedOutput)
 {
-    const CommitAnchor   anchor{.magic             = kAnchorMagic,
-                                .format_version    = kFormatVersion,
-                                .snapshot_seq      = 7,
-                                .root_page_id      = 2,
-                                .last_applied_slot = 99,
-                                .next_page_id      = 9,
-                                .segment_slots     = 1024,
-                                .segdir_addr       = 8192,
-                                .segdir_len        = 84,
-                                .segdir_crc        = 42,
-                                .leaf_count        = 4,
-                                .inner_count       = 1};
+    const CommitAnchor anchor{
+        .magic             = kAnchorMagic,
+        .format_version    = kFormatVersion,
+        .snapshot_seq      = 7,
+        .root_page_id      = 2,
+        .last_applied_slot = 99,
+        .next_page_id      = 9,
+        .segment_slots     = 1024,
+        .segdir_addr       = 8192,
+        .segdir_len        = 84,
+        .segdir_crc        = 42,
+        .leaf_count        = 4,
+        .inner_count       = 1,
+        .root_summary      = IndexSummary{.live_kv = 4, .live_key_bytes = 6, .live_value_bytes = 42, .exact = true}
+    };
     std::vector<uint8_t> input;
     encode_anchor(anchor, 4096, &input);
-    CommitAnchor output;
-    ASSERT_TRUE(decode_anchor(std::span(input).first(80), &output));
+    CommitAnchor   output;
+    constexpr auto size = kAnchorChecksumOffset + sizeof(uint32_t);
+    ASSERT_TRUE(decode_anchor(std::span(input).first(size), &output));
     EXPECT_EQ(output.snapshot_seq, 7U);
     EXPECT_EQ(output.last_applied_slot, 99U);
     EXPECT_EQ(output.leaf_count, 4U);
     EXPECT_EQ(output.inner_count, 1U);
-    input[80] = 0xAA;
+    EXPECT_EQ(output.root_summary, anchor.root_summary);
+    input[size] = 0xAA;
     EXPECT_TRUE(decode_anchor(input, &output));
-    for (size_t length = 0; length < 80; ++length) {
+    for (size_t length = 0; length < size; ++length) {
         EXPECT_FALSE(decode_anchor(std::span(input).first(length), &output));
     }
     EXPECT_FALSE(decode_anchor(input, nullptr));
-    for (const size_t offset : {0U, 4U, 8U, 76U}) {
+    for (const size_t offset : std::array<size_t, 5>{0, 4, 8, 76, kAnchorChecksumOffset}) {
         auto corrupt = input;
         corrupt[offset] ^= 1;
         if (offset < 8) {
-            header_crc(corrupt, 76);
+            header_crc(corrupt, kAnchorChecksumOffset);
         }
         EXPECT_FALSE(decode_anchor(corrupt, &output));
         EXPECT_EQ(output.snapshot_seq, 7U);

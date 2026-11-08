@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 #ifdef CROWDB_HAVE_LIBURING
 #    include "allocation_account_test_support.h"
-#    include "backend/local/block_account.h"
-#    include "crowdb-tree/backend/async_page_store.h"
-#    include "crowdb-tree/backend/block_page_store.h"
+#    include "crowdb-tree/page_store/async_page_store.h"
+#    include "crowdb-tree/page_store/page_disk_store.h"
+#    include "page_store/local/block_account.h"
 #    include "test_tmp.h"
 
 #    include <chrono>
@@ -50,12 +50,12 @@ struct TestCompletion
 
 TEST(BlockAsyncAccount, SplitControlsBounceAndBarrierSpendPrepaidCapacityAtTheHardLimit)
 {
-    tree_test::TempDir              directory("block_async_account_");
-    std::unique_ptr<BlockPageStore> store;
-    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 3, 4, 4096, 4096, &store).ok());
-    ResourceBudget    host(limits(kCapacity), 1);
-    auto              account = host.make_account(limits(kCapacity));
-    BackendOpenBudget adopted;
+    tree_test::TempDir             directory("block_async_account_");
+    std::unique_ptr<PageDiskStore> store;
+    ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 3, 4, 4096, 4096, &store).ok());
+    ResourceBudget      host(limits(kCapacity), 1);
+    auto                account = host.make_account(limits(kCapacity));
+    PageStoreOpenBudget adopted;
     ASSERT_TRUE(bind_block_account(store.get(), account, 1, &adopted).ok());
     std::shared_ptr<AllocationBudget> grant;
     ASSERT_TRUE(reserve_backend_operation(
@@ -72,7 +72,7 @@ TEST(BlockAsyncAccount, SplitControlsBounceAndBarrierSpendPrepaidCapacityAtTheHa
         topology.pipelines.push_back({.entries = 16, .mode = ::crowdb::common::PollingMode::Classic});
         ::crowdb::common::DiskIOUring uring(std::move(topology));
         ASSERT_TRUE(uring.valid());
-        BlockAsyncPageStore  backend(store.get(), &uring);
+        AsyncPageDiskStore   backend(store.get(), &uring);
         std::vector<uint8_t> input(8193, 37);
         std::vector<uint8_t> output(8193, 0);
         TestCompletion       completion;

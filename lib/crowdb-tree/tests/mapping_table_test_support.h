@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Legacy mutable mapping model for allocation, packed slots, segment recycling
-// and prepare/commit identity regressions. Production uses immutable MappingView.
+// Legacy mutable mapping model for allocation, packed slots, mapping segment recycling
+// and prepare/commit identity regressions. Production uses immutable MappingTable.
 #pragma once
 
 #include "crowdb-common/metrics/metrics.h"
@@ -62,10 +62,10 @@ class TestMappingTable
     // Clear a slot to empty (slot_word::kEmpty).
     void clear(uint64_t page_id);
 
-    // Wire the epoch manager used to safely reclaim segments that recycle to
+    // Wire the epoch manager used to safely reclaim mapping segments that recycle to
     // empty. Call once,
     // before any concurrent readers can observe the table. If never called,
-    // recycled segments are `delete`d directly on the writer thread -- fine
+    // recycled mapping segments are `delete`d directly on the writer thread -- fine
     // for a standalone table with no concurrent readers (e.g. unit tests),
     // unsafe otherwise.
     void set_epoch_manager(EpochManager *epoch)
@@ -82,26 +82,26 @@ class TestMappingTable
     // Allocate a fresh monotonic PID; stale readers must never see a reused identity.
     uint64_t allocate_page_id();
 
-    // Number of segments currently allocated (diagnostics).
+    // Number of mapping segments currently allocated (diagnostics).
     [[nodiscard]] size_t segments_allocated() const;
 
     // Recovery: resume fresh PID allocation past the highest persisted PID.
     void                   set_next_page_id(uint64_t next);
     [[nodiscard]] uint64_t next_page_id() const;
 
-    // Inspect the test model's current segment, or nullptr after recycling.
+    // Inspect the test model's current mapping segment, or nullptr after recycling.
     [[nodiscard]] TestMappingSegment *segment_at(uint64_t seg_idx) const;
 
-    // Model a prepared segment image commit. Changed identity or write sequence
+    // Model a prepared mapping segment image commit. Changed identity or write sequence
     // rejects the stale image without clearing newer dirty state.
     bool commit_segment_persist(uint64_t seg_idx, TestMappingSegment *expected, uint64_t seen_write_seq,
                                 uint64_t new_generation, uint64_t new_image_addr, uint32_t new_image_len,
                                 uint32_t new_image_crc);
 
-    // Recovery: install a segment's full slot-word array plus its
+    // Recovery: install a mapping segment's full slot-word array plus its
     // bookkeeping directly (no live_count/write_seq transition logic --
     // recovery has no concurrent readers yet). `words.size()` must equal
-    // kSegmentSize, matching the durable segment geometry.
+    // kSegmentSize, matching the durable mapping segment geometry.
     void install_recovered_segment(uint64_t seg_idx, uint64_t generation, uint32_t live_count,
                                    const std::vector<uint64_t> &words, uint64_t image_addr, uint32_t image_len,
                                    uint32_t image_crc);
@@ -111,9 +111,9 @@ class TestMappingTable
 
     // Called by the writer when a slot's last live entry in `seg` goes empty
     // CAS the top-level slot to nullptr -- final and safe
-    // because PIDs are monotonic, so a freed segment's PID range is dead
+    // because PIDs are monotonic, so a freed mapping segment's PID range is dead
     // forever and no allocation will ever revisit `seg_idx` -- then hands the
-    // segment to the epoch manager (if wired) so any in-flight lock-free
+    // mapping segment to the epoch manager (if wired) so any in-flight lock-free
     // reader that already loaded `seg` keeps a valid pointer until its guard
     // drains.
     void recycle_segment_if_empty(uint64_t seg_idx, TestMappingSegment *seg);

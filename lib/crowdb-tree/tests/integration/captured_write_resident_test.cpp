@@ -1,29 +1,30 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "captured_write_test_support.h"
 
 namespace crowdb::tree
 {
 namespace
 {
-std::shared_ptr<PublishedTreeState> shared_resident_chain()
+std::shared_ptr<TreeRoot> shared_resident_chain()
 {
-    auto overflow = std::make_shared<OverflowBackingSet>(nullptr);
+    auto overflow = std::make_shared<OverflowPageBlockSet>(nullptr);
     for (uint64_t pid = 1; pid <= 2; ++pid) {
         auto              bytes = std::make_shared<std::vector<uint8_t>>(512);
         const std::string value(300, 'v');
         const auto        next = pid == 1 ? 2 : kInvalidPageId;
         overflow_frame_build(bytes->data(), bytes->size(), pid, next, reinterpret_cast<const uint8_t *>(value.data()),
                              value.size());
-        auto backing            = std::make_shared<BackingRef>();
-        backing->owner          = bytes;
-        backing->storage        = BackingStorage::kResidentFrame;
-        backing->resident_frame = *bytes;
-        overflow->pages.emplace(
-            pid,
-            OverflowBackingPage{
-                .backing = std::move(backing), .next = next, .bytes = 300, .frame_bytes = 512, .logical_bytes = 0});
+        auto page_block            = std::make_shared<PageBlockRef>();
+        page_block->owner          = bytes;
+        page_block->storage        = PageBlockStorage::kResidentFrame;
+        page_block->resident_frame = *bytes;
+        overflow->pages.emplace(pid, OverflowPageBlock{.page_block    = std::move(page_block),
+                                                       .next          = next,
+                                                       .bytes         = 300,
+                                                       .frame_bytes   = 512,
+                                                       .logical_bytes = 0});
     }
     auto             raw  = std::make_shared<std::vector<uint8_t>>(512);
     const auto       cell = encode_overflow_cell_buf(10, 1, 600);
@@ -31,18 +32,18 @@ std::shared_ptr<PublishedTreeState> shared_resident_chain()
     EXPECT_TRUE(builder.try_append_sorted("a", Slice(cell)));
     EXPECT_TRUE(builder.try_append_sorted("b", Slice(cell)));
     builder.finish(0, kInvalidPageId);
-    auto backing            = std::make_shared<BackingRef>();
-    backing->owner          = raw;
-    backing->storage        = BackingStorage::kResidentFrame;
-    backing->resident_frame = *raw;
-    backing->overflow       = std::move(overflow);
-    auto leaf               = std::make_shared<PageState>();
+    auto page_block            = std::make_shared<PageBlockRef>();
+    page_block->owner          = raw;
+    page_block->storage        = PageBlockStorage::kResidentFrame;
+    page_block->resident_frame = *raw;
+    page_block->overflow       = std::move(overflow);
+    auto leaf                  = std::make_shared<PageState>();
     leaf->bases.push_back(
         {.identity   = 1,
          .generation = 1,
          .max_slot   = 10,
          .resident   = std::shared_ptr<const LeafBase>(LeafBase::from_frame_copy(raw->data(), raw->size())),
-         .backing    = std::move(backing)});
+         .page_block = std::move(page_block)});
     auto captured          = test_write::captured_leaf(std::move(leaf));
     captured->next_page_id = 3;
     return captured;
@@ -53,7 +54,7 @@ TEST(CapturedWriteResident, DuplicateReferencesShareWritesAndReleaseEveryExtent)
     test_write::TestCapturedWrite test;
     auto                          captured = shared_resident_chain();
     std::weak_ptr<const void>     raw_owner =
-        captured->mapping.get(0)->leaf->bases.front().backing->overflow->pages.at(1).backing->owner;
+        captured->mapping.get(0)->leaf->bases.front().page_block->overflow->pages.at(1).page_block->owner;
     ASSERT_TRUE(test.prepare(captured).ok());
     test_write::Completion done;
     test.run(&done);
@@ -62,8 +63,8 @@ TEST(CapturedWriteResident, DuplicateReferencesShareWritesAndReleaseEveryExtent)
     ASSERT_NE(pages, nullptr);
     EXPECT_EQ(test.operation->result().written_frames, 3U);
     EXPECT_EQ(pages->frames.size(), 3U);
-    EXPECT_EQ(pages->frames.at(0).backing->overflow->pages.size(), 2U);
-    auto retained = pages->frames.at(0).backing;
+    EXPECT_EQ(pages->frames.at(0).page_block->overflow->pages.size(), 2U);
+    auto retained = pages->frames.at(0).page_block;
     test.operation.reset();
     captured.reset();
     pages.reset();

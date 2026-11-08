@@ -44,7 +44,7 @@ TEST_F(TreeCoreNativeImport, OwnedNativeFramesReplaceGenerationAndResumeAutomati
     EXPECT_EQ(old.value().to_string(), "retained");
     EXPECT_FALSE(tree->get_view("old").found());
     EXPECT_EQ(tree->get_view("key").value().to_string(), value);
-    const auto primary = core->capture()->mapping.get(0)->leaf->bases.front().backing;
+    const auto primary = core->capture()->mapping.get(0)->leaf->bases.front().page_block;
     ASSERT_NE(primary, nullptr);
     EXPECT_TRUE(primary->readable());
     EXPECT_FALSE(primary->reloadable());

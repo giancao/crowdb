@@ -29,9 +29,9 @@ void CapturedFrameStream::State::load_base(const BaseLoadRequest &request)
 
 void CapturedFrameStream::State::load_inner()
 {
-    const auto &backing = stack.back().page->inner_backing;
-    if (!backing || !backing->readable()) {
-        finish(Status::corruption("captured inner has no reloadable backing"), true);
+    const auto &page_block = stack.back().page->inner_page_block;
+    if (!page_block || !page_block->readable()) {
+        finish(Status::corruption("captured inner has no reloadable page_block"), true);
         return;
     }
     if (!loader) {
@@ -43,7 +43,7 @@ void CapturedFrameStream::State::load_inner()
     load            = event;
     ++counters.loads;
     auto self = shared_from_this();
-    loader->load_inner(backing, [self, event](Status status, auto inner) {
+    loader->load_inner(page_block, [self, event](Status status, auto inner) {
         if (event->claimed.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
@@ -66,7 +66,7 @@ void CapturedFrameStream::State::loaded()
         return;
     }
     auto &path = stack.back();
-    auto  page = detail::reserved_shared<PublishedPage>(limits.encode.metadata, *path.page);
+    auto  page = detail::reserved_shared<PageEntry>(limits.encode.metadata, *path.page);
     if (event->is_inner) {
         page->inner = std::move(event->inner);
     }

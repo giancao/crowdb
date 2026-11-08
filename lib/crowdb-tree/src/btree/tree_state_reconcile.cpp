@@ -6,12 +6,11 @@
 
 namespace crowdb::tree
 {
-TreeStateReconciliation::TreeStateReconciliation(std::shared_ptr<const PublishedTreeState> view)
-    : view_(std::move(view))
+TreeStateReconciliation::TreeStateReconciliation(std::shared_ptr<const TreeRoot> view) : view_(std::move(view))
 {
 }
 
-void TreeStateReconciliation::visit(void *context, uint64_t pid, const std::shared_ptr<const PublishedPage> &page)
+void TreeStateReconciliation::visit(void *context, uint64_t pid, const std::shared_ptr<const PageEntry> &page)
 {
     auto &self = *static_cast<TreeStateReconciliation *>(context);
     ++self.visited_;
@@ -19,7 +18,7 @@ void TreeStateReconciliation::visit(void *context, uint64_t pid, const std::shar
         return;
     }
     if (page->metrics.leaf != (page->level == 0) || (page->level == 0 && (!page->leaf || page->inner)) ||
-        (page->level != 0 && (page->leaf || (!page->inner && !page->inner_backing))) ||
+        (page->level != 0 && (page->leaf || (!page->inner && !page->inner_page_block))) ||
         (page->metrics.split_ready && !page->metrics.split_candidate) ||
         (page->metrics.writeback_candidate && !page->metrics.dirty)) {
         self.status_ = Status::corruption("page shape or candidate metrics disagree");

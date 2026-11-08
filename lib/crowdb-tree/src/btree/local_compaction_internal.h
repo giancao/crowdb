@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #pragma once
-#include "backend/local/local_sparse_gc.h"
 #include "btree/local_compaction_operation.h"
 #include "btree/tree_core_checkpoint_internal.h"
+#include "page_store/local/local_sparse_gc.h"
 
 namespace crowdb::tree
 {
@@ -47,8 +47,8 @@ struct LocalCompactionOperation::State : std::enable_shared_from_this<State>
     std::shared_ptr<TreeOperationLifetime::Ticket>         ticket;
     std::shared_ptr<AllocationBudget>                      backend;
     TreeCore                                              *core  = nullptr;
-    BlockPageStore                                        *store = nullptr;
-    std::shared_ptr<LocalBackendState>                     local;
+    PageDiskStore                                         *store = nullptr;
+    std::shared_ptr<LocalPageStoreState>                   local;
     ApplyDispatcher::Node                                  cpu_node{&State::cpu_run, this};
     ApplyDispatcher::Node                                  backend_node{&State::backend_run, this};
     std::shared_ptr<ApplyDispatcher>                       cpu_progress;

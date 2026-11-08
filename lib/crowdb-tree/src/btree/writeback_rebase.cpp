@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "writeback_rebase.h"
 
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 #include <algorithm>
 
@@ -14,12 +14,12 @@ bool same_base(const BaseRef &captured, const BaseRef &current)
 {
     return captured.identity == current.identity && captured.generation == current.generation &&
            captured.range.lower == current.range.lower && captured.range.upper == current.range.upper &&
-           captured.max_slot == current.max_slot && captured.backing == current.backing &&
-           (captured.backing || captured.resident == current.resident);
+           captured.max_slot == current.max_slot && captured.page_block == current.page_block &&
+           (captured.page_block || captured.resident == current.resident);
 }
 
 Status leaf_rebase(const PageState &captured, const PageState &current, BaseRef base, const FinalPageSummary *summary,
-                   uint64_t coverage, const std::shared_ptr<AllocationBudget> &metadata, PublishedPage &replacement,
+                   uint64_t coverage, const std::shared_ptr<AllocationBudget> &metadata, PageEntry &replacement,
                    size_t max_sources)
 {
     if (captured.route_generation != current.route_generation || captured.range.lower != current.range.lower ||
@@ -80,6 +80,7 @@ Status leaf_rebase(const PageState &captured, const PageState &current, BaseRef 
         metrics.kv_known                 = summary->live_counts_known;
         metrics.kv_count                 = summary->live_keys;
         metrics.kv_bytes                 = summary->live_key_bytes + summary->live_value_bytes;
+        metrics.key_bytes                = summary->live_key_bytes;
         metrics.split_candidate          = false;
         metrics.split_ready              = false;
     }
@@ -88,46 +89,46 @@ Status leaf_rebase(const PageState &captured, const PageState &current, BaseRef 
 }
 } // namespace
 
-Status build_writeback_rebase(const std::shared_ptr<const PublishedPage> &captured,
-                              const std::shared_ptr<const PublishedPage> &current, const DurableCapturedFrame &written,
+Status build_writeback_rebase(const std::shared_ptr<const PageEntry> &captured,
+                              const std::shared_ptr<const PageEntry> &current, const DurableCapturedFrame &written,
                               uint64_t coverage, const std::shared_ptr<AllocationBudget> &metadata,
-                              std::shared_ptr<const PublishedPage> *out, size_t max_sources, uint64_t gc_floor)
+                              std::shared_ptr<const PageEntry> *out, size_t max_sources, uint64_t gc_floor)
 try {
-    if (!captured || !current || out == nullptr || *out || !written.backing || !written.backing->reloadable() ||
-        written.page_id >= MappingView::kPageLimit || max_sources == 0 || captured->level != current->level ||
+    if (!captured || !current || out == nullptr || *out || !written.page_block || !written.page_block->reloadable() ||
+        written.page_id >= MappingTable::kPageLimit || max_sources == 0 || captured->level != current->level ||
         (current->level == 0 ? written.type != page_type::kLeafBase : written.type != page_type::kInnerBase)) {
         return Status::invalid_argument("invalid writeback receipt or page kind");
     }
     if (current->revision == UINT64_MAX) {
         return Status::resource_exhausted("writeback page revision exhausted");
     }
-    auto replacement = detail::reserved_shared<PublishedPage>(metadata, *current);
+    auto replacement = detail::reserved_shared<PageEntry>(metadata, *current);
     replacement->revision++;
     replacement->allocation_owner.reset();
     if (current->level == 0) {
         if (!captured->leaf || !current->leaf) {
             return Status::invalid_argument("writeback leaf descriptor is absent");
         }
-        BaseRef base{.identity   = written.backing->content_id,
-                     .generation = written.backing->generation,
+        BaseRef base{.identity   = written.page_block->content_id,
+                     .generation = written.page_block->generation,
                      .range      = current->leaf->range,
                      .max_slot   = coverage,
-                     .backing    = written.backing};
+                     .page_block = written.page_block};
         auto    status =
             leaf_rebase(*captured->leaf, *current->leaf, std::move(base), written.summary ? &*written.summary : nullptr,
                         coverage, metadata, *replacement, max_sources);
         if (!status.ok()) {
             return status;
         }
-        replacement->primary = make_primary_backing(written, *captured->leaf, coverage, gc_floor, metadata);
+        replacement->primary = make_primary_page_block(written, *captured->leaf, coverage, gc_floor, metadata);
     }
     else {
-        if (captured->inner != current->inner || captured->inner_backing != current->inner_backing) {
+        if (captured->inner != current->inner || captured->inner_page_block != current->inner_page_block) {
             return Status::unavailable("writeback inner routing changed");
         }
-        replacement->primary       = make_inner_primary_backing(written, *current, coverage, gc_floor, metadata);
-        replacement->inner_backing = written.backing;
-        replacement->metrics.dirty = false;
+        replacement->primary          = make_inner_primary_page_block(written, *current, coverage, gc_floor, metadata);
+        replacement->inner_page_block = written.page_block;
+        replacement->metrics.dirty    = false;
         replacement->metrics.writeback_candidate = false;
         replacement->metrics.evict_candidate     = replacement->inner != nullptr;
     }

@@ -60,7 +60,7 @@ struct TreeExecutorSnapshot
     uint64_t execute_ns = 0;
 };
 
-// Cumulative relaxed-atomic samples. CPU and blocking-backend durations are
+// Cumulative relaxed-atomic samples. CPU and blocking-page store durations are
 // separate; concurrent worker durations are not a host wall-clock interval.
 struct TreeRuntimeSnapshot
 {
@@ -93,7 +93,7 @@ struct TreeRuntimeAccess;
 struct AsyncCompletion;
 
 // A host shares CPU and blocking-backend pools and a resource ledger across its
-// Trees. Tree operations retain a binding until their CPU work and backend
+// Trees. Tree operations retain a binding until their CPU work and page store
 // callbacks end. Page caches remain owned by their individual publication
 // coordinators.
 class TreeRuntime
@@ -109,7 +109,7 @@ class TreeRuntime
     // Reject new bindings/reservations and stop budget waiters. Existing
     // operations retain their allocation credit and can still use the CPU.
     void stop_admission() noexcept;
-    // Host-only blocking boundary. Call after Tree operations and backend
+    // Host-only blocking boundary. Call after Tree operations and page store
     // tickets have drained. This closes CPU submission and waits for CPU jobs;
     // it does not wait for or cancel external I/O on the caller's behalf.
     void drain_cpu() noexcept;

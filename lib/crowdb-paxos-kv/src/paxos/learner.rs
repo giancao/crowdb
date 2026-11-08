@@ -19,7 +19,7 @@ use std::sync::Barrier;
 use tokio::sync::Notify;
 
 use crate::kv::{
-    AdmittedApply, ApplyAdmissionResult, Batch, CrowdbTreeBackend, CrowdbTreeConfig, CrowdbTreeEngine,
+    AdmittedApply, ApplyAdmissionResult, Batch, CrowdbTreeConfig, CrowdbTreeEngine, CrowdbTreeStoreKind,
     KVEngine, KVFuture,
 };
 use crate::paxos::roles::{Learner, ProposalPayload, PxLogEntry, RequestIdentity, SlotIndex};
@@ -193,7 +193,7 @@ pub struct PxLearner {
 impl Default for PxLearner {
     fn default() -> Self {
         let opt = CrowdbTreeConfig {
-            backend: CrowdbTreeBackend::MemBlock,
+            page_store_kind: CrowdbTreeStoreKind::Mem,
             ..Default::default()
         };
         let engine = CrowdbTreeEngine::open(&opt).expect("crowdb-tree mem-block open");

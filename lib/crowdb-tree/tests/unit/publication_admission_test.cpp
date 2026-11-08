@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -49,9 +49,9 @@ PublicationResult release(PublicationCoordinator &publisher, uint64_t owner = 42
     });
 }
 
-std::shared_ptr<PublishedPage> leaf()
+std::shared_ptr<PageEntry> leaf()
 {
-    auto page  = std::make_shared<PublishedPage>();
+    auto page  = std::make_shared<PageEntry>();
     page->leaf = std::make_shared<PageState>();
     return page;
 }
@@ -202,7 +202,7 @@ TEST(PublicationAdmission, AdmissionReleaseDropsTheUnusedCompleteView)
 {
     PublicationCoordinator publisher;
     ASSERT_TRUE(acquire(publisher, publisher.capture()->commit_seq).status.ok());
-    std::weak_ptr<const PublishedTreeState> complete = publisher.capture_complete();
+    std::weak_ptr<const TreeRoot> complete = publisher.capture_complete();
     EXPECT_FALSE(complete.expired());
     ASSERT_TRUE(release(publisher).status.ok());
     EXPECT_EQ(publisher.capture_complete(), publisher.capture());

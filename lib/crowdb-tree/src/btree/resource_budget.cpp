@@ -93,12 +93,16 @@ struct ResourceBudget::State
         }
     }
 
-    std::optional<Credit> reserve(const std::shared_ptr<Account> &account, size_t category, size_t amount) noexcept
+    std::optional<Credit> reserve(const std::shared_ptr<Account> &account, size_t category, size_t amount,
+                                  bool *memory_denied = nullptr) noexcept
     {
         if (category >= kClasses || closed.load(std::memory_order_acquire)) {
             return {};
         }
         if (category == static_cast<size_t>(BudgetClass::kAdmittedWriter) && memory_exhausted(account)) {
+            if (memory_denied != nullptr) {
+                *memory_denied = true;
+            }
             denied(*account, category, false);
             return {};
         }
@@ -909,13 +913,14 @@ std::shared_ptr<ResourceBudget::Account> ResourceBudget::make_account(Limits    
 }
 
 std::optional<ResourceBudget::Credit> ResourceBudget::try_reserve(const std::shared_ptr<Account> &account,
-                                                                  BudgetClass category, size_t amount) noexcept
+                                                                  BudgetClass category, size_t amount,
+                                                                  bool *memory_denied) noexcept
 {
     if (!account) {
         return {};
     }
     auto state  = account->state_;
-    auto credit = state->reserve(account, static_cast<size_t>(category), amount);
+    auto credit = state->reserve(account, static_cast<size_t>(category), amount, memory_denied);
     if (!credit) {
         record_work(account->work_metrics(), TreeWorkCounter::AdmissionRejected, 1, TreeWorkCause::Allocation);
         // A failed host acquisition rolls back a temporary Tree charge. A

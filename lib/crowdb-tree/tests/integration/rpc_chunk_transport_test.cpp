@@ -1,14 +1,14 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "backend/chunk/rpc_chunk_allocation.h"
-#include "backend/chunk/rpc_chunk_transport.h"
 #include "chunkdb_generated.h"
 #include "common/test_chunk_route_service.h"
 #include "crowdb-rpc/c_api.h"
 #include "diskdb_generated.h"
 #include "diskio_generated.h"
 #include "msg_type_generated.h"
+#include "page_store/chunk/rpc_chunk_allocation.h"
+#include "page_store/chunk/rpc_chunk_transport.h"
 
 #include <gtest/gtest.h>
 

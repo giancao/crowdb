@@ -75,7 +75,7 @@ Status TreeCore::State::prepare_split_handoff(const SplitSourceSession &session,
         return status;
     }
     auto prepare        = preparation;
-    prepare.store       = ticket->backend(backend.get());
+    prepare.store       = ticket->page_store(page_store.get());
     const auto controls = detail::AllocationBound(detail::shared_allocation_bound<SplitHandoff>())
                               .add(SourceAdmission::coverage_allocation_bound(locals->tables.size()))
                               .add_product(2, OwnedKey::allocation_overhead())

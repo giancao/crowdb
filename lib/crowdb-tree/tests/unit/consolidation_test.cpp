@@ -78,13 +78,13 @@ TEST(Consolidation, TombstonePreservedThroughFold)
     EXPECT_FALSE(t.get(Slice("a"), &slot, &v));
 }
 
-TEST(Consolidation, OldPublishedPageRemainsAliveUntilCapturedViewIsReleased)
+TEST(Consolidation, OldPageEntryRemainsAliveUntilCapturedViewIsReleased)
 {
     Crowdbtree tree;
     ASSERT_TRUE(tree.put("k", "old").ok());
     ASSERT_TRUE(tree.flush().ok());
-    auto                               old      = RuntimeTreeAccess_for_tests::capture(tree);
-    std::weak_ptr<const PublishedPage> retained = old->mapping.get(old->root_page_id);
+    auto                           old      = RuntimeTreeAccess_for_tests::capture(tree);
+    std::weak_ptr<const PageEntry> retained = old->mapping.get(old->root_page_id);
     ASSERT_TRUE(tree.put("k", "new").ok());
     ASSERT_TRUE(tree.flush().ok());
     RuntimeTreeAccess_for_tests::reclaim(tree);

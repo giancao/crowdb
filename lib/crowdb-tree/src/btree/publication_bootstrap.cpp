@@ -23,11 +23,10 @@ std::shared_ptr<const PublishedSources> initial_sources(const std::shared_ptr<Al
     return sources;
 }
 
-std::shared_ptr<const PublishedTreeState> initial_state(const PublicationBootstrap &bootstrap, uint64_t generation)
+std::shared_ptr<const TreeRoot> initial_state(const PublicationBootstrap &bootstrap, uint64_t generation)
 {
-    auto state = bootstrap.initial
-                   ? detail::reserved_shared<PublishedTreeState>(bootstrap.metadata, *bootstrap.initial)
-                   : detail::reserved_shared<PublishedTreeState>(bootstrap.metadata, bootstrap.metadata);
+    auto state = bootstrap.initial ? detail::reserved_shared<TreeRoot>(bootstrap.metadata, *bootstrap.initial)
+                                   : detail::reserved_shared<TreeRoot>(bootstrap.metadata, bootstrap.metadata);
     if (bootstrap.initial && (state->generation != generation || state->pending_handoff ||
                               state->flush_admission_owner != 0 || state->checkpoint_inflight)) {
         throw std::invalid_argument("initial publication must be a completed state in this generation");
@@ -64,20 +63,20 @@ std::shared_ptr<const PublishedTreeState> initial_state(const PublicationBootstr
 }
 } // namespace
 
-PublishedTreeState::PublishedTreeState(std::shared_ptr<AllocationBudget> metadata, uint64_t source_floor)
+TreeRoot::TreeRoot(std::shared_ptr<AllocationBudget> metadata, uint64_t source_floor)
     : sources(initial_sources(metadata, source_floor))
 {
 }
 
 std::optional<size_t> PublicationCoordinator::allocation_bound(size_t source_count, size_t max_threads,
-                                                               const MappingView *mapping,
-                                                               bool               track_residency) noexcept
+                                                               const MappingTable *mapping,
+                                                               bool                track_residency) noexcept
 {
     using detail::shared_allocation_bound;
     auto bound =
         detail::AllocationBound(
             sizeof(PublicationCoordinator) + sizeof(Root) + shared_allocation_bound<CheckpointLedger>() +
-            shared_allocation_bound<PublishedTreeState>() + (2 * PublishedSources::allocation_bound()) +
+            shared_allocation_bound<TreeRoot>() + (2 * PublishedSources::allocation_bound()) +
             shared_allocation_bound<TreeWorkMetrics>() + EpochManager::infrastructure_allocation_bound())
             .add(mapping != nullptr ? merge_membership_reserve_bytes(mapping->copy_bounds().merge_candidate_pages) : 0)
             .add_product(source_count, sizeof(std::shared_ptr<MemTable>))

@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/extent_writeback.h"
 #include "extent_ledger_test_support.h"
+#include "page_store/local/extent_writeback.h"
 #include "page_writeback_test_support.h"
 #include "test_tmp.h"
 
@@ -18,7 +18,7 @@ struct LedgerWrites : TestWriter
     LedgerWrites()
     {
         EXPECT_TRUE(
-            ExtentLedger::create({.backend_id = 3, .address_limit = 65536}, credits.credits.reservation(), &ledger)
+            ExtentLedger::create({.page_store_id = 3, .address_limit = 65536}, credits.credits.reservation(), &ledger)
                 .ok());
         EXPECT_TRUE(await_ledger([&](auto done) {
                         return ledger->activate(credits.credits.reservation(), std::move(done));
@@ -34,7 +34,7 @@ struct LedgerWrites : TestWriter
 
 ReservedWriteExtent for_write(ProtectedExtent extent)
 {
-    return {.backend_id       = extent.backend_id,
+    return {.page_store_id    = extent.page_store_id,
             .address          = extent.address,
             .length           = extent.length,
             .content_id       = extent.identity,
@@ -45,16 +45,16 @@ ReservedWriteExtent for_write(ProtectedExtent extent)
 }
 
 #ifdef CROWDB_HAVE_LIBURING
-TEST(LedgerWriteback, RealBlockPageStaysReadableAndCannotBeReusedUntilLastBackingOwner)
+TEST(LedgerWriteback, RealBlockPageStaysReadableAndCannotBeReusedUntilLastPageBlockOwner)
 {
-    crowdb::tree_test::TempDir      dir("ledger_write_");
-    std::unique_ptr<BlockPageStore> file;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 1, 2, 4096, 4096, &file).ok());
+    crowdb::tree_test::TempDir     dir("ledger_write_");
+    std::unique_ptr<PageDiskStore> file;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir.path, 1, 2, 4096, 4096, &file).ok());
     crowdb::common::Topology topology;
     topology.pipelines.emplace_back().entries = 64;
     crowdb::common::DiskIOUring uring(std::move(topology));
     ASSERT_TRUE(uring.valid());
-    auto         store = std::make_shared<BlockAsyncPageStore>(file.get(), &uring);
+    auto         store = std::make_shared<AsyncPageDiskStore>(file.get(), &uring);
     LedgerWrites test;
     ASSERT_TRUE(PageWriteOperation::create(
                     store, test.runtime, test.lane, write_input(),
@@ -63,7 +63,7 @@ TEST(LedgerWriteback, RealBlockPageStaysReadableAndCannotBeReusedUntilLastBackin
                     .ok());
     ASSERT_TRUE(stdexec::sync_wait(test.operation->sender()));
     test.runtime->drain();
-    auto reader = test.operation->result().backing;
+    auto reader = test.operation->result().page_block;
     ASSERT_TRUE(reader);
     EXPECT_EQ(reader->address, 8192U);
     EXPECT_EQ(reader->length, 8192U);

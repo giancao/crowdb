@@ -25,7 +25,7 @@ mod scan;
 
 /// Async facade over native operation futures. Runtime Trees execute CPU work
 /// on their shared native pool; [`drive_ct_future`] polls completion and the
-/// backend reactor without blocking the Rust executor. Clones share one Tree.
+/// page store reactor without blocking the Rust executor. Clones share one Tree.
 #[derive(Clone, Debug)]
 pub struct AsyncCrowdbtree {
     inner: Arc<Crowdbtree>,

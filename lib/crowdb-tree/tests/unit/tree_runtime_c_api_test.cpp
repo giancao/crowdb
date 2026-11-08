@@ -87,11 +87,11 @@ TEST(TreeRuntimeCAbi, AsyncMemBlockOpenDoesNotNeedAPath)
     std::unique_ptr<ct_runtime, decltype(&ct_runtime_free)> runtime(handle, &ct_runtime_free);
 
     ct_options options{};
-    options.backend     = CT_BACKEND_MEM_BLOCK;
-    using Reply         = std::promise<std::pair<ct_status, ct_tree *>>;
-    auto      *reply    = new Reply;
-    auto       opened   = reply->get_future();
-    const auto accepted = ct_open_with_runtime_async(
+    options.page_store_kind = CT_PAGE_STORE_MEM;
+    using Reply             = std::promise<std::pair<ct_status, ct_tree *>>;
+    auto      *reply        = new Reply;
+    auto       opened       = reply->get_future();
+    const auto accepted     = ct_open_with_runtime_async(
         &options, handle, nullptr,
         [](void *context, ct_status status, ct_tree *tree) {
             std::unique_ptr<Reply> owner(static_cast<Reply *>(context));

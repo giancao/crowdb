@@ -13,10 +13,11 @@ Status prepare_inner(FinalPageEncodeState &state, const CapturedEncodeContext &c
         return Status::corruption("captured inner page has a leaf representation");
     }
     if (!state.page->inner) {
-        if (!state.page->inner_backing || !state.page->inner_backing->readable()) {
-            return Status::corruption("cold inner has no captured reloadable backing");
+        if (!state.page->inner_page_block || !state.page->inner_page_block->readable()) {
+            return Status::corruption("cold inner has no captured reloadable page_block");
         }
-        result->needs_inner = {.page_id = state.pid, .range = context.range, .backing = state.page->inner_backing};
+        result->needs_inner = {
+            .page_id = state.pid, .range = context.range, .page_block = state.page->inner_page_block};
         return Status::Ok();
     }
     const auto &inner = *state.page->inner;

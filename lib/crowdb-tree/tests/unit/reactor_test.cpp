@@ -1,13 +1,13 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// plan-tree #11: DiskIOUring (io_uring event loop) + BlockAsyncPageStore.
+// plan-tree #11: DiskIOUring (io_uring event loop) + AsyncPageDiskStore.
 // Only built when CMake found liburing (see CMakeLists.txt's
 // CROWDB_HAVE_LIBURING gate) -- io_uring is Linux-only.
 #include "async_completion_adapter.h"
 #include "crowdb-common/diskio_uring.h"
-#include "crowdb-tree/backend/async_page_store.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/async_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
 #include "test_tmp.h"
 
 #include <fcntl.h>
@@ -180,19 +180,19 @@ TEST(DiskIOUring, DestructorStopsThreadCleanly)
     SUCCEED();
 }
 
-// ── BlockAsyncPageStore (async twin of BlockPageStore) ───────────
+// ── AsyncPageDiskStore (async twin of PageDiskStore) ───────────
 
-TEST(BlockAsyncPageStore, WriteThenReadRoundTrips)
+TEST(AsyncPageDiskStore, WriteThenReadRoundTrips)
 {
-    std::string                     path  = temp_path();
-    DiskIOUring                     uring = make_uring();
-    std::unique_ptr<BlockPageStore> bs;
-    ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
+    std::string                    path  = temp_path();
+    DiskIOUring                    uring = make_uring();
+    std::unique_ptr<PageDiskStore> bs;
+    ASSERT_TRUE(PageDiskStore::open(path, 4096, &bs).ok());
     // Register the store's fd with the uring.
     for (int fd : bs->all_extent_fds()) {
         uring.register_fd(fd);
     }
-    BlockAsyncPageStore s(bs.get(), &uring);
+    AsyncPageDiskStore s(bs.get(), &uring);
 
     // O_DIRECT requires aligned offset/length/buffer; use 4096-aligned I/O.
     std::vector<uint8_t> in(4096, 0);
@@ -222,16 +222,16 @@ TEST(BlockAsyncPageStore, WriteThenReadRoundTrips)
     std::remove(path.c_str());
 }
 
-TEST(BlockAsyncPageStore, ReadPastEndSurfacesAsError)
+TEST(AsyncPageDiskStore, ReadPastEndSurfacesAsError)
 {
-    std::string                     path  = temp_path();
-    DiskIOUring                     uring = make_uring();
-    std::unique_ptr<BlockPageStore> bs;
-    ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
+    std::string                    path  = temp_path();
+    DiskIOUring                    uring = make_uring();
+    std::unique_ptr<PageDiskStore> bs;
+    ASSERT_TRUE(PageDiskStore::open(path, 4096, &bs).ok());
     for (int fd : bs->all_extent_fds()) {
         uring.register_fd(fd);
     }
-    BlockAsyncPageStore s(bs.get(), &uring);
+    AsyncPageDiskStore s(bs.get(), &uring);
 
     // Read from an offset far past the file end (aligned to keep O_DIRECT happy
     // for the offset, but there's no data there).
@@ -248,16 +248,16 @@ TEST(BlockAsyncPageStore, ReadPastEndSurfacesAsError)
     std::remove(path.c_str());
 }
 
-TEST(BlockAsyncPageStore, FsyncCompletes)
+TEST(AsyncPageDiskStore, FsyncCompletes)
 {
-    std::string                     path  = temp_path();
-    DiskIOUring                     uring = make_uring();
-    std::unique_ptr<BlockPageStore> bs;
-    ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
+    std::string                    path  = temp_path();
+    DiskIOUring                    uring = make_uring();
+    std::unique_ptr<PageDiskStore> bs;
+    ASSERT_TRUE(PageDiskStore::open(path, 4096, &bs).ok());
     for (int fd : bs->all_extent_fds()) {
         uring.register_fd(fd);
     }
-    BlockAsyncPageStore s(bs.get(), &uring);
+    AsyncPageDiskStore s(bs.get(), &uring);
 
     // Write something first so the single-medium fd is dirty
     std::vector<uint8_t> in(4096, 0xAB);
@@ -280,11 +280,11 @@ TEST(BlockAsyncPageStore, FsyncCompletes)
     std::remove(path.c_str());
 }
 
-TEST(BlockAsyncPageStore, AllExtentFdsReturnsAllLiveFds)
+TEST(AsyncPageDiskStore, AllExtentFdsReturnsAllLiveFds)
 {
-    std::string                     path = temp_path();
-    std::unique_ptr<BlockPageStore> bs;
-    ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
+    std::string                    path = temp_path();
+    std::unique_ptr<PageDiskStore> bs;
+    ASSERT_TRUE(PageDiskStore::open(path, 4096, &bs).ok());
     std::vector<int> fds = bs->all_extent_fds();
     // Single-medium mode: exactly one fd.
     EXPECT_EQ(fds.size(), 1U);

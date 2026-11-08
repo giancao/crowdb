@@ -29,7 +29,7 @@ struct PageWriteInput
     std::shared_ptr<const void> owner;
     // Protects actual referenced overflow extents and their captured resolver.
     // The encoder's PID reservation alone does not protect those byte ranges.
-    // This is retained by the resulting backing, independently of raw input.
+    // This is retained by the resulting page block, independently of raw input.
     std::shared_ptr<const void> reload_dependencies;
     // A new raw frame may already occupy its final aligned write buffer.
     std::span<const uint8_t> raw_blob;
@@ -37,24 +37,24 @@ struct PageWriteInput
 
 struct ReservedWriteExtent
 {
-    uint64_t backend_id = 0;
-    uint64_t address    = 0;
-    uint64_t length     = 0;
-    uint64_t content_id = 0;
-    uint64_t generation = 0;
+    uint64_t page_store_id = 0;
+    uint64_t address       = 0;
+    uint64_t length        = 0;
+    uint64_t content_id    = 0;
+    uint64_t generation    = 0;
     // Held before submission, including on error/unknown write outcome, until
-    // the final transport callback and every published backing release it.
-    std::shared_ptr<const void>        owner;
-    std::weak_ptr<BackingMetricExtent> physical_metrics;
-    std::weak_ptr<ChunkPackBacking>    chunk;
+    // the final transport callback and every published page block release it.
+    std::shared_ptr<const void>          owner;
+    std::weak_ptr<PageBlockMetricExtent> physical_metrics;
+    std::weak_ptr<ChunkPageBlock>        chunk;
 };
 
 struct PageWriteResult
 {
-    Status                            status;
-    std::shared_ptr<const BackingRef> backing;
-    uint32_t                          logical_bytes  = 0;
-    uint64_t                          physical_bytes = 0;
+    Status                              status;
+    std::shared_ptr<const PageBlockRef> page_block;
+    uint32_t                            logical_bytes  = 0;
+    uint64_t                            physical_bytes = 0;
 };
 
 class PageWriteOperation

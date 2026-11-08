@@ -1,6 +1,5 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/recovered_frame_identity.h"
 #include "crowdb-tree/btree/cell.h"
 #include "crowdb-tree/maptable/compressor.h"
 #include "snapshot/local_recovery_internal.h"
@@ -19,21 +18,42 @@ void LocalRecoveryOperation::State::next_frame()
             finish(Status::corruption());
             return;
         }
+        bool valid_summaries = true;
+
+        struct Validation
+        {
+            const CapturedDurablePages &pages;
+            bool                       &valid;
+        } check{.pages = *pages, .valid = valid_summaries};
+
+        uint32_t pid = 0;
+        pages->index_summaries.visit_from(
+            pid, &check, +[](void *raw, uint32_t id, IndexSummary) {
+                auto      &validation = *static_cast<Validation *>(raw);
+                const auto frame      = validation.pages.frames.find(id);
+                validation.valid =
+                    frame != validation.pages.frames.end() && frame->second.type == page_type::kInnerBase;
+                return validation.valid;
+            });
+        if (!valid_summaries) {
+            finish(Status::corruption("summary does not reference an index"));
+            return;
+        }
         stage = Stage::Dependencies;
         wake();
         return;
     }
-    const auto &backing = frame_position->second.backing;
-    if (!backing || !backing->reloadable() || backing->encoding != 0 || backing->backend_id != domain.backend_id ||
-        backing->generation != domain.generation) {
+    const auto &page_block = frame_position->second.page_block;
+    if (!page_block || !page_block->reloadable() || page_block->encoding != 0 ||
+        page_block->page_store_id != domain.page_store_id || page_block->generation != domain.generation) {
         finish(Status::corruption());
         return;
     }
-    if (backing->length > limits.max_blob_bytes) {
+    if (page_block->length > limits.max_blob_bytes) {
         finish(Status::resource_exhausted());
         return;
     }
-    read(backing->address, static_cast<size_t>(backing->length), Stage::FrameRead);
+    read(page_block->address, static_cast<size_t>(page_block->length), Stage::FrameRead);
 }
 
 Status LocalRecoveryOperation::State::collect_cell(uint64_t page_id, Slice raw)
@@ -81,9 +101,7 @@ void LocalRecoveryOperation::State::frame_read()
     }
     auto       &descriptor = frame_position->second;
     const auto *frame      = window->frame.data();
-    if (!frame_validate(frame, bytes) ||
-        !recovered_frame_identity_matches(*descriptor.backing, frame_page_type(frame),
-                                          frame_u64(frame, fh::kSelfpage_id), descriptor.page_id)) {
+    if (!frame_validate(frame, bytes) || frame_u64(frame, fh::kSelfpage_id) != descriptor.page_id) {
         finish(Status::corruption());
         return;
     }
@@ -99,13 +117,6 @@ void LocalRecoveryOperation::State::frame_read()
                 return;
             }
         }
-        for (uint32_t i = 0; i < leaf.delta_count(); ++i) {
-            status = collect_cell(descriptor.page_id, leaf.delta_cell(i));
-            if (!status.ok()) {
-                finish(std::move(status));
-                return;
-            }
-        }
         status =
             capture_stored_overflow(leaf, limits.max_overflow_references, budget.bytes, &descriptor.stored_overflow);
         if (!status.ok()) {
@@ -115,6 +126,13 @@ void LocalRecoveryOperation::State::frame_read()
         ++leaf_count;
     }
     else if (descriptor.type == page_type::kInnerBase) {
+        if (image->anchor.root_summary) {
+            const auto summary = frame_summary(frame);
+            descriptor.summary = FinalPageSummary{.live_counts_known = summary.exact,
+                                                  .live_keys         = summary.live_kv,
+                                                  .live_key_bytes    = summary.live_key_bytes,
+                                                  .live_value_bytes  = summary.live_value_bytes};
+        }
         ++inner_count;
     }
     else {
@@ -154,18 +172,18 @@ void LocalRecoveryOperation::State::dependencies()
     }
     if (protected_leaf != reference.page_id) {
         auto leaf = pages->frames.find(reference.page_id);
-        if (leaf == pages->frames.end() || leaf->second.type != page_type::kLeafBase || !leaf->second.backing) {
+        if (leaf == pages->frames.end() || leaf->second.type != page_type::kLeafBase || !leaf->second.page_block) {
             finish(Status::corruption());
             return;
         }
-        protection           = detail::reserved_shared<LeafProtection>(budget.bytes, budget.bytes);
-        overflow_backing     = detail::reserved_shared<OverflowBackingSet>(budget.bytes, budget.bytes);
-        protection->primary  = leaf->second.backing->owner;
-        auto backing         = detail::reserved_shared<BackingRef>(budget.bytes, *leaf->second.backing);
-        backing->owner       = protection;
-        backing->overflow    = overflow_backing;
-        leaf->second.backing = std::move(backing);
-        protected_leaf       = reference.page_id;
+        protection              = detail::reserved_shared<LeafProtection>(budget.bytes, budget.bytes);
+        overflow_page_block     = detail::reserved_shared<OverflowPageBlockSet>(budget.bytes, budget.bytes);
+        protection->primary     = leaf->second.page_block->owner;
+        auto page_block         = detail::reserved_shared<PageBlockRef>(budget.bytes, *leaf->second.page_block);
+        page_block->owner       = protection;
+        page_block->overflow    = overflow_page_block;
+        leaf->second.page_block = std::move(page_block);
+        protected_leaf          = reference.page_id;
     }
     const auto found = pages->frames.find(chain_pid);
     if (found == pages->frames.end()) {
@@ -173,18 +191,18 @@ void LocalRecoveryOperation::State::dependencies()
         return;
     }
     const auto &overflow = found->second;
-    if (overflow.type != page_type::kOverflowFrame || !overflow.backing || !overflow.backing->reloadable() ||
+    if (overflow.type != page_type::kOverflowFrame || !overflow.page_block || !overflow.page_block->reloadable() ||
         overflow.overflow_bytes == 0 || overflow.overflow_bytes > chain_bytes ||
         (overflow.next_overflow == kInvalidPageId) != (overflow.overflow_bytes == chain_bytes)) {
         finish(Status::corruption());
         return;
     }
-    protection->overflow.push_back(overflow.backing->owner);
-    overflow_backing->pages.emplace(chain_pid, OverflowBackingPage{.backing       = overflow.backing,
-                                                                   .next          = overflow.next_overflow,
-                                                                   .bytes         = overflow.overflow_bytes,
-                                                                   .frame_bytes   = overflow.frame_bytes,
-                                                                   .logical_bytes = overflow.logical_bytes});
+    protection->overflow.push_back(overflow.page_block->owner);
+    overflow_page_block->pages.emplace(chain_pid, OverflowPageBlock{.page_block    = overflow.page_block,
+                                                                    .next          = overflow.next_overflow,
+                                                                    .bytes         = overflow.overflow_bytes,
+                                                                    .frame_bytes   = overflow.frame_bytes,
+                                                                    .logical_bytes = overflow.logical_bytes});
     chain_bytes -= overflow.overflow_bytes;
     chain_pid = overflow.next_overflow;
     if (chain_bytes == 0) {
@@ -203,7 +221,7 @@ void LocalRecoveryOperation::State::image_complete()
     decoder.reset();
     recovered = {};
     protection.reset();
-    overflow_backing.reset();
+    overflow_page_block.reset();
     reference_index  = 0;
     chain_pid        = kInvalidPageId;
     chain_bytes      = 0;

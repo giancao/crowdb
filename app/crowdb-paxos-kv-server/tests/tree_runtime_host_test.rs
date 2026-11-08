@@ -12,7 +12,7 @@ use crowdb_paxos_kv_server::store_registry::PaxosKvStoreRegistry;
 fn config(root: &std::path::Path) -> PaxosKvConfig {
     let mut config = PaxosKvConfig {
         wal_backend: "mem-block".to_owned(),
-        crowtree_backend: "mem-block".to_owned(),
+        crowtree_store_kind: "mem-block".to_owned(),
         wal_root: root.join("wal"),
         config_root: root.join("config"),
         data_root: root.join("tree"),
@@ -45,7 +45,7 @@ async fn standalone_constructor_uses_runtime_without_a_mode_flag() {
         PxLocalReplicaRole::Leader,
         &registry.config,
         Arc::clone(&registry.wal_backend),
-        registry.crowtree_backend,
+        registry.crowtree_store_kind,
     )
     .await;
     let group = result.unwrap();
@@ -69,7 +69,7 @@ async fn every_group_uses_the_same_registry_owned_native_host() {
                 PxLocalReplicaRole::Leader,
                 &registry.config,
                 Arc::clone(&registry.wal_backend),
-                registry.crowtree_backend,
+                registry.crowtree_store_kind,
                 registry.tree_runtime.clone(),
             )
             .await
@@ -105,7 +105,7 @@ async fn host_awaits_block_tree_release_before_reopening_persistent_data() {
 
     let root = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-runtime-close");
     let mut options = config(root.path());
-    options.crowtree_backend = "block".to_owned();
+    options.crowtree_store_kind = "block".to_owned();
     let registry = Arc::new(PaxosKvStoreRegistry::try_with_config(options.clone()).unwrap());
     let runtime = registry.tree_runtime.clone();
     let group = create_group_with_wal_on_runtime(
@@ -115,7 +115,7 @@ async fn host_awaits_block_tree_release_before_reopening_persistent_data() {
         PxLocalReplicaRole::Leader,
         &registry.config,
         registry.wal_backend.clone(),
-        registry.crowtree_backend,
+        registry.crowtree_store_kind,
         runtime.clone(),
     )
     .await
@@ -128,7 +128,7 @@ async fn host_awaits_block_tree_release_before_reopening_persistent_data() {
         .downcast_ref::<CrowdbTreeEngine>()
         .unwrap();
     let tree = engine.handle();
-    let release = tree.backend_release_service().unwrap();
+    let release = tree.page_store_release_service().unwrap();
     tree.apply_put(1, b"key", b"value").unwrap();
     drop(tree);
     let store = Arc::new(PxKvStore::new(1, "127.0.0.1:0".parse().unwrap()));
@@ -160,7 +160,7 @@ async fn host_awaits_block_tree_release_before_reopening_persistent_data() {
         PxLocalReplicaRole::Leader,
         &reopened.config,
         reopened.wal_backend.clone(),
-        reopened.crowtree_backend,
+        reopened.crowtree_store_kind,
         reopened.tree_runtime.clone(),
     )
     .await
@@ -176,7 +176,7 @@ async fn host_awaits_block_tree_release_before_reopening_persistent_data() {
     assert_eq!(tree.get(b"key").unwrap(), Some((1, b"value".to_vec())));
     assert!(old_name.exists());
     assert!(!canonical.exists());
-    let release = tree.backend_release_service().unwrap();
+    let release = tree.page_store_release_service().unwrap();
     drop(group);
     let close = Arc::try_unwrap(tree).unwrap().begin_close().unwrap();
     close.wait().await.unwrap();

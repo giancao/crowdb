@@ -3,7 +3,7 @@
 #pragma once
 
 #include "btree/page_maintenance.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <span>
 
@@ -36,7 +36,7 @@ struct CapturedEncodeContext
     // Required for an inner page. Both invalid explicitly denotes an empty
     // subtree; otherwise these are captured descendants from the traversal.
     std::optional<InnerEncodeFences> inner_fences = std::nullopt;
-    // Owns the captured backend mapping/extents for pre-existing overflow
+    // Owns the captured page store mapping/extents for pre-existing overflow
     // references. A resident leaf frame alone does not protect its chain.
     std::shared_ptr<const void> overflow_dependencies = nullptr;
 };
@@ -52,10 +52,10 @@ struct ReservedOverflowIds
 
 struct ReusedOverflowDependency
 {
-    uint64_t                                  head  = kInvalidPageId;
-    uint64_t                                  bytes = 0;
-    std::shared_ptr<const void>               owner;
-    std::shared_ptr<const OverflowBackingSet> backing = nullptr;
+    uint64_t                                    head  = kInvalidPageId;
+    uint64_t                                    bytes = 0;
+    std::shared_ptr<const void>                 owner;
+    std::shared_ptr<const OverflowPageBlockSet> page_block = nullptr;
 };
 
 struct FinalPageSummary
@@ -78,13 +78,13 @@ struct FinalPageSummary
 // Encoding borrows this exact output; it does not build another mapping.
 struct PageEncodeInput
 {
-    std::shared_ptr<const PublishedPage> page;
-    uint64_t                             page_id;
-    uint64_t                             coverage;
-    uint64_t                             gc_floor;
-    uint64_t                             next_page_id;
-    CapturedEncodeContext                context;
-    std::optional<FinalPageSummary>      children_summary = std::nullopt;
+    std::shared_ptr<const PageEntry> page;
+    uint64_t                         page_id;
+    uint64_t                         coverage;
+    uint64_t                         gc_floor;
+    uint64_t                         next_page_id;
+    CapturedEncodeContext            context;
+    std::optional<FinalPageSummary>  children_summary = std::nullopt;
 };
 
 struct PageEncodeCounters
@@ -101,7 +101,7 @@ struct EncodedFrameInfo
     uint64_t  page_id = kInvalidPageId;
     page_type type    = page_type::kLeafBase;
     uint32_t  bytes   = 0;
-    // Carry into the asynchronous write and staged backing: bytes alone do
+    // Carry into the asynchronous write and staged page block: bytes alone do
     // not protect the overflow references embedded in an output frame.
     std::shared_ptr<const void> dependencies = nullptr;
 };
@@ -115,9 +115,9 @@ struct PageEncodeStep
 
 struct InnerEncodeLoad
 {
-    uint64_t                          page_id = kInvalidPageId;
-    PageKeyRange                      range;
-    std::shared_ptr<const BackingRef> backing;
+    uint64_t                            page_id = kInvalidPageId;
+    PageKeyRange                        range;
+    std::shared_ptr<const PageBlockRef> page_block;
 };
 
 namespace detail
@@ -154,7 +154,7 @@ class FinalPageEncoder
 
   private:
     friend PageEncodePreparation prepare_final_page(const PageEncodeInput &, const PageEncodeLimits &);
-    friend PageEncodePreparation prepare_final_page(const std::shared_ptr<const PublishedTreeState> &, uint64_t,
+    friend PageEncodePreparation prepare_final_page(const std::shared_ptr<const TreeRoot> &, uint64_t,
                                                     const CapturedEncodeContext &, const PageEncodeLimits &);
     explicit FinalPageEncoder(std::shared_ptr<detail::FinalPageEncodeState> state) noexcept;
     [[nodiscard]] PageEncodeStep                  next_frame(std::span<uint8_t> output);
@@ -166,7 +166,7 @@ class FinalPageEncoder
 // continuation; resume it instead of restarting and rescanning the prefix.
 // Ordinary cold bases still use a privately loaded descriptor and retry.
 // Oversized primary layouts require structural maintenance first.
-PageEncodePreparation prepare_final_page(const std::shared_ptr<const PublishedTreeState> &captured, uint64_t pid,
+PageEncodePreparation prepare_final_page(const std::shared_ptr<const TreeRoot> &captured, uint64_t pid,
                                          const CapturedEncodeContext &context, const PageEncodeLimits &limits = {});
 PageEncodePreparation prepare_final_page(const PageEncodeInput &input, const PageEncodeLimits &limits = {});
 } // namespace crowdb::tree

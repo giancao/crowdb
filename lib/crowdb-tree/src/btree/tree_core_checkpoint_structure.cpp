@@ -6,7 +6,7 @@
 
 namespace crowdb::tree::checkpoint_detail
 {
-Status Preparation::structure(std::shared_ptr<const PublishedTreeState> view, uint64_t pid,
+Status Preparation::structure(std::shared_ptr<const TreeRoot> view, uint64_t pid,
                               std::shared_ptr<PageSplitOperation> *out)
 try {
     using namespace detail;
@@ -29,9 +29,9 @@ try {
                                                                            page->leaf->bases.size(), 0, 0))
                              .add(shared_allocation_bound<AllocationReservation>())
                              .value();
-    const BackendOperationLimits backend_limits{
+    const PageStoreOperationLimits backend_limits{
         .max_io_bytes = loads.max_blob_bytes, .write_calls = 0, .workers = workers, .barriers = false};
-    const auto backend_bytes = backend_operation_bound(core->async_backend(), backend_limits);
+    const auto backend_bytes = backend_operation_bound(core->async_page_store(), backend_limits);
     auto       account       = core->binding()->account();
     if (routing && backend_bytes) {
         const auto reclaim_available = ResourceBudget::available(account, BudgetClass::kReclaim);
@@ -66,13 +66,13 @@ try {
     phase->budget.cause        = options.cause;
     phase->budget.cpu_progress = cpu_progress;
     auto status =
-        bind_backend_operation(core->async_backend(), backend_limits, std::move(*backend), &phase->budget.backend);
+        bind_backend_operation(core->async_page_store(), backend_limits, std::move(*backend), &phase->budget.backend);
     if (!status.ok()) {
         return status;
     }
     auto loader = reserved_shared<AsyncStorePageLoader>(
-        phase->budget.reservation(), ticket->backend(core->async_backend()), core->binding()->cpu(),
-        core->binding()->lane(), loads, OverflowBackingResolver{}, phase->budget);
+        phase->budget.reservation(), ticket->page_store(core->async_page_store()), core->binding()->cpu(),
+        core->binding()->lane(), loads, OverflowPageBlockResolver{}, phase->budget);
     limits.prepaid = AllocationReservation::create(std::move(*bytes));
     return PageSplitOperation::create(core->publisher(), *core->binding()->cpu(), core->binding()->lane(),
                                       std::move(view), pid, std::move(limits), std::move(loader), cpu_progress,

@@ -4,11 +4,9 @@
 //! Server lifecycle for a `PxKvStore`.
 //!
 //! Defines the [`PaxosKvServer`] trait (start / join / stop / `listen_addr`)
-//! and implements it on `Arc<PxKvStore>`. The trait's `start` binds a
-//! single crowdb-rpc server on the listen port that hosts both
-//! consensus (`PxRpcService`) and client-facing (`PaxosKvRpcService`)
-//! handlers. Server state (join handle, shutdown sender, bound
-//! address) lives on [`RpcTaskState`] inside the store so
+//! and implements it on `Arc<PxKvStore>`. Client-facing and consensus
+//! listeners own separate RPC transports. Lifecycle state lives on
+//! [`RpcTaskState`] inside the store so
 //! [`PxKvStore::shutdown_server`] can drive a timed graceful stop from
 //! the cascade shutdown path.
 
@@ -64,71 +62,53 @@ impl PaxosKvServer for Arc<PxKvStore> {
 
         let bound_addr = self.listen_addr;
 
-        // Start a single crowdb-rpc server on the listen port. Both
-        // consensus (PxRpcService) and client (PaxosKvRpcService) handlers
-        // are registered on the same server — their handler names
-        // don't conflict. Worker count set from `--rpc-workers` CLI
-        // (via `PxKvStore::rpc_workers`).
-        let workers = self.rpc_workers;
-        let server = Arc::new(RpcServer::with_engines(None, 1, workers));
-        server.set_tcp_nodelay(!self.enable_nagle);
-        server.set_quickack(self.quickack);
-        server.set_event_write(self.event_write);
-        server.set_send_queue_capacity(self.send_queue_capacity);
-        server
-            .listen(&bound_addr.ip().to_string(), i32::from(bound_addr.port()))
-            .map_err(|e| {
-                let msg = format!(
-                    "failed to bind kv server on {bound_addr}: {e:?}; next step: choose an available listen_addr or stop the conflicting process"
-                );
-                error!(s = self.store_id, listen_addr = %bound_addr, error = ?e, "{msg}");
-                msg
-            })?;
+        let client = self.bind_rpc_listener(bound_addr)?;
+        let peer = self.bind_rpc_listener(SocketAddr::new(bound_addr.ip(), 0))?;
+        let peer_port = u16::try_from(peer.port()).map_err(|_| "invalid Paxos peer listener port")?;
+        let actual_port = u16::try_from(client.port()).map_err(|_| "invalid KV client listener port")?;
+        let actual_addr = SocketAddr::new(bound_addr.ip(), actual_port);
         let rt = tokio::runtime::Handle::current();
         let px_service = Arc::new(PxRpcService::new(self.clone(), rt.clone()));
-        px_service.register_handlers(&server);
+        px_service.register_handlers(&peer);
 
         let forwarder = Arc::new(PaxosKvRpcForwarder::with_workers(self.rpc_workers));
         let kv_service = Arc::new(PaxosKvRpcService::new(self.clone(), rt, forwarder));
-        kv_service.register_handlers(&server);
+        kv_service.register_handlers(&client);
+        PxRpcTransport::register_listener_discovery(&client, peer_port);
 
-        let transport = PxRpcTransport::on_listener(Arc::clone(&server), self);
-        server.start();
-        server.register_conn_count_gauge("rpc.server.connections");
+        let transport = PxRpcTransport::on_listener(Arc::clone(&peer), self);
+        peer.start();
+        peer.register_conn_count_gauge("rpc.consensus.connections");
+        client.start();
+        client.register_conn_count_gauge("rpc.server.connections");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let server_clone = Arc::clone(&server);
+        let (peer_task, client_task) = (Arc::clone(&peer), Arc::clone(&client));
         let handle = tokio::spawn(
             async move {
                 let _ = rx.await;
-                server_clone.stop();
+                client_task.stop();
+                peer_task.stop();
             }
             .instrument(info_span!("rpc_server", s = self.store_id)),
         );
 
         {
             let mut state = self.server_state.lock();
-            // If the listen addr used port 0 (OS-assigned), read the
-            // actual bound port from the RPC server.
-            let actual_addr = if bound_addr.port() == 0 {
-                let actual_port = u16::try_from(server.port()).unwrap_or(0);
-                SocketAddr::new(bound_addr.ip(), actual_port)
-            } else {
-                bound_addr
-            };
             state.listen_addr = Some(actual_addr);
             state.handle = Some(handle);
             state.shutdown_tx = Some(tx);
         }
         {
             let mut state = self.rpc_server_state.lock();
-            state.server = Some(server);
+            state.server = Some(peer);
             state.transport = Some(transport.clone());
         }
+        self.client_rpc_server_state.lock().server = Some(client);
 
         let group_count = self.group_count();
         for entry in self.groups_snapshot().values() {
-            entry.local_replica().set_endpoint(bound_addr.to_string());
+            entry.local_replica().set_endpoint(actual_addr.to_string());
             // Wire the shared transport into remote replicas that were
             // created by apply_config during restore (before start()).
             let mut wired = 0usize;
@@ -147,7 +127,7 @@ impl PaxosKvServer for Arc<PxKvStore> {
             );
         }
 
-        info!(s = self.store_id, listen_addr = %bound_addr, group_count, "kv server started");
+        info!(s = self.store_id, listen_addr = %actual_addr, peer_port, group_count, "kv server started");
         Ok(())
     }
 
@@ -180,6 +160,18 @@ impl PaxosKvServer for Arc<PxKvStore> {
 }
 
 impl PxKvStore {
+    fn bind_rpc_listener(&self, address: SocketAddr) -> Result<Arc<RpcServer>, String> {
+        let server = Arc::new(RpcServer::with_engines(None, 1, self.rpc_workers));
+        server.set_tcp_nodelay(!self.enable_nagle);
+        server.set_quickack(self.quickack);
+        server.set_event_write(self.event_write);
+        server.set_send_queue_capacity(self.send_queue_capacity);
+        server
+            .listen(&address.ip().to_string(), i32::from(address.port()))
+            .map_err(|error| format!("failed to bind Paxos-KV RPC listener on {address}: {error:?}"))?;
+        Ok(server)
+    }
+
     /// Stop the server task and await its join under a timeout.
     ///
     /// Used by [`PxKvStore::shutdown`] after runtime accepted work drains.
@@ -250,9 +242,15 @@ impl PxKvStore {
             .map(|s| s.transport_stats())
     }
 
-    /// Sample the native transport and live connections for diagnostics.
+    /// Sample the peer RPC transport and its live connections.
     pub fn rpc_transport_status(&self) -> Option<Vec<u8>> {
         let server = self.rpc_server_state.lock().server.clone()?;
+        server.transport_status_json().ok()
+    }
+
+    /// Sample the client RPC transport and its live connections.
+    pub fn client_rpc_transport_status(&self) -> Option<Vec<u8>> {
+        let server = self.client_rpc_server_state.lock().server.clone()?;
         server.transport_status_json().ok()
     }
 

@@ -3,7 +3,7 @@
 #pragma once
 
 #include "logical_page.h"
-#include "published_state.h"
+#include "tree_root.h"
 
 namespace crowdb::tree
 {

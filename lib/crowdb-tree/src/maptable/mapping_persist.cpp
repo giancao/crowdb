@@ -75,8 +75,8 @@ size_t segment_image_encoded_size(uint32_t slot_count)
     return kImageHeaderBytes + (static_cast<size_t>(slot_count) * 8) + 4 /* body_crc trailer */;
 }
 
-void encode_segment_image(const SegmentImageHeader &hdr, const std::vector<uint64_t> &words, std::vector<uint8_t> *out,
-                          uint32_t *out_body_crc)
+void encode_segment_image(const MappingSegmentImageHeader &hdr, const std::vector<uint64_t> &words,
+                          std::vector<uint8_t> *out, uint32_t *out_body_crc)
 {
     const size_t base = out->size();
     put_u32(out, kSegImageMagic);
@@ -100,7 +100,7 @@ void encode_segment_image(const SegmentImageHeader &hdr, const std::vector<uint6
     }
 }
 
-Status decode_segment_image(const uint8_t *buf, size_t len, SegmentImageHeader *hdr_out,
+Status decode_segment_image(const uint8_t *buf, size_t len, MappingSegmentImageHeader *hdr_out,
                             std::vector<uint64_t> *words_out)
 {
     if (len < kImageHeaderBytes) {

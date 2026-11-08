@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
-#include "backend/local/local_backend_state.h"
+#include "page_store/checkpoint_page_store.h"
+#include "page_store/local/local_page_store_state.h"
 #include "tree_core_internal.h"
 
 #include <algorithm>
@@ -9,20 +9,20 @@
 
 namespace crowdb::tree
 {
-BackingStatsSampler TreeCore::backing_sampler() const noexcept
+PageBlockStatsSampler TreeCore::page_block_sampler() const noexcept
 {
     if (state_->chunk) {
-        return state_->chunk->backing_sampler();
+        return state_->chunk->page_block_sampler();
     }
     if (state_->local) {
-        return {.scope_id = state_->local->ledger->limits().backend_id, .metrics = state_->resources};
+        return {.scope_id = state_->local->ledger->limits().page_store_id, .metrics = state_->resources};
     }
     return {};
 }
 
-BackingStatsSnapshot TreeCore::backing_stats() const noexcept
+PageBlockStatsSnapshot TreeCore::page_block_stats() const noexcept
 {
-    return backing_sampler().snapshot();
+    return page_block_sampler().snapshot();
 }
 
 TreeStatsSnapshot TreeCore::state_stats() const
@@ -43,9 +43,9 @@ TreeStatsSnapshot TreeCore::state_stats() const
     result.resources.metadata_bytes = budget.physical[static_cast<size_t>(AllocationKind::kMetadata)];
     result.resources.io_bytes       = budget.physical[static_cast<size_t>(AllocationKind::kIo)];
     result.resources.scratch_bytes  = budget.physical[static_cast<size_t>(AllocationKind::kScratch)];
-    const auto backing              = backing_stats();
-    if (backing.scope_id != 0) {
-        result.resources.allocated_backing_bytes = backing.allocated_bytes;
+    const auto page_block           = page_block_stats();
+    if (page_block.scope_id != 0) {
+        result.resources.allocated_page_block_bytes = page_block.allocated_bytes;
     }
     return result;
 }

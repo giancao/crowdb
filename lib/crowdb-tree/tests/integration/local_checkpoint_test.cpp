@@ -112,8 +112,8 @@ TEST(LocalCheckpoint, ExcludedMetadataSegmentIsRelocatedDespiteUnchangedPageSlot
                                                        test.source.credits.credits.reservation(), std::move(done));
     });
     ASSERT_TRUE(fence.status.ok());
-    const BackingExclusion exclusion{.address = segment.address, .length = segment.length};
-    const auto             before = test.store->events.size();
+    const PageBlockExclusion exclusion{.address = segment.address, .length = segment.length};
+    const auto               before = test.store->events.size();
     ASSERT_TRUE(test.prepare(pages, {.exclusion = exclusion}).ok());
     Completion relocated;
     test.run(&relocated);

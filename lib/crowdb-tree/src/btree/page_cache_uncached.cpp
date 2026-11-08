@@ -46,7 +46,7 @@ void SharedPageCache::State::uncached(Request *request)
                                 [finish](Status status, auto leaf) { finish(std::move(status), std::move(leaf), {}); });
         }
         else {
-            upstream->load_inner(request->base.backing, [finish](Status status, auto inner) {
+            upstream->load_inner(request->base.page_block, [finish](Status status, auto inner) {
                 finish(std::move(status), {}, std::move(inner));
             });
         }

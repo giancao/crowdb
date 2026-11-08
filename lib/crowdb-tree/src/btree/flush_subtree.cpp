@@ -112,6 +112,7 @@ FlushBatch::State::Subtree::Subtree(State &state, uint64_t page_id, PageKeyRange
       bounds(std::move(range)),
       active(selected),
       final_pages(detail::ReservationAllocator<FinalPage>(state.metadata)),
+      more_index_summaries(detail::ReservationAllocator<std::pair<uint64_t, IndexSummary>>(state.metadata)),
       expected(state.captured->mapping.get(page_id)),
       output(state.metadata),
       children(detail::ReservationAllocator<std::shared_ptr<Subtree>>(state.metadata))
@@ -245,7 +246,7 @@ void FlushBatch::State::Subtree::fork()
         inner = expected->inner;
     }
     if (!inner) {
-        if (!expected->inner_backing || !owner.options.loader) {
+        if (!expected->inner_page_block || !owner.options.loader) {
             complete(Status::unavailable("flush index requires an asynchronous loader"));
             return;
         }
@@ -319,6 +320,8 @@ void FlushBatch::State::Subtree::reset_work()
     persist_at     = 0;
     page_writes.reset();
     final_pages.clear();
+    first_index_summary.reset();
+    more_index_summaries.clear();
     child_join.reset();
     layout.reset();
     layout_metrics.reset();

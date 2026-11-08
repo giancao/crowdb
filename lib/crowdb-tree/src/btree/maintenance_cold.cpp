@@ -19,8 +19,7 @@ size_t route_child(const InnerPageState &inner, const PageState &leaf)
              : 0;
 }
 
-bool needs_load(const PublishedTreeState &view, uint64_t target, const PageState &leaf, size_t max_path,
-                bool inner_repair)
+bool needs_load(const TreeRoot &view, uint64_t target, const PageState &leaf, size_t max_path, bool inner_repair)
 {
     if (!inner_repair && std::ranges::any_of(leaf.bases, [](const auto &base) { return !base.resident; })) {
         return true;
@@ -29,7 +28,7 @@ bool needs_load(const PublishedTreeState &view, uint64_t target, const PageState
     for (size_t depth = 0; pid != target && depth < max_path; ++depth) {
         const auto page = view.mapping.get(pid);
         if (!page || !page->inner) {
-            return page && page->inner_backing && page->inner_backing->readable();
+            return page && page->inner_page_block && page->inner_page_block->readable();
         }
         const auto child = route_child(*page->inner, leaf);
         if (child >= page->inner->children.size()) {
@@ -39,7 +38,7 @@ bool needs_load(const PublishedTreeState &view, uint64_t target, const PageState
             for (const auto at :
                  {child == 0 ? child : child - 1, std::min(child + 1, page->inner->children.size() - 1)}) {
                 const auto sibling = view.mapping.get(page->inner->children[at]);
-                if (sibling && !sibling->inner && sibling->inner_backing) {
+                if (sibling && !sibling->inner && sibling->inner_page_block) {
                     return true;
                 }
             }
@@ -50,8 +49,7 @@ bool needs_load(const PublishedTreeState &view, uint64_t target, const PageState
 }
 } // namespace
 
-bool MaintenanceOperation::begin_cold(std::shared_ptr<const PublishedTreeState> view,
-                                      std::shared_ptr<const PublishedPage>      page)
+bool MaintenanceOperation::begin_cold(std::shared_ptr<const TreeRoot> view, std::shared_ptr<const PageEntry> page)
 {
     auto &started = phase == Phase::InnerMerge ? cold_inner_started : cold_started;
     if (started || !loader ||
@@ -123,7 +121,7 @@ void MaintenanceOperation::cold_step()
         }
         if (pending.loading_inner) {
             const auto original = pending.view->mapping.get(pending.loading_pid);
-            auto       page     = reserved_shared<PublishedPage>(publication.metadata, *original);
+            auto       page     = reserved_shared<PageEntry>(publication.metadata, *original);
             page->inner         = std::move(pending.loaded_inner);
             pending.replacements.push_back(
                 {.page_id = pending.loading_pid, .expected = original, .replacement = std::move(page)});
@@ -149,7 +147,7 @@ void MaintenanceOperation::cold_step()
         if (base.resident) {
             continue;
         }
-        if (!base.backing || !base.backing->readable()) {
+        if (!base.page_block || !base.page_block->readable()) {
             finish(Status::corruption("maintenance cold base has no readable owner"));
             return;
         }
@@ -171,13 +169,13 @@ void MaintenanceOperation::cold_step()
 void MaintenanceOperation::cold_plan()
 {
     const auto pid  = (*candidates)[index].pid;
-    auto       page = reserved_shared<PublishedPage>(publication.metadata, *cold->expected);
+    auto       page = reserved_shared<PageEntry>(publication.metadata, *cold->expected);
     if (phase != Phase::InnerMerge) {
         page->leaf = std::move(cold->leaf);
         cold->replacements.push_back({.page_id = pid, .expected = cold->expected, .replacement = page});
     }
-    auto                   resolved = reserved_shared<PublishedTreeState>(publication.metadata, *cold->view);
-    MappingView::CopyStats copied;
+    auto                    resolved = reserved_shared<TreeRoot>(publication.metadata, *cold->view);
+    MappingTable::CopyStats copied;
     std::sort(cold->replacements.begin(), cold->replacements.end(),
               [](const auto &left, const auto &right) { return left.page_id < right.page_id; });
     resolved->mapping = cold->view->mapping.replace(cold->replacements, copied, publication.metadata);

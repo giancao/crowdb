@@ -40,9 +40,12 @@ try {
     if (category == detail::BudgetClass::kAdmittedWriter && *complete > binding()->options().limits.writer_bytes) {
         return Status::invalid_argument("complete proposal cannot fit the ordinary writer partition");
     }
-    auto grant = detail::ResourceBudget::try_reserve(binding()->account(), category, *complete);
+    bool memory_denied = false;
+    auto grant         = detail::ResourceBudget::try_reserve(binding()->account(), category, *complete, &memory_denied);
     if (!grant) {
-        (void)state_->source_rotation->request_pressure();
+        if (!memory_denied) {
+            (void)state_->source_rotation->request_pressure();
+        }
         return Status::unavailable("complete apply grant is currently occupied");
     }
     auto staging = grant->split(plan.staging_bytes);

@@ -7,8 +7,8 @@
 // CMake build.
 #include "crowdb-common/log.h"
 #include "crowdb-common/runtime_path.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -63,7 +63,7 @@ std::string read_file(const fs::path &p)
 TEST(Logging, WritesFormattedFileOnOpenAndSnapshot)
 {
     TempDir      dir;
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
 
@@ -109,7 +109,7 @@ TEST(Logging, StderrWhenNoLogDir)
     // Empty log_dir => stderr logger (enabled, no file).
     init_logging("", "info", 30, 5, "crowdb-tree");
     EXPECT_TRUE(logging_enabled());
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store = &store;
     std::unique_ptr<Crowdbtree> t;

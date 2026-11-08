@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_bound.h"
-#include "btree/backing_ref.h"
 #include "btree/logical_page.h"
+#include "btree/page_block_ref.h"
 #include "btree/publication_generation_internal.h"
 #include "page_cache.h"
 #include "publication_admission.h"
@@ -22,15 +22,15 @@ bool invalidates_merge(const PageReplacement &page)
     return logical_page_change(page) || (page.replacement && page.replacement->metrics.split_candidate);
 }
 
-bool matches_expected_page(const std::shared_ptr<const PublishedPage> &current,
-                           const std::shared_ptr<const PublishedPage> &expected)
+bool matches_expected_page(const std::shared_ptr<const PageEntry> &current,
+                           const std::shared_ptr<const PageEntry> &expected)
 {
     if (current == expected) {
         return true;
     }
     if (!current || !expected || current->revision != expected->revision || current->level != expected->level ||
         current->leaf != expected->leaf || current->inner != expected->inner ||
-        current->inner_backing != expected->inner_backing || current->primary != expected->primary ||
+        current->inner_page_block != expected->inner_page_block || current->primary != expected->primary ||
         current->allocation_owner != expected->allocation_owner) {
         return false;
     }
@@ -43,7 +43,7 @@ bool matches_expected_page(const std::shared_ptr<const PublishedPage> &current,
     return current_metrics == expected_metrics;
 }
 
-void prepare_pending(const PublicationTransaction &transaction, const PublishedTreeState &current,
+void prepare_pending(const PublicationTransaction &transaction, const TreeRoot &current,
                      CheckpointPendingMetrics::PreparedDelta &delta)
 {
     for (const auto &page : transaction.pages) {
@@ -64,20 +64,20 @@ void prepare_pending(const PublicationTransaction &transaction, const PublishedT
     }
 }
 
-std::shared_ptr<PublishedTreeState> checkpoint_artifact(const std::shared_ptr<PublishedTreeState> &next,
-                                                        const PublicationTransaction              &transaction)
+std::shared_ptr<TreeRoot> checkpoint_artifact(const std::shared_ptr<TreeRoot> &next,
+                                              const PublicationTransaction    &transaction)
 {
     if (!transaction.checkpoint || transaction.checkpoint->action != CheckpointAction::Capture) {
         return {};
     }
-    auto snapshot     = detail::reserved_shared<PublishedTreeState>(transaction.metadata, *next);
+    auto snapshot     = detail::reserved_shared<TreeRoot>(transaction.metadata, *next);
     auto sources      = detail::reserved_shared<PublishedSources>(transaction.metadata, transaction.metadata);
     sources->floor    = next->coverage;
     snapshot->sources = std::move(sources);
     return snapshot;
 }
 
-Status validate_merge_pair(const PublishedTreeState &current, const PublicationTransaction &transaction)
+Status validate_merge_pair(const TreeRoot &current, const PublicationTransaction &transaction)
 {
     if (!transaction.merge_pair) {
         return Status::Ok();
@@ -118,8 +118,7 @@ Status validate_merge_pair(const PublishedTreeState &current, const PublicationT
     return Status::Ok();
 }
 
-Status validate_transaction(const PublishedTreeState &current, const PublicationTransaction &transaction,
-                            uint64_t publisher_id)
+Status validate_transaction(const TreeRoot &current, const PublicationTransaction &transaction, uint64_t publisher_id)
 {
     if (!transaction.record || transaction.record->token.generation != current.generation) {
         return Status::unavailable("publication belongs to a different tree generation");
@@ -146,7 +145,7 @@ Status validate_transaction(const PublishedTreeState &current, const Publication
     }
     if (transaction.next_page_id &&
         (!transaction.expected_next_page_id || *transaction.next_page_id < current.next_page_id ||
-         *transaction.next_page_id > MappingView::kPageLimit)) {
+         *transaction.next_page_id > MappingTable::kPageLimit)) {
         return Status::invalid_argument("page identifier reservation must monotonically advance the authority");
     }
     if (auto admission = validate_flush_admission(current, transaction); !admission.ok()) {
@@ -211,7 +210,7 @@ Status validate_transaction(const PublishedTreeState &current, const Publication
     uint64_t previous = 0;
     bool     first    = true;
     for (const auto &page : transaction.pages) {
-        if (page.page_id >= MappingView::kPageLimit || (!first && page.page_id <= previous)) {
+        if (page.page_id >= MappingTable::kPageLimit || (!first && page.page_id <= previous)) {
             return Status::invalid_argument("replacement PIDs must be unique and ordered");
         }
         if (!matches_expected_page(current.mapping.get(page.page_id), page.expected)) {
@@ -228,10 +227,10 @@ Status validate_transaction(const PublishedTreeState &current, const Publication
         }
         if (page.replacement &&
             (page.replacement->level == 0
-                 ? (!page.replacement->leaf || page.replacement->inner || page.replacement->inner_backing)
+                 ? (!page.replacement->leaf || page.replacement->inner || page.replacement->inner_page_block)
                  : (page.replacement->leaf ||
                     (!page.replacement->inner &&
-                     (!page.replacement->inner_backing || !page.replacement->inner_backing->readable()))))) {
+                     (!page.replacement->inner_page_block || !page.replacement->inner_page_block->readable()))))) {
             return Status::invalid_argument("published page must have the representation for its routing level");
         }
         previous = page.page_id;
@@ -245,14 +244,14 @@ size_t PublicationCoordinator::empty_commit_reserve_bytes() noexcept
 {
     // Includes a replacement request after a rejected attempt and allocator
     // control blocks. No mapping or checkpoint collection grows here.
-    return detail::shared_allocation_bound<PublishedTreeState>() + sizeof(Root) + sizeof(PublicationRequest) +
+    return detail::shared_allocation_bound<TreeRoot>() + sizeof(Root) + sizeof(PublicationRequest) +
            sizeof(InstallRecord) + 1024;
 }
 
 size_t PublicationCoordinator::merge_membership_reserve_bytes(size_t pages) noexcept
 {
     return detail::AllocationBound()
-        .add_product(pages, MappingView::path_copy_bound() + detail::shared_allocation_bound<PublishedPage>() +
+        .add_product(pages, MappingTable::path_copy_bound() + detail::shared_allocation_bound<PageEntry>() +
                                 (3 * sizeof(PageReplacement)) + 64)
         .value()
         .value_or(SIZE_MAX);
@@ -293,9 +292,9 @@ PublicationResult PublicationCoordinator::commit(const PublicationTransaction &t
         return result;
     }
     detail::BudgetMemoryResource::Scope checkpoint_credit(checkpoint_->resource, transaction.metadata);
-    auto next          = detail::reserved_shared<PublishedTreeState>(transaction.metadata, *current->state);
-    next->next_page_id = transaction.next_page_id.value_or(next->next_page_id);
-    next->mapping      = current->state->mapping.replace(transaction.pages, result.copied, transaction.metadata);
+    auto                                next = detail::reserved_shared<TreeRoot>(transaction.metadata, *current->state);
+    next->next_page_id                       = transaction.next_page_id.value_or(next->next_page_id);
+    next->mapping = current->state->mapping.replace(transaction.pages, result.copied, transaction.metadata);
     for (const auto &page : transaction.pages) {
         const auto previous = current->state->mapping.get(page.page_id);
         if (!apply_page_metrics(next->stats, previous ? &previous->metrics : nullptr,
@@ -339,6 +338,27 @@ PublicationResult PublicationCoordinator::commit(const PublicationTransaction &t
     }
     if (transaction.summary) {
         next->summary = transaction.summary;
+    }
+    if (transaction.index_summaries) {
+        next->index_summaries = *transaction.index_summaries;
+    }
+    else if (pending_changes != 0 || next->root_page_id != current->state->root_page_id) {
+        detail::ReservedVector<IndexSummaries::Change> removed{
+            detail::ReservationAllocator<IndexSummaries::Change>(transaction.metadata)};
+        for (const auto &page : transaction.pages) {
+            if (page.expected && page.expected->level != 0 && logical_page_change(page) &&
+                current->state->index_summaries.find(page.page_id)) {
+                removed.push_back({.pid = static_cast<uint32_t>(page.page_id), .summary = std::nullopt});
+            }
+        }
+        if (next->root_page_id != current->state->root_page_id &&
+            current->state->index_summaries.find(next->root_page_id)) {
+            removed.push_back({.pid = static_cast<uint32_t>(next->root_page_id), .summary = std::nullopt});
+        }
+        std::ranges::sort(removed, {}, &IndexSummaries::Change::pid);
+        const auto duplicates = std::ranges::unique(removed, {}, &IndexSummaries::Change::pid);
+        removed.erase(duplicates.begin(), duplicates.end());
+        next->index_summaries = next->index_summaries.merge(removed, transaction.metadata);
     }
     CheckpointPendingMetrics::PreparedDelta pending(checkpoint_->pending, pending_changes);
     prepare_pending(transaction, *current->state, pending);
@@ -398,7 +418,7 @@ PublicationResult PublicationCoordinator::commit(const PublicationTransaction &t
         if (!before || (before->metrics.merge_candidate == present && before->merge_outgoing == proof)) {
             continue;
         }
-        auto after                     = detail::reserved_shared<PublishedPage>(transaction.metadata, *before);
+        auto after                     = detail::reserved_shared<PageEntry>(transaction.metadata, *before);
         after->metrics.merge_candidate = present;
         after->merge_outgoing          = proof;
         if (!apply_page_metrics(next->stats, &before->metrics, &after->metrics)) {

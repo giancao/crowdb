@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "native_import.h"
-#include "overflow_backing.h"
+#include "overflow_page_block.h"
 #include "snapshot/stored_overflow.h"
 
 namespace crowdb::tree
@@ -38,11 +38,11 @@ Status inspect_import_leaf(const ResidentImportFrame &owned, uint64_t coverage, 
                            ReadablePageFrame                                    *descriptor)
 {
     const LeafFrameView leaf(owned.bytes.data(), static_cast<uint32_t>(owned.bytes.size()));
-    if (leaf.count() > limits.max_leaf_entries || leaf.delta_count() > limits.max_leaf_entries - leaf.count()) {
+    if (leaf.count() > limits.max_leaf_entries) {
         return Status::resource_exhausted("native import leaf exceeds entry limit");
     }
-    for (uint32_t i = 0; i < leaf.count() + leaf.delta_count(); ++i) {
-        const auto cell   = i < leaf.count() ? leaf.cell(i) : leaf.delta_cell(i - leaf.count());
+    for (uint32_t i = 0; i < leaf.count(); ++i) {
+        const auto cell   = leaf.cell(i);
         auto       status = validate_import_cell(cell, coverage, limits);
         if (!status.ok()) {
             return status;
@@ -61,7 +61,7 @@ std::optional<size_t> native_import_allocation_bound(const NativeImportShape &sh
     }
     const auto frame = detail::AllocationBound(shared_allocation_bound<ResidentImportFrame>())
                            .add(shape.max_frame_bytes)
-                           .add(shared_allocation_bound<BackingRef>())
+                           .add(shared_allocation_bound<PageBlockRef>())
                            .add(shared_allocation_bound<ReadablePageCatalog::Entry>())
                            .value();
     if (!frame) {
@@ -70,11 +70,11 @@ std::optional<size_t> native_import_allocation_bound(const NativeImportShape &sh
     return detail::AllocationBound(shared_allocation_bound<ReadablePageCatalog>())
         .add_product(shape.frames, *frame)
         .add_product(shape.leaf_pages, shared_allocation_bound<StoredOverflowReferences>() +
-                                           shared_allocation_bound<BackingRef>() +
-                                           shared_allocation_bound<OverflowBackingSet>())
+                                           shared_allocation_bound<PageBlockRef>() +
+                                           shared_allocation_bound<OverflowPageBlockSet>())
         .add_product(shape.max_leaf_entries, sizeof(Slice))
         .add_product(shape.stored_references, sizeof(StoredOverflowReference))
-        .add_product(shape.dependency_steps, shared_allocation_bound<OverflowBackingSet::Entry>())
+        .add_product(shape.dependency_steps, shared_allocation_bound<OverflowPageBlockSet::Entry>())
         .value();
 }
 
@@ -97,34 +97,29 @@ Status append_native_frame(ReadablePageCatalog &catalog, uint64_t pid, std::span
     if (catalog.frames.size() == limits.max_frames) {
         return Status::resource_exhausted("native import frame limit exceeded");
     }
-    if (pid >= MappingView::kPageLimit || frame.size() > loads.max_frame_bytes || frame.size() > UINT32_MAX) {
+    if (pid >= MappingTable::kPageLimit || frame.size() > loads.max_frame_bytes || frame.size() > UINT32_MAX) {
         return Status::resource_exhausted("native import PID or frame exceeds configured limits");
     }
     const auto bytes = static_cast<uint32_t>(frame.size());
     if (!frame_validate_key_range(frame.data(), bytes, config.key_range)) {
         return Status::corruption("native import frame CRC, structure, or key range is invalid");
     }
-    const auto stored_pid = frame_u64(frame.data(), fh::kSelfpage_id);
-    if (stored_pid != kInvalidPageId && stored_pid != pid) {
+    if (frame_u64(frame.data(), fh::kSelfpage_id) != pid) {
         return Status::corruption("native import frame identity differs from its descriptor");
     }
-    auto owned = detail::reserved_shared<ResidentImportFrame>(metadata, frame, metadata);
-    if (stored_pid == kInvalidPageId) {
-        frame_put_u64(owned->bytes.data(), fh::kSelfpage_id, pid);
-        frame_restamp_crc(owned->bytes.data(), bytes);
-    }
-    auto backing            = detail::reserved_shared<BackingRef>(metadata);
-    backing->content_id     = pid + 1;
-    backing->generation     = catalog.generation;
-    backing->storage        = BackingStorage::kResidentFrame;
-    backing->durability     = BackingDurability::kResident;
-    backing->resident_frame = owned->bytes;
-    backing->owner          = owned;
+    auto owned                 = detail::reserved_shared<ResidentImportFrame>(metadata, frame, metadata);
+    auto page_block            = detail::reserved_shared<PageBlockRef>(metadata);
+    page_block->content_id     = pid + 1;
+    page_block->generation     = catalog.generation;
+    page_block->storage        = PageBlockStorage::kResidentFrame;
+    page_block->durability     = PageBlockDurability::kResident;
+    page_block->resident_frame = owned->bytes;
+    page_block->owner          = owned;
     ReadablePageFrame descriptor{.page_id       = pid,
                                  .type          = frame_page_type(owned->bytes.data()),
                                  .frame_bytes   = bytes,
                                  .logical_bytes = bytes,
-                                 .backing       = backing};
+                                 .page_block    = page_block};
     if (descriptor.type == page_type::kLeafBase) {
         auto status = inspect_import_leaf(*owned, catalog.coverage, loads, metadata, &descriptor);
         if (!status.ok()) {
@@ -154,7 +149,7 @@ Status build_native_catalog(std::span<const NativeFrame> frames, NativeStreamInf
                             const std::shared_ptr<detail::AllocationReservation> &metadata,
                             std::shared_ptr<ReadablePageCatalog>                 *out)
 {
-    if (out == nullptr || *out || frames.size() != info.frame_count || info.next_page_id > MappingView::kPageLimit) {
+    if (out == nullptr || *out || frames.size() != info.frame_count || info.next_page_id > MappingTable::kPageLimit) {
         return Status::invalid_argument("native import requires consistent bounded stream metadata");
     }
     if (frames.size() > limits.max_frames) {
@@ -165,9 +160,9 @@ Status build_native_catalog(std::span<const NativeFrame> frames, NativeStreamInf
     catalog->next_page_id = info.next_page_id;
     catalog->coverage     = info.at_slot;
     catalog->generation   = 1;
-    // Resident identities never claim a backend domain. Each page's owner
+    // Resident identities never claim a page store domain. Each page's owner
     // distinguishes separate imports, including equal PIDs in old captures.
-    catalog->backend_id = 0;
+    catalog->page_store_id = 0;
     for (const auto &input : frames) {
         const auto status = append_native_frame(*catalog, input.page_id, input.frame, config, loads, limits, metadata);
         if (!status.ok()) {

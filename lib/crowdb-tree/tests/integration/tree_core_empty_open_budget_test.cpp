@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/resource_budget.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "runtime/tree_runtime_binding.h"
 
 #include <gtest/gtest.h>
@@ -26,9 +26,9 @@ TEST(TreeCoreEmptyOpenBudget, ConcurrentEmptyDomainsPayOnlyTheirRecoveryWindows)
     auto retained =
         detail::ResourceBudget::try_reserve(other_tree->account(), detail::BudgetClass::kRouting, 4 * 1024 * 1024);
     ASSERT_TRUE(retained);
-    MemPageStore first_store(1);
-    MemPageStore second_store(1);
-    auto         open = [&](MemPageStore *store) {
+    PageMemStore first_store(1);
+    PageMemStore second_store(1);
+    auto         open = [&](PageMemStore *store) {
         Config config;
         config.runtime         = runtime;
         config.runtime_binding = binding_options;

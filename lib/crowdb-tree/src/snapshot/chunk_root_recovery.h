@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #pragma once
-#include "backend/chunk/chunk_runtime_ids.h"
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
+#include "page_store/chunk/chunk_runtime_ids.h"
 #include "snapshot/captured_write.h"
 #include "snapshot/chunk_root_codec.h"
 
@@ -14,7 +14,7 @@ struct ChunkRecoveryLimits
     size_t max_blob_bytes  = 2 * 1024 * 1024;
 };
 
-// Recover ordered PageIndex segments through async reads, then verify their
+// Recover ordered mapping segments (PageIndex packs) through async reads, then verify their
 // dependencies. A successful result still requires graph validation.
 class ChunkRootRecovery : public std::enable_shared_from_this<ChunkRootRecovery>
 {
@@ -25,7 +25,7 @@ class ChunkRootRecovery : public std::enable_shared_from_this<ChunkRootRecovery>
   public:
     ChunkRootRecovery(ConstructionKey, std::shared_ptr<AllocationBudget> metadata,
                       std::shared_ptr<AllocationBudget> window);
-    static Status create(ChunkRootManifest root, std::shared_ptr<const ChunkBackingDomain> domain,
+    static Status create(ChunkRootManifest root, std::shared_ptr<const PageChunkStoreDomain> domain,
                          std::shared_ptr<detail::ChunkRuntimeIds> ids, ChunkRecoveryLimits limits,
                          std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<AllocationBudget> window,
                          std::shared_ptr<ChunkRootRecovery> *out);
@@ -63,14 +63,15 @@ class ChunkRootRecovery : public std::enable_shared_from_this<ChunkRootRecovery>
 
     struct LeafProtection
     {
-        std::shared_ptr<const void>               primary;
-        std::shared_ptr<const OverflowBackingSet> overflow;
+        std::shared_ptr<const void>                 primary;
+        std::shared_ptr<const OverflowPageBlockSet> overflow;
     };
 
     Status finish_indexes();
     Status index_loaded();
-    Status prepare_frame(ChunkIndexFrame *out, size_t *offset, uint64_t left, std::optional<uint64_t> previous) const;
-    Status frame_loaded(const ChunkIndexFrame &record, std::shared_ptr<const ChunkPackBacking> pack,
+    Status summaries_loaded();
+    Status prepare_frame(ChunkPageEntry *out, size_t *offset, uint64_t left, std::optional<uint64_t> previous) const;
+    Status frame_loaded(const ChunkPageEntry &record, std::shared_ptr<const ChunkPageBlock> pack,
                         std::span<const uint8_t> blob);
     Status validate_frame(DurableCapturedFrame &descriptor, std::span<const uint8_t> words,
                           std::span<const uint8_t> blob);
@@ -80,16 +81,16 @@ class ChunkRootRecovery : public std::enable_shared_from_this<ChunkRootRecovery>
     void   complete_step(Status status);
     void   read_pinned(Status status);
     void   read_completed(Status status);
-    AsyncCompletion                           async_reply(AsyncCompleteFn callback);
-    std::shared_ptr<ScheduledPageStore>       cpu_;
-    AsyncCompletion                           completion_;
-    std::shared_ptr<const ChunkPackBacking>   async_pack_;
-    std::shared_ptr<FrameReads>               frame_reads_;
-    std::shared_ptr<AllocationBudget>         metadata_;
-    std::shared_ptr<AllocationBudget>         window_;
-    std::shared_ptr<const ChunkBackingDomain> domain_;
-    std::shared_ptr<detail::ChunkRuntimeIds>  ids_;
-    ChunkRecoveryLimits                       limits_;
+    AsyncCompletion                             async_reply(AsyncCompleteFn callback);
+    std::shared_ptr<ScheduledPageStore>         cpu_;
+    AsyncCompletion                             completion_;
+    std::shared_ptr<const ChunkPageBlock>       async_pack_;
+    std::shared_ptr<FrameReads>                 frame_reads_;
+    std::shared_ptr<AllocationBudget>           metadata_;
+    std::shared_ptr<AllocationBudget>           window_;
+    std::shared_ptr<const PageChunkStoreDomain> domain_;
+    std::shared_ptr<detail::ChunkRuntimeIds>    ids_;
+    ChunkRecoveryLimits                         limits_;
 
     ChunkRootManifest                                         root_;
     std::shared_ptr<CapturedDurablePages>                     pages_;
@@ -105,6 +106,7 @@ class ChunkRootRecovery : public std::enable_shared_from_this<ChunkRootRecovery>
     uint64_t                                                  steps_            = 0;
     bool                                                      have_pid_         = false;
     bool                                                      dependency_phase_ = false;
+    bool                                                      summaries_ready_  = false;
     bool                                                      done_             = false;
     Status                                                    status_;
     CapturedDurablePages::Frames::iterator                    leaf_;
@@ -112,6 +114,6 @@ class ChunkRootRecovery : public std::enable_shared_from_this<ChunkRootRecovery>
     uint64_t                                                  pid_         = kInvalidPageId;
     uint64_t                                                  remaining_   = 0;
     uint64_t                                                  chain_steps_ = 0;
-    std::shared_ptr<OverflowBackingSet>                       overflow_;
+    std::shared_ptr<OverflowPageBlockSet>                     overflow_;
 };
 } // namespace crowdb::tree

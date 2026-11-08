@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Immutable snapshot interface. Runtime views retain independent mapping and backing owners.
+// Immutable snapshot interface. Runtime views retain independent mapping and page block owners.
 
 #pragma once
 

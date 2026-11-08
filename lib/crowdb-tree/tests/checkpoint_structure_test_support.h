@@ -111,7 +111,7 @@ struct TestCheckpointStructure
     Status publish(std::shared_ptr<const PageState> logical, bool split_candidate = false)
     {
         const auto old                       = publisher.capture()->mapping.get(0);
-        auto       replacement               = std::make_shared<PublishedPage>();
+        auto       replacement               = std::make_shared<PageEntry>();
         replacement->leaf                    = std::move(logical);
         replacement->revision                = old ? old->revision + 1 : 1;
         replacement->metrics.dirty           = true;
@@ -138,8 +138,7 @@ struct TestCheckpointStructure
         return status;
     }
 
-    Status prepare(std::shared_ptr<const PublishedTreeState> view, size_t max_output_pages = 4,
-                   size_t max_work_entries = 16)
+    Status prepare(std::shared_ptr<const TreeRoot> view, size_t max_output_pages = 4, size_t max_work_entries = 16)
     {
         PageMaintenanceOperationOptions options;
         options.max_candidates = options.max_steps = options.max_visits = options.visits_per_step = 1;

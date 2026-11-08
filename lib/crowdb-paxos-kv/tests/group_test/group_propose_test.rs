@@ -199,7 +199,7 @@ async fn membership_epoch_mismatch_fences_prepare_and_accept_until_epochs_match(
         .expect("follower store started")
         .to_string();
     let voting_remote = PxRemoteReplica::new(2, follower_endpoint);
-    voting_remote.set_rpc_transport(Arc::new(PxRpcTransport::new()));
+    voting_remote.set_rpc_transport(Arc::new(PxRpcTransport::with_peer_discovery_for_tests()));
 
     let local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
     let mut group = PxGroup::new(1, local);

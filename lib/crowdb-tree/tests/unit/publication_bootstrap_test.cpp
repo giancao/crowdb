@@ -15,10 +15,10 @@ using namespace test_cache_residency;
 
 TEST(PublicationBootstrap, LifecycleChargesSourceControllerEpochAndInitialPublicationUntilLastViewRelease)
 {
-    LoadCredits                               credits;
-    detail::FlushRuntime                      runtime(1, 8);
-    auto                                      lane = std::make_shared<detail::FlushRuntime::Lane>(8);
-    std::shared_ptr<const PublishedTreeState> retained;
+    LoadCredits                     credits;
+    detail::FlushRuntime            runtime(1, 8);
+    auto                            lane = std::make_shared<detail::FlushRuntime::Lane>(8);
+    std::shared_ptr<const TreeRoot> retained;
     {
         auto       sources = detail::reserved_unique<SourceAdmission>(credits.credits.reservation(), 0, 1,
                                                                       SourceWriteOptions{.account = credits.account},
@@ -63,7 +63,7 @@ TEST(PublicationBootstrap, SparseRecoveredMappingInstallsExactSourcesAndAllColdR
     auto                 cache =
         std::make_shared<SharedPageCache>(PageCacheLimits{}, credits.credits.reservation(), resources, &runtime, lane);
     SourceAdmission sources(42, 9, {}, credits.credits.reservation());
-    auto            initial            = std::make_shared<PublishedTreeState>(nullptr, 42);
+    auto            initial            = std::make_shared<TreeRoot>(nullptr, 42);
     initial->generation                = 9;
     initial->coverage                  = 42;
     initial->root_page_id              = 0;
@@ -75,7 +75,7 @@ TEST(PublicationBootstrap, SparseRecoveredMappingInstallsExactSourcesAndAllColdR
     }
     const uint64_t last = (uint64_t{1} << 29) + 3;
     edits.push_back({.page_id = last, .expected = {}, .replacement = published({input, input})});
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     initial->mapping      = initial->mapping.replace(edits, copied);
     initial->next_page_id = last + 1;
     for (const auto &edit : edits) {
@@ -125,7 +125,7 @@ TEST(PublicationBootstrap, FailedInitialPublicationDoesNotClaimCacheOrLeaveAlloc
     auto                 resources = std::make_shared<TreeResourceMetrics>();
     auto            cache = std::make_shared<SharedPageCache>(PageCacheLimits{}, nullptr, resources, &runtime, lane);
     SourceAdmission wrong(7, 1);
-    const auto      initial = std::make_shared<PublishedTreeState>();
+    const auto      initial = std::make_shared<TreeRoot>();
     EXPECT_THROW(
         (PublicationCoordinator(
             8, 1, {}, std::pmr::get_default_resource(), cache,

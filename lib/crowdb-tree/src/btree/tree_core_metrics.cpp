@@ -119,7 +119,7 @@ void Crowdbtree::init_core_metrics(const std::string &prefix)
     resource(".read.inflight.bytes.g", &TreeResourceStats::read_inflight_bytes);
     resource(".write.inflight.bytes.g", &TreeResourceStats::write_inflight_bytes);
     resource(".materialize.inflight.bytes.g", &TreeResourceStats::materialize_inflight_bytes);
-    resource(".backing.allocated.bytes.g", &TreeResourceStats::allocated_backing_bytes);
+    resource(".page_block.allocated.bytes.g", &TreeResourceStats::allocated_page_block_bytes);
     resource(".maintenance.queued.g", &TreeResourceStats::maintenance_queued);
     resource(".maintenance.inflight.g", &TreeResourceStats::maintenance_inflight);
     registry->register_callback_gauge_inline(prefix, ".tree.page.count.g",

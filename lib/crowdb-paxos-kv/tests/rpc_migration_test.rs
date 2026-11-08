@@ -545,13 +545,19 @@ async fn verify_peer_connection_reuse(cluster: CrowdbRpcCluster) {
         reverse.unwrap(),
         PxPrepareReply::Promised { slot: 12, .. }
     ));
-    unrelated.close();
-    client.stop();
-
     let (leader_connection, follower_connection) = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let (Some(a), Some(b)) = (connection_ids(&cluster.leader), connection_ids(&cluster.follower)) {
-                break (a, b);
+                let status: serde_json::Value =
+                    serde_json::from_slice(&cluster.leader.client_rpc_transport_status().unwrap()).unwrap();
+                let clients = status["connections"].as_array().unwrap();
+                if clients.len() == 1 {
+                    assert_eq!(
+                        clients[0]["path"],
+                        if unrelated.is_rdma() { "rdma" } else { "tcp" }
+                    );
+                    break (a, b);
+                }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -566,6 +572,8 @@ async fn verify_peer_connection_reuse(cluster: CrowdbRpcCluster) {
     assert_eq!(connection_ids(&cluster.follower), Some(follower_connection));
 
     verify_peer_reconnect(&cluster, to_follower, &leader_connection).await;
+    unrelated.close();
+    client.stop();
     cluster.shutdown().await;
 }
 
@@ -618,8 +626,17 @@ async fn verify_peer_reconnect(
         .send_prepare(15, PxBallot::new(1, 2), 0, 1, 0)
         .await
         .is_ok());
-    assert!(connection_ids(&restarted).is_some());
-    assert_ne!(connection_ids(&cluster.leader).unwrap(), old_connections);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let (Some(leader), Some(_)) = (connection_ids(&cluster.leader), connection_ids(&restarted)) {
+                assert_ne!(leader, old_connections);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("old peer connections should retire after the replacement pool connects");
     restarted.stop();
     restarted.join().await;
 }

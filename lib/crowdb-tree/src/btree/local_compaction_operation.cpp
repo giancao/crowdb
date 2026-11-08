@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/block_account.h"
 #include "btree/allocation_bound.h"
 #include "btree/local_compaction_internal.h"
+#include "page_store/local/block_account.h"
 
 #include <cmath>
 
@@ -33,8 +33,8 @@ try {
     state->ticket           = std::move(ticket);
     state->core             = &core;
     state->options          = options;
-    state->local            = core.local_backend();
-    state->store            = dynamic_cast<BlockPageStore *>(core.config().page_store);
+    state->local            = core.local_page_store();
+    state->store            = dynamic_cast<PageDiskStore *>(core.config().page_store);
     state->cpu_progress     = std::move(cpu);
     state->backend_progress = core.binding()->backend_progress();
     Status status;

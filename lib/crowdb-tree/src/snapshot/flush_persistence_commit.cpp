@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
 #include "btree/allocation_bound.h"
 #include "crowdb-common/log.h"
+#include "page_store/checkpoint_page_store.h"
 #include "snapshot/flush_persistence.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 #include <cassert>
 
@@ -46,12 +46,12 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
     };
 
     std::shared_ptr<FlushPersistence>           owner;
-    std::shared_ptr<const PublishedTreeState>   view;
+    std::shared_ptr<const TreeRoot>             view;
     FlushBatch::MaintenanceComplete             done;
     CheckpointWork                              work;
     std::shared_ptr<const CapturedDurablePages> pages;
     std::shared_ptr<LocalCheckpointOperation>   local;
-    std::shared_ptr<BackendCheckpoint>          chunk;
+    std::shared_ptr<PageStoreCheckpoint>        chunk;
     std::optional<Attempt>                      attempt;
     Status                                      status;
     std::optional<TreeMetricsOperation>         metrics;
@@ -70,7 +70,15 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
             reconcile(std::move(result));
             return;
         }
+        const auto        &stats = view->stats;
+        const IndexSummary root_summary =
+            stats.kv_unknown_pages == 0 ? IndexSummary{.live_kv          = stats.kv_known_count,
+                                                       .live_key_bytes   = stats.key_known_bytes,
+                                                       .live_value_bytes = stats.kv_known_bytes - stats.key_known_bytes,
+                                                       .exact            = true}
+                                        : IndexSummary{};
         if (!source || source->coverage != view->coverage || source->generation != view->generation ||
+            !source->index_summaries.same(view->index_summaries) || source->root_summary != root_summary ||
             source->root_page_id != view->root_page_id || source->next_page_id != view->next_page_id || owner->pages_) {
             if (!owner->pages_) {
                 owner->pages_ = detail::reserved_shared<CapturedDurablePages>(work.budget.bytes, work.budget.bytes);
@@ -107,12 +115,15 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
                 reconcile(std::move(deletions.status));
                 return;
             }
-            catalog.coverage     = view->coverage;
-            catalog.generation   = view->generation;
-            catalog.root_page_id = view->root_page_id;
-            catalog.next_page_id = view->next_page_id;
-            catalog.backend_id   = p.core->local_backend() ? p.core->local_backend()->ledger->limits().backend_id
-                                                           : p.core->chunk_backend()->backend_identity();
+            catalog.coverage        = view->coverage;
+            catalog.generation      = view->generation;
+            catalog.root_page_id    = view->root_page_id;
+            catalog.next_page_id    = view->next_page_id;
+            catalog.index_summaries = view->index_summaries;
+            catalog.root_summary    = root_summary;
+            catalog.page_store_id   = p.core->local_page_store()
+                                        ? p.core->local_page_store()->ledger->limits().page_store_id
+                                        : p.core->page_chunk_store()->page_store_identity();
             catalog.frames.refresh_counts();
             pages = owner->pages_;
             source.reset();
@@ -129,23 +140,24 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
         owner->selection_metadata_.reset();
         owner->initial_.reset();
         owner->report_.captured_coverage = view->coverage;
-        if (p.core->chunk_backend()) {
-            result = p.core->chunk_backend()->prepare_checkpoint({.pages      = pages,
-                                                                  .view       = *view,
-                                                                  .wal_offset = owner->wal_offset_,
-                                                                  .store   = p.ticket->backend(p.core->async_backend()),
-                                                                  .runtime = p.core->binding()->cpu(),
-                                                                  .lane    = p.core->binding()->lane(),
-                                                                  .budget  = work.budget,
-                                                                  .owner   = owner},
-                                                                 &chunk);
+        if (p.core->page_chunk_store()) {
+            result = p.core->page_chunk_store()->prepare_checkpoint(
+                {.pages      = pages,
+                 .view       = *view,
+                 .wal_offset = owner->wal_offset_,
+                 .store      = p.ticket->page_store(p.core->async_page_store()),
+                 .runtime    = p.core->binding()->cpu(),
+                 .lane       = p.core->binding()->lane(),
+                 .budget     = work.budget,
+                 .owner      = owner},
+                &chunk);
         }
         else {
             auto metadata                   = p.options.metadata;
             metadata.exclusion              = p.options.write.frames.exclusion;
             metadata.retire_previous_anchor = metadata.retire_previous_anchor || metadata.exclusion.length != 0;
             result                          = LocalCheckpointOperation::create(
-                pages, p.core->local_backend()->checkpoints, p.ticket->backend(p.core->async_backend()),
+                pages, p.core->local_page_store()->checkpoints, p.ticket->page_store(p.core->async_page_store()),
                 p.core->binding()->cpu(), p.core->binding()->lane(), metadata, work.budget, &local);
         }
         if (!result.ok()) {
@@ -227,9 +239,9 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
             baseline->capture_token     = report.checkpoint_token;
             baseline->coverage          = report.durable_coverage;
             baseline->snapshot_sequence = report.snapshot_sequence;
-            baseline->backend_id        = pages->backend_id;
+            baseline->page_store_id     = pages->page_store_id;
             baseline->gc_floor          = view->gc_floor;
-            baseline->wal_offset        = p.core->chunk_backend() ? owner->wal_offset_ : 0;
+            baseline->wal_offset        = p.core->page_chunk_store() ? owner->wal_offset_ : 0;
             baseline->pages             = pages;
         }
         auto request                = detail::reserved_shared<PublicationRequest>(p.finish, p.finish);
@@ -239,20 +251,15 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
                                                                                 : CheckpointAction::Abort,
                                            .token    = report.checkpoint_token,
                                            .baseline = std::move(baseline)};
-        if (report.durable_committed) {
-            const auto root = view->mapping.get(view->root_page_id);
-            if (root && root->primary && root->primary->frame.summary &&
-                root->primary->frame.summary->live_counts_known) {
-                auto        summary                  = pages->frames.shape();
-                const auto &live                     = *root->primary->frame.summary;
-                summary.covered_slot                 = view->coverage;
-                summary.live_kv                      = live.live_keys;
-                summary.live_key_bytes               = live.live_key_bytes;
-                summary.live_value_bytes             = live.live_value_bytes;
-                summary.live_logical_bytes           = live.live_key_bytes + live.live_value_bytes;
-                request->transaction.summary         = summary;
-                request->transaction.expected_l1_seq = view->l1_seq;
-            }
+        if (report.durable_committed && view->stats.kv_unknown_pages == 0) {
+            auto summary                         = pages->frames.shape();
+            summary.covered_slot                 = view->coverage;
+            summary.live_kv                      = view->stats.kv_known_count;
+            summary.live_key_bytes               = view->stats.key_known_bytes;
+            summary.live_logical_bytes           = view->stats.kv_known_bytes;
+            summary.live_value_bytes             = summary.live_logical_bytes - summary.live_key_bytes;
+            request->transaction.summary         = summary;
+            request->transaction.expected_l1_seq = view->l1_seq;
         }
         request->on_done = [self = shared_from_this()](PublicationResult published) {
             self->finish(published.status.ok() ? self->owner->report_.status : std::move(published.status));
@@ -284,7 +291,7 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
     }
 };
 
-void FlushPersistence::commit(std::shared_ptr<const PublishedTreeState> view, FlushBatch::MaintenanceComplete done)
+void FlushPersistence::commit(std::shared_ptr<const TreeRoot> view, FlushBatch::MaintenanceComplete done)
 try {
     auto commit   = detail::reserved_shared<Commit>(preparation_->control);
     commit->owner = shared_from_this();

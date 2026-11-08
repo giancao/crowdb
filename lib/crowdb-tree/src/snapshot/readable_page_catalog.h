@@ -27,12 +27,14 @@ struct ReadablePageCatalog
     {
     }
 
-    Frames   frames;
-    uint64_t root_page_id = kInvalidPageId;
-    uint64_t next_page_id = 0;
-    uint64_t coverage     = 0;
-    uint64_t generation   = 0;
-    uint64_t backend_id   = 0;
+    Frames                      frames;
+    IndexSummaries              index_summaries;
+    std::optional<IndexSummary> root_summary;
+    uint64_t                    root_page_id  = kInvalidPageId;
+    uint64_t                    next_page_id  = 0;
+    uint64_t                    coverage      = 0;
+    uint64_t                    generation    = 0;
+    uint64_t                    page_store_id = 0;
 };
 
 } // namespace crowdb::tree

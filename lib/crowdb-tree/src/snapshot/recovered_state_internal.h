@@ -12,20 +12,12 @@ struct RecoveredStateOperation::State : std::enable_shared_from_this<State>
 {
     enum class Phase : uint8_t { Load, Inner, Children, Leaf, Dependencies, Finish };
 
-    struct Bounds
-    {
-        std::optional<OwnedKey> lower;
-        std::optional<OwnedKey> upper;
-        uint64_t                lower_leaf = kInvalidPageId;
-        uint64_t                upper_leaf = kInvalidPageId;
-    };
-
     struct Path
     {
         uint64_t                              pid        = kInvalidPageId;
         const DurableCapturedFrame           *descriptor = nullptr;
         PageKeyRange                          range;
-        Bounds                                bounds;
+        InnerEncodeFences                     fences;
         std::shared_ptr<const InnerPageState> inner;
         std::shared_ptr<const LeafBase>       leaf;
         PageMetricsContribution               metrics;
@@ -78,7 +70,7 @@ struct RecoveredStateOperation::State : std::enable_shared_from_this<State>
     std::shared_ptr<detail::FlushRuntime::Lane>     lane;
     std::shared_ptr<detail::FlushRuntime::Progress> progress;
     RecoveredStateLimits                            limits;
-    std::shared_ptr<PublishedTreeState>             building;
+    std::shared_ptr<TreeRoot>                       building;
     detail::ReservedVector<Path>                    path;
     Pids                                            reached;
     std::shared_ptr<Load>                           load;

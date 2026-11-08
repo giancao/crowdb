@@ -74,7 +74,7 @@ struct PageCacheResidency::State : std::enable_shared_from_this<State>
     };
 
     explicit State(std::shared_ptr<TreeResourceMetrics> resources);
-    static void prepare_page(Update &update, uint64_t pid, const std::shared_ptr<const PublishedPage> &replacement,
+    static void prepare_page(Update &update, uint64_t pid, const std::shared_ptr<const PageEntry> &replacement,
                              const std::shared_ptr<AllocationBudget> &metadata);
     void        enqueue(Command *command) noexcept;
     bool        enter() noexcept;

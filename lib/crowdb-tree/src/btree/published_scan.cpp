@@ -9,7 +9,7 @@ namespace crowdb::tree
 {
 using namespace published_read_detail;
 
-PublishedScan::State::State(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> transport,
+PublishedScan::State::State(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> transport,
                             PageKeyRange selection, bool descending, PublishedReadLimits bounds,
                             PublishedScanOptions selection_options)
     : ReadPump(std::move(captured), std::move(transport), bounds),
@@ -212,7 +212,7 @@ std::optional<size_t> PublishedScan::allocation_bound(const PublishedReadLimits 
         .value();
 }
 
-Status PublishedScan::create(std::shared_ptr<const PublishedTreeState> view, std::shared_ptr<PageLoader> loader,
+Status PublishedScan::create(std::shared_ptr<const TreeRoot> view, std::shared_ptr<PageLoader> loader,
                              PageKeyRange range, bool reverse, PublishedReadLimits limits,
                              std::shared_ptr<PublishedScan> *out, PublishedScanOptions options)
 {

@@ -9,13 +9,14 @@
 
 namespace crowdb::tree
 {
-// The durable mapping uses the same segment boundaries in memory and on disk.
-// Copying a catalog shares segment owners; the first mutation copies that
-// segment alone. A segment's allocations keep their original credit owners.
+// The durable catalog groups page descriptors into mapping segments with the
+// Local on-disk PID boundaries. These segments hold metadata, not page segment
+// payloads. Copying a catalog shares mapping segment owners; the first mutation
+// copies that mapping segment alone. Allocations keep their original credit owners.
 class ReadablePageFrames
 {
-    struct Segment;
-    using Segments = std::pmr::map<uint64_t, std::shared_ptr<Segment>>;
+    struct MappingSegment;
+    using Segments = std::pmr::map<uint64_t, std::shared_ptr<MappingSegment>>;
 
     template <bool Const> class Position
     {
@@ -181,7 +182,7 @@ class ReadablePageFrames
     [[nodiscard]] static size_t segment_allocation_bound() noexcept;
 
   private:
-    Segment                          &mutable_segment(uint64_t segment);
+    MappingSegment                   &mutable_segment(uint64_t segment);
     value_type                       &entry(uint64_t pid);
     [[nodiscard]] const value_type   &entry(uint64_t pid) const;
     [[nodiscard]] uint64_t            next(uint64_t pid) const;

@@ -39,11 +39,10 @@ Status measure_native(PublishedNativeCursor &cursor, NativeImportShape *out)
         if (type == page_type::kLeafBase) {
             ++shape.leaf_pages;
             const LeafFrameView leaf(frame->bytes.data(), frame->bytes.size());
-            const size_t        count = static_cast<size_t>(leaf.count()) + leaf.delta_count();
-            shape.max_leaf_entries    = std::max(shape.max_leaf_entries, count);
-            for (size_t i = 0; i < count; ++i) {
-                const CellView cell(i < leaf.count() ? leaf.cell(static_cast<uint32_t>(i))
-                                                     : leaf.delta_cell(static_cast<uint32_t>(i - leaf.count())));
+            const auto          count = leaf.count();
+            shape.max_leaf_entries    = std::max<size_t>(shape.max_leaf_entries, count);
+            for (uint32_t i = 0; i < count; ++i) {
+                const CellView cell(leaf.cell(i));
                 shape.stored_references += static_cast<size_t>(cell.is_overflow());
             }
         }
@@ -60,23 +59,6 @@ Status measure_native(PublishedNativeCursor &cursor, NativeImportShape *out)
     return cursor.rewind();
 }
 
-uint64_t native_leaf_keys(const NativeFrameView &frame, const std::shared_ptr<detail::AllocationReservation> &credit)
-{
-    if (frame_page_type(frame.bytes.data()) != page_type::kLeafBase) {
-        return 0;
-    }
-    const LeafFrameView           leaf(frame.bytes.data(), frame.bytes.size());
-    detail::ReservedVector<Slice> keys{detail::ReservationAllocator<Slice>(credit)};
-    keys.reserve(static_cast<size_t>(leaf.count()) + leaf.delta_count());
-    for (uint32_t i = 0; i < leaf.count(); ++i) {
-        keys.push_back(leaf.key(i));
-    }
-    for (uint32_t i = 0; i < leaf.delta_count(); ++i) {
-        keys.push_back(leaf.delta_key(i));
-    }
-    std::sort(keys.begin(), keys.end());
-    return std::unique(keys.begin(), keys.end()) - keys.begin();
-}
 } // namespace
 
 Status copy_native_range(Crowdbtree &source, TreeCore &destination, RuntimeRangeImport &staging)
@@ -117,7 +99,9 @@ Status copy_native_range(Crowdbtree &source, TreeCore &destination, RuntimeRange
         if (!status.ok()) {
             return status;
         }
-        staging.stats.entries_examined += native_leaf_keys(*frame, staging.credit);
+        if (frame_page_type(frame->bytes.data()) == page_type::kLeafBase) {
+            staging.stats.entries_examined += LeafFrameView(frame->bytes.data(), frame->bytes.size()).count();
+        }
         ++staging.stats.pages_rebuilt;
     }
     if (staging.catalog->frames.size() != info.frame_count) {

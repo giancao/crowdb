@@ -11,8 +11,8 @@ namespace crowdb::tree
 {
 TEST(ChunkRegistryScope, HostAndLogicalTreeScopeRemainDistinctAcrossClosedHostQueues)
 {
-    test_chunk::TestRootBackend backend;
-    uint64_t                    first_scope = 0;
+    test_chunk::TestRootPageStore backend;
+    uint64_t                      first_scope = 0;
     {
         test_chunk::TestPhysicalHost           first;
         std::shared_ptr<ChunkPhysicalRegistry> one;
@@ -22,20 +22,20 @@ TEST(ChunkRegistryScope, HostAndLogicalTreeScopeRemainDistinctAcrossClosedHostQu
         ASSERT_TRUE(backend.transport->physical_registry(19, first.budget, &same).ok());
         ASSERT_TRUE(backend.transport->physical_registry(20, first.budget, &other_tree).ok());
         EXPECT_EQ(one, same);
-        EXPECT_NE(one->backing_stats().scope_id, other_tree->backing_stats().scope_id);
-        first_scope = one->backing_stats().scope_id;
+        EXPECT_NE(one->page_block_stats().scope_id, other_tree->page_block_stats().scope_id);
+        first_scope = one->page_block_stats().scope_id;
     }
     test_chunk::TestPhysicalHost           second;
     std::shared_ptr<ChunkPhysicalRegistry> next_host;
     ASSERT_TRUE(backend.transport->physical_registry(19, second.budget, &next_host).ok());
-    EXPECT_NE(next_host->backing_stats().scope_id, first_scope);
-    EXPECT_EQ(next_host->backing_stats().allocated_bytes, 0U);
+    EXPECT_NE(next_host->page_block_stats().scope_id, first_scope);
+    EXPECT_EQ(next_host->page_block_stats().allocated_bytes, 0U);
 }
 
 TEST(ChunkRegistryScope, ConcurrentFacadesShareOneCanonicalLedger)
 {
     test_chunk::TestPhysicalHost           host;
-    test_chunk::TestRootBackend            backend;
+    test_chunk::TestRootPageStore          backend;
     std::shared_ptr<ChunkPhysicalRegistry> first;
     std::shared_ptr<ChunkPhysicalRegistry> second;
     Status                                 one;
@@ -53,8 +53,8 @@ TEST(ChunkRegistryScope, SubmissionReturnsOnTheOnlyWorkerBeforeRegistryCompletio
 {
     using namespace std::chrono_literals;
 
-    test_chunk::TestPhysicalHost host;
-    test_chunk::TestRootBackend  backend;
+    test_chunk::TestPhysicalHost  host;
+    test_chunk::TestRootPageStore backend;
 
     struct Open : std::enable_shared_from_this<Open>
     {
@@ -101,10 +101,10 @@ TEST(ChunkRegistryScope, EveryStartupAllocationFailureReturnsItsPaidMetadataWith
     test_chunk::TestPhysicalHost host;
     bool                         accepted = false;
     for (int allowance = 0; allowance < 16; ++allowance) {
-        test_chunk::TestRootBackend backend;
-        auto                        credit = std::make_shared<test_chunk::TestPhysicalBudget>();
-        credit->queue                      = host.queue;
-        credit->allowances                 = allowance;
+        test_chunk::TestRootPageStore backend;
+        auto                          credit = std::make_shared<test_chunk::TestPhysicalBudget>();
+        credit->queue                        = host.queue;
+        credit->allowances                   = allowance;
         std::shared_ptr<ChunkPhysicalRegistry> registry;
         const auto                             status = backend.transport->physical_registry(19, credit, &registry);
         if (status.ok()) {

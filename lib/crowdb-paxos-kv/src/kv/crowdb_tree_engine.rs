@@ -21,7 +21,7 @@ mod maintenance;
 mod metrics;
 
 pub use crowdb_tree_ffi::Config as CrowdbTreeConfig;
-pub use crowdb_tree_ffi::PageStoreBackend as CrowdbTreeBackend;
+pub use crowdb_tree_ffi::PageStoreKind as CrowdbTreeStoreKind;
 pub use crowdb_tree_ffi::Stats as CrowdbTreeStats;
 
 /// `KVEngine` backed by [`crowdb_tree_ffi::Crowdbtree`], via [`AsyncCrowdbtree`].
@@ -72,7 +72,7 @@ impl CrowdbTreeEngine {
     /// Opens a native Tree and awaits recovery on the shared host.
     ///
     /// # Errors
-    /// Returns the underlying [`CtError`] for an unsupported backend, failed
+    /// Returns the underlying [`CtError`] for an unsupported page store, failed
     /// recovery, or failure to initialize metrics collection.
     pub async fn open_async(opt: &CrowdbTreeConfig) -> Result<Self, CtError> {
         let tree = Crowdbtree::open_async(opt).await?;
@@ -83,7 +83,7 @@ impl CrowdbTreeEngine {
         match tree.work_metrics_collector() {
             Ok(collector) => Ok(Self::with_tree(opt, tree, collector)),
             Err(error) => {
-                let release = tree.backend_release_service();
+                let release = tree.page_store_release_service();
                 if let Ok(close) = tree.begin_close() {
                     let _ = close.wait().await;
                 }
@@ -349,7 +349,7 @@ impl KVEngine for CrowdbTreeEngine {
 
     fn resume_from_slot(&self) -> u64 {
         // Recovery/WAL retention must use the committed checkpoint frontier.
-        // Publication can advance in memory without any durable backend.
+        // Publication can advance in memory without any durable page store.
         self.inner.handle().durable_coverage()
     }
 

@@ -37,27 +37,28 @@ Status append_leaf_entry(FinalPageEncodeState &state, Slice key, LogicalCell cel
                          .encoded_cell_bytes = static_cast<uint32_t>(cell_bytes)};
     uint64_t       value_bytes = entry.cell.value.size();
     if (entry.cell.overflow()) {
-        const auto captured_backing = entry.cell.backing ? entry.cell.backing->overflow : nullptr;
-        if (entry.cell.encoded.size() != kOverflowCellSize || (!captured_backing && !context.overflow_dependencies)) {
+        const auto captured_page_block = entry.cell.page_block ? entry.cell.page_block->overflow : nullptr;
+        if (entry.cell.encoded.size() != kOverflowCellSize ||
+            (!captured_page_block && !context.overflow_dependencies)) {
             return Status::invalid_argument("reused overflow needs its captured backend dependency owner");
         }
         const CellView overflow(entry.cell.encoded);
         value_bytes = overflow.overflow_len();
-        if (overflow.overflow_head() >= MappingView::kPageLimit || value_bytes == 0) {
+        if (overflow.overflow_head() >= MappingTable::kPageLimit || value_bytes == 0) {
             return Status::corruption("invalid captured overflow pointer");
         }
         if (state.reused.size() == state.reused.capacity()) {
             state.reused.reserve(std::min(state.entries.capacity(), std::max(size_t{1}, 2 * state.reused.size())));
         }
-        state.reused.push_back({.head    = overflow.overflow_head(),
-                                .bytes   = value_bytes,
-                                .owner   = captured_backing ? nullptr : context.overflow_dependencies,
-                                .backing = captured_backing});
+        state.reused.push_back({.head       = overflow.overflow_head(),
+                                .bytes      = value_bytes,
+                                .owner      = captured_page_block ? nullptr : context.overflow_dependencies,
+                                .page_block = captured_page_block});
     }
     else if (spill) {
         const uint64_t cap    = overflow_chunk_cap(state.limits.frame_bytes);
         entry.overflow_frames = (value_bytes / cap) + static_cast<uint64_t>(value_bytes % cap != 0);
-        if (entry.overflow_frames > MappingView::kPageLimit - state.summary.new_overflow_frames) {
+        if (entry.overflow_frames > MappingTable::kPageLimit - state.summary.new_overflow_frames) {
             return Status::resource_exhausted("encoded overflow identity count exceeds the namespace");
         }
         state.summary.new_overflow_frames += entry.overflow_frames;

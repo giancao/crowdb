@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "captured_frames_internal.h"
-#include "primary_backing.h"
+#include "primary_page_block.h"
 
 namespace crowdb::tree
 {
@@ -10,14 +10,14 @@ bool CapturedFrameStream::State::reuse_primary()
     const auto &path     = stack.back();
     const bool  leaf     = path.page->level == 0;
     const auto  gc_floor = single_page ? single_page->gc_floor : view->gc_floor;
-    if (leaf ? !can_reuse_primary(*path.page, path.pid, path.range, gc_floor, limits.reuse_backend_id,
+    if (leaf ? !can_reuse_primary(*path.page, path.pid, path.range, gc_floor, limits.reuse_page_store_id,
                                   limits.encode.frame_bytes)
-             : !can_reuse_inner_primary(*path.page, path.pid, path.fences, limits.reuse_backend_id,
+             : !can_reuse_inner_primary(*path.page, path.pid, path.fences, limits.reuse_page_store_id,
                                         limits.encode.frame_bytes)) {
         return false;
     }
     const auto &proof = path.page->primary;
-    if (limits.exclusion.overlaps(*proof->frame.backing)) {
+    if (limits.exclusion.overlaps(*proof->frame.page_block)) {
         return false;
     }
     const auto &summary = proof->frame.summary;
@@ -36,10 +36,10 @@ bool CapturedFrameStream::State::reuse_primary()
     output->primary = proof;
     output->dependencies.reserve(references.size());
     for (const auto &reference : references) {
-        output->dependencies.push_back({.head    = reference.head,
-                                        .bytes   = reference.bytes,
-                                        .owner   = proof->frame.backing,
-                                        .backing = proof->frame.backing->overflow});
+        output->dependencies.push_back({.head       = reference.head,
+                                        .bytes      = reference.bytes,
+                                        .owner      = proof->frame.page_block,
+                                        .page_block = proof->frame.page_block->overflow});
     }
     if (limits.plan_only) {
         report.plan = CapturedFrameResult::Plan{.page_id         = path.pid,

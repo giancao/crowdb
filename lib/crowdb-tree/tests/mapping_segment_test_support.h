@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Mutable segment model retained only for low-level legacy mapping tests.
+// Mutable mapping segment model retained only for low-level legacy mapping tests.
 // Sequence checks model a write that races a prepared image commit.
 #pragma once
 
@@ -13,7 +13,7 @@
 namespace crowdb::tree
 {
 
-// Sentinel image_addr meaning "this segment has never been persisted".
+// Sentinel image_addr meaning "this mapping segment has never been persisted".
 inline constexpr uint64_t kNoSegmentImageAddr = std::numeric_limits<uint64_t>::max();
 
 struct TestMappingSegment

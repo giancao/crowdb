@@ -195,6 +195,13 @@ impl RpcServer {
         Connection::from_owned(handle)
     }
 
+    /// Start a nonblocking TCP control connection independent of the RDMA policy.
+    pub fn connect_tcp(&self, addr: &str, port: i32) -> Result<Connection, RpcError> {
+        let c_addr = CString::new(addr).map_err(|_| RpcError::InvalidArg)?;
+        let handle = unsafe { sys::crowdb_rpc_connect_tcp(self.handle, c_addr.as_ptr(), port) };
+        Connection::from_owned(handle)
+    }
+
     /// Register the built-in echo handler for the given msg_type. The
     /// echo handler returns the request data as the response data, with
     /// a ConnectionPingResponse control buffer echoing the request_id.

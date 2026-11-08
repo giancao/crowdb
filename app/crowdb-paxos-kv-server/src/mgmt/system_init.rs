@@ -141,7 +141,7 @@ async fn init_owned(
         },
         &state.config,
         state.wal_backend.clone(),
-        state.crowtree_backend,
+        state.crowtree_store_kind,
         state.tree_runtime.clone(),
     )
     .await

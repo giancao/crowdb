@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/writeback_rebase.h"
 #include "snapshot/captured_rebase_internal.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 
 namespace crowdb::tree
 {

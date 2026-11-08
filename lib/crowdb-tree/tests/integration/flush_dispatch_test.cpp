@@ -28,7 +28,7 @@ void initialize_dispatch(PublicationCoordinator &publisher, size_t ranges, size_
             logical->right_sibling = index + 1;
         }
         inner->children.push_back(index);
-        auto page  = std::make_shared<PublishedPage>();
+        auto page  = std::make_shared<PageEntry>();
         page->leaf = logical;
         request->transaction.pages.push_back({.page_id = index, .expected = {}, .replacement = page});
         for (size_t entry = 0; entry < entries; ++entry) {
@@ -41,7 +41,7 @@ void initialize_dispatch(PublicationCoordinator &publisher, size_t ranges, size_
     sources->tables.push_back(table);
     request->transaction.expected_sources = publisher.capture()->sources;
     request->transaction.sources          = sources;
-    auto root                             = std::make_shared<PublishedPage>();
+    auto root                             = std::make_shared<PageEntry>();
     root->level                           = 1;
     root->metrics.leaf                    = false;
     root->inner                           = inner;

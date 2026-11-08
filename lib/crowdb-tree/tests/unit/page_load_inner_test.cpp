@@ -16,11 +16,11 @@ TEST(InnerLoad, SharedSeparatorKeepsOnlyItsChargedCapacityAfterIndexRelease)
     auto              lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto              store   = std::make_shared<TestInnerStore>();
     const std::string key(4096, 'm');
-    auto              backing = inner_backing(store, 7, *inner({key, std::string(4096, 't')}, {1, 2, 3}));
-    auto              loader  = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
-                                                                       OverflowBackingResolver{}, credits.credits);
+    auto              page_block = inner_page_block(store, 7, *inner({key, std::string(4096, 't')}, {1, 2, 3}));
+    auto              loader     = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
+                                                                          OverflowPageBlockResolver{}, credits.credits);
     std::shared_ptr<const InnerPageState> result;
-    loader->load_inner(backing, [&](Status status, auto index) {
+    loader->load_inner(page_block, [&](Status status, auto index) {
         EXPECT_TRUE(status.ok()) << status.to_string();
         result = std::move(index);
     });
@@ -43,15 +43,15 @@ TEST(InnerLoad, SharedSeparatorKeepsOnlyItsChargedCapacityAfterIndexRelease)
 
 TEST(InnerLoad, InlineIoDecodesOnCpuAndReturnsIndependentImmutableRouting)
 {
-    auto                                  runtime = std::make_shared<detail::FlushRuntime>(1, 1);
-    auto                                  lane    = std::make_shared<detail::FlushRuntime::Lane>(1);
-    auto                                  store   = std::make_shared<TestInnerStore>();
-    auto                                  backing = inner_backing(store, 0, *inner({"m", "t"}, {1, 2, 3}));
+    auto                                  runtime    = std::make_shared<detail::FlushRuntime>(1, 1);
+    auto                                  lane       = std::make_shared<detail::FlushRuntime::Lane>(1);
+    auto                                  store      = std::make_shared<TestInnerStore>();
+    auto                                  page_block = inner_page_block(store, 0, *inner({"m", "t"}, {1, 2, 3}));
     AsyncStorePageLoader                  loader(store, runtime, lane);
     std::shared_ptr<const InnerPageState> result;
     std::atomic<size_t>                   calls{0};
     const auto                            caller = std::this_thread::get_id();
-    loader.load_inner(backing, [&](Status status, std::shared_ptr<const InnerPageState> loaded) {
+    loader.load_inner(page_block, [&](Status status, std::shared_ptr<const InnerPageState> loaded) {
         EXPECT_TRUE(status.ok()) << status.to_string();
         EXPECT_NE(std::this_thread::get_id(), caller);
         result = std::move(loaded);
@@ -59,7 +59,7 @@ TEST(InnerLoad, InlineIoDecodesOnCpuAndReturnsIndependentImmutableRouting)
     });
     runtime->drain();
     store->blobs.clear();
-    backing.reset();
+    page_block.reset();
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->separators, (InnerPageState::Keys{"m", "t"}));
     EXPECT_EQ(result->children, (InnerPageState::Children{1, 2, 3}));
@@ -71,9 +71,9 @@ TEST(InnerLoad, ValidatesChecksumChildIdsAndMetadataBounds)
     auto runtime = std::make_shared<detail::FlushRuntime>(1, 1);
     auto lane    = std::make_shared<detail::FlushRuntime::Lane>(1);
     for (size_t scenario = 0; scenario < 4; ++scenario) {
-        auto store   = std::make_shared<TestInnerStore>();
-        auto state   = inner({"m"}, {1, scenario == 1 ? kInvalidPageId : 2});
-        auto backing = inner_backing(store, 0, *state);
+        auto store      = std::make_shared<TestInnerStore>();
+        auto state      = inner({"m"}, {1, scenario == 1 ? kInvalidPageId : 2});
+        auto page_block = inner_page_block(store, 0, *state);
         if (scenario == 0) {
             store->blobs[0].back() ^= 1;
         }
@@ -82,7 +82,7 @@ TEST(InnerLoad, ValidatesChecksumChildIdsAndMetadataBounds)
         limits.max_inner_key_bytes = scenario == 3 ? 0 : 1;
         AsyncStorePageLoader loader(store, runtime, lane, limits);
         std::atomic<size_t>  calls{0};
-        loader.load_inner(backing, [&](Status status, std::shared_ptr<const InnerPageState> loaded) {
+        loader.load_inner(page_block, [&](Status status, std::shared_ptr<const InnerPageState> loaded) {
             EXPECT_EQ(status.code(), scenario < 2 ? Code::kCorruption : Code::kResourceExhausted);
             EXPECT_EQ(loaded, nullptr);
             ++calls;
@@ -94,15 +94,15 @@ TEST(InnerLoad, ValidatesChecksumChildIdsAndMetadataBounds)
 
 TEST(InnerLoad, ReadReturnsDecodeToTheOriginalTaskWithoutQueueing)
 {
-    auto runtime                                  = std::make_shared<detail::FlushRuntime>(1, 1);
-    auto lane                                     = std::make_shared<detail::FlushRuntime::Lane>(1);
-    auto store                                    = std::make_shared<TestInnerStore>();
-    store->deferred                               = true;
-    auto                                  backing = inner_backing(store, 0, *inner({"m"}, {1, 2}));
+    auto runtime                                     = std::make_shared<detail::FlushRuntime>(1, 1);
+    auto lane                                        = std::make_shared<detail::FlushRuntime::Lane>(1);
+    auto store                                       = std::make_shared<TestInnerStore>();
+    store->deferred                                  = true;
+    auto                                  page_block = inner_page_block(store, 0, *inner({"m"}, {1, 2}));
     AsyncStorePageLoader                  loader(store, runtime, lane);
     std::shared_ptr<const InnerPageState> result;
     InnerDecode                           decode;
-    const auto immediate = loader.read_inner(backing, &result, [&](Status status, InnerDecode ready) {
+    const auto immediate = loader.read_inner(page_block, &result, [&](Status status, InnerDecode ready) {
         EXPECT_TRUE(status.ok()) << status.to_string();
         decode = std::move(ready);
     });
@@ -119,15 +119,15 @@ TEST(InnerLoad, ReadReturnsDecodeToTheOriginalTaskWithoutQueueing)
 
 TEST(InnerLoad, SlowIoDoesNotHoldCpuWorkerOrDelayOtherReads)
 {
-    auto runtime                 = std::make_shared<detail::FlushRuntime>(1, 1);
-    auto lane                    = std::make_shared<detail::FlushRuntime::Lane>(1);
-    auto store                   = std::make_shared<TestInnerStore>();
-    store->deferred              = true;
-    auto                 backing = inner_backing(store, 0, *inner({"m"}, {1, 2}));
+    auto runtime                    = std::make_shared<detail::FlushRuntime>(1, 1);
+    auto lane                       = std::make_shared<detail::FlushRuntime::Lane>(1);
+    auto store                      = std::make_shared<TestInnerStore>();
+    store->deferred                 = true;
+    auto                 page_block = inner_page_block(store, 0, *inner({"m"}, {1, 2}));
     AsyncStorePageLoader loader(store, runtime, lane, {});
     std::vector<Code>    outcomes;
     auto complete = [&](Status status, std::shared_ptr<const InnerPageState>) { outcomes.push_back(status.code()); };
-    loader.load_inner(backing, complete);
+    loader.load_inner(page_block, complete);
     std::atomic<bool> progressed{false};
     ASSERT_TRUE(runtime
                     ->try_submit(
@@ -137,9 +137,9 @@ TEST(InnerLoad, SlowIoDoesNotHoldCpuWorkerOrDelayOtherReads)
     runtime->drain();
     EXPECT_TRUE(progressed.load());
     EXPECT_TRUE(outcomes.empty());
-    loader.load_inner(backing, complete);
+    loader.load_inner(page_block, complete);
     store->finish(Status::io_error("first read failed"));
-    loader.load_inner(backing, complete);
+    loader.load_inner(page_block, complete);
     store->finish(Status::io_error("second read failed"));
     store->finish(Status::io_error("third read failed"));
     EXPECT_EQ(outcomes, (std::vector<Code>{Code::kIoError, Code::kIoError, Code::kIoError}));
@@ -148,26 +148,26 @@ TEST(InnerLoad, SlowIoDoesNotHoldCpuWorkerOrDelayOtherReads)
 
 TEST(InnerLoad, RejectsWrongFrameTypeAndCpuQueueShutdown)
 {
-    auto       runtime = std::make_shared<detail::FlushRuntime>(1, 1);
-    auto       lane    = std::make_shared<detail::FlushRuntime::Lane>(1);
-    auto       store   = std::make_shared<TestInnerStore>();
-    auto       backing = std::make_shared<BackingRef>();
-    const auto leaf    = base({
+    auto       runtime    = std::make_shared<detail::FlushRuntime>(1, 1);
+    auto       lane       = std::make_shared<detail::FlushRuntime::Lane>(1);
+    auto       store      = std::make_shared<TestInnerStore>();
+    auto       page_block = std::make_shared<PageBlockRef>();
+    const auto leaf       = base({
         {.key = "a", .value = "leaf"}
     });
     encode_durable_page(leaf->frame(), leaf->page_bytes(), compress_algo::kNone, &store->blobs[0]);
-    backing->length = store->blobs[0].size();
-    backing->owner  = std::make_shared<int>(1);
+    page_block->length = store->blobs[0].size();
+    page_block->owner  = std::make_shared<int>(1);
     AsyncStorePageLoader loader(store, runtime, lane);
     std::atomic<size_t>  calls{0};
-    loader.load_inner(backing, [&](Status status, std::shared_ptr<const InnerPageState> loaded) {
+    loader.load_inner(page_block, [&](Status status, std::shared_ptr<const InnerPageState> loaded) {
         EXPECT_EQ(status.code(), Code::kCorruption);
         EXPECT_EQ(loaded, nullptr);
         ++calls;
     });
     runtime->drain();
     runtime->close();
-    loader.load_inner(backing, [&](Status status, std::shared_ptr<const InnerPageState> loaded) {
+    loader.load_inner(page_block, [&](Status status, std::shared_ptr<const InnerPageState> loaded) {
         EXPECT_EQ(status.code(), Code::kUnavailable);
         EXPECT_EQ(loaded, nullptr);
         ++calls;

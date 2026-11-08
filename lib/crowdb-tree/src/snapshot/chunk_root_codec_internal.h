@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #pragma once
-#include "backend/chunk/chunk_frame.h"
 #include "crowdb-common/crc32c.h"
+#include "page_store/chunk/chunk_frame.h"
 #include "snapshot/chunk_root_codec.h"
 
 namespace crowdb::tree::chunk_codec

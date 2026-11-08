@@ -27,8 +27,7 @@ struct FlushController::State
     [[nodiscard]] bool          has_pending() const noexcept;
     [[nodiscard]] static size_t control_allocation_bound() noexcept;
 
-    Status prepare_covered(const FlushPreparationOptions                   &preparation,
-                           const std::shared_ptr<const PublishedTreeState> &view,
+    Status prepare_covered(const FlushPreparationOptions &preparation, const std::shared_ptr<const TreeRoot> &view,
                            const std::shared_ptr<const SourceCatalog> &catalog, std::shared_ptr<FlushOperation> *out);
 
     PublicationCoordinator                        &publisher;

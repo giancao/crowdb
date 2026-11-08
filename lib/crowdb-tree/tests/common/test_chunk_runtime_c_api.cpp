@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_c_api_internal.h"
 #include "common/test_root_transport.h"
 #include "common/test_runtime_catalog.h"
+#include "page_store/chunk/chunk_c_api_internal.h"
 #include "runtime/tree_runtime_c_api.h"
 
 using namespace crowdb::tree;

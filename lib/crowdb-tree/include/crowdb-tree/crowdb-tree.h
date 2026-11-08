@@ -5,8 +5,8 @@
 
 // Umbrella C++ interface. Subsystem headers remain available when a caller
 // needs a narrower dependency surface.
-#include "crowdb-tree/backend/async_page_store.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/key_range.h"
 #include "crowdb-tree/btree/range_rebuild.h"
 #include "crowdb-tree/btree/tree.h"
+#include "crowdb-tree/page_store/async_page_store.h"
+#include "crowdb-tree/page_store/page_store.h"

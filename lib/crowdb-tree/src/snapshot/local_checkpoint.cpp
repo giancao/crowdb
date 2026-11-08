@@ -119,7 +119,7 @@ void LocalCheckpointOperation::State::begin()
     const auto    &pages      = *image->pages;
     constexpr auto page_limit = kMappingSegmentSize * kMaxMappingSegments;
     if (pages.next_page_id > page_limit ||
-        (pages.backend_id != registry->ledger_->limits().backend_id && !pages.frames.empty()) ||
+        (pages.page_store_id != registry->ledger_->limits().page_store_id && !pages.frames.empty()) ||
         (pages.frames.empty() ? pages.root_page_id != kInvalidPageId : !pages.frames.contains(pages.root_page_id))) {
         finish(Status::invalid_argument());
         return;

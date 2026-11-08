@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/local/extent_ledger.h"
 #include "load_budget_test_support.h"
+#include "page_store/local/extent_ledger.h"
 
 namespace crowdb::tree::test_read
 {
@@ -30,7 +30,7 @@ struct LedgerFixture
     LoadCredits                   credits;
     std::shared_ptr<ExtentLedger> ledger;
 
-    explicit LedgerFixture(ExtentLedgerLimits limits = {.backend_id = 1})
+    explicit LedgerFixture(ExtentLedgerLimits limits = {.page_store_id = 1})
     {
         EXPECT_TRUE(ExtentLedger::create(limits, credits.credits.reservation(), &ledger).ok());
         EXPECT_LE(credits.budget.snapshot().allocated[LoadCredits::kBytes], ExtentLedger::creation_metadata_bound());

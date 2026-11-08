@@ -4,6 +4,8 @@
 #include "snapshot/commit_anchor.h"
 
 #include "crowdb-common/crc32c.h"
+#include "snapshot/index_summary_codec.h"
+#include "snapshot/metadata_codec.h"
 
 #include <algorithm>
 
@@ -11,22 +13,6 @@ namespace crowdb::tree::snapshot
 {
 namespace
 {
-constexpr size_t kAnchorFixedFields = 4 + 4 + (8 * 4) + 4 + 8 + 4 + 4 + 8 + 8 + 4;
-
-void put_u32(std::vector<uint8_t> *out, uint32_t v)
-{
-    for (int i = 0; i < 4; ++i) {
-        out->push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
-    }
-}
-
-void put_u64(std::vector<uint8_t> *out, uint64_t v)
-{
-    for (int i = 0; i < 8; ++i) {
-        out->push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xff));
-    }
-}
-
 uint32_t get_u32(const uint8_t *p)
 {
     uint32_t v = 0;
@@ -49,34 +35,27 @@ uint64_t get_u64(const uint8_t *p)
 
 void encode_anchor(const CommitAnchor &anchor, uint64_t slot_bytes, std::vector<uint8_t> *out)
 {
-    put_u32(out, anchor.magic);
-    put_u32(out, anchor.format_version);
-    put_u64(out, anchor.snapshot_seq);
-    put_u64(out, anchor.root_page_id);
-    put_u64(out, anchor.last_applied_slot);
-    put_u64(out, anchor.next_page_id);
-    put_u32(out, anchor.segment_slots);
-    put_u64(out, anchor.segdir_addr);
-    put_u32(out, anchor.segdir_len);
-    put_u32(out, anchor.segdir_crc);
-    put_u64(out, anchor.leaf_count);
-    put_u64(out, anchor.inner_count);
-    uint32_t crc = crowdb::common::crc32c(out->data(), out->size());
-    put_u32(out, crc);
-    out->resize(slot_bytes, 0); // zero pad to the IU-aligned slot size
+    out->resize(slot_bytes);
+    (void)encode_anchor_into(anchor, *out);
 }
 
 bool decode_anchor(std::span<const uint8_t> input, CommitAnchor *out)
 {
-    if (input.size() < kAnchorFixedFields || out == nullptr) {
+    if (input.size() < kAnchorChecksumOffset + sizeof(uint32_t) || out == nullptr) {
         return false;
     }
     const auto *buf = input.data();
     if (get_u32(buf) != kAnchorMagic || get_u32(buf + 4) != kFormatVersion) {
         return false;
     }
-    uint32_t stored_crc = get_u32(buf + (kAnchorFixedFields - 4));
-    if (crowdb::common::crc32c(buf, kAnchorFixedFields - 4) != stored_crc) {
+    const auto stored_crc = get_u32(buf + kAnchorChecksumOffset);
+    if (crowdb::common::crc32c(buf, kAnchorChecksumOffset) != stored_crc) {
+        return false;
+    }
+    IndexSummary root_summary;
+    uint32_t     has_root_summary;
+    if (!decode_index_summary(buf + 92, &has_root_summary, &root_summary) || has_root_summary > 1 ||
+        (has_root_summary == 0 && root_summary.exact)) {
         return false;
     }
     auto *a              = out;
@@ -92,6 +71,10 @@ bool decode_anchor(std::span<const uint8_t> input, CommitAnchor *out)
     a->segdir_crc        = get_u32(buf + 56);
     a->leaf_count        = get_u64(buf + 60);
     a->inner_count       = get_u64(buf + 68);
+    a->summaries_addr    = get_u64(buf + 76);
+    a->summaries_len     = get_u32(buf + 84);
+    a->summaries_crc     = get_u32(buf + 88);
+    a->root_summary      = has_root_summary != 0 ? std::optional(root_summary) : std::nullopt;
     return true;
 }
 

@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/overflow_backing.h"
+#include "btree/overflow_page_block.h"
 #include "captured_write_test_support.h"
 
 namespace crowdb::tree
@@ -32,15 +32,15 @@ TEST(CapturedWriteDependencies, ReusingOneValueDoesNotKeepTheDeletedValueFromThe
     std::vector<std::weak_ptr<const void>> deleted_owners;
     for (auto pid = deleted.overflow_head(); pid != kInvalidPageId;) {
         const auto &frame = old->frames.at(pid);
-        deleted_owners.emplace_back(frame.backing->physical_owner);
+        deleted_owners.emplace_back(frame.page_block->physical_owner);
         pid = frame.next_overflow;
     }
     auto leaf = std::make_shared<PageState>();
     leaf->bases.push_back(
-        {.identity = 1,
-         .max_slot = 10,
-         .resident = std::shared_ptr<const LeafBase>(LeafBase::from_frame_copy(raw.data(), raw.size())),
-         .backing  = old->frames.at(0).backing});
+        {.identity   = 1,
+         .max_slot   = 10,
+         .resident   = std::shared_ptr<const LeafBase>(LeafBase::from_frame_copy(raw.data(), raw.size())),
+         .page_block = old->frames.at(0).page_block});
     const auto delta = page({
         {.key = "b", .slot = 10, .value = "", .tombstone = true}
     });
@@ -84,7 +84,7 @@ TEST(CapturedWriteDependencies, ReusingOneValueDoesNotKeepTheDeletedValueFromThe
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
 }
 
-std::shared_ptr<const PublishedTreeState> shared_chain_input(const CapturedDurablePages &old, Slice encoded)
+std::shared_ptr<const TreeRoot> shared_chain_input(const CapturedDurablePages &old, Slice encoded)
 {
     std::vector<leaf_entry> entries;
     entries.push_back({.key = "a", .cell = buffer::copy_of(encoded)});
@@ -97,19 +97,22 @@ std::shared_ptr<const PublishedTreeState> shared_chain_input(const CapturedDurab
     }));
     left->range.upper    = "c";
     left->right_sibling  = right_pid;
-    left->bases.push_back(
-        {.identity = 1, .range = left->range, .max_slot = 10, .resident = shared, .backing = old.frames.at(0).backing});
+    left->bases.push_back({.identity   = 1,
+                           .range      = left->range,
+                           .max_slot   = 10,
+                           .resident   = shared,
+                           .page_block = old.frames.at(0).page_block});
     auto right         = std::make_shared<PageState>();
     right->range.lower = "c";
-    right->bases.push_back({.identity = 1,
-                            .range    = right->range,
-                            .max_slot = 10,
-                            .resident = shared,
-                            .backing  = old.frames.at(0).backing});
+    right->bases.push_back({.identity   = 1,
+                            .range      = right->range,
+                            .max_slot   = 10,
+                            .resident   = shared,
+                            .page_block = old.frames.at(0).page_block});
     auto inner      = std::make_shared<InnerPageState>();
     inner->children = {0, right_pid};
     inner->separators.emplace_back("c");
-    auto root   = std::make_shared<PublishedPage>();
+    auto root   = std::make_shared<PageEntry>();
     root->level = 1;
     root->inner = inner;
     const std::array<PageReplacement, 3> changes{
@@ -117,8 +120,8 @@ std::shared_ptr<const PublishedTreeState> shared_chain_input(const CapturedDurab
          {.page_id = right_pid, .replacement = published(right)},
          {.page_id = root_pid, .replacement = root}}
     };
-    auto                   captured = std::make_shared<PublishedTreeState>();
-    MappingView::CopyStats copied;
+    auto                    captured = std::make_shared<TreeRoot>();
+    MappingTable::CopyStats copied;
     captured->mapping      = captured->mapping.replace(changes, copied);
     captured->root_page_id = root_pid;
     captured->next_page_id = root_pid + 1;
@@ -150,7 +153,7 @@ TEST(CapturedWriteDependencies, SharedChainsDoNotJoinTheDependencyOwnersOfDiffer
     ASSERT_EQ(second.values.load(), 1U) << second.status.to_string();
     auto result = test.operation->result();
     ASSERT_NE(result.pages, nullptr);
-    auto retained = result.pages->frames.at(right_pid).backing;
+    auto retained = result.pages->frames.at(right_pid).page_block;
     ASSERT_NE(retained->overflow, nullptr);
     const auto protected_count = retained->overflow->pages.size() + 1;
     test.operation.reset();
@@ -168,7 +171,7 @@ TEST(CapturedWriteDependencies, SharedChainsDoNotJoinTheDependencyOwnersOfDiffer
                                                    .logical_bytes  = frame.logical_bytes,
                                                    .next_overflow  = frame.next,
                                                    .overflow_bytes = frame.bytes,
-                                                   .backing        = frame.backing});
+                                                   .page_block     = frame.page_block});
         const OverflowFrameView chunk(bytes.data(), bytes.size());
         restored += chunk.payload().to_string();
         pid = chunk.next_page_id();

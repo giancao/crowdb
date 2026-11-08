@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core.h"
-#include "crowdb-tree/backend/page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "snapshot/checkpoint_operation.h"
 #include "snapshot/operation_wait.h"
-#include "snapshot/primary_backing.h"
+#include "snapshot/primary_page_block.h"
 #include "snapshot/published_native.h"
 
 #include <gtest/gtest.h>
@@ -13,9 +13,9 @@ namespace crowdb::tree
 {
 namespace
 {
-struct TestCountedStore : MemPageStore
+struct TestCountedStore : PageMemStore
 {
-    TestCountedStore() : MemPageStore(4096)
+    TestCountedStore() : PageMemStore(4096)
     {
     }
 
@@ -27,19 +27,19 @@ struct TestCountedStore : MemPageStore
     Status write_at(uint64_t address, const uint8_t *data, size_t bytes) override
     {
         total_writes.fetch_add(1);
-        return MemPageStore::write_at(address, data, bytes);
+        return PageMemStore::write_at(address, data, bytes);
     }
 
     Status sync() override
     {
         barriers.fetch_add(1);
-        return MemPageStore::sync();
+        return PageMemStore::sync();
     }
 
     Status read_at(uint64_t address, uint8_t *data, size_t bytes) const override
     {
         reads.fetch_add(1);
-        return MemPageStore::read_at(address, data, bytes);
+        return PageMemStore::read_at(address, data, bytes);
     }
 
     Status write_typed_at(PagePurpose purpose, uint64_t address, const uint8_t *data, size_t bytes) override
@@ -61,7 +61,7 @@ struct TestPrimaryReuse
     {
         EXPECT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
         config.page_store                           = store.get();
-        config.backend_owner                        = store;
+        config.page_store_owner                     = store;
         config.frame_bytes                          = 4096;
         config.leaf_split_bytes                     = 3000;
         config.max_inline_value                     = 64;
@@ -70,7 +70,7 @@ struct TestPrimaryReuse
         EXPECT_TRUE(status.ok()) << status.to_string();
     }
 
-    [[nodiscard]] std::shared_ptr<const PublishedPage> page() const
+    [[nodiscard]] std::shared_ptr<const PageEntry> page() const
     {
         auto view = core->capture();
         return view->mapping.get(view->root_page_id);
@@ -96,7 +96,7 @@ TEST(TreeCorePrimaryReuse, ColdInlineAndOverflowCheckpointReusesWithoutPrimaryIo
     ASSERT_TRUE(test.core->checkpoint().ok());
     EXPECT_EQ(test.store->reads.load(), reads);
     EXPECT_EQ(test.store->primary_writes.load(), writes);
-    EXPECT_EQ(test.page()->leaf->bases.front().backing, before->leaf->bases.front().backing);
+    EXPECT_EQ(test.page()->leaf->bases.front().page_block, before->leaf->bases.front().page_block);
     EXPECT_EQ(test.page(), before);
     test.core.reset();
     auto status = TreeCore::open(test.config, &test.core);
@@ -176,7 +176,7 @@ TEST(TreeCorePrimaryReuse, LaterOverlayAndGcFloorInvalidateOldReceipts)
     ASSERT_TRUE(test.core->apply(2, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = "new"}}}).ok());
     ASSERT_TRUE(test.core->checkpoint().ok());
     EXPECT_GT(test.store->primary_writes.load(), writes);
-    EXPECT_NE(test.page()->leaf->bases.front().backing, old->leaf->bases.front().backing);
+    EXPECT_NE(test.page()->leaf->bases.front().page_block, old->leaf->bases.front().page_block);
     writes = test.store->primary_writes.load();
     test.core->request_gc_floor(2);
     ASSERT_TRUE(test.core->complete_noop(3).ok());
@@ -231,11 +231,11 @@ TEST(TreeCorePrimaryReuse, InnerAndLeavesKeepTheirDurableFramesAcrossCheckpointA
     ASSERT_TRUE(first.ok()) << first.to_string();
     ASSERT_GT(test.page()->level, 0U);
     ASSERT_TRUE(test.page()->primary);
-    const auto writes  = test.store->primary_writes.load();
-    const auto backing = test.page()->inner_backing;
+    const auto writes     = test.store->primary_writes.load();
+    const auto page_block = test.page()->inner_page_block;
     ASSERT_TRUE(test.core->checkpoint().ok());
     EXPECT_EQ(test.store->primary_writes.load(), writes);
-    EXPECT_EQ(test.page()->inner_backing, backing);
+    EXPECT_EQ(test.page()->inner_page_block, page_block);
     test.core.reset();
     const auto open = TreeCore::open(test.config, &test.core);
     ASSERT_TRUE(open.ok()) << open.to_string();

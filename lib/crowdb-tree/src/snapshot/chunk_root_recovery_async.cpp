@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/scheduled_page_store.h"
+#include "page_store/local/scheduled_page_store.h"
 #include "snapshot/chunk_root_recovery.h"
 
 #include <algorithm>
@@ -41,15 +41,15 @@ struct ChunkRootRecovery::FrameReads : std::enable_shared_from_this<FrameReads>
         {
             auto &self = *static_cast<Pack *>(raw);
             auto &root = self.reads->root;
-            submit_pin_chunk_backing(root.domain_, self.first, self.pin, root.metadata_, &self.backing,
-                                     self.begin(*self.reads, done, context), &self.stage);
+            submit_pin_chunk_page_block(root.domain_, self.first, self.pin, root.metadata_, &self.page_block,
+                                        self.begin(*self.reads, done, context), &self.stage);
         }
 
         FrameReads                             *reads = nullptr;
         detail::ChunkFixedPackRef               first;
         detail::ChunkStageId                    pin;
         std::optional<detail::ChunkStageRecord> stage;
-        std::shared_ptr<const ChunkPackBacking> backing;
+        std::shared_ptr<const ChunkPageBlock>   page_block;
     };
 
     struct Frame : Work
@@ -71,9 +71,9 @@ struct ChunkRootRecovery::FrameReads : std::enable_shared_from_this<FrameReads>
         }
 
         FrameReads                                          *reads = nullptr;
-        ChunkIndexFrame                                      record;
+        ChunkPageEntry                                       record;
         size_t                                               pack = 0;
-        std::shared_ptr<const ChunkPackBacking>              backing;
+        std::shared_ptr<const ChunkPageBlock>                page_block;
         detail::ReservedVector<uint8_t, AllocationKind::kIo> blob;
     };
 
@@ -178,7 +178,7 @@ struct ChunkRootRecovery::FrameReads : std::enable_shared_from_this<FrameReads>
             if (!frame.status.ok()) {
                 return std::move(frame.status);
             }
-            auto status = root.frame_loaded(frame.record, std::move(frame.backing), frame.blob);
+            auto status = root.frame_loaded(frame.record, std::move(frame.page_block), frame.blob);
             if (!status.ok()) {
                 return status;
             }
@@ -197,9 +197,9 @@ struct ChunkRootRecovery::FrameReads : std::enable_shared_from_this<FrameReads>
             if (!status.ok()) {
                 return status;
             }
-            auto backing  = detail::reserved_shared<ChunkPackBacking>(root.metadata_, *pack.backing);
-            backing->pack = frame.record.pack;
-            frame.backing = std::move(backing);
+            auto page_block  = detail::reserved_shared<ChunkPageBlock>(root.metadata_, *pack.page_block);
+            page_block->pack = frame.record.pack;
+            frame.page_block = std::move(page_block);
             frame.blob.resize(frame.record.pack.length);
         }
         return Status::Ok();
@@ -233,7 +233,7 @@ try {
         status = domain_->catalog->protection()->check_read_owner();
     }
     if (status.ok()) {
-        status = index_loaded();
+        status = index_ == root_.indexes.size() ? summaries_loaded() : index_loaded();
     }
     async_pack_.reset();
     complete_step(std::move(status));
@@ -322,13 +322,19 @@ void ChunkRootRecovery::submit_step(bool stopped, std::shared_ptr<ScheduledPageS
             complete_step(reads->install());
             return;
         }
-        if (index_ == root_.indexes.size()) {
-            complete_step(finish_indexes());
-            return;
+        const detail::ChunkFixedPackRef *pack = nullptr;
+        if (index_ != root_.indexes.size()) {
+            pack = &root_.indexes[index_].pack;
+            if (pack->length > kChunkMappingSegmentWindowBytes) {
+                complete_step(Status::corruption());
+                return;
+            }
         }
-        const auto &pack = root_.indexes[index_].pack;
-        if (pack.length > kChunkIndexWindowBytes) {
-            complete_step(Status::corruption());
+        else if (root_.summaries && !summaries_ready_) {
+            pack = &*root_.summaries;
+        }
+        else {
+            complete_step(finish_indexes());
             return;
         }
         detail::ChunkStageId pin;
@@ -338,10 +344,10 @@ void ChunkRootRecovery::submit_step(bool stopped, std::shared_ptr<ScheduledPageS
             return;
         }
         async_pack_.reset();
-        submit_pin_chunk_backing(domain_, pack, pin, metadata_, &async_pack_,
-                                 async_reply(+[](void *raw, Status status) {
-                                     static_cast<ChunkRootRecovery *>(raw)->read_pinned(std::move(status));
-                                 }));
+        submit_pin_chunk_page_block(domain_, *pack, pin, metadata_, &async_pack_,
+                                    async_reply(+[](void *raw, Status status) {
+                                        static_cast<ChunkRootRecovery *>(raw)->read_pinned(std::move(status));
+                                    }));
     }
     catch (const std::bad_alloc &) {
         complete_step(Status::resource_exhausted());

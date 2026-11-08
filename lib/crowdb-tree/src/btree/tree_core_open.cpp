@@ -1,15 +1,15 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/block_account.h"
-#include "backend/local/local_backend_state.h"
-#include "backend/local/scheduled_page_store.h"
 #include "btree/allocation_account.h"
 #include "btree/apply_dispatcher.h"
-#include "btree/backing_identity.h"
+#include "btree/page_block_identity.h"
 #include "btree/tree_core.h"
 #include "btree/tree_core_geometry.h"
-#include "crowdb-tree/backend/page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "host_completion.h"
+#include "page_store/local/block_account.h"
+#include "page_store/local/local_page_store_state.h"
+#include "page_store/local/scheduled_page_store.h"
 #include "snapshot/local_recovery.h"
 #include "snapshot/recovered_state.h"
 
@@ -49,7 +49,7 @@ struct LocalOpen : std::enable_shared_from_this<LocalOpen>
     using Connection = stdexec::connect_result_t<detail::CallbackSender, Receiver>;
 
     LocalOpen(const Config &config, const std::shared_ptr<TreeRuntimeBinding> &binding,
-              std::shared_ptr<LocalBackendState> local, PageStore::RuntimeOpenComplete complete)
+              std::shared_ptr<LocalPageStoreState> local, PageStore::RuntimeOpenComplete complete)
         : config(config),
           binding(binding),
           local(std::move(local)),
@@ -99,7 +99,7 @@ struct LocalOpen : std::enable_shared_from_this<LocalOpen>
     }
 
 #ifdef CROWDB_HAVE_LIBURING
-    Status probe_size(BlockAsyncPageStore &block)
+    Status probe_size(AsyncPageDiskStore &block)
     {
         return block.submit_size(&file_size, {.context = this,
                                               .complete_fn =
@@ -120,12 +120,12 @@ struct LocalOpen : std::enable_shared_from_this<LocalOpen>
             finish(std::move(status));
             return;
         }
-        store = ticket->backend(local->store.get());
-        ExtentLedgerLimits domain{.backend_id   = detail::allocate_backend_identity(),
-                                  .region_begin = snapshot::region_base_for(config.page_store->iu_size()),
-                                  .file_size    = file_size,
-                                  .iu_size      = config.page_store->iu_size()};
-        if (domain.backend_id == 0) {
+        store = ticket->page_store(local->store.get());
+        ExtentLedgerLimits domain{.page_store_id = detail::allocate_page_store_identity(),
+                                  .region_begin  = snapshot::region_base_for(config.page_store->iu_size()),
+                                  .file_size     = file_size,
+                                  .iu_size       = config.page_store->iu_size()};
+        if (domain.page_store_id == 0) {
             finish(Status::resource_exhausted());
             return;
         }
@@ -152,7 +152,7 @@ struct LocalOpen : std::enable_shared_from_this<LocalOpen>
         loads.max_blob_bytes  = limits.max_blob_bytes;
         loads.max_frame_bytes = limits.max_frame_bytes;
         auto loader           = detail::reserved_shared<AsyncStorePageLoader>(
-            budget.bytes, store, binding->cpu(), binding->lane(), loads, OverflowBackingResolver{}, budget);
+            budget.bytes, store, binding->cpu(), binding->lane(), loads, OverflowPageBlockResolver{}, budget);
         auto status = RecoveredStateOperation::create(local->inherited, loader, binding->cpu(), binding->lane(), {},
                                                       budget.bytes, &graph);
         if (!status.ok()) {
@@ -206,7 +206,7 @@ struct LocalOpen : std::enable_shared_from_this<LocalOpen>
 
     Config                                         config;
     std::shared_ptr<TreeRuntimeBinding>            binding;
-    std::shared_ptr<LocalBackendState>             local;
+    std::shared_ptr<LocalPageStoreState>           local;
     PageStore::RuntimeOpenComplete                 complete;
     TreeOperationLifetime                          lifetime;
     PageLoadBudget                                 budget;
@@ -220,7 +220,7 @@ struct LocalOpen : std::enable_shared_from_this<LocalOpen>
     std::shared_ptr<AsyncPageStore>                store;
     std::shared_ptr<LocalRecoveryOperation>        recovery;
     std::shared_ptr<RecoveredStateOperation>       graph;
-    std::shared_ptr<const PublishedTreeState>      initial;
+    std::shared_ptr<const TreeRoot>                initial;
     std::shared_ptr<Connection>                    connected;
 };
 
@@ -252,20 +252,20 @@ try {
     if (detail::ResourceBudget::memory_exhausted(binding->account())) {
         return Status::resource_exhausted("Local open exceeds Tree or host memory admission");
     }
-    auto local = detail::reserved_shared<LocalBackendState>(binding->lifecycle_budget());
-    status     = ScheduledPageStore::create(config.page_store, config.async_page_store, config.backend_owner, binding,
-                                            binding->lifecycle_budget(), binding->backend_lane(), &local->store);
+    auto local = detail::reserved_shared<LocalPageStoreState>(binding->lifecycle_budget());
+    status = ScheduledPageStore::create(config.page_store, config.async_page_store, config.page_store_owner, binding,
+                                        binding->lifecycle_budget(), binding->backend_lane(), &local->store);
     if (!status.ok()) {
         return status;
     }
-    status =
-        LocalBackendDomain::claim(config.page_store, config.backend_owner, binding->lifecycle_budget(), &local->domain);
+    status = LocalPageStoreDomain::claim(config.page_store, config.page_store_owner, binding->lifecycle_budget(),
+                                         &local->domain);
     if (!status.ok()) {
         return status;
     }
-    detail::BackendOpenBudget backend_metadata;
+    detail::PageStoreOpenBudget page_store_metadata;
     status = detail::bind_block_account(config.page_store, binding->account(),
-                                        config.runtime->options().backend_workers, &backend_metadata);
+                                        config.runtime->options().backend_workers, &page_store_metadata);
     if (!status.ok()) {
         return status;
     }
@@ -282,12 +282,12 @@ try {
     open->budget.bytes = std::move(allocations);
     // The exclusive domain remains held across the size probe and recovery.
 #ifdef CROWDB_HAVE_LIBURING
-    if (auto *block = dynamic_cast<BlockAsyncPageStore *>(config.async_page_store);
+    if (auto *block = dynamic_cast<AsyncPageDiskStore *>(config.async_page_store);
         block != nullptr && config.page_store->block_size() != 0) {
         return open->probe_size(*block);
     }
 #endif
-    open->file_size = detail::backend_size(*config.page_store, open->budget.backend);
+    open->file_size = detail::page_store_size(*config.page_store, open->budget.backend);
     open->schedule(&LocalOpen::recover);
     return Status::Ok();
 }
@@ -303,15 +303,15 @@ catch (const std::exception &) {
 Status TreeCore::open_local_async(const Config &config, PageStore::RuntimeOpenComplete complete)
 {
     auto status = validate_open(config);
-    if (!status.ok() || !complete || !config.backend_owner) {
+    if (!status.ok() || !complete || !config.page_store_owner) {
         return Status::invalid_argument();
     }
-    if (dynamic_cast<MemPageStore *>(config.page_store) != nullptr) {
+    if (dynamic_cast<PageMemStore *>(config.page_store) != nullptr) {
         return submit_local_open(config, std::move(complete));
     }
 #ifdef CROWDB_HAVE_LIBURING
     if (config.page_store->block_size() != 0 &&
-        dynamic_cast<BlockAsyncPageStore *>(config.async_page_store) != nullptr) {
+        dynamic_cast<AsyncPageDiskStore *>(config.async_page_store) != nullptr) {
         return submit_local_open(config, std::move(complete));
     }
 #endif

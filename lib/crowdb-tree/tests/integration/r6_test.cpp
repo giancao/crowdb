@@ -3,8 +3,8 @@
 
 // Independent immutable read owners survive asynchronous delivery and
 // generation replacement; their final release retires the old publication.
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "crowdb-tree/snapshot/snapshot.h"
 #include "runtime_tree_access.h"
 #include "snapshot/published_snapshot_view.h"
@@ -36,7 +36,7 @@ std::string make_key(int i)
 // callback, without carrying a caller-thread epoch guard.
 TEST(R6, GetAsyncSlowPathReturnsBorrowedSlice)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.leaf_split_bytes = 160;
@@ -84,10 +84,10 @@ TEST(R6, GetAsyncSlowPathReturnsBorrowedSlice)
 // An immutable snapshot keeps its fixed mapping through generation install.
 TEST(R6, PublishedSnapshotStaysConsistentAcrossInstallSnapshot)
 {
-    auto   store = std::make_shared<MemPageStore>(1);
+    auto   store = std::make_shared<PageMemStore>(1);
     Config opt;
     opt.page_store       = store.get();
-    opt.backend_owner    = store;
+    opt.page_store_owner = store;
     opt.leaf_split_bytes = 160;
     opt.frame_bytes      = 4096;
     Crowdbtree t(opt);
@@ -98,8 +98,8 @@ TEST(R6, PublishedSnapshotStaysConsistentAcrossInstallSnapshot)
     ASSERT_TRUE(t.flush().ok());
     ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
-    std::weak_ptr<const PublishedPage> old_root = RuntimeTreeAccess_for_tests::root(t);
-    auto                               snap     = t.snapshot_view();
+    std::weak_ptr<const PageEntry> old_root = RuntimeTreeAccess_for_tests::root(t);
+    auto                           snap     = t.snapshot_view();
     ASSERT_NE(dynamic_cast<PublishedSnapshotView *>(snap.get()), nullptr);
     ASSERT_EQ(snap->size(), 200U);
 
@@ -129,12 +129,12 @@ TEST(R6, PublishedSnapshotStaysConsistentAcrossInstallSnapshot)
 // every borrowed value alive until its handle drops.
 TEST(R6, ConcurrentReadersAndInstallSnapshotNoUAF)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.leaf_split_bytes = 160;
     opt.frame_bytes      = 4096;
-    // Raw-backend snapshots materialize independently. Four concurrent
+    // Raw-page store snapshots materialize independently. Four concurrent
     // cursors must each fund a full supported value and its output owner.
     TreeRuntimeOptions runtime;
     runtime.limits.routing_bytes             = 1024ULL * 1024 * 1024;

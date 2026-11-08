@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "backend/local/scheduled_page_store.h"
 #include "common/test_tree_core_chunk.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "page_store/local/scheduled_page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -122,7 +122,7 @@ TEST(ChunkSnapshotRetry, SmallFramesCheckpointLargeValues)
     EXPECT_GE(test.tree->last_snapshot_pages_written(), 512U);
     EXPECT_EQ(test.tree->durable_coverage(), 32U);
     test.tree.reset();
-    test.config.backend_owner.reset();
+    test.config.page_store_owner.reset();
     test.store.reset();
     const auto released = test.backend.catalog->queue->pump(test.backend.catalog->queue->snapshot().pending);
     ASSERT_EQ(released.failed, 0U);
@@ -167,7 +167,7 @@ TEST(ChunkSnapshotRetry, SingleLeafSubmitsAnotherOverflowPackBeforeFirstComplete
     EXPECT_EQ(result.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
     EXPECT_EQ(test.tree->durable_coverage(), 0U);
     auto  receipt = std::make_shared<ChunkTransportCompletion>(held.get());
-    auto *backend = static_cast<ScheduledPageStore *>(TreeCoreAccess::get(*test.tree)->async_backend());
+    auto *backend = static_cast<ScheduledPageStore *>(TreeCoreAccess::get(*test.tree)->async_page_store());
     ASSERT_TRUE(backend
                     ->submit_step(
                         [receipt] {

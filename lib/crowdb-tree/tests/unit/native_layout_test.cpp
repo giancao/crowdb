@@ -11,30 +11,30 @@ namespace
 {
 struct TestNativeLayout
 {
-    std::shared_ptr<PublishedTreeState>   view         = std::make_shared<PublishedTreeState>();
-    std::shared_ptr<OverflowBackingSet>   dependencies = std::make_shared<OverflowBackingSet>(nullptr);
+    std::shared_ptr<TreeRoot>             view         = std::make_shared<TreeRoot>();
+    std::shared_ptr<OverflowPageBlockSet> dependencies = std::make_shared<OverflowPageBlockSet>(nullptr);
     std::vector<ReusedOverflowDependency> references;
 
     TestNativeLayout()
     {
         view->next_page_id = 8;
         add(1, kInvalidPageId, 100);
-        references.push_back({.head = 1, .bytes = 100, .owner = dependencies, .backing = dependencies});
+        references.push_back({.head = 1, .bytes = 100, .owner = dependencies, .page_block = dependencies});
     }
 
     void add(uint64_t pid, uint64_t next, uint32_t bytes)
     {
-        auto backing             = std::make_shared<BackingRef>();
-        backing->backend_id      = 7;
-        backing->generation      = 9;
-        backing->address         = 8192 * pid;
-        backing->length          = 8192;
-        backing->owner           = std::make_shared<int>(0);
-        dependencies->pages[pid] = {.backing       = std::move(backing),
-                                    .next          = next,
-                                    .bytes         = bytes,
-                                    .frame_bytes   = 4096,
-                                    .logical_bytes = 4096 + kDurableBlobHeader};
+        auto page_block           = std::make_shared<PageBlockRef>();
+        page_block->page_store_id = 7;
+        page_block->generation    = 9;
+        page_block->address       = 8192 * pid;
+        page_block->length        = 8192;
+        page_block->owner         = std::make_shared<int>(0);
+        dependencies->pages[pid]  = {.page_block    = std::move(page_block),
+                                     .next          = next,
+                                     .bytes         = bytes,
+                                     .frame_bytes   = 4096,
+                                     .logical_bytes = 4096 + kDurableBlobHeader};
     }
 
     CapturedFrameResult::Plan page(uint64_t pid = 0, uint64_t fresh = 0)
@@ -68,7 +68,7 @@ TEST(NativeLayout, DeduplicatesPhysicalChainsAndCountsNewFramesWithoutPayloads)
     EXPECT_EQ(planner.frame_count(), 5U);
     EXPECT_EQ(planner.new_overflow_frames(), 3U);
     EXPECT_EQ(planner.old_frames().size(), 1U);
-    EXPECT_EQ(planner.old_frames().at(1).backing, test.dependencies->pages.at(1).backing);
+    EXPECT_EQ(planner.old_frames().at(1).page_block, test.dependencies->pages.at(1).page_block);
 }
 
 TEST(NativeLayout, RejectsMissingCycleLengthAndForeignDomainDescriptors)
@@ -85,9 +85,9 @@ TEST(NativeLayout, RejectsMissingCycleLengthAndForeignDomainDescriptors)
             test.references.front().bytes = 101;
         }
         if (fault == 3) {
-            auto foreign = std::make_shared<BackingRef>(*test.dependencies->pages.at(1).backing);
+            auto foreign = std::make_shared<PageBlockRef>(*test.dependencies->pages.at(1).page_block);
             ++foreign->generation;
-            test.dependencies->pages.at(1).backing = std::move(foreign);
+            test.dependencies->pages.at(1).page_block = std::move(foreign);
         }
         NativeLayoutPlanner planner(test.view, {}, {}, 7, 9);
         ASSERT_TRUE(planner.accept(test.page()).ok());
@@ -109,9 +109,9 @@ TEST(NativeLayout, RejectsConflictingAliasesAndStopsAtTheDependencyStepLimit)
     NativeLayoutPlanner conflicting(test.view, {}, {}, 7, 9);
     ASSERT_TRUE(conflicting.accept(test.page()).ok());
     ASSERT_TRUE(TestNativeLayout::drain(conflicting).ok());
-    auto changed = std::make_shared<BackingRef>(*test.dependencies->pages.at(1).backing);
+    auto changed = std::make_shared<PageBlockRef>(*test.dependencies->pages.at(1).page_block);
     changed->address += 4096;
-    test.dependencies->pages.at(1).backing = std::move(changed);
+    test.dependencies->pages.at(1).page_block = std::move(changed);
     ASSERT_TRUE(conflicting.accept(test.page(3)).ok());
     EXPECT_EQ(conflicting.step().code(), Code::kCorruption);
 }

@@ -2,16 +2,16 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/local/extent_writeback.h"
 #include "extent_ledger_test_support.h"
+#include "page_store/local/extent_writeback.h"
 #include "page_writeback_test_support.h"
 #include "snapshot/captured_write.h"
 
 namespace crowdb::tree::test_write
 {
-inline std::shared_ptr<PublishedTreeState> captured_leaf(std::shared_ptr<const PageState> leaf)
+inline std::shared_ptr<TreeRoot> captured_leaf(std::shared_ptr<const PageState> leaf)
 {
-    auto result          = std::make_shared<PublishedTreeState>(*view(std::move(leaf), {}, 10));
+    auto result          = std::make_shared<TreeRoot>(*view(std::move(leaf), {}, 10));
     result->next_page_id = 1;
     return result;
 }
@@ -28,14 +28,13 @@ struct TestCapturedWrite
 
     TestCapturedWrite()
     {
-        EXPECT_TRUE(ExtentLedger::create({.backend_id = 9}, credits.credits.reservation(), &ledger).ok());
+        EXPECT_TRUE(ExtentLedger::create({.page_store_id = 9}, credits.credits.reservation(), &ledger).ok());
         EXPECT_TRUE(await_ledger([&](auto done) {
                         return ledger->activate(credits.credits.reservation(), std::move(done));
                     }).status.ok());
     }
 
-    Status prepare(std::shared_ptr<const PublishedTreeState>   captured,
-                   std::shared_ptr<const CapturedDurablePages> inherited = {},
+    Status prepare(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<const CapturedDurablePages> inherited = {},
                    CapturedWriteLimits limits = {.frames = {.encode = {.frame_bytes = 512, .inline_value_bytes = 16}},
                                                  .write  = {.max_frame_bytes = 512}})
     {
@@ -52,9 +51,9 @@ struct TestCapturedWrite
 
     std::vector<uint8_t> read(const DurableCapturedFrame &frame)
     {
-        std::vector<uint8_t> blob(frame.backing->length);
+        std::vector<uint8_t> blob(frame.page_block->length);
         std::vector<uint8_t> raw(frame.frame_bytes);
-        EXPECT_TRUE(store->device->read_at(frame.backing->address, blob.data(), blob.size()).ok());
+        EXPECT_TRUE(store->device->read_at(frame.page_block->address, blob.data(), blob.size()).ok());
         EXPECT_TRUE(decode_durable_page(blob.data(), blob.size(), raw.data(), raw.size()).ok());
         EXPECT_TRUE(frame_validate(raw.data(), raw.size()));
         EXPECT_EQ(frame_u64(raw.data(), fh::kSelfpage_id), frame.page_id);

@@ -11,12 +11,12 @@ namespace crowdb::tree
 {
 namespace
 {
-struct TestNativeBackend
+struct TestNativePageStore
 {
-    std::shared_ptr<MemPageStore>   device = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore>   device = std::make_shared<PageMemStore>(4096);
     test_write::TestCheckpointStore store;
 
-    TestNativeBackend()
+    TestNativePageStore()
     {
         store.device = device;
     }
@@ -24,9 +24,9 @@ struct TestNativeBackend
 
 struct TestNativeExport
 {
-    std::shared_ptr<TestNativeBackend> backend = std::make_shared<TestNativeBackend>();
-    Config                             config;
-    std::unique_ptr<Crowdbtree>        tree;
+    std::shared_ptr<TestNativePageStore> backend = std::make_shared<TestNativePageStore>();
+    Config                               config;
+    std::unique_ptr<Crowdbtree>          tree;
 
     explicit TestNativeExport(bool owned = true)
     {
@@ -37,7 +37,7 @@ struct TestNativeExport
         config.max_inline_value                     = 64;
         config.runtime_binding.limits.io_operations = 1;
         if (owned) {
-            config.backend_owner = backend;
+            config.page_store_owner = backend;
         }
     }
 
@@ -212,9 +212,9 @@ TEST(PublishedNative, CorruptColdOverflowCannotBeReportedAsCompleteOutput)
     const auto view = core->capture();
     const auto page = view->mapping.get(view->root_page_id);
     ASSERT_TRUE(page && page->leaf && !page->leaf->bases.empty());
-    const auto primary = page->leaf->bases.front().backing;
+    const auto primary = page->leaf->bases.front().page_block;
     ASSERT_TRUE(primary && primary->overflow && !primary->overflow->pages.empty());
-    const auto                           broken = primary->overflow->pages.begin()->second.backing;
+    const auto                           broken = primary->overflow->pages.begin()->second.page_block;
     std::unique_ptr<NativeFrameIterator> iterator;
     auto                                 status = test.tree->open_native_frame_iterator(nullptr, &iterator);
     ASSERT_TRUE(status.ok()) << status.to_string();

@@ -79,7 +79,7 @@ try {
     // after flush and the exact P checks may its immutable mapping be copied
     // without L0. Lease acquisition rechecks the expected root and drains any
     // admitted writer before publication, rejecting a child that advanced.
-    auto candidate       = detail::reserved_shared<PublishedTreeState>(self.metadata, *base);
+    auto candidate       = detail::reserved_shared<TreeRoot>(self.metadata, *base);
     auto empty_sources   = detail::reserved_shared<PublishedSources>(self.metadata, self.metadata);
     empty_sources->floor = replayed_prefix;
     candidate->sources   = std::move(empty_sources);

@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_runtime_ids.h"
-#include "backend/chunk/chunk_runtime_page_store.h"
-#include "common/test_chunk_backing.h"
+#include "common/test_chunk_page_block.h"
+#include "page_store/chunk/chunk_runtime_ids.h"
+#include "page_store/chunk/page_chunk_store.h"
 #include "snapshot/chunk_root_codec_internal.h"
 
 namespace crowdb::tree
@@ -62,16 +62,16 @@ TEST(ChunkRootCodec, RoundTripKeepsRootSequenceAndWalDistinctFromPageGeneration)
 
 TEST(ChunkRootCodec, IndexValidatesExactNamespaceAndRejectsOversizedPackFields)
 {
-    test_chunk::TestChunkBackend      test;
-    std::shared_ptr<ChunkPackBacking> pack;
+    test_chunk::TestPageChunkStore  test;
+    std::shared_ptr<ChunkPageBlock> pack;
     ASSERT_TRUE(test.prepare(8192, &pack).ok());
-    auto backing        = detail::reserved_shared<BackingRef>(test.credits.credits.reservation());
-    backing->backend_id = 17;
-    backing->length     = 8192;
-    backing->owner      = pack;
-    backing->chunk      = pack;
-    backing->storage    = BackingStorage::kChunkPack;
-    auto refs           = detail::reserved_shared<StoredOverflowReferences>(
+    auto page_block           = detail::reserved_shared<PageBlockRef>(test.credits.credits.reservation());
+    page_block->page_store_id = 17;
+    page_block->length        = 8192;
+    page_block->owner         = pack;
+    page_block->chunk         = pack;
+    page_block->storage       = PageBlockStorage::kChunkPack;
+    auto refs                 = detail::reserved_shared<StoredOverflowReferences>(
         test.credits.credits.reservation(),
         detail::ReservationAllocator<StoredOverflowReference>(test.credits.credits.reservation()));
     refs->push_back({.head = 4, .bytes = 123});
@@ -81,26 +81,27 @@ TEST(ChunkRootCodec, IndexValidatesExactNamespaceAndRejectsOversizedPackFields)
                                       .logical_bytes   = 4132,
                                       .next_overflow   = kInvalidPageId,
                                       .overflow_bytes  = 0,
-                                      .backing         = backing,
+                                      .page_block      = page_block,
                                       .stored_overflow = refs,
                                       .summary         = {}};
     const DurableCapturedFrame *frames[]{&frame};
     ChunkMetadataBytes          bytes{detail::ReservationAllocator<uint8_t>(test.credits.credits.reservation())};
-    ASSERT_TRUE(encode_chunk_index(test_identity(), 2, frames, &bytes).ok());
+    ASSERT_TRUE(encode_chunk_mapping_segment(test_identity(), 2, frames, &bytes).ok());
     uint64_t count  = 0;
     size_t   offset = 0;
-    EXPECT_EQ(decode_chunk_index_header(bytes, test_identity(), 3, &count, &offset).code(), Code::kCorruption);
-    ASSERT_TRUE(decode_chunk_index_header(bytes, test_identity(), 2, &count, &offset).ok());
+    EXPECT_EQ(decode_chunk_mapping_segment_header(bytes, test_identity(), 3, &count, &offset).code(),
+              Code::kCorruption);
+    ASSERT_TRUE(decode_chunk_mapping_segment_header(bytes, test_identity(), 2, &count, &offset).ok());
     ASSERT_EQ(count, 1U);
-    ChunkIndexFrame parsed;
-    ASSERT_TRUE(decode_chunk_index_frame(bytes, &offset, &parsed).ok());
+    ChunkPageEntry parsed;
+    ASSERT_TRUE(decode_chunk_page_entry(bytes, &offset, &parsed).ok());
     EXPECT_EQ(parsed.page_id, 0U);
     EXPECT_EQ(parsed.stored_reference_words.size(), 16U);
     EXPECT_EQ(offset + 4, bytes.size());
-    chunk_codec::put(std::span(bytes).subspan(kChunkIndexHeaderBytes), 12, uint64_t{1} << 32U);
+    chunk_codec::put(std::span(bytes).subspan(kChunkMappingSegmentHeaderBytes), 12, uint64_t{1} << 32U);
     chunk_codec::seal(bytes);
-    ASSERT_TRUE(decode_chunk_index_header(bytes, test_identity(), 2, &count, &offset).ok());
-    EXPECT_EQ(decode_chunk_index_frame(bytes, &offset, &parsed).code(), Code::kCorruption);
+    ASSERT_TRUE(decode_chunk_mapping_segment_header(bytes, test_identity(), 2, &count, &offset).ok());
+    EXPECT_EQ(decode_chunk_page_entry(bytes, &offset, &parsed).code(), Code::kCorruption);
 }
 
 TEST(ChunkRuntimeIds, PurposeAndCounterShareOneNamespaceWithoutReusingOperations)
@@ -119,15 +120,14 @@ TEST(ChunkRuntimeIds, PurposeAndCounterShareOneNamespaceWithoutReusingOperations
     EXPECT_NE(a.low, b.low);
 }
 
-TEST(ChunkRuntimePageStore, UnsupportedCatalogDoesNotExposeAnIndependentAddressSpace)
+TEST(PageChunkStore, UnsupportedCatalogDoesNotExposeAnIndependentAddressSpace)
 {
-    test_read::LoadCredits        credits;
-    auto                          catalog   = std::make_shared<detail::RootCatalog>();
-    auto                          transport = std::make_shared<detail::MemoryChunkTransport>();
-    detail::ChunkRuntimePageStore store({.tree = 19, .owner_epoch = 1}, catalog, transport,
-                                        credits.credits.reservation());
+    test_read::LoadCredits credits;
+    auto                   catalog   = std::make_shared<detail::RootCatalog>();
+    auto                   transport = std::make_shared<detail::MemoryChunkTransport>();
+    detail::PageChunkStore store({.tree = 19, .owner_epoch = 1}, catalog, transport, credits.credits.reservation());
     EXPECT_FALSE(store.supported());
-    std::shared_ptr<const ChunkBackingDomain> domain;
+    std::shared_ptr<const PageChunkStoreDomain> domain;
     EXPECT_EQ(store.make_domain(17, credits.credits.reservation(), &domain).code(), Code::kNotSupported);
     EXPECT_FALSE(domain);
     EXPECT_EQ(store.sync().code(), Code::kNotSupported);

@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/local_backend_state.h"
 #include "btree/tree_apply_operation.h"
 #include "btree/tree_core.h"
-#include "crowdb-tree/backend/block_page_store.h"
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "page_store/local/local_page_store_state.h"
 #include "test_tmp.h"
 
 #include <gtest/gtest.h>
@@ -52,7 +52,7 @@ class TreeCoreReplay : public testing::Test
   protected:
     void SetUp() override
     {
-        ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &device).ok());
+        ASSERT_TRUE(PageDiskStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &device).ok());
         TreeRuntimeOptions host;
         host.workers = 2;
         // Replay and source rotation retain fixed paths; one proposal must also fit.
@@ -90,21 +90,21 @@ class TreeCoreReplay : public testing::Test
         return completed.status;
     }
 
-    tree_test::TempDir              directory{"tree_replay_"};
-    std::unique_ptr<BlockPageStore> device;
-    Config                          config;
-    std::shared_ptr<TreeCore>       core;
+    tree_test::TempDir             directory{"tree_replay_"};
+    std::unique_ptr<PageDiskStore> device;
+    Config                         config;
+    std::shared_ptr<TreeCore>      core;
 };
 
 TEST_F(TreeCoreReplay, DefaultInlineGeometryPersistsUnderChosenPayloadPressure)
 {
     core.reset();
-    auto   store = std::make_shared<MemPageStore>(1);
+    auto   store = std::make_shared<PageMemStore>(1);
     Config large;
-    large.runtime       = config.runtime;
-    large.page_store    = store.get();
-    large.backend_owner = store;
-    large.frame_bytes   = 65536;
+    large.runtime          = config.runtime;
+    large.page_store       = store.get();
+    large.page_store_owner = store;
+    large.frame_bytes      = 65536;
     // Keep the pressure workload fixed as the configurable defaults evolve.
     large.runtime_binding.limits.gap_repair_bytes = 64ULL * 1024 * 1024;
     auto status                                   = TreeCore::open(large, &core);
@@ -128,11 +128,11 @@ TEST_F(TreeCoreReplay, DefaultInlineGeometryPersistsUnderChosenPayloadPressure)
 TEST_F(TreeCoreReplay, CoalescedInlineReplaySplitsAndPersistsUnderGapPressure)
 {
     core.reset();
-    auto   store = std::make_shared<MemPageStore>(1);
+    auto   store = std::make_shared<PageMemStore>(1);
     Config large;
     large.runtime                                 = config.runtime;
     large.page_store                              = store.get();
-    large.backend_owner                           = store;
+    large.page_store_owner                        = store;
     large.frame_bytes                             = 65536;
     large.runtime_binding.limits.gap_repair_bytes = 1024 * 1024;
     auto status                                   = TreeCore::open(large, &core);
@@ -235,7 +235,7 @@ TEST_F(TreeCoreReplay, PersistentFlushReleasesGapPayloadWithResourceWaitersAndSi
     const auto status = apply(3, "c", pressure_value);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(core->contiguous_slot(), 3U);
-    EXPECT_EQ(core->local_backend()->checkpoints->durable_coverage(), 2U);
+    EXPECT_EQ(core->local_page_store()->checkpoints->durable_coverage(), 2U);
     EXPECT_GT(core->publisher().work_metrics()->counters.snapshot()[static_cast<size_t>(
                   TreeWorkCause::CachePressure)][static_cast<size_t>(TreeWorkCounter::WriteOperations)],
               0U);

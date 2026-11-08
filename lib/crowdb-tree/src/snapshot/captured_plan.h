@@ -22,18 +22,18 @@ struct CapturedWritePlan
     size_t reference_heads              = 0;
     size_t frame_count_upper            = 0;
     size_t segments                     = 0;
-    // Publication batches use MappingView radix leaves, not durable segments.
+    // Publication batches use MappingTable radix leaves, not durable mapping segments.
     size_t rebase_batches = 0;
 };
 
 // Consumes layout-only stream results. One step visits one old dependency;
-// only distinct durable/radix segment numbers accumulate, never frame payloads.
+// only distinct durable/radix mapping segment numbers accumulate, never frame payloads.
 class CapturedLayoutPlanner
 {
   public:
-    CapturedLayoutPlanner(uint64_t next_page_id, uint64_t backend_id, CapturedWriteLimits limits, size_t max_segments,
-                          std::shared_ptr<const CapturedDurablePages> inherited,
-                          std::shared_ptr<AllocationBudget>           metadata);
+    CapturedLayoutPlanner(uint64_t next_page_id, uint64_t page_store_id, CapturedWriteLimits limits,
+                          size_t max_segments, std::shared_ptr<const CapturedDurablePages> inherited,
+                          std::shared_ptr<AllocationBudget> metadata);
     Status accept(CapturedFrameResult::Plan page);
     Status step();
     Status finish();

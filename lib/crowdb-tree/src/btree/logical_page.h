@@ -3,10 +3,10 @@
 #pragma once
 
 #include "btree/allocation_reservation.h"
-#include "btree/backing_ref.h"
 #include "btree/entry_key_arena.h"
 #include "btree/merge_sources.h"
 #include "btree/owned_key.h"
+#include "btree/page_block_ref.h"
 #include "btree/page_key_range.h"
 #include "crowdb-tree/maptable/page.h"
 #include "crowdb-tree/memtable/memtable.h"
@@ -159,20 +159,20 @@ struct BaseRef
     PageKeyRange            range{};
     std::optional<uint64_t> max_slot = std::nullopt;
     // A resident owner can be an aliasing shared_ptr backed by a page pin.
-    std::shared_ptr<const LeafBase>   resident = nullptr;
-    std::shared_ptr<const BackingRef> backing  = nullptr;
-    bool                              clipped  = false;
-    [[nodiscard]] bool                valid() const;
+    std::shared_ptr<const LeafBase>     resident   = nullptr;
+    std::shared_ptr<const PageBlockRef> page_block = nullptr;
+    bool                                clipped    = false;
+    [[nodiscard]] bool                  valid() const;
 };
 
 struct LogicalCell
 {
-    std::shared_ptr<const void>       owner;
-    uint64_t                          slot  = 0;
-    uint8_t                           flags = 0;
-    Slice                             value;
-    Slice                             encoded;
-    std::shared_ptr<const BackingRef> backing = nullptr;
+    std::shared_ptr<const void>         owner;
+    uint64_t                            slot  = 0;
+    uint8_t                             flags = 0;
+    Slice                               value;
+    Slice                               encoded;
+    std::shared_ptr<const PageBlockRef> page_block = nullptr;
 
     [[nodiscard]] bool tombstone() const
     {
@@ -186,7 +186,7 @@ struct LogicalCell
 
     static LogicalCell from_entry(const EntryRef &entry);
     static LogicalCell from_base(const std::shared_ptr<const LeafBase> &base, size_t index,
-                                 std::shared_ptr<const BackingRef> backing = {});
+                                 std::shared_ptr<const PageBlockRef> page_block = {});
 };
 
 enum class LogicalLookupState : uint8_t { kMissing, kValue, kTombstone, kNeedsBase, kInvalid };

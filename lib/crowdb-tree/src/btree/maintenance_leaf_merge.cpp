@@ -6,7 +6,7 @@
 
 namespace crowdb::tree::detail
 {
-MaintenanceLeafMerge plan_published_leaf_merge(const PublishedPage &left, const PublishedPage &right,
+MaintenanceLeafMerge plan_published_leaf_merge(const PageEntry &left, const PageEntry &right,
                                                const LeafMergeInput &input, const PageMaintenanceLimits &limits,
                                                PageVersion version, uint64_t first_run_id)
 {
@@ -35,7 +35,9 @@ MaintenanceLeafMerge plan_published_leaf_merge(const PublishedPage &left, const 
         }
         result.logical       = join_leaf_ranges(input, limits, version);
         result.primary_bytes = a.page_size_bytes + b.page_size_bytes - overhead;
-        result.statistics = LeafLayoutStats{.kv_count = a.kv_count + b.kv_count, .kv_bytes = a.kv_bytes + b.kv_bytes};
+        result.statistics    = LeafLayoutStats{.kv_count  = a.kv_count + b.kv_count,
+                                               .kv_bytes  = a.kv_bytes + b.kv_bytes,
+                                               .key_bytes = a.key_bytes + b.key_bytes};
         return result;
     }
     result.logical = plan_leaf_merge(input, limits, version, first_run_id);

@@ -30,7 +30,7 @@ class SharedPageCache::Binding final : public PageLoader
             complete_page_load(complete, Status::Ok(), std::move(base.resident));
             return;
         }
-        if (!base.backing || !base.backing->readable()) {
+        if (!base.page_block || !base.page_block->readable()) {
             complete_page_load(complete, Status::invalid_argument(), std::shared_ptr<const LeafBase>{});
             return;
         }
@@ -52,27 +52,27 @@ class SharedPageCache::Binding final : public PageLoader
         state_->submit(request);
     }
 
-    void load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete) override
+    void load_inner(std::shared_ptr<const PageBlockRef> page_block, InnerComplete complete) override
     {
-        if (!backing || !backing->readable()) {
+        if (!page_block || !page_block->readable()) {
             complete_page_load(complete, Status::invalid_argument(), std::shared_ptr<const InnerPageState>{});
             return;
         }
         auto *request = claim();
         if (request == nullptr) {
             if (!state_->closed.load(std::memory_order_acquire)) {
-                upstream_->load_inner(std::move(backing), std::move(complete));
+                upstream_->load_inner(std::move(page_block), std::move(complete));
                 return;
             }
             complete_page_load(complete, Status::unavailable(), std::shared_ptr<const InnerPageState>{});
             return;
         }
-        request->priority     = priority_;
-        request->base.backing = std::move(backing);
-        request->key          = State::make_key(State::Kind::Inner, request->base);
-        request->inner_done   = std::move(complete);
-        request->upstream     = upstream_;
-        request->metadata     = metadata_;
+        request->priority        = priority_;
+        request->base.page_block = std::move(page_block);
+        request->key             = State::make_key(State::Kind::Inner, request->base);
+        request->inner_done      = std::move(complete);
+        request->upstream        = upstream_;
+        request->metadata        = metadata_;
         state_->submit(request);
     }
 
@@ -87,7 +87,7 @@ class SharedPageCache::Binding final : public PageLoader
         upstream_->load_overflow(head, length, std::move(complete));
     }
 
-    void load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
+    void load_overflow(std::shared_ptr<const PageBlockRef> primary, uint64_t head, uint64_t length,
                        ValueComplete complete) override
     {
         if (state_->closed.load(std::memory_order_acquire)) {

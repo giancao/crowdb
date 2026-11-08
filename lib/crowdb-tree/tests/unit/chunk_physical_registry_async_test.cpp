@@ -48,20 +48,20 @@ struct TestRegistryChain : detail::RetirementNode
     {
         auto &self    = *static_cast<TestRegistryChain *>(context);
         self.observed = true;
-        EXPECT_EQ(self.host.registry->backing_stats().allocated_bytes, 8192U);
+        EXPECT_EQ(self.host.registry->page_block_stats().allocated_bytes, 8192U);
         if (!status.ok()) {
             self.result.set_value(std::move(status));
             return;
         }
-        self.host.registry->submit_deleted(TestPhysicalHost::stage, TestPhysicalHost::chunk, TestPhysicalHost::receipt,
-                                           self.host.budget,
-                                           {.complete_fn =
-                                                +[](void *context, Status status) {
-                                                    auto &self = *static_cast<TestRegistryChain *>(context);
-                                                    EXPECT_EQ(self.host.registry->backing_stats().allocated_bytes, 0U);
-                                                    self.result.set_value(std::move(status));
-                                                },
-                                            .context = &self});
+        self.host.registry->submit_deleted(
+            TestPhysicalHost::stage, TestPhysicalHost::chunk, TestPhysicalHost::receipt, self.host.budget,
+            {.complete_fn =
+                 +[](void *context, Status status) {
+                     auto &self = *static_cast<TestRegistryChain *>(context);
+                     EXPECT_EQ(self.host.registry->page_block_stats().allocated_bytes, 0U);
+                     self.result.set_value(std::move(status));
+                 },
+             .context = &self});
     }
 };
 
@@ -94,7 +94,7 @@ TEST(ChunkPhysicalRegistryAsync, FailedCommandAllocationCompletesWithoutPublishi
                                    .context = &calls});
     EXPECT_EQ(calls, 1U);
     EXPECT_FALSE(pack);
-    EXPECT_EQ(host.registry->backing_stats().allocated_bytes, 0U);
+    EXPECT_EQ(host.registry->page_block_stats().allocated_bytes, 0U);
     host.budget->reject = false;
 }
 } // namespace

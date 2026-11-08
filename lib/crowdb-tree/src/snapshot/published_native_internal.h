@@ -20,7 +20,7 @@ struct PublishedNativeCursor::State
     std::shared_ptr<SnapshotPageLoader>            loader;
     std::shared_ptr<CapturedFrameStream>           stream;
     std::shared_ptr<const NativeLayoutPlanner>     layout;
-    OverflowBackingSet::Pages::const_iterator      old;
+    OverflowPageBlockSet::Pages::const_iterator    old;
     CapturedFrameLimits                            limits;
     NativeStreamInfo                               info;
     size_t                                         read_bound = 0;

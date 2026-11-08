@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 // CT12: page split & merge integration tests.
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "runtime_tree_access.h"
 
 #include <gtest/gtest.h>
@@ -159,12 +159,12 @@ TEST(SplitMerge, MergeAndRootCollapse)
 // Regression (plan-tree #14c/#14d): a merged-away leaf/inner's own PID is
 // orphaned (its mapping slot never gets a replacement store()) -- see
 // Crowdbtree::retire_orphaned_page's doc comment. snapshot() discovers dirty
-// pages/segments by scanning every mapping-table slot directly (no
+// page segments / mapping segments by scanning every mapping-table slot directly (no
 // reachable-page tree walk), so a stale slot left pointing at a since-freed
 // page is a use-after-free the moment a merge-heavy tree gets snapshotted.
 TEST(SplitMerge, SnapshotSucceedsAfterHeavyMergeAndRootCollapse)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     Config       opt;
     opt.page_store       = &store;
     opt.max_delta_len    = 0; // consolidate (and check merge) on every flush

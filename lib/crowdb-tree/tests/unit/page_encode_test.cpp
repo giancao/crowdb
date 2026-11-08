@@ -17,7 +17,7 @@ std::shared_ptr<const CellVersion> encode_cell_owner(uint64_t slot, std::string 
                                          deleted ? kFlagTombstone : 0);
 }
 
-std::shared_ptr<PublishedPage>
+std::shared_ptr<PageEntry>
 encoding_leaf(const std::vector<std::pair<std::string, std::shared_ptr<const CellVersion>>> &entries,
               PageKeyRange                                                                   range = {})
 {
@@ -32,21 +32,21 @@ encoding_leaf(const std::vector<std::pair<std::string, std::shared_ptr<const Cel
     if (run) {
         logical->overlays.push_back(std::move(run));
     }
-    auto page  = std::make_shared<PublishedPage>();
+    auto page  = std::make_shared<PageEntry>();
     page->leaf = std::move(logical);
     return page;
 }
 
-std::shared_ptr<PublishedTreeState> encoding_capture(std::vector<std::shared_ptr<PublishedPage>> pages,
-                                                     uint64_t root = 0, uint64_t coverage = 10, uint64_t gc_floor = 0)
+std::shared_ptr<TreeRoot> encoding_capture(std::vector<std::shared_ptr<PageEntry>> pages, uint64_t root = 0,
+                                           uint64_t coverage = 10, uint64_t gc_floor = 0)
 {
-    auto                         view = std::make_shared<PublishedTreeState>();
+    auto                         view = std::make_shared<TreeRoot>();
     std::vector<PageReplacement> replacements;
     replacements.reserve(pages.size());
     for (size_t index = 0; index < pages.size(); ++index) {
         replacements.push_back({.page_id = index, .expected = {}, .replacement = std::move(pages[index])});
     }
-    MappingView::CopyStats copied;
+    MappingTable::CopyStats copied;
     view->mapping      = view->mapping.replace(replacements, copied);
     view->root_page_id = root;
     view->next_page_id = pages.size();
@@ -84,6 +84,11 @@ TEST(FinalPageEncoder, LeafResolvesCapturedWinnersAndGcWithoutIntermediateValueC
     ASSERT_TRUE(step.status.ok());
     ASSERT_TRUE(step.complete);
     ASSERT_TRUE(frame_validate(frame.data(), frame.size()));
+    const auto summary = frame_summary(frame.data());
+    EXPECT_TRUE(summary.exact);
+    EXPECT_EQ(summary.live_kv, 2U);
+    EXPECT_EQ(summary.live_key_bytes, 2U);
+    EXPECT_EQ(summary.live_value_bytes, 11U);
     EXPECT_TRUE(std::all_of(frame.begin() + frame_u32(frame.data(), fh::kFreeLo),
                             frame.begin() + frame_u32(frame.data(), fh::kFreeHi), [](auto b) { return b == 0; }));
     LeafFrameView leaf(frame.data(), frame.size());
@@ -211,12 +216,12 @@ TEST(FinalPageEncoder, OversizedPrimaryAndBoundedWorkFailBeforeOutput)
 
 TEST(FinalPageEncoder, ColdLeafAndInnerReturnOwnedLoadRequestsWithoutEncoding)
 {
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = 512;
-    backing->owner  = std::make_shared<int>(1);
-    auto logical    = std::make_shared<PageState>();
-    logical->bases.push_back({.identity = 1, .generation = 1, .backing = backing});
-    auto leaf      = std::make_shared<PublishedPage>();
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = 512;
+    page_block->owner  = std::make_shared<int>(1);
+    auto logical       = std::make_shared<PageState>();
+    logical->bases.push_back({.identity = 1, .generation = 1, .page_block = page_block});
+    auto leaf      = std::make_shared<PageEntry>();
     leaf->leaf     = logical;
     auto captured  = encoding_capture({leaf});
     auto leaf_plan = prepare_final_page(captured, 0, {});
@@ -227,17 +232,17 @@ TEST(FinalPageEncoder, ColdLeafAndInnerReturnOwnedLoadRequestsWithoutEncoding)
     }
     EXPECT_EQ(leaf_plan.needs_base->page, logical);
     EXPECT_EQ(leaf_plan.encoder, nullptr);
-    auto inner           = std::make_shared<PublishedPage>();
-    inner->level         = 1;
-    inner->inner_backing = backing;
-    captured             = encoding_capture({inner});
-    auto inner_plan      = prepare_final_page(captured, 0, {});
+    auto inner              = std::make_shared<PageEntry>();
+    inner->level            = 1;
+    inner->inner_page_block = page_block;
+    captured                = encoding_capture({inner});
+    auto inner_plan         = prepare_final_page(captured, 0, {});
     ASSERT_TRUE(inner_plan.status.ok());
     if (!inner_plan.needs_inner.has_value()) {
         ADD_FAILURE() << "cold inner did not return its load request";
         return;
     }
-    EXPECT_EQ(inner_plan.needs_inner->backing, backing);
+    EXPECT_EQ(inner_plan.needs_inner->page_block, page_block);
     EXPECT_EQ(inner_plan.encoder, nullptr);
 }
 
@@ -246,7 +251,7 @@ TEST(FinalPageEncoder, InnerUsesOnlyCapturedRoutingAndExplicitDescendantFences)
     auto inner        = std::make_shared<InnerPageState>();
     inner->children   = {0, 1};
     inner->separators = {"m"};
-    auto root         = std::make_shared<PublishedPage>();
+    auto root         = std::make_shared<PageEntry>();
     root->level       = 1;
     root->inner       = inner;
     auto captured     = encoding_capture(
@@ -279,8 +284,41 @@ TEST(FinalPageEncoder, InnerUsesOnlyCapturedRoutingAndExplicitDescendantFences)
     EXPECT_EQ(encoded.child_at(1), 1U);
     EXPECT_EQ(encoded.separator_at(0).to_string(), "m");
     EXPECT_FALSE(prepared.encoder->summary().live_counts_known);
+    EXPECT_FALSE(frame_summary(frame.data()).exact);
     EXPECT_EQ(frame_lower_fence_page_id(frame.data()), 0U);
     EXPECT_EQ(frame_upper_fence_page_id(frame.data()), 1U);
+}
+
+TEST(FinalPageEncoder, InnerWritesChildTotalsIntoTheCheckedFrame)
+{
+    auto inner      = std::make_shared<InnerPageState>();
+    inner->children = {0};
+    auto page       = std::make_shared<PageEntry>();
+    page->level     = 1;
+    page->inner     = std::move(inner);
+    auto prepared   = prepare_final_page(
+        {
+            .page         = std::move(page),
+            .page_id      = 1,
+            .coverage     = 10,
+            .gc_floor     = 0,
+            .next_page_id = 2,
+            .context      = {.inner_fences = InnerEncodeFences{.lower_leaf = 0, .upper_leaf = 0}},
+            .children_summary =
+                FinalPageSummary{
+                             .live_counts_known = true, .live_keys = 3, .live_key_bytes = 15, .live_value_bytes = 20}
+    },
+        {.frame_bytes = 256});
+    ASSERT_TRUE(prepared.status.ok());
+    ASSERT_NE(prepared.encoder, nullptr);
+    std::array<uint8_t, 256> frame;
+    ASSERT_TRUE(prepared.encoder->next(frame).complete);
+    ASSERT_TRUE(frame_validate(frame.data(), frame.size()));
+    const auto summary = frame_summary(frame.data());
+    EXPECT_TRUE(summary.exact);
+    EXPECT_EQ(summary.live_kv, 3U);
+    EXPECT_EQ(summary.live_key_bytes, 15U);
+    EXPECT_EQ(summary.live_value_bytes, 20U);
 }
 
 TEST(FinalPageEncoder, GcCanProduceAnEmptyValidLeafFrame)

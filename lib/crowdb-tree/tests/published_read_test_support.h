@@ -49,25 +49,25 @@ inline std::shared_ptr<const LeafBase> base(std::initializer_list<Record> record
     return std::shared_ptr<const LeafBase>(LeafBase::build(entries));
 }
 
-inline std::shared_ptr<PublishedPage> published(std::shared_ptr<const PageState> leaf)
+inline std::shared_ptr<PageEntry> published(std::shared_ptr<const PageState> leaf)
 {
-    auto result           = std::make_shared<PublishedPage>();
+    auto result           = std::make_shared<PageEntry>();
     result->leaf          = std::move(leaf);
     result->metrics.dirty = true;
     return result;
 }
 
-inline std::shared_ptr<const PublishedTreeState>
-view(std::shared_ptr<const PageState> leaf, std::vector<std::shared_ptr<MemTable>> tables = {}, uint64_t floor = 0)
+inline std::shared_ptr<const TreeRoot> view(std::shared_ptr<const PageState>       leaf,
+                                            std::vector<std::shared_ptr<MemTable>> tables = {}, uint64_t floor = 0)
 {
-    auto result  = std::make_shared<PublishedTreeState>();
+    auto result  = std::make_shared<TreeRoot>();
     auto sources = std::make_shared<PublishedSources>();
     sources->tables.assign(tables.begin(), tables.end());
     sources->floor       = floor;
     result->sources      = std::move(sources);
     result->coverage     = floor;
     result->root_page_id = 0;
-    MappingView::CopyStats               copied;
+    MappingTable::CopyStats              copied;
     const std::array<PageReplacement, 1> changes{
         {{.page_id = 0, .expected = {}, .replacement = published(std::move(leaf))}}};
     result->mapping = result->mapping.replace(changes, copied);
@@ -76,10 +76,10 @@ view(std::shared_ptr<const PageState> leaf, std::vector<std::shared_ptr<MemTable
 
 inline BaseRef cold(uint64_t identity, std::optional<uint64_t> max_slot = std::nullopt)
 {
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = 4096;
-    backing->owner  = std::make_shared<int>(1);
-    return {.identity = identity, .max_slot = max_slot, .backing = std::move(backing)};
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = 4096;
+    page_block->owner  = std::make_shared<int>(1);
+    return {.identity = identity, .max_slot = max_slot, .page_block = std::move(page_block)};
 }
 
 class TestLoader final : public PageLoader

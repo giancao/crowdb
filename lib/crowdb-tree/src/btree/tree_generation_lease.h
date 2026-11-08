@@ -3,13 +3,13 @@
 #pragma once
 
 #include "allocation_reservation.h"
-#include "crowdb-tree/backend/async_page_store.h"
+#include "crowdb-tree/page_store/async_page_store.h"
 #include "crowdb-tree/status.h"
 
 namespace crowdb::tree
 {
 class TreeCore;
-struct PublishedTreeState;
+struct TreeRoot;
 struct SplitGeneration;
 struct TreeGenerationPreparation;
 struct SourceMemoryStats;
@@ -20,8 +20,8 @@ struct SourceMemoryStats;
 class TreeGenerationLease : public std::enable_shared_from_this<TreeGenerationLease>
 {
   public:
-    static Status prepare(TreeCore &owner, std::shared_ptr<const PublishedTreeState> candidate,
-                          const SplitGeneration *split, std::shared_ptr<TreeGenerationLease> *out);
+    static Status prepare(TreeCore &owner, std::shared_ptr<const TreeRoot> candidate, const SplitGeneration *split,
+                          std::shared_ptr<TreeGenerationLease> *out);
     ~TreeGenerationLease();
 
     Status acquire();

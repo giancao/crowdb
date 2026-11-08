@@ -11,7 +11,7 @@ using namespace test_read;
 
 TEST(ExtentLedger, RecoveryProtectsBothAnchorOwnersBeforeAllocationAndReaderPinsSurviveRotation)
 {
-    LedgerFixture test({.backend_id = 7, .file_size = 65536, .address_limit = 65536});
+    LedgerFixture test({.page_store_id = 7, .file_size = 65536, .address_limit = 65536});
     auto          first  = test.recover(8192, 8192);
     auto          second = test.recover(8192, 8192);
     auto          other  = test.recover(24576, 4096);
@@ -38,12 +38,12 @@ TEST(ExtentLedger, RecoveryProtectsBothAnchorOwnersBeforeAllocationAndReaderPins
     ASSERT_TRUE(reused.status.ok());
     EXPECT_EQ(reused.extent.address, 8192U);
     EXPECT_NE(reused.extent.identity, old_identity);
-    EXPECT_EQ(reused.extent.backend_id, 7U);
+    EXPECT_EQ(reused.extent.page_store_id, 7U);
 }
 
 TEST(ExtentLedger, LastOwnerReleaseCoalescesBothNeighborsWithoutAllocatingAfterSeal)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 24576, .address_limit = 24576});
+    LedgerFixture test({.page_store_id = 1, .file_size = 24576, .address_limit = 24576});
     ASSERT_TRUE(test.activate().status.ok());
     auto a = test.reserve(4096);
     auto b = test.reserve(4096);
@@ -66,7 +66,7 @@ TEST(ExtentLedger, LastOwnerReleaseCoalescesBothNeighborsWithoutAllocatingAfterS
 
 TEST(ExtentLedger, RecoveryRejectsPartialOverlapAndCapacityNeverWrapsOrInventsSpace)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 16384, .address_limit = 20480});
+    LedgerFixture test({.page_store_id = 1, .file_size = 16384, .address_limit = 20480});
     auto          recovered = test.recover(8192, 4096);
     ASSERT_TRUE(recovered.status.ok());
     EXPECT_EQ(test.recover(8192, 8192).status.code(), Code::kCorruption);
@@ -103,7 +103,7 @@ TEST(ExtentLedger, MetadataBoundPaysForReserveAndAllocationFailuresLeaveIndexesU
         }
         auto limited = std::make_shared<detail::AllocationReservation>(std::move(carved.value()));
         std::shared_ptr<ExtentLedger> ledger;
-        ASSERT_TRUE(ExtentLedger::create({.backend_id = 1, .file_size = 65536}, {}, &ledger).ok());
+        ASSERT_TRUE(ExtentLedger::create({.page_store_id = 1, .file_size = 65536}, {}, &ledger).ok());
         ASSERT_TRUE(await_ledger([&](auto done) { return ledger->activate({}, std::move(done)); }).status.ok());
         bool               called = false;
         ExtentLedgerResult outcome;
@@ -139,7 +139,7 @@ TEST(ExtentLedger, MetadataBoundPaysForReserveAndAllocationFailuresLeaveIndexesU
 
 TEST(ExtentLedger, ConcurrentReservationsAndCrossThreadReleasesShareOneReuseDomain)
 {
-    LedgerFixture test({.backend_id = 1, .address_limit = 2 * 1024 * 1024});
+    LedgerFixture test({.page_store_id = 1, .address_limit = 2 * 1024 * 1024});
     ASSERT_TRUE(test.activate().status.ok());
     std::vector<ProtectedExtent> extents(200);
     std::vector<std::thread>     workers;
@@ -184,7 +184,7 @@ TEST(ExtentLedger, ConcurrentReservationsAndCrossThreadReleasesShareOneReuseDoma
 
 TEST(ExtentLedger, RangeLimitRejectsSplitsWithoutLosingTheOriginalGap)
 {
-    LedgerFixture test({.backend_id = 1, .file_size = 24576, .address_limit = 24576, .max_ranges = 2});
+    LedgerFixture test({.page_store_id = 1, .file_size = 24576, .address_limit = 24576, .max_ranges = 2});
     EXPECT_EQ(test.recover(12288, 4096).status.code(), Code::kResourceExhausted);
     EXPECT_EQ(test.ledger->stats().protected_ranges, 0U);
     auto first = test.recover(8192, 4096);
@@ -212,7 +212,7 @@ TEST(ExtentLedger, MiddleRecoveryFitsItsBoundAndEveryFailedAllocationRollsBack)
         }
         auto limited = std::make_shared<detail::AllocationReservation>(std::move(carved.value()));
         std::shared_ptr<ExtentLedger> ledger;
-        ASSERT_TRUE(ExtentLedger::create({.backend_id = 1, .file_size = 32768}, {}, &ledger).ok());
+        ASSERT_TRUE(ExtentLedger::create({.page_store_id = 1, .file_size = 32768}, {}, &ledger).ok());
         auto result = await_ledger([&](auto done) { return ledger->recover(16384, 4096, limited, std::move(done)); });
         if (amount == bound) {
             ASSERT_TRUE(result.status.ok());
@@ -236,7 +236,7 @@ TEST(ExtentLedger, MiddleRecoveryFitsItsBoundAndEveryFailedAllocationRollsBack)
 
 TEST(ExtentLedger, QueueReentryAndThrowingReceiverDoNotStrandAllocationOrRelease)
 {
-    LedgerFixture test({.backend_id = 1});
+    LedgerFixture test({.page_store_id = 1});
     ASSERT_TRUE(test.activate().status.ok());
     size_t          delivered = 0;
     ProtectedExtent retained;

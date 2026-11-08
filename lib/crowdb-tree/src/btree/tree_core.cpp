@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/checkpoint_backend.h"
-#include "backend/local/local_backend_state.h"
-#include "backend/local/scheduled_page_store.h"
 #include "btree/allocation_account.h"
 #include "btree/allocation_bound.h"
+#include "page_store/checkpoint_page_store.h"
+#include "page_store/local/local_page_store_state.h"
+#include "page_store/local/scheduled_page_store.h"
 #include "runtime/tree_tuning_c_api.h"
 #include "snapshot/snapshot_baseline.h"
 #include "tree_apply_operation.h"
@@ -18,24 +18,24 @@ namespace crowdb::tree
 {
 namespace
 {
-class EmptyBackend final : public AsyncPageStore
+class EmptyPageStore final : public AsyncPageStore
 {
   public:
     uint64_t submit_read(PageAddr /*addr*/, void * /*buf*/, size_t /*len*/, AsyncCompletion done) override
     {
-        done.complete(Status::unavailable("in-memory Tree has no durable backing"));
+        done.complete(Status::unavailable("in-memory Tree has no durable page_block"));
         return 0;
     }
 
     uint64_t submit_write(PageAddr /*addr*/, const void * /*buf*/, size_t /*len*/, AsyncCompletion done) override
     {
-        done.complete(Status::unavailable("in-memory Tree has no durable backing"));
+        done.complete(Status::unavailable("in-memory Tree has no durable page_block"));
         return 0;
     }
 
     Status submit_fsync(AsyncCompletion done) override
     {
-        done.complete(Status::unavailable("in-memory Tree has no durable backing"));
+        done.complete(Status::unavailable("in-memory Tree has no durable page_block"));
         return Status::Ok();
     }
 
@@ -96,17 +96,16 @@ SourceWriteOptions TreeCore::State::source_write_options() const
     return writers;
 }
 
-std::shared_ptr<PublishedTreeState>
-TreeCore::State::empty_state(const std::shared_ptr<detail::AllocationReservation> &credit)
+std::shared_ptr<TreeRoot> TreeCore::State::empty_state(const std::shared_ptr<detail::AllocationReservation> &credit)
 {
-    auto leaf                      = detail::reserved_shared<PageState>(credit, credit);
-    auto page                      = detail::reserved_shared<PublishedPage>(credit);
-    page->leaf                     = std::move(leaf);
-    page->metrics.page_size_known  = true;
-    page->metrics.kv_known         = true;
-    auto                   initial = detail::reserved_shared<PublishedTreeState>(credit, credit);
-    const PageReplacement  replacement{.page_id = 0, .expected = {}, .replacement = page};
-    MappingView::CopyStats copied;
+    auto leaf                       = detail::reserved_shared<PageState>(credit, credit);
+    auto page                       = detail::reserved_shared<PageEntry>(credit);
+    page->leaf                      = std::move(leaf);
+    page->metrics.page_size_known   = true;
+    page->metrics.kv_known          = true;
+    auto                    initial = detail::reserved_shared<TreeRoot>(credit, credit);
+    const PageReplacement   replacement{.page_id = 0, .expected = {}, .replacement = page};
+    MappingTable::CopyStats copied;
     initial->mapping      = initial->mapping.replace(std::span(&replacement, 1), copied, credit);
     initial->root_page_id = 0;
     initial->next_page_id = 1;
@@ -151,7 +150,7 @@ void TreeCore::State::release_resources() noexcept
     publisher.reset();
     sources.reset();
     cache.reset();
-    // Lifetime state also owns the backend. Release it before the final drain
+    // Lifetime state also owns the page store. Release it before the final drain
     // so registry and ledger roots cannot enqueue retirement after that drain.
     replay_lifetime.reset();
     apply_lifetime.reset();
@@ -160,8 +159,8 @@ void TreeCore::State::release_resources() noexcept
     replay_controls.reset();
     local.reset();
     chunk.reset();
-    backend.reset();
-    config.backend_owner.reset();
+    page_store.reset();
+    config.page_store_owner.reset();
 }
 
 Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
@@ -177,7 +176,7 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
     source_lifecycle = detail::AllocationReservation::create(std::move(*source_credit));
     auto initial     = bootstrap.initial ? std::move(bootstrap.initial) : empty_state(credit);
     if (initial->mapping.empty() && initial->root_page_id == kInvalidPageId) {
-        auto empty        = detail::reserved_shared<PublishedTreeState>(credit, *empty_state(credit));
+        auto empty        = detail::reserved_shared<TreeRoot>(credit, *empty_state(credit));
         empty->coverage   = initial->coverage;
         empty->generation = initial->generation;
         auto source       = detail::reserved_shared<PublishedSources>(credit, credit);
@@ -188,7 +187,7 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
     local = std::move(bootstrap.local);
     chunk = std::move(bootstrap.chunk);
     if (initial->snapshot_baseline && (local || chunk)) {
-        auto restored = detail::reserved_shared<PublishedTreeState>(credit, *initial);
+        auto restored = detail::reserved_shared<TreeRoot>(credit, *initial);
         auto baseline = detail::reserved_shared<SnapshotBaseline>(credit, *initial->snapshot_baseline);
         baseline->snapshot_sequence =
             local ? local->checkpoints->snapshot_sequence() : chunk->snapshot_sequence.load(std::memory_order_acquire);
@@ -197,20 +196,20 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
         initial                     = std::move(restored);
     }
     if (local) {
-        backend = local->store;
+        page_store = local->store;
     }
     else if (chunk) {
-        backend = chunk->store;
+        page_store = chunk->store;
     }
     else if (config.async_page_store != nullptr || config.page_store != nullptr) {
-        auto status = ScheduledPageStore::create(config.page_store, config.async_page_store, config.backend_owner,
-                                                 binding, credit, binding->backend_lane(), &backend);
+        auto status = ScheduledPageStore::create(config.page_store, config.async_page_store, config.page_store_owner,
+                                                 binding, credit, binding->backend_lane(), &page_store);
         if (!status.ok()) {
             return status;
         }
     }
     else {
-        backend = detail::reserved_shared<EmptyBackend>(credit);
+        page_store = detail::reserved_shared<EmptyPageStore>(credit);
     }
     auto status = ApplyFrontier::create(initial->coverage, ApplyFrontier::kMaxWindow, credit, &frontier);
     if (!status.ok()) {
@@ -289,7 +288,7 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
         for (const auto &[pid, frame] : local->inherited->frames) {
             (void)pid;
             loads.max_frame_bytes = std::max<size_t>(loads.max_frame_bytes, frame.frame_bytes);
-            loads.max_blob_bytes  = std::max<size_t>(loads.max_blob_bytes, frame.backing->length);
+            loads.max_blob_bytes  = std::max<size_t>(loads.max_blob_bytes, frame.page_block->length);
         }
         loads.max_inner_key_bytes = loads.max_frame_bytes;
         loads.max_leaf_key_bytes  = loads.max_frame_bytes;
@@ -323,7 +322,7 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
     }
     work_allocations = std::move(ongoing);
     auto batch       = flush_batch_options(writers.max_key_size);
-    preparation      = {.runtime = binding->cpu(), .store = backend, .loads = loads, .maintenance = {}, .cache = cache};
+    preparation = {.runtime = binding->cpu(), .store = page_store, .loads = loads, .maintenance = {}, .cache = cache};
     preparation.cpu_progress = apply_dispatcher;
     preparation.allocations  = work_allocations;
     status                   = publisher->prepare_lane(credit, &preparation.publication);
@@ -352,7 +351,7 @@ TreeCore::TreeCore(detail::ReservedUnique<State> state) : state_(std::move(state
                               .source_window = std::min(state_->reads.max_memtables, state_->flush->source_window())});
     state_->source_rotation->set_flush(
         [this](std::shared_ptr<FlushOperation> *out) { return prepare_flush(out); },
-        [this](const PublishedTreeState &view, const SourceCatalog &catalog, WriteFootprint sealed) {
+        [this](const TreeRoot &view, const SourceCatalog &catalog, WriteFootprint sealed) {
             return state_->flush->check_rotation(state_->preparation, view, catalog, sealed);
         });
     state_->source_rotation->set_async_flush(*state_->flush, [this](FlushPreparationOptions *out) {
@@ -366,8 +365,8 @@ TreeCore::TreeCore(detail::ReservedUnique<State> state) : state_(std::move(state
             return status;
         }
         *out       = state_->preparation;
-        out->store = ticket->backend(async_backend());
-        if (state_->sources->capacity_paused() && (local_backend() || chunk_backend())) {
+        out->store = ticket->page_store(async_page_store());
+        if (state_->sources->capacity_paused() && (local_page_store() || page_chunk_store())) {
             return prepare_capacity_flush(out, std::move(ticket));
         }
         return Status::Ok();

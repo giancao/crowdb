@@ -21,11 +21,11 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
     };
 
     struct Subtree;
-    void                     start_subtree();
-    Status                   collect_subtree(PublicationTransaction &transaction, uint64_t &handoff_bytes);
-    std::shared_ptr<Subtree> subtree;
-    std::shared_ptr<const PublishedTreeState> checkpoint_view;
-    std::atomic<uint64_t>                     next_pid{0};
+    void                            start_subtree();
+    Status                          collect_subtree(PublicationTransaction &transaction, uint64_t &handoff_bytes);
+    std::shared_ptr<Subtree>        subtree;
+    std::shared_ptr<const TreeRoot> checkpoint_view;
+    std::atomic<uint64_t>           next_pid{0};
 
     struct Range
     {
@@ -33,13 +33,13 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
         std::optional<detail::BoundedRangeJoin::Completion>    join_completion = std::nullopt;
         uint64_t                                               page_id;
         PageKeyRange                                           bounds;
-        std::shared_ptr<const PublishedPage>                   expected;
+        std::shared_ptr<const PageEntry>                       expected;
         std::shared_ptr<InstallRecord>                         record = nullptr;
         OverlayStorage                                         runs;
         detail::ReservedVector<std::shared_ptr<InstallRecord>> installs;
         std::optional<OwnedKey>                                next_key;
         std::shared_ptr<InstallRecord>                         prepared_record   = nullptr;
-        std::shared_ptr<const PublishedPage>                   prepared_page     = nullptr;
+        std::shared_ptr<const PageEntry>                       prepared_page     = nullptr;
         bool                                                   window_prepared   = false;
         bool                                                   probed            = false;
         size_t                                                 installed_runs    = 0;
@@ -163,7 +163,7 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
     PublicationCoordinator                                 &publisher;
     detail::FlushRuntime                                   &runtime;
     std::shared_ptr<detail::FlushRuntime::Lane>             lane;
-    std::shared_ptr<const PublishedTreeState>               captured;
+    std::shared_ptr<const TreeRoot>                         captured;
     std::shared_ptr<const PublishedSources>                 inputs;
     std::shared_ptr<AllocationBudget>                       metadata;
     uint64_t                                                admission_owner = 0;

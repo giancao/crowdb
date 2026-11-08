@@ -48,9 +48,9 @@ struct PageCacheTrim
     PageCacheTrim *next                       = nullptr;
 };
 
-// One cache may serve independently budgeted loaders for the same backend.
-// Nonzero backend_id must uniquely name that backend. Legacy zero IDs also
-// compare backing owner addresses, preventing unrelated stores from aliasing.
+// One cache may serve independently budgeted loaders for the same page store.
+// Nonzero page_store_id must uniquely name that page store. Legacy zero IDs also
+// compare page block owner addresses, preventing unrelated stores from aliasing.
 // It never changes live mapping/overlays: returned owners serve captured views.
 class SharedPageCache
 {
@@ -98,7 +98,7 @@ class SharedPageCache
     void trim(PageCacheTrim &request) noexcept;
     void close() noexcept;
     // Close admission and detach residency progress; the caller separately
-    // drains accepted load/I/O owners before destroying its backend.
+    // drains accepted load/I/O owners before destroying its page store.
     void close_async(AsyncCompletion complete) noexcept;
     void close_and_drain() noexcept;
 

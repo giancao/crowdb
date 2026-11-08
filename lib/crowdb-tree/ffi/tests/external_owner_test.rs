@@ -12,12 +12,12 @@ mod external_owner;
 use external_owner::payload;
 
 #[test]
-fn unknown_capacity_slice_releases_large_backing_during_apply() {
+fn unknown_capacity_slice_releases_large_page_block_during_apply() {
     let tree = Crowdbtree::open(&Config::default()).unwrap();
     let drops = Arc::new(AtomicUsize::new(0));
-    let backing = payload(1024 * 1024, &drops);
-    let value = backing.slice(500_000..500_064);
-    drop(backing);
+    let page_block = payload(1024 * 1024, &drops);
+    let value = page_block.slice(500_000..500_064);
+    drop(page_block);
     tree.apply_batch_external(
         1,
         vec![ExtOp::Put {
@@ -39,10 +39,10 @@ fn cloned_slices_across_trees_release_last_rust_owner_once() {
     let first = Crowdbtree::open(&Config::default()).unwrap();
     let second = Crowdbtree::open(&Config::default()).unwrap();
     let drops = Arc::new(AtomicUsize::new(0));
-    let backing = payload(65_536, &drops);
-    let left = backing.slice(100..200);
-    let right = backing.slice(200..400);
-    drop(backing);
+    let page_block = payload(65_536, &drops);
+    let left = page_block.slice(100..200);
+    let right = page_block.slice(200..400);
+    drop(page_block);
     first
         .apply_batch_external(
             1,

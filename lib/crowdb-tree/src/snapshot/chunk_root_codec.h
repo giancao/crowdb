@@ -1,20 +1,20 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #pragma once
-#include "backend/chunk/chunk_backing.h"
+#include "page_store/chunk/chunk_page_block.h"
 #include "snapshot/readable_page_catalog.h"
 
 namespace crowdb::tree
 {
-inline constexpr size_t kChunkIndexFrameLimit         = 64;
-inline constexpr size_t kChunkIndexReferencesPerFrame = 4096;
-inline constexpr size_t kChunkIndexHeaderBytes        = 48;
-inline constexpr size_t kChunkIndexRecordBytes        = 128;
-inline constexpr size_t kChunkRootHeaderBytes         = 128;
-inline constexpr size_t kChunkRootEntryBytes          = 96;
-inline constexpr size_t kChunkIndexWindowBytes =
-    kChunkIndexHeaderBytes + 4 +
-    (kChunkIndexFrameLimit * (kChunkIndexRecordBytes + (16 * kChunkIndexReferencesPerFrame)));
+inline constexpr size_t kChunkMappingSegmentEntryLimit  = 64;
+inline constexpr size_t kChunkPageEntryReferenceLimit   = 4096;
+inline constexpr size_t kChunkMappingSegmentHeaderBytes = 48;
+inline constexpr size_t kChunkPageEntryBytes            = 128;
+inline constexpr size_t kChunkRootHeaderBytes           = 232;
+inline constexpr size_t kChunkRootEntryBytes            = 96;
+inline constexpr size_t kChunkMappingSegmentWindowBytes =
+    kChunkMappingSegmentHeaderBytes + 4 +
+    (kChunkMappingSegmentEntryLimit * (kChunkPageEntryBytes + (16 * kChunkPageEntryReferenceLimit)));
 
 struct ChunkRootIdentity
 {
@@ -30,7 +30,10 @@ struct ChunkRootIdentity
     uint64_t wal_replay_offset = 0;
 };
 
-struct ChunkIndexReference
+// A mapping segment encoded in a PageIndex pack. Its entries locate individual
+// page frames in BtreePage packs; page segments group that frame storage.
+// The B-tree's own index pages are page data.
+struct ChunkMappingSegmentRef
 {
     uint64_t                  first_page  = 0;
     uint64_t                  last_page   = 0;
@@ -41,15 +44,17 @@ struct ChunkIndexReference
 struct ChunkRootManifest
 {
     explicit ChunkRootManifest(const std::shared_ptr<AllocationBudget> &budget)
-        : indexes(detail::ReservationAllocator<ChunkIndexReference>(budget))
+        : indexes(detail::ReservationAllocator<ChunkMappingSegmentRef>(budget))
     {
     }
 
-    ChunkRootIdentity                           identity;
-    uint64_t                                    frame_count        = 0;
-    uint64_t                                    stored_references  = 0;
-    uint64_t                                    dependency_entries = 0;
-    detail::ReservedVector<ChunkIndexReference> indexes;
+    ChunkRootIdentity                              identity;
+    uint64_t                                       frame_count        = 0;
+    uint64_t                                       stored_references  = 0;
+    uint64_t                                       dependency_entries = 0;
+    std::optional<IndexSummary>                    root_summary       = std::nullopt;
+    std::optional<detail::ChunkFixedPackRef>       summaries          = std::nullopt;
+    detail::ReservedVector<ChunkMappingSegmentRef> indexes;
 };
 
 using ChunkMetadataBytes = detail::ReservedVector<uint8_t>;
@@ -57,12 +62,12 @@ using ChunkMetadataBytes = detail::ReservedVector<uint8_t>;
 Status encode_chunk_root(const ChunkRootManifest &root, ChunkMetadataBytes *out);
 Status decode_chunk_root(std::span<const uint8_t> bytes, uint64_t tree, uint64_t exact_generation,
                          ChunkRootManifest *out);
-Status encode_chunk_index(const ChunkRootIdentity &identity, uint64_t ordinal,
-                          std::span<const DurableCapturedFrame *const> frames, ChunkMetadataBytes *out);
+Status encode_chunk_mapping_segment(const ChunkRootIdentity &identity, uint64_t ordinal,
+                                    std::span<const DurableCapturedFrame *const> frames, ChunkMetadataBytes *out);
 
 // Parsing does no I/O or pin registration. Callers acquire exact pack pins on
-// the backend lane before turning these records into readable BackingRefs.
-struct ChunkIndexFrame
+// the backend lane before turning these records into readable PageBlockRefs.
+struct ChunkPageEntry
 {
     uint64_t                  page_id        = 0;
     page_type                 type           = page_type::kLeafBase;
@@ -74,7 +79,7 @@ struct ChunkIndexFrame
     std::span<const uint8_t>  stored_reference_words;
 };
 
-Status decode_chunk_index_header(std::span<const uint8_t> bytes, const ChunkRootIdentity &identity, uint64_t ordinal,
-                                 uint64_t *count, size_t *offset);
-Status decode_chunk_index_frame(std::span<const uint8_t> bytes, size_t *offset, ChunkIndexFrame *out);
+Status decode_chunk_mapping_segment_header(std::span<const uint8_t> bytes, const ChunkRootIdentity &identity,
+                                           uint64_t ordinal, uint64_t *count, size_t *offset);
+Status decode_chunk_page_entry(std::span<const uint8_t> bytes, size_t *offset, ChunkPageEntry *out);
 } // namespace crowdb::tree

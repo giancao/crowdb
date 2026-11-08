@@ -12,12 +12,12 @@ namespace crowdb::tree
 {
 namespace
 {
-struct TestByteBackend
+struct TestBytePageStore
 {
-    std::shared_ptr<MemPageStore>   device = std::make_shared<MemPageStore>(4096);
+    std::shared_ptr<PageMemStore>   device = std::make_shared<PageMemStore>(4096);
     test_write::TestCheckpointStore store;
 
-    TestByteBackend()
+    TestBytePageStore()
     {
         store.device = device;
     }
@@ -25,16 +25,16 @@ struct TestByteBackend
 
 struct TestByteExport
 {
-    std::shared_ptr<TestByteBackend> backend = std::make_shared<TestByteBackend>();
-    Config                           config;
-    std::unique_ptr<Crowdbtree>      tree;
+    std::shared_ptr<TestBytePageStore> backend = std::make_shared<TestBytePageStore>();
+    Config                             config;
+    std::unique_ptr<Crowdbtree>        tree;
 
     TestByteExport()
     {
         EXPECT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
         config.page_store                           = backend->device.get();
         config.async_page_store                     = &backend->store;
-        config.backend_owner                        = backend;
+        config.page_store_owner                     = backend;
         config.frame_bytes                          = 4096;
         config.max_inline_value                     = 64;
         config.runtime_binding.limits.io_operations = 1;
@@ -159,9 +159,9 @@ TEST(PublishedByteExport, AsyncPreflightAndOutputReleaseWorkersWhileReadingColdP
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
     auto store              = std::make_shared<test_write::TestCheckpointStore>();
-    store->device           = std::make_shared<MemPageStore>(4096);
+    store->device           = std::make_shared<PageMemStore>(4096);
     config.page_store       = store->device.get();
-    config.backend_owner    = store;
+    config.page_store_owner = store;
     config.frame_bytes      = 4096;
     config.max_inline_value = 64;
     std::unique_ptr<Crowdbtree> tree;

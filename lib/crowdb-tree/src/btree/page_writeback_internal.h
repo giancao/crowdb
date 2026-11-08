@@ -39,7 +39,7 @@ struct PageWriteOperation::State : std::enable_shared_from_this<State>
     OverwriteByteVector<AllocationKind::kIo>                  blob;
     detail::ReservedVector<uint8_t, AllocationKind::kScratch> scratch;
     std::span<uint8_t>                                        aligned;
-    std::shared_ptr<BackingRef>                               backing;
+    std::shared_ptr<PageBlockRef>                             page_block;
     std::shared_ptr<Protection>                               protection;
     PageWriteResult                                           report;
     ReservedWriteExtent                                       reserved_extent;

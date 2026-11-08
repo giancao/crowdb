@@ -11,7 +11,8 @@ namespace crowdb::tree::snapshot
 {
 // Decodes into caller-owned storage without allocating. IU padding is ignored;
 // only slot_count words are written. Both outputs remain unchanged on failure.
-Status decode_segment_into(std::span<const uint8_t> input, SegmentImageHeader *header, std::span<uint64_t> words);
+Status decode_segment_into(std::span<const uint8_t> input, MappingSegmentImageHeader *header,
+                           std::span<uint64_t> words);
 
 // Reads the first 16 bytes and checks that the count describes exactly
 // logical_bytes. This allows charging output storage before streaming the body.

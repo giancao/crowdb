@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_runtime_page_store.h"
 #include "common/test_chunk_physical.h"
 #include "common/test_chunk_root.h"
+#include "page_store/chunk/page_chunk_store.h"
 
 #include <future>
 #include <latch>
@@ -13,7 +13,7 @@ namespace
 {
 using namespace test_chunk;
 
-Status register_store(detail::ChunkRuntimePageStore &store, const std::shared_ptr<AllocationBudget> &budget)
+Status register_store(detail::PageChunkStore &store, const std::shared_ptr<AllocationBudget> &budget)
 {
     std::promise<Status> terminal;
     auto                 result = terminal.get_future();
@@ -38,30 +38,29 @@ TEST(ChunkPhysicalRegistry, RepeatedObserversCountAllMirrorCapacityOnceUntilActu
     pack.reset();
     repeated.reset();
     host.lane->drain();
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 8192U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 8192U);
     ASSERT_TRUE(
         host.registry->deleted(TestPhysicalHost::stage, TestPhysicalHost::chunk, TestPhysicalHost::receipt, host.budget)
             .ok());
     // Metadata observers are still alive, but the physical allocation is gone.
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 0U);
     ASSERT_TRUE(
         host.registry->deleted(TestPhysicalHost::stage, TestPhysicalHost::chunk, TestPhysicalHost::receipt, host.budget)
             .ok());
     tail.reset();
     host.lane->drain();
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 0U);
 }
 
 TEST(ChunkPhysicalRegistry, OnePageStoreReopensIntoTheOriginalCanonicalPhysicalLedger)
 {
-    TestPhysicalHost              host;
-    TestRootBackend               backend;
-    detail::ChunkRuntimePageStore store({.tree = 19, .owner_epoch = 1}, backend.catalog, backend.transport,
-                                        host.budget);
-    auto                          other = std::make_shared<TestPhysicalBudget>();
-    other->queue                        = host.queue;
-    std::shared_ptr<const ChunkBackingDomain> first;
-    std::shared_ptr<const ChunkBackingDomain> second;
+    TestPhysicalHost       host;
+    TestRootPageStore      backend;
+    detail::PageChunkStore store({.tree = 19, .owner_epoch = 1}, backend.catalog, backend.transport, host.budget);
+    auto                   other = std::make_shared<TestPhysicalBudget>();
+    other->queue                 = host.queue;
+    std::shared_ptr<const PageChunkStoreDomain> first;
+    std::shared_ptr<const PageChunkStoreDomain> second;
     ASSERT_TRUE(register_store(store, host.budget).ok());
     ASSERT_TRUE(store.make_domain(51, host.budget, &first).ok());
     ASSERT_TRUE(register_store(store, other).ok());
@@ -76,22 +75,21 @@ TEST(ChunkPhysicalRegistry, OnePageStoreReopensIntoTheOriginalCanonicalPhysicalL
     host.lane->drain();
     ASSERT_TRUE(second->physical_registry->prepare(TestPhysicalHost::stage, TestPhysicalHost::chunk, other, &two).ok());
     ASSERT_TRUE(second->physical_registry->observe(two, TestPhysicalHost::receipt, other).ok());
-    EXPECT_EQ(second->physical_registry->backing_metrics()->snapshot().allocated_backing_bytes, 8192U);
-    EXPECT_EQ(other->metrics->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(second->physical_registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 8192U);
+    EXPECT_EQ(other->metrics->snapshot().allocated_page_block_bytes, 0U);
     ASSERT_TRUE(second->physical_registry
                     ->deleted(TestPhysicalHost::stage, TestPhysicalHost::chunk, TestPhysicalHost::receipt, other)
                     .ok());
-    EXPECT_EQ(second->physical_registry->backing_metrics()->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(second->physical_registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 0U);
 }
 
 TEST(ChunkPhysicalRegistry, ExistingPageStoreCannotMixCanonicalRolesAcrossHostQueues)
 {
-    TestPhysicalHost                          first_host;
-    TestPhysicalHost                          other_host;
-    TestRootBackend                           backend;
-    detail::ChunkRuntimePageStore             store({.tree = 19, .owner_epoch = 1}, backend.catalog, backend.transport,
-                                                    first_host.budget);
-    std::shared_ptr<const ChunkBackingDomain> first;
+    TestPhysicalHost       first_host;
+    TestPhysicalHost       other_host;
+    TestRootPageStore      backend;
+    detail::PageChunkStore store({.tree = 19, .owner_epoch = 1}, backend.catalog, backend.transport, first_host.budget);
+    std::shared_ptr<const PageChunkStoreDomain> first;
     ASSERT_TRUE(register_store(store, first_host.budget).ok());
     ASSERT_TRUE(store.make_domain(51, first_host.budget, &first).ok());
     EXPECT_EQ(register_store(store, other_host.budget).code(), Code::kInvalidArgument);
@@ -115,13 +113,13 @@ TEST(ChunkPhysicalRegistry, ChangedIncarnationCannotRemoveAnotherPhysicalAllocat
     std::shared_ptr<ChunkPhysicalPack> fresh;
     ASSERT_TRUE(host.registry->prepare(stage, TestPhysicalHost::chunk, host.budget, &fresh).ok());
     ASSERT_TRUE(host.registry->observe(fresh, receipt, host.budget).ok());
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 16384U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 16384U);
     ASSERT_TRUE(host.registry->deleted(TestPhysicalHost::stage, TestPhysicalHost::chunk, {}, host.budget).ok());
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 8192U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 8192U);
     EXPECT_EQ(host.registry->deleted(stage, TestPhysicalHost::chunk, TestPhysicalHost::receipt, host.budget).code(),
               Code::kCorruption);
     ASSERT_TRUE(host.registry->deleted(stage, TestPhysicalHost::chunk, receipt, host.budget).ok());
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 0U);
 }
 
 TEST(ChunkPhysicalRegistry, SingleBackendWorkerWaitsOnlyOnTheIndependentHostRetirementLane)
@@ -155,7 +153,7 @@ TEST(ChunkPhysicalRegistry, SingleBackendWorkerWaitsOnlyOnTheIndependentHostReti
     call.done.wait();
     lane->drain();
     ASSERT_TRUE(call.status.ok()) << call.status.to_string();
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 8192U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 8192U);
     EXPECT_GT(host.queue->snapshot().cpu_steps, 0U);
 }
 
@@ -176,7 +174,7 @@ TEST(ChunkPhysicalRegistry, CommandAdmissionRejectsBeforeEnqueueAndClosedHostAcc
     ASSERT_TRUE(
         host.registry->deleted(TestPhysicalHost::stage, TestPhysicalHost::chunk, TestPhysicalHost::receipt, host.budget)
             .ok());
-    EXPECT_EQ(host.registry->backing_metrics()->snapshot().allocated_backing_bytes, 0U);
+    EXPECT_EQ(host.registry->page_block_metrics()->snapshot().allocated_page_block_bytes, 0U);
 }
 } // namespace
 

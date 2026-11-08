@@ -1,9 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// PT1: PageStore backend tests (MemPageStore + BlockPageStore).
-#include "crowdb-tree/backend/block_page_store.h"
-#include "crowdb-tree/backend/page_store.h"
+// PT1: PageStore page store tests (PageMemStore + PageDiskStore).
+#include "crowdb-tree/page_store/page_disk_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 #include "test_tmp.h"
 
 #include <gtest/gtest.h>
@@ -38,7 +38,7 @@ std::string temp_path()
 
 TEST(PageStore, MemRoundTrip)
 {
-    MemPageStore         s(1);
+    PageMemStore         s(1);
     std::vector<uint8_t> in{1, 2, 3, 4, 5};
     ASSERT_TRUE(s.write_at(100, in.data(), in.size()).ok());
     std::vector<uint8_t> out(in.size(), 0);
@@ -49,14 +49,14 @@ TEST(PageStore, MemRoundTrip)
 
 TEST(PageStore, MemReadPastEndFails)
 {
-    MemPageStore           s(1);
+    PageMemStore           s(1);
     std::array<uint8_t, 4> b{};
     EXPECT_FALSE(s.read_at(0, b.data(), b.size()).ok());
 }
 
 TEST(PageStore, MemOverwrite)
 {
-    MemPageStore         s(1);
+    PageMemStore         s(1);
     std::vector<uint8_t> a{9, 9, 9};
     ASSERT_TRUE(s.write_at(0, a.data(), a.size()).ok());
     std::vector<uint8_t> b{1, 2};
@@ -75,22 +75,22 @@ TEST(PageStore, FileRoundTripAcrossReopen)
     ASSERT_EQ(::mkdir(dir.c_str(), 0755), 0);
     std::vector<uint8_t> in{10, 20, 30, 40};
     {
-        std::unique_ptr<BlockPageStore> s;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
+        std::unique_ptr<PageDiskStore> s;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
         ASSERT_TRUE(s->write_at(8, in.data(), in.size()).ok());
         ASSERT_TRUE(s->sync().ok());
         EXPECT_EQ(s->iu_size(), 1U);
     }
     {
-        std::unique_ptr<BlockPageStore> s;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
+        std::unique_ptr<PageDiskStore> s;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
         std::vector<uint8_t> out(in.size(), 0);
         ASSERT_TRUE(s->read_at(8, out.data(), out.size()).ok());
         EXPECT_EQ(in, out);
     }
 }
 
-// plan-tree #22: BlockPageStore (O_DIRECT). Backed by a regular
+// plan-tree #22: PageDiskStore (O_DIRECT). Backed by a regular
 // pre-allocated file in these tests (no real block device available), which
 // exercises the exact same O_DIRECT alignment path a raw device would.
 TEST(PageStore, BlockDeviceAlignedRoundTripAcrossReopen)
@@ -101,16 +101,16 @@ TEST(PageStore, BlockDeviceAlignedRoundTripAcrossReopen)
     // across runs -- either path (direct or bounced) must round-trip.
     std::vector<uint8_t> in(4096, 0xAB);
     {
-        std::unique_ptr<BlockPageStore> s;
-        ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+        std::unique_ptr<PageDiskStore> s;
+        ASSERT_TRUE(PageDiskStore::open(path, 4096, &s).ok());
         EXPECT_FALSE(s->is_block_device());
         ASSERT_TRUE(s->write_at(4096, in.data(), in.size()).ok());
         ASSERT_TRUE(s->sync().ok());
         EXPECT_EQ(s->iu_size(), 4096U);
     }
     {
-        std::unique_ptr<BlockPageStore> s;
-        ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+        std::unique_ptr<PageDiskStore> s;
+        ASSERT_TRUE(PageDiskStore::open(path, 4096, &s).ok());
         std::vector<uint8_t> out(in.size(), 0);
         ASSERT_TRUE(s->read_at(4096, out.data(), out.size()).ok());
         EXPECT_EQ(in, out);
@@ -120,9 +120,9 @@ TEST(PageStore, BlockDeviceAlignedRoundTripAcrossReopen)
 
 TEST(PageStore, BlockDeviceUnalignedWriteReadBounces)
 {
-    std::string                     path = temp_path();
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+    std::string                    path = temp_path();
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open(path, 4096, &s).ok());
 
     // Offset 10, length 7: neither aligned to the 4096 IU -- must bounce
     // through the bounce-buffer read-modify-write path.
@@ -137,9 +137,9 @@ TEST(PageStore, BlockDeviceUnalignedWriteReadBounces)
 
 TEST(PageStore, BlockDeviceUnalignedWritePreservesSurroundingBytes)
 {
-    std::string                     path = temp_path();
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+    std::string                    path = temp_path();
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open(path, 4096, &s).ok());
 
     // Fill one full IU with a known pattern (aligned write).
     std::vector<uint8_t> block(4096, 0xFF);
@@ -166,9 +166,9 @@ TEST(PageStore, BlockDeviceUnalignedWritePreservesSurroundingBytes)
 
 TEST(PageStore, BlockDeviceReadPastEndFails)
 {
-    std::string                     path = temp_path();
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+    std::string                    path = temp_path();
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open(path, 4096, &s).ok());
     std::vector<uint8_t> out(16, 0);
     EXPECT_EQ(s->read_at(0, out.data(), out.size()).code(), Code::kNotFound);
     std::remove(path.c_str());
@@ -177,7 +177,7 @@ TEST(PageStore, BlockDeviceReadPastEndFails)
 // plan-tree #14e: FaultyPageStore fault-injection wrapper.
 TEST(FaultyPageStore, PassesThroughWithNoFaultArmed)
 {
-    MemPageStore    inner(1);
+    PageMemStore    inner(1);
     FaultyPageStore s(&inner);
 
     std::vector<uint8_t> in{1, 2, 3, 4};
@@ -192,7 +192,7 @@ TEST(FaultyPageStore, PassesThroughWithNoFaultArmed)
 
 TEST(FaultyPageStore, DropWriteNeverReachesInner)
 {
-    MemPageStore    inner(1);
+    PageMemStore    inner(1);
     FaultyPageStore s(&inner);
 
     std::vector<uint8_t> a{1, 2, 3};
@@ -215,7 +215,7 @@ TEST(FaultyPageStore, DropWriteNeverReachesInner)
 
 TEST(FaultyPageStore, TearWriteTruncatesToTearLen)
 {
-    MemPageStore    inner(1);
+    PageMemStore    inner(1);
     FaultyPageStore s(&inner);
     inner.write_at(0, std::vector<uint8_t>(6, 0xAA).data(), 6); // pre-fill
 
@@ -237,7 +237,7 @@ TEST(FaultyPageStore, TearWriteTruncatesToTearLen)
 
 TEST(FaultyPageStore, FailWriteReturnsErrorWithoutTouchingInner)
 {
-    MemPageStore    inner(1);
+    PageMemStore    inner(1);
     FaultyPageStore s(&inner);
     s.arm_write_fault(0, FaultyPageStore::Fault::kFail);
 
@@ -248,7 +248,7 @@ TEST(FaultyPageStore, FailWriteReturnsErrorWithoutTouchingInner)
 
 TEST(FaultyPageStore, FailSyncReturnsError)
 {
-    MemPageStore    inner(1);
+    PageMemStore    inner(1);
     FaultyPageStore s(&inner);
     ASSERT_TRUE(s.sync().ok()); // sync #0: unarmed
     s.arm_sync_fault(1, FaultyPageStore::Fault::kFail);
@@ -256,11 +256,11 @@ TEST(FaultyPageStore, FailSyncReturnsError)
     EXPECT_TRUE(s.sync().ok());  // sync #2: one-shot, back to normal
 }
 
-// Task 2: BlockPageStore::open_mem() — MemoryMedium with IU=1.
-TEST(BlockPageStoreMem, RoundTrip)
+// Task 2: PageDiskStore::open_mem() — MemoryMedium with IU=1.
+TEST(PageDiskStoreMem, RoundTrip)
 {
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open_mem(1, &s).ok());
     EXPECT_EQ(s->iu_size(), 1U);
     EXPECT_FALSE(s->is_block_device());
 
@@ -272,10 +272,10 @@ TEST(BlockPageStoreMem, RoundTrip)
     EXPECT_GE(s->size(), 105U);
 }
 
-TEST(BlockPageStoreMem, Overwrite)
+TEST(PageDiskStoreMem, Overwrite)
 {
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open_mem(1, &s).ok());
 
     std::vector<uint8_t> a{9, 9, 9};
     ASSERT_TRUE(s->write_at(0, a.data(), a.size()).ok());
@@ -288,25 +288,25 @@ TEST(BlockPageStoreMem, Overwrite)
     EXPECT_EQ(out[2], 9);
 }
 
-TEST(BlockPageStoreMem, ReadPastEndFails)
+TEST(PageDiskStoreMem, ReadPastEndFails)
 {
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open_mem(1, &s).ok());
     std::array<uint8_t, 4> b{};
     EXPECT_EQ(s->read_at(0, b.data(), b.size()).code(), Code::kNotFound);
 }
 
-TEST(BlockPageStoreMem, SyncIsNoOp)
+TEST(PageDiskStoreMem, SyncIsNoOp)
 {
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open_mem(1, &s).ok());
     EXPECT_TRUE(s->sync().ok());
 }
 
-TEST(BlockPageStoreMem, ContentVerification)
+TEST(PageDiskStoreMem, ContentVerification)
 {
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open_mem(1, &s).ok());
 
     std::vector<uint8_t> in{0xAA, 0xBB, 0xCC};
     ASSERT_TRUE(s->write_at(50, in.data(), in.size()).ok());
@@ -343,9 +343,9 @@ std::string temp_dir()
 
 TEST(BlockArray, WriteWithinFirstBlock)
 {
-    std::string                     dir = temp_dir();
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir, 1, 0, 4096, 1, &s).ok());
+    std::string                    dir = temp_dir();
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir, 1, 0, 4096, 1, &s).ok());
     EXPECT_EQ(s->num_extents(), 1U);
     EXPECT_EQ(s->block_size(), 4096U);
 
@@ -359,10 +359,10 @@ TEST(BlockArray, WriteWithinFirstBlock)
 
 TEST(BlockArray, WriteExceedsOneBlockCreatesSecond)
 {
-    std::string                     dir = temp_dir();
-    std::unique_ptr<BlockPageStore> s;
-    constexpr uint64_t              blk = 4096;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir, 1, 0, blk, 1, &s).ok());
+    std::string                    dir = temp_dir();
+    std::unique_ptr<PageDiskStore> s;
+    constexpr uint64_t             blk = 4096;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir, 1, 0, blk, 1, &s).ok());
 
     // Write 100 bytes starting at offset blk-50 → spans into block 1
     std::vector<uint8_t> in(100, 0x42);
@@ -376,10 +376,10 @@ TEST(BlockArray, WriteExceedsOneBlockCreatesSecond)
 
 TEST(BlockArray, Write20MiBWith8MiBBlocks)
 {
-    std::string                     dir = temp_dir();
-    std::unique_ptr<BlockPageStore> s;
-    constexpr uint64_t              blk = 8 * 1024 * 1024;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &s).ok());
+    std::string                    dir = temp_dir();
+    std::unique_ptr<PageDiskStore> s;
+    constexpr uint64_t             blk = 8 * 1024 * 1024;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, blk, 1, &s).ok());
 
     // Write 20 MiB of data
     std::vector<uint8_t> in(20 * 1024 * 1024, 0xAB);
@@ -398,16 +398,16 @@ TEST(BlockArray, ReopenAfterWrites)
     std::vector<uint8_t> in(100, 0x77);
 
     {
-        std::unique_ptr<BlockPageStore> s;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 2, 3, blk, 1, &s).ok());
+        std::unique_ptr<PageDiskStore> s;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 2, 3, blk, 1, &s).ok());
         ASSERT_TRUE(s->write_at(0, in.data(), in.size()).ok());
         ASSERT_TRUE(s->write_at(blk + 10, in.data(), in.size()).ok());
         ASSERT_TRUE(s->sync().ok());
         EXPECT_EQ(s->num_extents(), 2U);
     }
     {
-        std::unique_ptr<BlockPageStore> s;
-        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 2, 3, blk, 1, &s).ok());
+        std::unique_ptr<PageDiskStore> s;
+        ASSERT_TRUE(PageDiskStore::open_blocks(dir, 2, 3, blk, 1, &s).ok());
         EXPECT_EQ(s->num_extents(), 2U);
 
         std::vector<uint8_t> out(in.size(), 0);
@@ -420,9 +420,9 @@ TEST(BlockArray, ReopenAfterWrites)
 
 TEST(BlockArray, DumpUtility)
 {
-    std::string                     dir = temp_dir();
-    std::unique_ptr<BlockPageStore> s;
-    ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
+    std::string                    dir = temp_dir();
+    std::unique_ptr<PageDiskStore> s;
+    ASSERT_TRUE(PageDiskStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
 
     std::vector<uint8_t> in{0xDE, 0xAD, 0xBE, 0xEF};
     ASSERT_TRUE(s->write_at(0, in.data(), in.size()).ok());

@@ -18,7 +18,7 @@ struct TestColdMaintenance
         return result;
     }
 
-    Status publish(std::shared_ptr<const PublishedPage> expected, std::shared_ptr<const PublishedPage> page)
+    Status publish(std::shared_ptr<const PageEntry> expected, std::shared_ptr<const PageEntry> page)
     {
         auto request         = std::make_shared<PublicationRequest>();
         request->transaction = {
@@ -91,7 +91,7 @@ TEST(ColdPageMaintenance, StaleLoadedViewDoesNotReplaceTheConcurrentWriter)
     ASSERT_FALSE(test.done.load(std::memory_order_acquire));
     ASSERT_EQ(test.loader->pending.size(), 1U);
     const auto before  = test.publisher.capture()->mapping.get(0);
-    auto       changed = std::make_shared<PublishedPage>(*before);
+    auto       changed = std::make_shared<PageEntry>(*before);
     changed->revision++;
     changed->leaf = test_read::page({
         {.key = "new", .slot = 2, .value = "concurrent"}

@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/extent_writeback.h"
+#include "page_store/local/extent_writeback.h"
 #include "snapshot/checkpoint_operation_internal.h"
 
 namespace crowdb::tree
@@ -224,7 +224,7 @@ void CheckpointOperation::State::pump()
 void CheckpointOperation::State::capture()
 {
     capture_metrics.emplace(publisher.work_metrics(), TreeStage::SnapshotCapture, tree_metrics_now_ns());
-    if (view->pending_handoff || view->flush_admission_owner != 0 || backend_needs_recovery()) {
+    if (view->pending_handoff || view->flush_admission_owner != 0 || page_store_needs_recovery()) {
         finish(Status::unavailable());
         return;
     }
@@ -271,7 +271,7 @@ void CheckpointOperation::State::captured()
         reconcile(Status::unavailable());
         return;
     }
-    auto artifact          = detail::reserved_shared<PublishedTreeState>(control_metadata, *view);
+    auto artifact          = detail::reserved_shared<TreeRoot>(control_metadata, *view);
     artifact->next_page_id = overflow_begin;
     view                   = std::move(artifact);
     const auto end         = overflow_begin + plan.new_overflow_frames;
@@ -290,7 +290,7 @@ void CheckpointOperation::State::captured()
     };
     auto status = CapturedWriteOperation::create(
         view, loader, store, runtime, lane, options.write, budget, std::move(reserve),
-        chunk ? chunk->reserve(budget.bytes) : extent_write_reservation(backend->ledger, budget.bytes),
+        chunk ? chunk->reserve(budget.bytes) : extent_write_reservation(local_page_store->ledger, budget.bytes),
         inherited_pages(), &write);
     if (!status.ok()) {
         reconcile(std::move(status));
@@ -318,8 +318,8 @@ void CheckpointOperation::State::written()
     auto metadata                   = options.metadata;
     metadata.exclusion              = options.write.frames.exclusion;
     metadata.retire_previous_anchor = metadata.retire_previous_anchor || metadata.exclusion.length != 0;
-    auto status = LocalCheckpointOperation::create(written_pages, backend->checkpoints, store, runtime, lane, metadata,
-                                                   budget, &checkpoint);
+    auto status = LocalCheckpointOperation::create(written_pages, local_page_store->checkpoints, store, runtime, lane,
+                                                   metadata, budget, &checkpoint);
     if (!status.ok()) {
         reconcile(std::move(status));
         return;
@@ -352,15 +352,15 @@ void CheckpointOperation::State::reconcile(Status status)
     if (report.durable_committed) {
         // The capture token excludes a later checkpoint until reconciliation.
         // Record this checkpoint's pair before releasing that serialization.
-        report.durable_coverage =
-            chunk ? chunk->durable_coverage.load(std::memory_order_acquire) : backend->checkpoints->durable_coverage();
+        report.durable_coverage     = chunk ? chunk->durable_coverage.load(std::memory_order_acquire)
+                                            : local_page_store->checkpoints->durable_coverage();
         report.snapshot_sequence    = chunk ? chunk->snapshot_sequence.load(std::memory_order_acquire)
-                                            : backend->checkpoints->snapshot_sequence();
+                                            : local_page_store->checkpoints->snapshot_sequence();
         baseline->generation        = view->generation;
         baseline->capture_token     = report.checkpoint_token;
         baseline->coverage          = report.durable_coverage;
         baseline->snapshot_sequence = report.snapshot_sequence;
-        baseline->backend_id        = backend_identity();
+        baseline->page_store_id     = page_store_identity();
         baseline->gc_floor          = view->gc_floor;
         baseline->wal_offset        = chunk_wal_offset;
         baseline->pages             = written_pages;

@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 // PT9: IU block alignment (9.1-9.3) + debug store/codec on real frames (9.5).
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/debug_codec.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -43,7 +43,7 @@ void fill_buf(Crowdbtree *t, int K, std::map<std::string, std::string> *oracle)
 
 TEST(Alignment, Iu4096CheckpointReopenEquals)
 {
-    MemPageStore store(4096); // aligned block device
+    PageMemStore store(4096); // aligned block device
     Config       opt;
     opt.page_store       = &store;
     opt.frame_bytes      = 4096; // frame_bytes % iu == 0
@@ -73,7 +73,7 @@ TEST(Alignment, Iu4096CheckpointReopenEquals)
 
 TEST(Alignment, Iu4096AllocatorReuseStaysAligned)
 {
-    MemPageStore store(4096);
+    PageMemStore store(4096);
     Config       opt;
     opt.page_store       = &store;
     opt.frame_bytes      = 4096;
@@ -105,7 +105,7 @@ TEST(Alignment, RejectsFrameNotIuAligned)
 {
     // The only geometry constraint now is frame_bytes % iu == 0 (the superblock
     // slot is IU-rounded, so any IU is supported).
-    MemPageStore store(512);
+    PageMemStore store(512);
     Config       opt;
     opt.page_store  = &store;
     opt.frame_bytes = 4097; // not a multiple of 512
@@ -117,7 +117,7 @@ TEST(Alignment, RejectsFrameNotIuAligned)
 // so snapshot/reopen round-trips with IU-sized, IU-aligned extents.
 TEST(Alignment, LargeIu16KCheckpointReopen)
 {
-    MemPageStore store(16384);
+    PageMemStore store(16384);
     Config       opt;
     opt.page_store       = &store;
     opt.frame_bytes      = 16384; // frame_bytes % iu == 0
@@ -148,7 +148,7 @@ TEST(Alignment, LargeIu16KCheckpointReopen)
 // works because the superblock slot is rounded up to the IU.
 TEST(Alignment, NonPowerOfTwoIuRoundTrip)
 {
-    MemPageStore store(5000);
+    PageMemStore store(5000);
     Config       opt;
     opt.page_store       = &store;
     opt.frame_bytes      = 10000; // 10000 % 5000 == 0
@@ -173,7 +173,7 @@ TEST(Alignment, NonPowerOfTwoIuRoundTrip)
 
 TEST(Alignment, DebugStoreTransparentRoundTrip)
 {
-    MemPageStore   inner(1);
+    PageMemStore   inner(1);
     DebugPageStore dbg(&inner);
     Config         opt;
     opt.page_store       = &dbg;

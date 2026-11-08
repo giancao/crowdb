@@ -9,11 +9,11 @@ namespace crowdb::tree::test_cache_residency
 {
 using namespace test_read;
 
-inline std::shared_ptr<PublishedPage> published(std::initializer_list<BaseRef> refs)
+inline std::shared_ptr<PageEntry> published(std::initializer_list<BaseRef> refs)
 {
     auto leaf = std::make_shared<PageState>();
     leaf->bases.assign(refs.begin(), refs.end());
-    auto page  = std::make_shared<PublishedPage>();
+    auto page  = std::make_shared<PageEntry>();
     page->leaf = std::move(leaf);
     return page;
 }

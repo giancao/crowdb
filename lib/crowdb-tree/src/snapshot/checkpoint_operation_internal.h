@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "backend/checkpoint_backend.h"
 #include "btree/apply_dispatcher.h"
 #include "btree/apply_progress.h"
+#include "page_store/checkpoint_page_store.h"
 #include "snapshot/captured_rebase.h"
 #include "snapshot/checkpoint_operation.h"
 #include "snapshot/snapshot_baseline.h"
@@ -89,8 +89,8 @@ struct CheckpointOperation::State : std::enable_shared_from_this<State>
     void                   written();
     void                   checkpointed();
     void                   begin_chunk_checkpoint();
-    [[nodiscard]] bool     backend_needs_recovery() const noexcept;
-    [[nodiscard]] uint64_t backend_identity() const noexcept;
+    [[nodiscard]] bool     page_store_needs_recovery() const noexcept;
+    [[nodiscard]] uint64_t page_store_identity() const noexcept;
     [[nodiscard]] std::shared_ptr<const CapturedDurablePages> inherited_pages() const;
     void                                                      reconcile(Status status);
     void                                                      begin_rebase();
@@ -107,10 +107,10 @@ struct CheckpointOperation::State : std::enable_shared_from_this<State>
     CheckpointWork                                  prepared_work;
     PublicationCoordinator                         &publisher;
     std::shared_ptr<const void>                     owner;
-    std::shared_ptr<LocalBackendState>              backend;
-    std::shared_ptr<CheckpointBackend>              chunk;
+    std::shared_ptr<LocalPageStoreState>            local_page_store;
+    std::shared_ptr<CheckpointPageStore>            chunk;
     uint64_t                                        chunk_wal_offset = 0;
-    std::shared_ptr<BackendCheckpoint>              chunk_checkpoint;
+    std::shared_ptr<PageStoreCheckpoint>            chunk_checkpoint;
     std::shared_ptr<AsyncPageStore>                 store;
     std::shared_ptr<detail::FlushRuntime>           runtime;
     std::shared_ptr<detail::FlushRuntime::Lane>     lane;
@@ -142,7 +142,7 @@ struct CheckpointOperation::State : std::enable_shared_from_this<State>
     std::shared_ptr<PublicationRequest>             capture_request;
     std::shared_ptr<PublicationRequest>             finish_request;
     PublicationResult                               publication;
-    std::shared_ptr<const PublishedTreeState>       view;
+    std::shared_ptr<const TreeRoot>                 view;
     std::shared_ptr<FlushOperation>                 handoff;
     std::shared_ptr<CapturedWriteOperation>         write;
     std::shared_ptr<LocalCheckpointOperation>       checkpoint;

@@ -36,7 +36,7 @@ TEST(BudgetedFlush, WriterPayloadRemainsChargedAfterHandoffAndReleasesWithLastMa
         PublicationCoordinator publisher;
         auto                   published_sources = std::make_shared<PublishedSources>();
         published_sources->tables.push_back(sources.catalog()->active);
-        auto page                   = std::make_shared<PublishedPage>();
+        auto page                   = std::make_shared<PageEntry>();
         page->leaf                  = std::make_shared<PageState>();
         auto request                = std::make_shared<PublicationRequest>();
         request->transaction.record = std::make_shared<InstallRecord>(InstallToken{});

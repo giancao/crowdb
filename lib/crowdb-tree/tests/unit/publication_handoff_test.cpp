@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -24,9 +24,9 @@ PublicationResult publish(PublicationCoordinator &publisher, PublicationTransact
     return result;
 }
 
-std::shared_ptr<PublishedPage> seed(PublicationCoordinator &publisher)
+std::shared_ptr<PageEntry> seed(PublicationCoordinator &publisher)
 {
-    auto page  = std::make_shared<PublishedPage>();
+    auto page  = std::make_shared<PageEntry>();
     page->leaf = std::make_shared<PageState>();
     EXPECT_TRUE(publish(publisher, {.record       = record(0, 0),
                                     .pages        = {{.page_id = 0, .expected = {}, .replacement = page}},
@@ -48,7 +48,7 @@ TEST(PublicationHandoff, PartialInstallBlocksCheckpointAndForeignMutationUntilCo
 {
     PublicationCoordinator publisher;
     auto                   before    = seed(publisher);
-    auto                   after     = std::make_shared<PublishedPage>(*before);
+    auto                   after     = std::make_shared<PageEntry>(*before);
     auto                   state     = std::make_shared<PageState>(*before->leaf);
     state->content_id                = 2;
     after->leaf                      = state;
@@ -111,7 +111,7 @@ TEST(PublicationHandoff, PriorCheckpointCanCommitDuringNewHandoff)
     auto                   page     = seed(publisher);
     auto                   captured = publish(publisher, capture(1));
     ASSERT_TRUE(captured.status.ok());
-    auto changed      = std::make_shared<PublishedPage>(*page);
+    auto changed      = std::make_shared<PageEntry>(*page);
     auto state        = std::make_shared<PageState>();
     state->content_id = 9;
     changed->leaf     = state;

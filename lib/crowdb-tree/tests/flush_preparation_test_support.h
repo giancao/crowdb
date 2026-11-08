@@ -104,16 +104,16 @@ struct TestPreparedFlushTree
             left->bases.push_back(cold_leaf(0, 10));
             right->bases.push_back(cold_leaf(1, 11));
         }
-        auto first         = std::make_shared<PublishedPage>();
+        auto first         = std::make_shared<PageEntry>();
         first->leaf        = left;
-        auto second        = std::make_shared<PublishedPage>();
+        auto second        = std::make_shared<PageEntry>();
         second->leaf       = right;
-        auto root          = std::make_shared<PublishedPage>();
+        auto root          = std::make_shared<PageEntry>();
         root->level        = 1;
         root->metrics.leaf = false;
         const auto inner   = test_read::inner({"m"}, {0, 1});
         if (cold) {
-            root->inner_backing = test_read::inner_backing(store, 0, *inner);
+            root->inner_page_block = test_read::inner_page_block(store, 0, *inner);
         }
         else {
             root->inner = inner;
@@ -149,11 +149,11 @@ struct TestPreparedFlushTree
         frame_set_summary(frame.data(), frame.size(), summary);
         auto &blob = store->blobs[address];
         encode_durable_page(frame.data(), frame.size(), compress_algo::kNone, &blob);
-        auto backing     = std::make_shared<BackingRef>();
-        backing->address = address;
-        backing->length  = blob.size();
-        backing->owner   = store;
-        return {.identity = identity, .backing = std::move(backing)};
+        auto page_block     = std::make_shared<PageBlockRef>();
+        page_block->address = address;
+        page_block->length  = blob.size();
+        page_block->owner   = store;
+        return {.identity = identity, .page_block = std::move(page_block)};
     }
 
     [[nodiscard]] detail::ResourceBudget::Limits lifecycle_reservations() const noexcept

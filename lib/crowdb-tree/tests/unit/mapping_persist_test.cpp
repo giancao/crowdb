@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// #14c: segment image + segment directory on-disk format encode/decode.
+// #14c: mapping segment image + mapping segment directory on-disk format encode/decode.
 #include "crowdb-tree/maptable/mapping_persist.h"
 #include "crowdb-tree/maptable/mapping_slot.h"
 
@@ -11,7 +11,7 @@ using namespace crowdb::tree;
 
 TEST(MappingPersist, SegmentImageRoundTrip)
 {
-    SegmentImageHeader hdr;
+    MappingSegmentImageHeader hdr;
     hdr.seg_idx    = 7;
     hdr.generation = 3;
     hdr.slot_count = 8;
@@ -25,8 +25,8 @@ TEST(MappingPersist, SegmentImageRoundTrip)
     encode_segment_image(hdr, words, &buf);
     EXPECT_EQ(buf.size(), segment_image_encoded_size(hdr.slot_count));
 
-    SegmentImageHeader    got_hdr;
-    std::vector<uint64_t> got_words;
+    MappingSegmentImageHeader got_hdr;
+    std::vector<uint64_t>     got_words;
     ASSERT_TRUE(decode_segment_image(buf.data(), buf.size(), &got_hdr, &got_words).ok());
     EXPECT_EQ(got_hdr.seg_idx, hdr.seg_idx);
     EXPECT_EQ(got_hdr.generation, hdr.generation);
@@ -39,7 +39,7 @@ TEST(MappingPersist, SegmentImageRoundTrip)
 
 TEST(MappingPersist, SegmentImageToleratesTrailingPadding)
 {
-    SegmentImageHeader hdr;
+    MappingSegmentImageHeader hdr;
     hdr.seg_idx    = 0;
     hdr.generation = 1;
     hdr.slot_count = 4;
@@ -50,29 +50,29 @@ TEST(MappingPersist, SegmentImageToleratesTrailingPadding)
     encode_segment_image(hdr, words, &buf);
     buf.resize(buf.size() + 100, 0xAA); // IU padding a real PageStore extent would add
 
-    SegmentImageHeader    got_hdr;
-    std::vector<uint64_t> got_words;
+    MappingSegmentImageHeader got_hdr;
+    std::vector<uint64_t>     got_words;
     ASSERT_TRUE(decode_segment_image(buf.data(), buf.size(), &got_hdr, &got_words).ok());
     EXPECT_EQ(got_words, words);
 }
 
 TEST(MappingPersist, SegmentImageRejectsBadMagic)
 {
-    SegmentImageHeader hdr;
+    MappingSegmentImageHeader hdr;
     hdr.slot_count = 2;
     std::vector<uint64_t> words(2, 0);
     std::vector<uint8_t>  buf;
     encode_segment_image(hdr, words, &buf);
     buf[0] ^= 0xff;
 
-    SegmentImageHeader    got_hdr;
-    std::vector<uint64_t> got_words;
+    MappingSegmentImageHeader got_hdr;
+    std::vector<uint64_t>     got_words;
     EXPECT_FALSE(decode_segment_image(buf.data(), buf.size(), &got_hdr, &got_words).ok());
 }
 
 TEST(MappingPersist, SegmentImageRejectsHeaderCrcTamper)
 {
-    SegmentImageHeader hdr;
+    MappingSegmentImageHeader hdr;
     hdr.seg_idx    = 1;
     hdr.slot_count = 2;
     std::vector<uint64_t> words(2, 0);
@@ -80,14 +80,14 @@ TEST(MappingPersist, SegmentImageRejectsHeaderCrcTamper)
     encode_segment_image(hdr, words, &buf);
     buf[8] ^= 0xff; // seg_idx byte, inside the header, after header_crc was computed
 
-    SegmentImageHeader    got_hdr;
-    std::vector<uint64_t> got_words;
+    MappingSegmentImageHeader got_hdr;
+    std::vector<uint64_t>     got_words;
     EXPECT_FALSE(decode_segment_image(buf.data(), buf.size(), &got_hdr, &got_words).ok());
 }
 
 TEST(MappingPersist, SegmentImageRejectsBodyCrcTamper)
 {
-    SegmentImageHeader hdr;
+    MappingSegmentImageHeader hdr;
     hdr.slot_count              = 4;
     std::vector<uint64_t> words = {0, slot_word::pack_unloaded(1, 1), 0, 0};
     std::vector<uint8_t>  buf;
@@ -95,22 +95,22 @@ TEST(MappingPersist, SegmentImageRejectsBodyCrcTamper)
     // Flip a byte inside the body (past the fixed header).
     buf[32] ^= 0xff;
 
-    SegmentImageHeader    got_hdr;
-    std::vector<uint64_t> got_words;
+    MappingSegmentImageHeader got_hdr;
+    std::vector<uint64_t>     got_words;
     EXPECT_FALSE(decode_segment_image(buf.data(), buf.size(), &got_hdr, &got_words).ok());
 }
 
 TEST(MappingPersist, SegmentImageRejectsShortBuffer)
 {
-    SegmentImageHeader hdr;
+    MappingSegmentImageHeader hdr;
     hdr.slot_count = 4;
     std::vector<uint64_t> words(4, 0);
     std::vector<uint8_t>  buf;
     encode_segment_image(hdr, words, &buf);
     buf.resize(buf.size() - 5); // truncate into the body
 
-    SegmentImageHeader    got_hdr;
-    std::vector<uint64_t> got_words;
+    MappingSegmentImageHeader got_hdr;
+    std::vector<uint64_t>     got_words;
     EXPECT_FALSE(decode_segment_image(buf.data(), buf.size(), &got_hdr, &got_words).ok());
 }
 

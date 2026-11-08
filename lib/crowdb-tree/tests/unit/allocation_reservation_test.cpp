@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/allocation_reservation.h"
 #include "btree/logical_page.h"
-#include "btree/published_state.h"
+#include "btree/tree_root.h"
 
 #include <gtest/gtest.h>
 
@@ -391,17 +391,17 @@ TEST(AllocationReservation, MappingOldViewRetainsItsChargeAfterReplacement)
 {
     ResourceBudget budget(limits(65536), 4);
     auto           reservation = reserve(budget, 65536);
-    auto           page        = std::make_shared<PublishedPage>();
+    auto           page        = std::make_shared<PageEntry>();
     page->leaf                 = std::make_shared<PageState>();
     std::array changes{
         PageReplacement{.page_id = 0, .expected = {}, .replacement = page}
     };
-    MappingView::CopyStats copied;
-    auto                   before      = MappingView{}.replace(changes, copied, reservation);
-    const auto             first_bytes = budget.snapshot().allocated[kMetadata];
-    EXPECT_LE(first_bytes, MappingView::path_copy_bound());
+    MappingTable::CopyStats copied;
+    auto                    before      = MappingTable{}.replace(changes, copied, reservation);
+    const auto              first_bytes = budget.snapshot().allocated[kMetadata];
+    EXPECT_LE(first_bytes, MappingTable::path_copy_bound());
     changes[0].expected    = page;
-    changes[0].replacement = std::make_shared<PublishedPage>(*page);
+    changes[0].replacement = std::make_shared<PageEntry>(*page);
     auto after             = before.replace(changes, copied, reservation);
     reservation->seal();
     EXPECT_GT(budget.snapshot().allocated[kMetadata], first_bytes);
@@ -417,7 +417,7 @@ TEST(AllocationReservation, PublicationBudgetFailureDoesNotCommitOrDetach)
     auto                   reservation = reserve(budget, 64);
     PublicationCoordinator publisher;
     auto                   before = publisher.capture();
-    auto                   page   = std::make_shared<PublishedPage>();
+    auto                   page   = std::make_shared<PageEntry>();
     page->leaf                    = std::make_shared<PageState>();
     auto record                   = std::make_shared<InstallRecord>(InstallToken{});
     auto request                  = std::make_shared<PublicationRequest>();

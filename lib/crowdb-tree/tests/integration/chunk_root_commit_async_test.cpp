@@ -1,8 +1,8 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_protocol_operation.h"
-#include "backend/chunk/chunk_write_queue.h"
 #include "common/test_chunk_root.h"
+#include "page_store/chunk/chunk_protocol_operation.h"
+#include "page_store/chunk/chunk_write_queue.h"
 
 #include <future>
 
@@ -12,11 +12,11 @@ namespace
 {
 struct TestRootAsync
 {
-    test_chunk::TestRootBackend                                   backend;
+    test_chunk::TestRootPageStore                                 backend;
     std::shared_ptr<TreeRuntime>                                  runtime;
     std::shared_ptr<TreeRuntimeBinding>                           binding;
     std::shared_ptr<AsyncPageStore>                               store;
-    MemPageStore                                                  device{4096};
+    PageMemStore                                                  device{4096};
     std::shared_ptr<ChunkRootCommit>                              commit;
     std::shared_ptr<ChunkProtocolOperation>                       operation;
     std::array<std::promise<detail::ChunkTransportCompletion>, 2> pending;

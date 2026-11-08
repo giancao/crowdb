@@ -9,7 +9,7 @@ using namespace published_read_detail;
 
 struct PublishedGet::State : ReadPump
 {
-    State(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> transport, Slice wanted,
+    State(std::shared_ptr<const TreeRoot> captured, std::shared_ptr<PageLoader> transport, Slice wanted,
           PublishedReadLimits bounds)
         : ReadPump(std::move(captured), std::move(transport), bounds),
           key(wanted, bounds.metadata),
@@ -56,9 +56,9 @@ struct PublishedGet::State : ReadPump
 
     bool advance() override
     {
-        if (auto backing = walker.needs_inner()) {
+        if (auto page_block = walker.needs_inner()) {
             loading_index = true;
-            load_inner(std::move(backing));
+            load_inner(std::move(page_block));
             return false;
         }
         if (loading_value) {
@@ -150,8 +150,8 @@ std::optional<size_t> PublishedGet::allocation_bound(const PublishedReadLimits &
         .value();
 }
 
-Status PublishedGet::create(std::shared_ptr<const PublishedTreeState> view, std::shared_ptr<PageLoader> loader,
-                            Slice key, PublishedReadLimits limits, std::shared_ptr<PublishedGet> *out)
+Status PublishedGet::create(std::shared_ptr<const TreeRoot> view, std::shared_ptr<PageLoader> loader, Slice key,
+                            PublishedReadLimits limits, std::shared_ptr<PublishedGet> *out)
 {
     auto status = validate_read(view, limits);
     if (!status.ok()) {

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "crowdb-tree/backend/async_page_store.h"
+#include "crowdb-tree/page_store/async_page_store.h"
 #include "crowdb-tree/status.h"
 
 #include <cstddef>

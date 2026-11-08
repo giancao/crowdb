@@ -14,7 +14,7 @@ ChunkRootRecovery::ChunkRootRecovery(ConstructionKey /*unused*/, std::shared_ptr
 {
 }
 
-Status ChunkRootRecovery::create(ChunkRootManifest root, std::shared_ptr<const ChunkBackingDomain> domain,
+Status ChunkRootRecovery::create(ChunkRootManifest root, std::shared_ptr<const PageChunkStoreDomain> domain,
                                  std::shared_ptr<detail::ChunkRuntimeIds> ids, ChunkRecoveryLimits limits,
                                  std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<AllocationBudget> window,
                                  std::shared_ptr<ChunkRootRecovery> *out)
@@ -35,8 +35,9 @@ try {
     pages.root_page_id   = identity.root_page_id;
     pages.next_page_id   = identity.next_page_id;
     pages.coverage       = identity.coverage;
+    pages.root_summary   = result->root_.root_summary;
     pages.generation     = identity.page_generation;
-    pages.backend_id     = result->domain_->backend_id;
+    pages.page_store_id  = result->domain_->page_store_id;
     *out                 = std::move(result);
     return Status::Ok();
 }

@@ -61,7 +61,7 @@ try {
     result.resources.read_inflight_bytes        = snapshot.resources.read_inflight_bytes;
     result.resources.write_inflight_bytes       = snapshot.resources.write_inflight_bytes;
     result.resources.materialize_inflight_bytes = snapshot.resources.materialize_inflight_bytes;
-    result.resources.allocated_backing_bytes    = snapshot.resources.allocated_backing_bytes;
+    result.resources.allocated_page_block_bytes = snapshot.resources.allocated_page_block_bytes;
     result.resources.maintenance_queued         = snapshot.resources.maintenance_queued;
     result.resources.maintenance_inflight       = snapshot.resources.maintenance_inflight;
     *out                                        = result;

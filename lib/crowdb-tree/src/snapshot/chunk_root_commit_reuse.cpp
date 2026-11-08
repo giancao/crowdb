@@ -6,7 +6,7 @@
 namespace crowdb::tree
 {
 bool ChunkRootCommit::unchanged(std::span<const DurableCapturedFrame *const> frames,
-                                const ChunkIndexReference                   &index) const
+                                const ChunkMappingSegmentRef                &index) const
 {
     if (!baseline_ || frames.size() != index.frame_count || frames.front()->page_id != index.first_page ||
         frames.back()->page_id != index.last_page) {
@@ -31,19 +31,20 @@ bool ChunkRootCommit::unchanged(std::span<const DurableCapturedFrame *const> fra
     return true;
 }
 
-Status ChunkRootCommit::reuse_index(const ChunkIndexReference &index, std::shared_ptr<const ChunkPackBacking> *backing)
+Status ChunkRootCommit::reuse_index(const ChunkMappingSegmentRef          &index,
+                                    std::shared_ptr<const ChunkPageBlock> *page_block)
 {
     detail::ChunkStageId pin;
     detail::ChunkId      unused;
     auto                 status = ids_->next(PagePurpose::kPageIndex, &pin, &unused);
-    return status.ok() ? pin_chunk_backing(domain_, index.pack, pin, metadata_, backing) : status;
+    return status.ok() ? pin_chunk_page_block(domain_, index.pack, pin, metadata_, page_block) : status;
 }
 
 Status ChunkRootCommit::write_index(std::span<const DurableCapturedFrame *const> frames,
-                                    std::shared_ptr<const ChunkPackBacking>     *backing)
+                                    std::shared_ptr<const ChunkPageBlock>       *page_block)
 {
     ChunkMetadataBytes bytes{detail::ReservationAllocator<uint8_t>(window_)};
-    auto               status = encode_chunk_index(root_.identity, root_.indexes.size(), frames, &bytes);
+    auto               status = encode_chunk_mapping_segment(root_.identity, root_.indexes.size(), frames, &bytes);
     if (!status.ok()) {
         return status;
     }
@@ -53,14 +54,14 @@ Status ChunkRootCommit::write_index(std::span<const DurableCapturedFrame *const>
     if (!status.ok()) {
         return status;
     }
-    std::shared_ptr<ChunkPackBacking> written;
-    status = prepare_chunk_backing(domain_, id, chunk, static_cast<uint32_t>(bytes.size()), PagePurpose::kPageIndex,
-                                   metadata_, &written);
+    std::shared_ptr<ChunkPageBlock> written;
+    status = prepare_chunk_page_block(domain_, id, chunk, static_cast<uint32_t>(bytes.size()), PagePurpose::kPageIndex,
+                                      metadata_, &written);
     if (status.ok()) {
-        status = write_chunk_backing(*written, bytes, window_);
+        status = write_chunk_page_block(*written, bytes, window_);
     }
     if (status.ok()) {
-        *backing = std::move(written);
+        *page_block = std::move(written);
     }
     return status;
 }

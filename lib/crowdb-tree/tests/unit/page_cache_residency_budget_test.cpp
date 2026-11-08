@@ -23,19 +23,19 @@ TEST(PageCacheResidency, ActualDecodedAllocationSurvivesEvictionUntilLastReaderP
         {.key = "a", .value = "value"}
     });
     encode_durable_page(source->frame(), source->page_bytes(), compress_algo::kNone, &store->blobs[0]);
-    auto backing    = std::make_shared<BackingRef>();
-    backing->length = store->blobs[0].size();
-    backing->owner  = store;
-    auto upstream   = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
-                                                             OverflowBackingResolver{}, credits.credits);
-    auto metrics    = std::make_shared<TreeResourceMetrics>();
+    auto page_block    = std::make_shared<PageBlockRef>();
+    page_block->length = store->blobs[0].size();
+    page_block->owner  = store;
+    auto upstream      = std::make_shared<AsyncStorePageLoader>(store, runtime, lane, PageLoadLimits{},
+                                                                OverflowPageBlockResolver{}, credits.credits);
+    auto metrics       = std::make_shared<TreeResourceMetrics>();
     {
         SharedPageCache cache({.max_pages = 1, .max_waiters = 2}, credits.credits.reservation(), metrics, runtime.get(),
                               lane);
         auto            loader         = cache.bind(upstream, credits.credits.reservation());
         const auto      infrastructure = credits.budget.snapshot().allocated[LoadCredits::kBytes];
         std::shared_ptr<const LeafBase> pin;
-        loader->load_leaf({.identity = 1, .backing = backing}, [&](Status status, auto leaf) {
+        loader->load_leaf({.identity = 1, .page_block = page_block}, [&](Status status, auto leaf) {
             EXPECT_TRUE(status.ok());
             pin = std::move(leaf);
         });
@@ -108,7 +108,7 @@ TEST(PageCacheResidency, PublisherShutdownRemovesOnlyLiveMembershipAndKeepsCache
     auto                 lane      = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto                 resources = std::make_shared<TreeResourceMetrics>();
     auto cache = std::make_shared<SharedPageCache>(PageCacheLimits{}, nullptr, resources, &runtime, lane);
-    std::shared_ptr<const PublishedTreeState> retained;
+    std::shared_ptr<const TreeRoot> retained;
     {
         PublicationCoordinator publisher(4, 1, {}, std::pmr::get_default_resource(), cache);
         auto                   request = std::make_shared<PublicationRequest>();

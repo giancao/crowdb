@@ -25,7 +25,7 @@
 namespace crowdb::tree
 {
 
-// Owned backing bytes for a decoded or constructed base page. Reference
+// Owned page block bytes for a decoded or constructed base page. Reference
 // identity follows the allocation; shared cache residency is managed
 // separately.
 struct FrameStore

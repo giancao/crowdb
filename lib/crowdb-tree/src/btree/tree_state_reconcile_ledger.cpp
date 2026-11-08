@@ -5,7 +5,7 @@
 
 namespace crowdb::tree
 {
-Status TreeStateReconciliation::step_ledger(size_t max_slots, const PublishedTreeState &current,
+Status TreeStateReconciliation::step_ledger(size_t max_slots, const TreeRoot &current,
                                             const CheckpointPendingMetrics &pending, const MergePairMetrics &merge)
 {
     if (view_.get() != &current) {
@@ -31,7 +31,7 @@ Status TreeStateReconciliation::step_ledger(size_t max_slots, const PublishedTre
     return result;
 }
 
-void TreeStateReconciliation::inspect_membership(uint64_t pid, const PublishedPage &page)
+void TreeStateReconciliation::inspect_membership(uint64_t pid, const PageEntry &page)
 {
     pending_pages_ += static_cast<uint64_t>(pending_->contains(pid));
     if (page.metrics.merge_candidate != merge_->contains_page(pid) || page.merge_outgoing != merge_->pair(pid)) {

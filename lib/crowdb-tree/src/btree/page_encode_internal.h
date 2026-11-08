@@ -24,7 +24,7 @@ struct FinalPageEncodeState
     {
     }
 
-    std::shared_ptr<const PublishedPage>                                                  page;
+    std::shared_ptr<const PageEntry>                                                      page;
     std::vector<FinalLeafEntry, ReservationAllocator<FinalLeafEntry>>                     entries;
     std::vector<ReusedOverflowDependency, ReservationAllocator<ReusedOverflowDependency>> reused;
     PageEncodeLimits                                                                      limits;

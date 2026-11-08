@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "buffer_pool_test_support.h"
-#include "crowdb-tree/backend/async_page_store.h"
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
+#include "crowdb-tree/page_store/async_page_store.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -40,7 +40,7 @@ size_t resident_bytes()
     return resident_pages * static_cast<size_t>(sysconf(_SC_PAGESIZE));
 }
 
-// Reserve the device before sampling allocations. Backend growth must not be
+// Reserve the device before sampling allocations. Page store growth must not be
 // confused with encoded snapshot pages retained after their writes complete.
 class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
 {
@@ -245,7 +245,7 @@ INSTANTIATE_TEST_SUITE_P(WritePaths, SnapshotMemoryTest, ::testing::Bool());
 
 TEST(SnapshotMemory, UnusedFrameCapacityDoesNotPrefaultTheArena)
 {
-    MemPageStore   store(65536);
+    PageMemStore   store(65536);
     const auto     before = resident_bytes();
     TestBufferPool pool(256U * 1024 * 1024, 65536, &store);
     const auto     current = resident_bytes();

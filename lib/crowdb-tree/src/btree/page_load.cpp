@@ -1,10 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/local/scheduled_page_store.h"
 #include "btree/allocation_bound.h"
 #include "btree/page_load_internal.h"
 #include "btree/page_load_leaf.h"
 #include "btree/page_load_lifetime.h"
+#include "page_store/local/scheduled_page_store.h"
 
 #include <atomic>
 #include <cassert>
@@ -29,7 +29,7 @@ void PageLoader::read_leaf(BaseRef &base, LeafReadComplete complete)
     });
 }
 
-void PageLoader::load_overflow(std::shared_ptr<const BackingRef> /*primary*/, uint64_t head, uint64_t length,
+void PageLoader::load_overflow(std::shared_ptr<const PageBlockRef> /*primary*/, uint64_t head, uint64_t length,
                                ValueComplete complete)
 {
     load_overflow(head, length, std::move(complete));
@@ -37,7 +37,7 @@ void PageLoader::load_overflow(std::shared_ptr<const BackingRef> /*primary*/, ui
 
 void PageLoader::load_overflow(uint64_t /*head*/, uint64_t /*length*/, ValueComplete complete)
 {
-    complete(Status::not_supported("captured overflow backing resolver is unavailable"), {});
+    complete(Status::not_supported("captured overflow page_block resolver is unavailable"), {});
 }
 
 namespace
@@ -180,7 +180,7 @@ std::optional<size_t> AsyncStorePageLoader::read_reserve_bound(const PageLoadLim
 AsyncStorePageLoader::AsyncStorePageLoader(std::shared_ptr<AsyncPageStore>             store,
                                            std::shared_ptr<detail::FlushRuntime>       runtime,
                                            std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadLimits limits,
-                                           OverflowBackingResolver overflow, PageLoadBudget budget)
+                                           OverflowPageBlockResolver overflow, PageLoadBudget budget)
 {
     const auto prepaid = budget.reservation();
     if ((prepaid && prepaid->category() == detail::BudgetClass::kIo) ||
@@ -218,17 +218,17 @@ std::optional<Status> AsyncStorePageLoader::try_load_leaf_bases(PageState &leaf)
         if (base.resident) {
             continue;
         }
-        if (base.backing && base.backing->storage == BackingStorage::kChunkPack) {
+        if (base.page_block && base.page_block->storage == PageBlockStorage::kChunkPack) {
             return std::nullopt;
         }
         const auto started = tree_metrics_now_ns();
         auto       status  = state_->validate_leaf(base);
-        if (status.ok() && base.backing) {
+        if (status.ok() && base.page_block) {
             try {
                 FrameStore::Bytes blob{FrameStore::Bytes::allocator_type(budget.bytes)};
-                if (base.backing->storage == BackingStorage::kDurableBlob) {
-                    blob.resize(base.backing->length);
-                    status = store->read_inline(base.backing->address, blob.data(), blob.size(), budget.cause);
+                if (base.page_block->storage == PageBlockStorage::kDurableBlob) {
+                    blob.resize(base.page_block->length);
+                    status = store->read_inline(base.page_block->address, blob.data(), blob.size(), budget.cause);
                 }
                 if (status.ok()) {
                     status = decode_loaded_leaf(blob, blob, base, state_->limits, budget.bytes, &base.resident);
@@ -248,11 +248,11 @@ std::optional<Status> AsyncStorePageLoader::try_load_leaf_bases(PageState &leaf)
 
 Status AsyncStorePageLoader::State::validate_leaf(const BaseRef &base) const
 {
-    if (!runtime || !lane || !base.valid() || !base.backing || base.backing->encoding != 0 ||
-        (!store && base.backing->storage != BackingStorage::kResidentFrame)) {
-        return Status::invalid_argument("leaf load requires a supported independently owned backing");
+    if (!runtime || !lane || !base.valid() || !base.page_block || base.page_block->encoding != 0 ||
+        (!store && base.page_block->storage != PageBlockStorage::kResidentFrame)) {
+        return Status::invalid_argument("leaf load requires a supported independently owned page_block");
     }
-    if (base.backing->length > limits.max_blob_bytes || !chunk_load_allowed(*base.backing, limits)) {
+    if (base.page_block->length > limits.max_blob_bytes || !chunk_load_allowed(*base.page_block, limits)) {
         return Status::resource_exhausted("leaf blob exceeds load budget");
     }
     return Status::Ok();
@@ -287,7 +287,7 @@ void AsyncStorePageLoader::State::start_leaf(BaseRef base, LeafCompletion comple
         operation->limits        = limits;
         operation->base          = std::move(base);
         operation->decode_target = decode_target;
-        if (operation->base.backing->storage == BackingStorage::kResidentFrame) {
+        if (operation->base.page_block->storage == PageBlockStorage::kResidentFrame) {
             if (decode_target != nullptr) {
                 LeafLoad::read_complete(operation.get(), Status::Ok());
             }
@@ -296,8 +296,8 @@ void AsyncStorePageLoader::State::start_leaf(BaseRef base, LeafCompletion comple
             }
         }
         else {
-            operation->blob.resize(operation->base.backing->length);
-            submit_page_read(operation, operation->base.backing, operation->blob.data(), operation->blob.size(),
+            operation->blob.resize(operation->base.page_block->length);
+            submit_page_read(operation, operation->base.page_block, operation->blob.data(), operation->blob.size(),
                              decode_target != nullptr ? &LeafLoad::read_complete : &page_read_completed<LeafLoad>);
         }
     }

@@ -83,7 +83,7 @@ void SharedPageCache::State::start(Entry *entry, Request *request)
     entry->key             = request->key;
     entry->priority        = request->priority;
     entry->touched         = ++clock;
-    entry->backing         = request->base.backing;
+    entry->page_block      = request->base.page_block;
     entry->upstream        = request->upstream;
     entry->waiters         = request;
     request->next          = nullptr;
@@ -106,7 +106,7 @@ void SharedPageCache::State::start(Entry *entry, Request *request)
             });
         }
         else {
-            entry->upstream->load_inner(entry->backing, [self, entry, identity](Status status, auto inner) {
+            entry->upstream->load_inner(entry->page_block, [self, entry, identity](Status status, auto inner) {
                 self->complete(entry, identity, std::move(status), {}, std::move(inner));
             });
         }
@@ -280,7 +280,7 @@ void SharedPageCache::State::discard(Entry &entry) noexcept
     entry.inner.reset();
     entry.frame.reset();
     entry.residency.reset();
-    entry.backing.reset();
+    entry.page_block.reset();
     entry.upstream.reset();
     entry.status   = {};
     entry.bytes    = 0;

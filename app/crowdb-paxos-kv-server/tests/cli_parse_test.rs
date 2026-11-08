@@ -79,7 +79,7 @@ fn parse_root_cli_option() {
     assert_eq!(cli.wal_backend, "block-device");
     assert!(!cli.no_fsync);
     let defaults = PaxosKvConfig::default();
-    assert_eq!(defaults.crowtree_backend, cli.kv_backend);
+    assert_eq!(defaults.crowtree_store_kind, cli.kv_backend);
     assert_eq!(defaults.wal_backend, cli.wal_backend);
     assert!(!defaults.wal_skip_fsync);
 }
@@ -97,7 +97,7 @@ fn loaded_configuration_uses_durable_block_defaults() {
     let path = root.path().join("server.toml");
     std::fs::write(&path, "").unwrap();
     let loaded = PaxosKvConfig::load_from_file(&path).unwrap();
-    assert_eq!(loaded.crowtree_backend, "block");
+    assert_eq!(loaded.crowtree_store_kind, "block");
     assert_eq!(loaded.wal_backend, "block-device");
     assert!(!loaded.wal_skip_fsync);
 }
@@ -187,7 +187,7 @@ fn service_tree_backend_accepts_block_and_mem_block() {
         ".crowdb-runtime/ephemeral/cli-parse/n1",
     ]);
     assert_eq!(defaults.kv_backend, "block");
-    assert_eq!(PaxosKvConfig::default().crowtree_backend, "block");
+    assert_eq!(PaxosKvConfig::default().crowtree_store_kind, "block");
 
     let memory = Cli::parse_from([
         "crowdb-paxos-kv-server",
@@ -211,7 +211,7 @@ fn service_tree_backend_accepts_block_and_mem_block() {
 #[test]
 fn service_registry_rejects_file_tree_backend() {
     let config = PaxosKvConfig {
-        crowtree_backend: "file".to_owned(),
+        crowtree_store_kind: "file".to_owned(),
         ..PaxosKvConfig::default()
     };
     let Err(error) = PaxosKvStoreRegistry::try_with_config(config) else {

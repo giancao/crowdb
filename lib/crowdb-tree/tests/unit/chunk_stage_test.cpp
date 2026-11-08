@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_root_catalog.h"
-#include "backend/chunk/chunk_stage.h"
+#include "page_store/chunk/chunk_root_catalog.h"
+#include "page_store/chunk/chunk_stage.h"
 
 #include <gtest/gtest.h>
 

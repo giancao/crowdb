@@ -3,11 +3,11 @@
 
 // R30: zero-copy apply path tests — kExternal buffer mode, split-cell
 // MemTable, and Crowdbtree::apply_external round-trip + flush + read.
-#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/cell.h"
 #include "crowdb-tree/buffer.h"
 #include "crowdb-tree/crowdb-tree.h"
 #include "crowdb-tree/memtable/memtable.h"
+#include "crowdb-tree/page_store/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -26,7 +26,7 @@ void count_drop(void *ctx)
     static_cast<std::atomic<int> *>(ctx)->fetch_add(1, std::memory_order_relaxed);
 }
 
-std::unique_ptr<Crowdbtree> open_tree(MemPageStore &store)
+std::unique_ptr<Crowdbtree> open_tree(PageMemStore &store)
 {
     Config opt;
     opt.page_store = &store;
@@ -230,7 +230,7 @@ TEST(ApplyExternal, RoundTripReadBeforeFlush)
 {
     std::atomic<int>     drops{0};
     std::vector<uint8_t> big(4096, 0xF0);
-    MemPageStore         store(1);
+    PageMemStore         store(1);
     auto                 t = open_tree(store);
     ASSERT_NE(t, nullptr);
     std::vector<Crowdbtree::external_op> ops;
@@ -243,14 +243,14 @@ TEST(ApplyExternal, RoundTripReadBeforeFlush)
     EXPECT_EQ(slot, 1U);
     EXPECT_EQ(value.size(), 4096U);
     EXPECT_EQ(std::memcmp(value.data(), big.data(), 4096), 0);
-    EXPECT_EQ(drops.load(), 1); // Unknown backing capacity is copied during admission.
+    EXPECT_EQ(drops.load(), 1); // Unknown page block capacity is copied during admission.
 }
 
 TEST(ApplyExternal, RoundTripReadAfterFlush)
 {
     std::atomic<int>     drops{0};
     std::vector<uint8_t> big(8192, 0xE1);
-    MemPageStore         store(1);
+    PageMemStore         store(1);
     auto                 t = open_tree(store);
     ASSERT_NE(t, nullptr);
     std::vector<Crowdbtree::external_op> ops;
@@ -273,7 +273,7 @@ TEST(ApplyExternal, MultiKeyBatchAtomicity)
     std::vector<uint8_t> v1(256, 0x01);
     std::vector<uint8_t> v2(256, 0x02);
     std::vector<uint8_t> v3(256, 0x03);
-    MemPageStore         store(1);
+    PageMemStore         store(1);
     auto                 t = open_tree(store);
     ASSERT_NE(t, nullptr);
     std::vector<Crowdbtree::external_op> ops;
@@ -288,7 +288,7 @@ TEST(ApplyExternal, MultiKeyBatchAtomicity)
         EXPECT_EQ(slot, 1U);
         EXPECT_EQ(value.size(), 256U);
     }
-    EXPECT_EQ(drops.load(), 3); // Every unknown backing owner was released after copying.
+    EXPECT_EQ(drops.load(), 3); // Every unknown page block owner was released after copying.
 }
 
 TEST(ApplyExternal, IntraBatchLastKeyWins)
@@ -296,7 +296,7 @@ TEST(ApplyExternal, IntraBatchLastKeyWins)
     std::atomic<int>     drops{0};
     std::vector<uint8_t> v1(64, 0xAA);
     std::vector<uint8_t> v2(64, 0xBB);
-    MemPageStore         store(1);
+    PageMemStore         store(1);
     auto                 t = open_tree(store);
     ASSERT_NE(t, nullptr);
     std::vector<Crowdbtree::external_op> ops;
@@ -312,7 +312,7 @@ TEST(ApplyExternal, IntraBatchLastKeyWins)
 
 TEST(ApplyExternal, DeleteViaExternalOp)
 {
-    MemPageStore store(1);
+    PageMemStore store(1);
     auto         t = open_tree(store);
     ASSERT_NE(t, nullptr);
     // First put a value via the legacy (contiguous) path, then delete via

@@ -40,7 +40,7 @@ void initialize_sources(PublicationCoordinator &publisher, SourceAdmission &admi
     const auto catalog = admission.catalog();
     sources->floor     = catalog->floor;
     sources->tables.assign(catalog->tables.begin(), catalog->tables.end());
-    auto page            = std::make_shared<PublishedPage>();
+    auto page            = std::make_shared<PageEntry>();
     page->leaf           = std::make_shared<PageState>();
     auto request         = std::make_shared<PublicationRequest>();
     request->transaction = {
