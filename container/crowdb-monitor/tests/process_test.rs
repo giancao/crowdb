@@ -176,7 +176,7 @@ async fn child_restarts_prune_old_pid_logs_without_crossing_log_channels() {
         .unwrap();
     let active = directory.join(format!("crowdb-fake-20260102-010101.000-{pid}.log"));
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !active.exists() {
+        while fs::read_to_string(&active).ok().as_deref() != Some("new") {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
