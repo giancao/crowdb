@@ -564,7 +564,10 @@ jobs:
       id: source
       run: |
         pixi run bash -euc '
-          [[ "$GITHUB_REPOSITORY" == buzzcrow/crowdb ]]
+          if [[ "$GITHUB_REPOSITORY_ID" != 1305349686 ]]; then
+            echo "::error::ContainerImage requires repository ID 1305349686, got $GITHUB_REPOSITORY_ID"
+            exit 1
+          fi
           version=$(cat VERSION)
           revision=$(git rev-parse HEAD)
           [[ "$revision" == "$GITHUB_SHA" ]]
