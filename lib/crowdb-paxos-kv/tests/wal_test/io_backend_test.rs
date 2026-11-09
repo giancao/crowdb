@@ -50,6 +50,7 @@ async fn open_read_only_can_read() {
         .await
         .expect("create");
     file.write_at(b"data", 0).await.expect("write");
+    file.flush().await.expect("flush before reopening");
     drop(file);
 
     // Reopen read-only and read.

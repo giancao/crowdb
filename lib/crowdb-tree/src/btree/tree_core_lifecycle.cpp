@@ -311,7 +311,7 @@ PageLoadLimits TreeCore::load_limits() const noexcept
     return state_->loads;
 }
 
-PublishedReadLimits TreeCore::read_limits() const noexcept
+const PublishedReadLimits &TreeCore::read_limits() const noexcept
 {
     return state_->reads;
 }

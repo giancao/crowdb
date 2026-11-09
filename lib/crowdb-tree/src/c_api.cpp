@@ -1540,7 +1540,7 @@ try {
         return reinterpret_cast<ct_future *>(make_ct_future_handle(std::move(impl)));
     }
     if (auto *core = TreeCoreAccess::get(*t->tree); core != nullptr) {
-        impl->result_controls = core->accepted_allocations();
+        impl->result_controls = core->read_limits().metadata;
     }
     t->tree->get_async(Slice(reinterpret_cast<const char *>(key), klen), [impl, signal](Status status, GetView view) {
         impl->status     = to_status(status);

@@ -200,11 +200,12 @@ impl PinnedValue {
     /// which drops the `PinnedValue`, which calls `ct_future_free` to unpin.
     ///
     /// # Panics
-    /// Panics if the pre-admitted control window cannot satisfy its fixed owner layout.
+    /// Panics if the owner control allocation exceeds the available memory budget.
+    /// Use [`Self::try_into_bytes`] to handle admission failure.
     #[must_use]
     pub fn into_bytes(self) -> bytes::Bytes {
         self.try_into_bytes()
-            .expect("admitted immutable result control capacity")
+            .expect("immutable result owner control allocation")
     }
 
     /// Preserve the native allocation account through the Rust control block.

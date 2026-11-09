@@ -178,7 +178,7 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     [[nodiscard]] uint64_t                                   snapshot_sequence() const noexcept;
     [[nodiscard]] AsyncPageStore                            *async_backend() const noexcept;
     [[nodiscard]] PageLoadLimits                             load_limits() const noexcept;
-    [[nodiscard]] PublishedReadLimits                        read_limits() const noexcept;
+    [[nodiscard]] const PublishedReadLimits                 &read_limits() const noexcept;
     [[nodiscard]] const std::shared_ptr<AllocationBudget>   &accepted_allocations() const noexcept;
     [[nodiscard]] std::shared_ptr<const PublishedTreeState>  capture() const;
     [[nodiscard]] PublicationCoordinator                    &publisher() const noexcept;
