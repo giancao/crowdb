@@ -73,6 +73,7 @@ class Case:
     chunkdb_multi: bool = False
     storage_backend: str = "mem"
     chunk_kv_empty_catalog: bool = False
+    chunk_kv_replay_budget_bytes: int | None = None
     sdk_client: bool = False
     dataset_sdk: bool = False
     s3_recovery: str | None = None
@@ -376,7 +377,8 @@ ICEBERG_CASES = (
 
     Case("iceberg.sdk.rust", "access_iceberg::rust_sdk::official_rust_client_namespace_and_table_lifecycle", iceberg_deferred_access=True, client_timeout=600),
     Case("iceberg.gc", "access_iceberg::gc::foreground::official_sdk_foreground_progresses_under_gc_backlog", iceberg_gc=True, iceberg_gc_page_items=1, iceberg_gc_interval_ms=None, client_timeout=180),
-    Case("iceberg.gc", "access_iceberg::gc::convergence::expired_inline_backlog_completes_with_foreground_progress", iceberg_gc=True, iceberg_gc_interval_ms=None, client_timeout=3600),
+    # Keep the long SDK workload within its measured replay capacity while GC advances.
+    Case("iceberg.gc", "access_iceberg::gc::convergence::expired_inline_backlog_completes_with_foreground_progress", iceberg_gc=True, iceberg_gc_interval_ms=None, chunk_kv_replay_budget_bytes=1 << 30, client_timeout=3600),
     Case("iceberg.gc", "access_iceberg::gc::notifications::mixed_external_and_tree_notifications_complete_without_reclaiming_live_ranges", iceberg_gc=True, iceberg_gc_page_items=1, iceberg_gc_interval_ms=None, client_timeout=600),
     Case("iceberg.gc", "access_iceberg::gc::notifications::matrix::restarted_cleaners_finish_large_and_sparse_backlogs_beside_an_invalid_catalog", iceberg_gc=True, iceberg_gc_page_items=1, iceberg_gc_interval_ms=None, iceberg_gc_catalogs=("01010101010101010101010101010101",), client_timeout=900),
     Case("iceberg.sdk.rust", "access_iceberg::rust_sdk::official_rust_client_lost_reply_survives_native_storage_restart", iceberg_deferred_access=True, client_timeout=1200),
@@ -728,6 +730,7 @@ def allocate_cluster(case, image, artifacts, bundle, data_root):
                                     gc_interval_ms=case.iceberg_gc_interval_ms,
                                     gc_catalogs=case.iceberg_gc_catalogs,
                                     deferred_access=case.iceberg_deferred_access,
+                                    replay_budget_bytes=case.chunk_kv_replay_budget_bytes,
                                     data_root=data_root)
     if case.access_protocol:
         return AccessProtocolCluster(image, artifacts, bundle, data_root=data_root)

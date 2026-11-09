@@ -12,8 +12,9 @@ from fixture import HTTP, wait
 
 
 class ChunkKvCluster(ChunkdbStorageCluster):
-    def __init__(self, image, artifacts, bundle, empty_catalog=False, **kwargs):
+    def __init__(self, image, artifacts, bundle, empty_catalog=False, replay_budget_bytes=None, **kwargs):
         self.empty_catalog = empty_catalog
+        self.replay_budget_bytes = replay_budget_bytes
         super().__init__(image, artifacts, bundle, storage_backend="file", **kwargs)
 
     def start(self):
@@ -54,6 +55,10 @@ metadata_group_id = 1
 ''')
         if self.empty_catalog:
             config.write_text(config.read_text().split("[bootstrap_partition]", 1)[0])
+        if self.replay_budget_bytes is not None:
+            with config.open("a") as stream:
+                for account in ("host", "tree"):
+                    stream.write(f"\n[tree_runtime.{account}.limits]\ngap_repair_bytes = {self.replay_budget_bytes}\n")
         observed = start_node(self, index, node_data(self, index), (
             "server", "chunk-kv", "--config", "/opt/crowdb/etc/e2e-chunk-kv.toml",
             "--log-dir", "/opt/crowdb/data/log/chunk-kv", "--log"), address,

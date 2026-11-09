@@ -188,6 +188,8 @@ class CaseResourcesTest(unittest.TestCase):
         self.assertTrue(convergence.iceberg_gc)
         self.assertIsNone(convergence.iceberg_gc_page_items)
         self.assertIsNone(convergence.iceberg_gc_interval_ms)
+        self.assertEqual(convergence.chunk_kv_replay_budget_bytes, 1 << 30)
+        self.assertTrue(all(case.chunk_kv_replay_budget_bytes is None for case in ICEBERG_CASES if case != convergence))
         self.assertEqual(convergence.client_timeout, 3600)
         one_item = [case for case in ICEBERG_CASES
                     if "::gc::foreground::" in case.name or "::gc::notifications::" in case.name]
