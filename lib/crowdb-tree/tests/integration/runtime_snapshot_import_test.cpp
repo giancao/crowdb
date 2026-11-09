@@ -299,13 +299,12 @@ TEST_F(RuntimeSnapshotImportTest, EmptyStreamsKeepCoverageAndAdmissionFailureLea
         ASSERT_TRUE(tree->put("after", "value").ok());
         EXPECT_EQ(tree->get_view("after").slot(), 24U);
     }
-    const auto original = core->capture();
-    const auto account  = core->binding()->account();
-    const auto index    = static_cast<size_t>(detail::BudgetClass::kReclaim);
-    const auto sample   = account->snapshot();
-    auto       pressure = detail::ResourceBudget::try_reserve(account, detail::BudgetClass::kReclaim,
-                                                              config.runtime_binding.limits.reclaim_bytes -
-                                                                  sample.allocated[index] - sample.reserved[index]);
+    core->binding()->drain();
+    const auto original  = core->capture();
+    const auto account   = core->binding()->account();
+    const auto category  = detail::BudgetClass::kReclaim;
+    const auto available = detail::ResourceBudget::available(account, category);
+    auto       pressure  = detail::ResourceBudget::try_reserve(account, category, available);
     ASSERT_TRUE(pressure);
     SnapshotImport importer(*tree);
     EXPECT_EQ(importer.feed(test_portable({})).code(), Code::kResourceExhausted);

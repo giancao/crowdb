@@ -2,9 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/chunk_root_recovery.h"
 
-#include "backend/chunk/chunk_physical_registry.h"
-#include "btree/allocation_bound.h"
-
 namespace crowdb::tree
 {
 ChunkRootRecovery::ChunkRootRecovery(ConstructionKey /*unused*/, std::shared_ptr<AllocationBudget> metadata,
@@ -13,39 +10,8 @@ ChunkRootRecovery::ChunkRootRecovery(ConstructionKey /*unused*/, std::shared_ptr
       window_(std::move(window)),
       root_(metadata_),
       index_bytes_(detail::ReservationAllocator<uint8_t>(window_)),
-      blob_(detail::ReservationAllocator<uint8_t, AllocationKind::kIo>(window_)),
       raw_(detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(window_))
 {
-}
-
-std::optional<size_t> ChunkRootRecovery::allocation_bound(const ChunkRootManifest &root) noexcept
-{
-    using namespace detail;
-    constexpr size_t node_links = 4 * sizeof(void *);
-    return AllocationBound(shared_allocation_bound<ChunkRootRecovery>() +
-                           shared_allocation_bound<CapturedDurablePages>() +
-                           shared_allocation_bound<ChunkRootManifest>())
-        .add(chunk_pin_validation_bound())
-        .add_product(root.indexes.size(), sizeof(ChunkIndexReference) + chunk_backing_allocation_bound())
-        .add_product(root.frame_count,
-                     sizeof(CapturedDurablePages::Entry) + node_links + (2 * shared_allocation_bound<BackingRef>()) +
-                         chunk_backing_allocation_bound() + shared_allocation_bound<StoredOverflowReferences>() +
-                         shared_allocation_bound<OverflowBackingSet>() + shared_allocation_bound<LeafProtection>())
-        .add_product(root.stored_references, sizeof(StoredOverflowReference))
-        .add_product(root.dependency_entries, sizeof(OverflowBackingSet::Entry) + node_links)
-        .value();
-}
-
-std::optional<size_t> ChunkRootRecovery::window_allocation_bound(ChunkRecoveryLimits limits) noexcept
-{
-    using namespace detail;
-    return AllocationBound(kChunkIndexWindowBytes)
-        .add(limits.max_blob_bytes)
-        .add(limits.max_frame_bytes)
-        .add(chunk_backing_allocation_bound())
-        .add(chunk_pin_validation_bound())
-        .add(ChunkFixedPackStore::read_into_allocation_bound(std::max(kChunkIndexWindowBytes, limits.max_blob_bytes)))
-        .value();
 }
 
 Status ChunkRootRecovery::create(ChunkRootManifest root, std::shared_ptr<const ChunkBackingDomain> domain,
@@ -92,52 +58,15 @@ std::shared_ptr<const ChunkRootManifest> ChunkRootRecovery::take_manifest()
     return detail::reserved_shared<ChunkRootManifest>(metadata_, std::move(root_));
 }
 
-Status ChunkRootRecovery::step(bool stopped) noexcept
-try {
-    if (done_) {
-        return status_;
-    }
-    if (stopped) {
-        return finish(Status::unavailable());
-    }
-    auto status = domain_->catalog->protection()->check_read_owner();
-    if (status.ok()) {
-        if (dependency_phase_) {
-            status = dependencies();
-        }
-        else if (left_ != 0) {
-            status = frame();
-        }
-        else {
-            status = index();
-        }
-    }
-    if (!status.ok()) {
-        return finish(std::move(status));
-    }
-    return status;
-}
-catch (const std::bad_alloc &) {
-    return finish(Status::resource_exhausted());
-}
-catch (...) {
-    return finish(Status::internal_error());
-}
-
 Status ChunkRootRecovery::finish(Status status)
 {
     status_ = std::move(status);
     done_   = true;
     if (!status_.ok()) {
+        frame_reads_.reset();
         pages_.reset();
     }
     return status_;
 }
 
-bool ChunkRootRecovery::retire_step() noexcept
-{
-    // The catalog owns its own bounded retirement; no synchronous map walk.
-    pages_.reset();
-    return true;
-}
 } // namespace crowdb::tree

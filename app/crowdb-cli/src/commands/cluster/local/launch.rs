@@ -108,6 +108,8 @@ fn arguments(record: &Launch, index: u8) -> Vec<String> {
         &record.cpus.to_string(),
         "--memory",
         &format!("{}m", record.memory_mib),
+        "--security-opt",
+        "seccomp=unconfined",
         "--mount",
         &format!("type=volume,source={volume},target=/opt/crowdb/data"),
     ]));

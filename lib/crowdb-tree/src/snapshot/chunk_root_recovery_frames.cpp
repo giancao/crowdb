@@ -6,36 +6,14 @@
 
 namespace crowdb::tree
 {
-Status ChunkRootRecovery::index()
+Status ChunkRootRecovery::finish_indexes()
 {
-    if (index_ == root_.indexes.size()) {
-        if (pages_->frames.size() != root_.frame_count || references_ != root_.stored_references) {
-            return Status::corruption();
-        }
-        leaf_             = pages_->frames.begin();
-        dependency_phase_ = true;
-        return Status::Ok();
-    }
-    const auto &expected = root_.indexes[index_];
-    if (expected.pack.length > kChunkIndexWindowBytes) {
+    if (pages_->frames.size() != root_.frame_count || references_ != root_.stored_references) {
         return Status::corruption();
     }
-    detail::ChunkStageId pin;
-    auto                 status = next_pin(&pin);
-    if (!status.ok()) {
-        return status;
-    }
-    std::shared_ptr<const ChunkPackBacking> backing;
-    status = pin_chunk_backing(domain_, expected.pack, pin, metadata_, &backing);
-    if (!status.ok()) {
-        return status;
-    }
-    index_bytes_.resize(expected.pack.length);
-    status = read_chunk_backing(*backing, index_bytes_, window_);
-    if (!status.ok()) {
-        return status;
-    }
-    return index_loaded();
+    leaf_             = pages_->frames.begin();
+    dependency_phase_ = true;
+    return Status::Ok();
 }
 
 Status ChunkRootRecovery::index_loaded()
@@ -50,39 +28,18 @@ Status ChunkRootRecovery::index_loaded()
     return Status::Ok();
 }
 
-Status ChunkRootRecovery::frame()
+Status ChunkRootRecovery::prepare_frame(ChunkIndexFrame *out, size_t *offset, uint64_t left,
+                                        std::optional<uint64_t> previous) const
 {
-    ChunkIndexFrame record;
-    auto            status = prepare_frame(&record);
-    if (!status.ok()) {
-        return status;
-    }
-    detail::ChunkStageId pin;
-    status = next_pin(&pin);
-    if (!status.ok()) {
-        return status;
-    }
-    std::shared_ptr<const ChunkPackBacking> pack;
-    status = pin_chunk_backing(domain_, record.pack, pin, metadata_, &pack);
-    if (!status.ok()) {
-        return status;
-    }
-    blob_.resize(record.pack.length);
-    status = read_chunk_backing(*pack, blob_, window_);
-    return status.ok() ? frame_loaded(record, std::move(pack)) : status;
-}
-
-Status ChunkRootRecovery::prepare_frame(ChunkIndexFrame *out)
-{
-    auto status = decode_chunk_index_frame(index_bytes_, &offset_, out);
+    auto status = decode_chunk_index_frame(index_bytes_, offset, out);
     if (!status.ok()) {
         return status;
     }
     const auto &record   = *out;
     const auto &expected = root_.indexes[index_];
-    if ((have_pid_ && record.page_id <= last_pid_) || record.page_id >= root_.identity.next_page_id ||
-        (left_ == expected.frame_count && record.page_id != expected.first_page) ||
-        (left_ == 1 && (record.page_id != expected.last_page || offset_ != index_bytes_.size() - 4))) {
+    if ((previous && record.page_id <= *previous) || record.page_id >= root_.identity.next_page_id ||
+        (left == expected.frame_count && record.page_id != expected.first_page) ||
+        (left == 1 && (record.page_id != expected.last_page || *offset != index_bytes_.size() - 4))) {
         return Status::corruption();
     }
     if (record.pack.length > limits_.max_blob_bytes || record.frame_bytes > limits_.max_frame_bytes) {
@@ -91,7 +48,8 @@ Status ChunkRootRecovery::prepare_frame(ChunkIndexFrame *out)
     return Status::Ok();
 }
 
-Status ChunkRootRecovery::frame_loaded(const ChunkIndexFrame &record, std::shared_ptr<const ChunkPackBacking> pack)
+Status ChunkRootRecovery::frame_loaded(const ChunkIndexFrame &record, std::shared_ptr<const ChunkPackBacking> pack,
+                                       std::span<const uint8_t> blob)
 {
     auto backing              = detail::reserved_shared<BackingRef>(metadata_);
     backing->backend_id       = domain_->backend_id;
@@ -113,7 +71,7 @@ Status ChunkRootRecovery::frame_loaded(const ChunkIndexFrame &record, std::share
                                     .backing         = std::move(backing),
                                     .stored_overflow = {},
                                     .summary         = {}};
-    auto                 status = validate_frame(descriptor, record.stored_reference_words);
+    auto                 status = validate_frame(descriptor, record.stored_reference_words, blob);
     if (!status.ok()) {
         return status;
     }
@@ -128,14 +86,15 @@ Status ChunkRootRecovery::frame_loaded(const ChunkIndexFrame &record, std::share
     return Status::Ok();
 }
 
-Status ChunkRootRecovery::validate_frame(DurableCapturedFrame &descriptor, std::span<const uint8_t> words)
+Status ChunkRootRecovery::validate_frame(DurableCapturedFrame &descriptor, std::span<const uint8_t> words,
+                                         std::span<const uint8_t> blob)
 {
-    if (durable_blob_raw_len(blob_.data(), blob_.size()) != descriptor.frame_bytes ||
-        durable_blob_logical_len(blob_.data(), blob_.size()) != descriptor.logical_bytes) {
+    if (durable_blob_raw_len(blob.data(), blob.size()) != descriptor.frame_bytes ||
+        durable_blob_logical_len(blob.data(), blob.size()) != descriptor.logical_bytes) {
         return Status::corruption();
     }
     raw_.resize(descriptor.frame_bytes);
-    auto status = decode_durable_page(blob_.data(), blob_.size(), raw_.data(), raw_.size());
+    auto status = decode_durable_page(blob.data(), blob.size(), raw_.data(), raw_.size());
     if (!status.ok()) {
         return status;
     }

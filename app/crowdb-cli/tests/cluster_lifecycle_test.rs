@@ -217,15 +217,17 @@ async fn default_single_node_start_seals_identity_and_resumes_without_duplicate_
         true
     );
     assert_eq!(fs::read(test.receipt("local")).unwrap(), original);
-    assert_eq!(
-        test.state()["calls"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|args| args[0] == "run")
-            .count(),
-        1
-    );
+    let state = test.state();
+    let mut launches = state["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|args| args[0] == "run");
+    let launch = launches.next().unwrap().as_array().unwrap();
+    assert!(launch
+        .windows(2)
+        .any(|args| args[0] == "--security-opt" && args[1] == "seccomp=unconfined"));
+    assert!(launches.next().is_none());
     server.abort();
 }
 

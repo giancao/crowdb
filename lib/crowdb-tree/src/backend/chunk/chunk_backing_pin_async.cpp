@@ -15,6 +15,7 @@ struct PinBacking : std::enable_shared_from_this<PinBacking>
     detail::ChunkStageId                     pin;
     detail::ChunkAllocationIdentity          receipt;
     std::optional<detail::ChunkStageRecord>  record;
+    std::optional<detail::ChunkStageRecord> *verified_stage = nullptr;
     AsyncCompletion                          completion;
 
     void finish(Status status)
@@ -25,7 +26,10 @@ struct PinBacking : std::enable_shared_from_this<PinBacking>
             }
             if (status.ok()) {
                 backing->physical_metrics = ChunkPhysicalRegistry::extent(backing->physical);
-                *output                   = backing;
+                if (verified_stage != nullptr) {
+                    *verified_stage = std::move(record);
+                }
+                *output = backing;
             }
         }
         catch (const std::bad_alloc &) {
@@ -124,7 +128,8 @@ struct PinBacking : std::enable_shared_from_this<PinBacking>
 
 void submit_pin_chunk_backing(const std::shared_ptr<const ChunkBackingDomain> &domain, detail::ChunkFixedPackRef pack,
                               detail::ChunkStageId pin, const std::shared_ptr<AllocationBudget> &metadata,
-                              std::shared_ptr<const ChunkPackBacking> *out, AsyncCompletion complete)
+                              std::shared_ptr<const ChunkPackBacking> *out, AsyncCompletion complete,
+                              std::optional<detail::ChunkStageRecord> *verified_stage)
 try {
     if (!domain || !domain->supported() || !metadata || out == nullptr || *out || pin.owner_epoch != domain->epoch) {
         complete.complete(Status::invalid_argument());
@@ -138,6 +143,7 @@ try {
     state->backing->domain          = domain;
     state->backing->pack            = pack;
     state->output                   = out;
+    state->verified_stage           = verified_stage;
     state->pin                      = pin;
     // The caller still owns completion if catalog submission throws.
     state->completion = complete; // NOLINT(performance-use-std-move)

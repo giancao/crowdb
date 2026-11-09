@@ -54,13 +54,25 @@ TEST(ChunkRecoveryAsync, RootAndIndexReadsReleaseTheOnlyBackendWorkerUntilTheirR
     };
     std::promise<detail::ChunkTransportCompletion> index;
     auto                                           index_reply = index.get_future();
-    bool                                           first       = true;
-    test.backend.transport->after_read_async                   = [&](auto complete) {
-        if (!std::exchange(first, false)) {
-            return false;
+    std::promise<detail::ChunkTransportCompletion> frame;
+    auto                                           frame_reply = frame.get_future();
+    std::promise<void>                             sibling;
+    auto                                           sibling_started = sibling.get_future();
+    size_t                                         reads           = 0;
+    test.backend.transport->after_read_async                       = [&](auto complete) {
+        const auto submitted = reads++;
+        if (submitted == 0) {
+            index.set_value(std::move(complete));
+            return true;
         }
-        index.set_value(std::move(complete));
-        return true;
+        if (submitted == 1) {
+            frame.set_value(std::move(complete));
+            return true;
+        }
+        if (submitted == 2) {
+            sibling.set_value();
+        }
+        return false;
     };
 
     std::promise<std::pair<Status, std::shared_ptr<TreeCore>>> result;
@@ -86,6 +98,17 @@ TEST(ChunkRecoveryAsync, RootAndIndexReadsReleaseTheOnlyBackendWorkerUntilTheirR
     ASSERT_TRUE(scheduled
                     ->submit_step(
                         [reply = index_reply.get()] {
+                            reply.complete(Status::Ok());
+                            return Status::Ok();
+                        },
+                        {.complete_fn = +[](void *, Status status) { EXPECT_TRUE(status.ok()); }})
+                    .ok());
+    ASSERT_EQ(frame_reply.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(sibling_started.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(open.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    ASSERT_TRUE(scheduled
+                    ->submit_step(
+                        [reply = frame_reply.get()] {
                             reply.complete(Status::Ok());
                             return Status::Ok();
                         },

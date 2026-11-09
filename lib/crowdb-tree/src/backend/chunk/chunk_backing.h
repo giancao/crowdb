@@ -68,7 +68,8 @@ Status validate_chunk_pin_stage(const ChunkBackingDomain &domain, const detail::
                                 const std::optional<detail::ChunkStageRecord> &record);
 void   submit_pin_chunk_backing(const std::shared_ptr<const ChunkBackingDomain> &domain, detail::ChunkFixedPackRef pack,
                                 detail::ChunkStageId pin, const std::shared_ptr<AllocationBudget> &metadata,
-                                std::shared_ptr<const ChunkPackBacking> *out, AsyncCompletion complete);
+                                std::shared_ptr<const ChunkPackBacking> *out, AsyncCompletion complete,
+                                std::optional<detail::ChunkStageRecord> *verified_stage = nullptr);
 
 // Finite blocking backend steps; the caller must dispatch them on its bounded
 // backend lane. Exact identities are never translated to synthetic file
