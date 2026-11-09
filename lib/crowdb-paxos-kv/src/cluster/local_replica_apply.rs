@@ -156,7 +156,8 @@ impl PxLocalReplica {
     /// require contiguous admission pause at the first gap until a repair
     /// or chosen notification arrives; other engines may apply later slots.
     fn ensure_apply_loop(&self) {
-        if self.apply_loop_handle.lock().is_some() {
+        let mut apply_loop = self.apply_loop_handle.lock();
+        if apply_loop.is_some() || self.apply_loop_cancel.is_cancelled() {
             return;
         }
         let known = Arc::clone(&self.known_commit_slot);
@@ -172,7 +173,7 @@ impl PxLocalReplica {
             g = self.log_group_id.load(Ordering::Acquire),
             replica = self.id
         );
-        let handle = tokio::spawn(
+        *apply_loop = Some(tokio::spawn(
             async move {
                 apply_loop_task(
                     known,
@@ -186,8 +187,7 @@ impl PxLocalReplica {
                 .await;
             }
             .instrument(span),
-        );
-        *self.apply_loop_handle.lock() = Some(handle);
+        ));
     }
 
     /// R65: record a gap slot that needs `FetchGap`. Called by the

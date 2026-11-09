@@ -108,6 +108,36 @@ async fn apply_loop_preserves_missing_slot_and_resumes_after_repair() {
     assert!(replica.shutdown(Duration::from_secs(2)).await.is_clean());
 }
 
+#[tokio::test]
+async fn shutdown_joins_the_apply_loop_started_before_membership_rebuild() {
+    let prior = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
+    let entry = write_entry(1, b"key", b"value");
+    assert!(matches!(
+        prior.on_accept(&entry).await,
+        PxAcceptReply::Accepted { .. }
+    ));
+    let reply = <PxLocalReplica as ReplicaHandler>::on_heartbeat(&prior, heartbeat(1, 2, 1), 1)
+        .await
+        .expect("reply");
+    assert!(reply.success);
+    tokio::time::timeout(Duration::from_secs(2), prior.await_apply_fence(1))
+        .await
+        .expect("prior apply loop must apply slot 1");
+
+    let learner = Arc::downgrade(&prior.learner);
+    let replacement = PxLocalReplica::new_inheriting_election_state(&prior);
+    drop(prior);
+    assert_eq!(replacement.contiguous_applied(), 1);
+    assert!(replacement.shutdown(Duration::from_secs(2)).await.is_clean());
+    drop(replacement);
+
+    assert_eq!(
+        learner.strong_count(),
+        0,
+        "the old apply loop still owns the learner"
+    );
+}
+
 /// Heartbeat reply returns immediately with the current `contiguous_applied`,
 /// which may lag behind `known_commit_slot`. The reply is not delayed by
 /// engine apply.

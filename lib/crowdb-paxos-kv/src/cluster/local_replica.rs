@@ -258,12 +258,12 @@ pub struct PxLocalReplica {
     /// advances. `Arc`-wrapped so the spawned apply task can hold a
     /// `'static` clone.
     pub(crate) apply_notify: Arc<tokio::sync::Notify>,
-    /// R63: cancellation token for the background apply loop. Owned by the
-    /// replica (not per-tenure) so the loop survives role transitions.
+    /// R63: cancellation token for the learner's background apply loop.
+    /// The loop survives role changes and membership rebuilds.
     pub(super) apply_loop_cancel: tokio_util::sync::CancellationToken,
     /// R63: join handle for the background apply loop. `None` until the
     /// loop is lazily spawned by `ensure_apply_loop`.
-    pub(super) apply_loop_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub(super) apply_loop_handle: Arc<parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// R65: set of slots that need `FetchGap` (missing or stale value).
     /// Populated by the `ChosenNotice` handler and the apply loop;
     /// consumed by the `FetchGap` driver. `Arc`-wrapped so the spawned
@@ -415,7 +415,7 @@ impl PxLocalReplica {
             known_commit_slot: Arc::new(AtomicU64::new(0)),
             apply_notify: Arc::new(tokio::sync::Notify::new()),
             apply_loop_cancel: tokio_util::sync::CancellationToken::new(),
-            apply_loop_handle: parking_lot::Mutex::new(None),
+            apply_loop_handle: Arc::new(parking_lot::Mutex::new(None)),
             gap_slots: Arc::new(Mutex::new(BTreeSet::new())),
             fetchgap_inflight: Arc::new(AtomicU64::new(0)),
         }
@@ -433,6 +433,7 @@ impl PxLocalReplica {
     /// The `id`, `voting` flag, and the [`PxAcceptor`] / [`PxLearner`]
     /// are inherited from `prior` (the latter two via `Arc::clone` so
     /// per-slot promises and the committed KV log survive the rebuild).
+    /// The shared learner keeps its existing apply loop and repair state.
     /// Per-tenure ephemeral signals (`Notify`s, `shutdown_started`) are
     /// freshly initialised on the new instance.
     #[must_use]
@@ -468,12 +469,12 @@ impl PxLocalReplica {
             replication_handles: OnceLock::new(),
             #[cfg(feature = "test-util")]
             persist_gate: Mutex::new(None),
-            known_commit_slot: Arc::new(AtomicU64::new(0)),
-            apply_notify: Arc::new(tokio::sync::Notify::new()),
-            apply_loop_cancel: tokio_util::sync::CancellationToken::new(),
-            apply_loop_handle: parking_lot::Mutex::new(None),
-            gap_slots: Arc::new(Mutex::new(BTreeSet::new())),
-            fetchgap_inflight: Arc::new(AtomicU64::new(0)),
+            known_commit_slot: Arc::clone(&prior.known_commit_slot),
+            apply_notify: Arc::clone(&prior.apply_notify),
+            apply_loop_cancel: prior.apply_loop_cancel.clone(),
+            apply_loop_handle: Arc::clone(&prior.apply_loop_handle),
+            gap_slots: Arc::clone(&prior.gap_slots),
+            fetchgap_inflight: Arc::clone(&prior.fetchgap_inflight),
         }
     }
 
