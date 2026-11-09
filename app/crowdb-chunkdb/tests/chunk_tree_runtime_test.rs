@@ -261,7 +261,13 @@ async fn runtime_host_recovers_root_wal_pair_and_collects_real_allocations() {
     drop((sampler, service));
     assert!(checkpoint.replay_offset > 0);
     assert_eq!(pages.wal_replay_offset().unwrap(), checkpoint.replay_offset);
-    assert!(pages.reclaim_chunk_generations_before(42, checkpoint.root_manifest_generation) > 0);
+    assert!(
+        pages
+            .reclaim_chunk_generations_before_async(42, checkpoint.root_manifest_generation)
+            .await
+            .unwrap()
+            > 0
+    );
     let before = stack.harness.store.list_chunks(None, 100).await.unwrap();
     assert!(before
         .iter()
