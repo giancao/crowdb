@@ -161,7 +161,13 @@ void CapturedWriteOperation::State::received_frame()
     dependency_index = 0;
     dependency_pid   = kInvalidPageId;
     if (limits.frames.retain_overflow_buffers && descriptor.type == page_type::kOverflowFrame) {
-        submit_overflow(*result.frame);
+        const auto &encoded = *result.frame;
+        if (submit_overflow(descriptor, {.info                = encoded.info,
+                                         .frame               = encoded.buffer->bytes,
+                                         .owner               = encoded.buffer,
+                                         .reload_dependencies = dependencies})) {
+            finish_frame();
+        }
         return;
     }
     if (overflow_writes) {
@@ -203,6 +209,10 @@ void CapturedWriteOperation::State::reuse_step()
         return;
     }
     if (dependency_index == frame->reused_overflow.size()) {
+        if (overflow_writes) {
+            join_overflow(Status::Ok());
+            return;
+        }
         begin_write();
         return;
     }

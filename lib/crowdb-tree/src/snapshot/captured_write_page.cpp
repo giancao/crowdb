@@ -28,23 +28,19 @@ struct CapturedWriteOperation::State::OverflowWrites
     Status                                          status;
 };
 
-void CapturedWriteOperation::State::submit_overflow(const CapturedFrame &encoded)
+bool CapturedWriteOperation::State::submit_overflow(DurableCapturedFrame value, PageWriteInput input)
 {
     if (!overflow_writes) {
         overflow_writes = detail::reserved_shared<OverflowWrites>(budget.bytes, shared_from_this());
     }
     auto item   = detail::reserved_shared<OverflowWrites::Result>(budget.bytes);
-    item->frame = descriptor;
-    PageWriteInput                      input{.info                = encoded.info,
-                                              .frame               = encoded.buffer->bytes,
-                                              .owner               = encoded.buffer,
-                                              .reload_dependencies = dependencies};
+    item->frame = std::move(value);
     std::shared_ptr<PageWriteOperation> operation;
     auto                                status =
         PageWriteOperation::create(store, runtime, lane, std::move(input), limits.write, budget, reserve, &operation);
     if (!status.ok()) {
         finish(std::move(status));
-        return;
+        return false;
     }
     overflow_writes->results.push_back(item);
     auto fail = [this, item](Status result) noexcept {
@@ -62,7 +58,7 @@ void CapturedWriteOperation::State::submit_overflow(const CapturedFrame &encoded
                    stdexec::env{
                        stdexec::prop{stdexec::get_allocator, MetadataAllocator<std::byte>(budget.bytes)}
     });
-    finish_frame();
+    return true;
 }
 
 void CapturedWriteOperation::State::join_overflow(Status status) noexcept

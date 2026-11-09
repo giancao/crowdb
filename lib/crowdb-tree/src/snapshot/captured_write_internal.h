@@ -99,7 +99,7 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     void                              received_frame();
     void                              reuse_step();
     void                              begin_write();
-    void                              submit_overflow(const CapturedFrame &encoded);
+    bool                              submit_overflow(DurableCapturedFrame value, PageWriteInput input);
     void                              join_overflow(Status status) noexcept;
     void                              collect_overflow();
     PageWriteOperation::ReserveExtent reserve_page(bool protect_dependency);
@@ -112,6 +112,7 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     void                              reuse_durable_dependency(DurableCapturedFrame value);
     Status                            rebind_primary();
     void                              attach_dependency(const DurableCapturedFrame &value, bool retain_owner = true);
+    void                              advance_dependency(const DurableCapturedFrame &value);
     void                              received_write();
     Status                            install_written(DurableCapturedFrame value, uint64_t physical_bytes);
     void                              finish_frame();

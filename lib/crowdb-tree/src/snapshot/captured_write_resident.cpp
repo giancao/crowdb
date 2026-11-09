@@ -4,6 +4,16 @@
 
 namespace crowdb::tree
 {
+namespace
+{
+bool same_resident_owner(const BackingRef &source, const BackingRef &candidate)
+{
+    return !source.owner.owner_before(candidate.owner) && !candidate.owner.owner_before(source.owner) &&
+           source.resident_frame.data() == candidate.resident_frame.data() &&
+           source.resident_frame.size() == candidate.resident_frame.size();
+}
+} // namespace
+
 void CapturedWriteOperation::State::attach_dependency(const DurableCapturedFrame &value, bool retain_owner)
 {
     if (retain_owner) {
@@ -15,6 +25,11 @@ void CapturedWriteOperation::State::attach_dependency(const DurableCapturedFrame
                                                                         .bytes         = value.overflow_bytes,
                                                                         .frame_bytes   = value.frame_bytes,
                                                                         .logical_bytes = value.logical_bytes});
+    advance_dependency(value);
+}
+
+void CapturedWriteOperation::State::advance_dependency(const DurableCapturedFrame &value)
+{
     dependency_bytes -= value.overflow_bytes;
     dependency_pid = value.next_overflow;
     if (dependency_bytes == 0) {
@@ -26,16 +41,29 @@ void CapturedWriteOperation::State::attach_dependency(const DurableCapturedFrame
 
 void CapturedWriteOperation::State::use_resident_dependency(DurableCapturedFrame value)
 {
-    const auto written = pages->frames.find(value.page_id);
+    const auto written  = pages->frames.find(value.page_id);
+    const auto original = resident_sources.find(value.page_id);
     if (written == pages->frames.end()) {
+        if (overflow_writes && original != resident_sources.end()) {
+            if (!value.backing || !same_resident_owner(*original->second.backing, *value.backing) ||
+                original->second.dependencies != dependencies ||
+                value.backing->resident_frame.size() != value.frame_bytes) {
+                finish(Status::corruption("resident overflow conflicts with a pending frame"));
+                return;
+            }
+            const OverflowFrameView raw(value.backing->resident_frame.data(), value.frame_bytes);
+            if (raw.next_page_id() != value.next_overflow || raw.chunk_len() != value.overflow_bytes) {
+                finish(Status::corruption("pending resident overflow differs from its frame"));
+                return;
+            }
+            advance_dependency(value);
+            return;
+        }
         if (inherited) {
             const auto staged = inherited->frames.find(value.page_id);
             if (staged != inherited->frames.end()) {
                 const auto source = staged->second.resident_source.lock();
-                if (!source || !value.backing || source->owner.owner_before(value.backing->owner) ||
-                    value.backing->owner.owner_before(source->owner) ||
-                    source->resident_frame.data() != value.backing->resident_frame.data() ||
-                    source->resident_frame.size() != value.backing->resident_frame.size() ||
+                if (!source || !value.backing || !same_resident_owner(*source, *value.backing) ||
                     staged->second.type != value.type || staged->second.next_overflow != value.next_overflow ||
                     staged->second.overflow_bytes != value.overflow_bytes ||
                     staged->second.frame_bytes != value.frame_bytes) {
@@ -54,14 +82,10 @@ void CapturedWriteOperation::State::use_resident_dependency(DurableCapturedFrame
         begin_resident_write(std::move(value));
         return;
     }
-    const auto  original = resident_sources.find(value.page_id);
-    const auto &backing  = value.backing;
+    const auto &backing = value.backing;
     if (!backing || original == resident_sources.end() || !backing->readable() ||
-        original->second.backing->owner.owner_before(backing->owner) ||
-        backing->owner.owner_before(original->second.backing->owner) ||
-        original->second.backing->resident_frame.data() != backing->resident_frame.data() ||
-        original->second.backing->resident_frame.size() != backing->resident_frame.size() ||
-        written->second.type != value.type || written->second.next_overflow != value.next_overflow ||
+        !same_resident_owner(*original->second.backing, *backing) || written->second.type != value.type ||
+        written->second.next_overflow != value.next_overflow ||
         written->second.overflow_bytes != value.overflow_bytes || written->second.frame_bytes != value.frame_bytes) {
         finish(Status::corruption("resident overflow PID conflicts with an already written frame"));
         return;
@@ -94,6 +118,13 @@ void CapturedWriteOperation::State::begin_resident_write(DurableCapturedFrame va
         .reload_dependencies = dependencies
     };
     resident_sources.emplace(value.page_id, ResidentSource{.backing = backing, .dependencies = dependencies});
+    if (limits.frames.retain_overflow_buffers) {
+        value.resident_source = backing;
+        if (submit_overflow(value, std::move(input))) {
+            advance_dependency(value);
+        }
+        return;
+    }
     resident_dependency = std::move(value);
     auto status         = PageWriteOperation::create(store, runtime, lane, std::move(input), limits.write, budget,
                                                      reserve_page(true), &write);
