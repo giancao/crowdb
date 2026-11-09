@@ -63,10 +63,9 @@ class FixtureTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "explicit advertised address"):
                 start_node(cluster, 4, Path(directory), (), running=False)
 
-    def test_node_applies_explicit_security_options(self):
+    def test_cluster_nodes_allow_io_uring(self):
         with tempfile.TemporaryDirectory() as directory:
             cluster = Cluster("image", directory)
-            cluster.security_options = ("seccomp=unconfined",)
             calls = []
             info = [{"NetworkSettings": {"Networks": {cluster.run_id: {"IPAddress": "10.20.30.4"}}}}]
 

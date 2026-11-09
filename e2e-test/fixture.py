@@ -70,6 +70,10 @@ def persisted_layout(topology):
 class Cluster:
     """The runner owns lifecycle; host clients use inspected node IPs."""
 
+    # The packaged Block backend requires io_uring, which Docker's default
+    # seccomp profile blocks even on a host that supports it.
+    security_options = ("seccomp=unconfined",)
+
     def __init__(self, image, artifacts, command=docker, data_root=None, node_count=3,
                  store_ids=None, wire_replicas=True, stores_per_node=None, groups=(1,), groups_per_node=None,
                  node_args=None, advertise=False, preserve_network=False):
