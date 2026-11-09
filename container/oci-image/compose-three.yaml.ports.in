@@ -6,6 +6,8 @@ x-node: &node
   pull_policy: never
   cpus: 1
   mem_limit: 1536m
+  security_opt:
+    - seccomp=unconfined
 services:
   node1:
     <<: *node

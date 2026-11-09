@@ -7,6 +7,8 @@ services:
     pull_policy: never
     cpus: 1
     mem_limit: 1536m
+    security_opt:
+      - seccomp=unconfined
     environment:
       CROWDB_CLUSTER: ${CROWDB_CLUSTER:-local}
       CROWDB_INITIAL_VOTERS: "1"

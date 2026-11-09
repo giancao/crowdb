@@ -88,6 +88,7 @@ def create_docker_nodes(cluster, indexes):
         cluster.containers.append(name)
         arguments = ["create", "--name", name, "--label", f"{LABEL}={cluster.run_id}",
                      "--network", getattr(cluster, 'reference_network', cluster.run_id), "--cpus", "1", "--memory", "1536m",
+                     "--security-opt", "seccomp=unconfined",
                      "--mount", f"type=volume,source={volume},target=/opt/crowdb/data",
                      "--env", f"CROWDB_CLUSTER={cluster.run_id}",
                      "--env", f"CROWDB_INITIAL_VOTERS={cluster.node_count}"]

@@ -165,10 +165,11 @@ class DockerLocalTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "endpoints"):
                     verify_container(item, record, 3, "owned-volume", "crowdb-first")
 
-    def test_compose_examples_publish_the_standard_node_listeners(self):
+    def test_compose_examples_allow_block_io_and_publish_the_standard_node_listeners(self):
         for filename in ("compose.yaml", "compose-three.yaml"):
             document = yaml.safe_load((Path(__file__).resolve().parents[1] / filename).read_text())
             for service in document["services"].values():
+                self.assertIn("seccomp=unconfined", service["security_opt"])
                 self.assertEqual([port.split("}:", 1)[1] for port in service["ports"]],
                                  [str(WEB_BASE), f"${{CROWDB_S3_CONTAINER_PORT:-{ACCESS_SERVER_HTTP_BASE}}}",
                                   f"${{CROWDB_ICEBERG_CONTAINER_PORT:-{ACCESS_SERVER_ICEBERG_HTTP_BASE}}}",

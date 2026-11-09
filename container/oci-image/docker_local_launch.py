@@ -114,6 +114,7 @@ def run(docker, record):
         base = record["port_base"] + (index - 1) * (10 if record["version"] < 3 else 1)
         command = ["run", "-d", "--pull", "never", "--name", name, *arguments(record),
                    "--network", network, "--cpus", record["cpus"], "--memory", f"{record['memory_mib']}m",
+                   "--security-opt", "seccomp=unconfined",
                    "--mount", f"type=volume,source={volume},target=/opt/crowdb/data",
                    "-e", "CROWDB_CLUSTER=" + record["cluster"], "-e", f"CROWDB_INITIAL_VOTERS={record['nodes']}"]
         for offset, protocol in enumerate((None, "S3", "ICEBERG", "DATASET")):

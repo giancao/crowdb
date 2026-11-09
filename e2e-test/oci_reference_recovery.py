@@ -38,6 +38,7 @@ def create_nonvoter(cluster):
     cluster.command('create', '--name', name, '--label', f'{LABEL}={cluster.run_id}',
         '--network', getattr(cluster, 'reference_network', cluster.run_id),
         '--cpus', '0.25', '--memory', '768m', '--env', 'TOKIO_WORKER_THREADS=1',
+        '--security-opt', 'seccomp=unconfined',
         '--mount', f'type=volume,source={volume},target=/opt/crowdb/data',
         '--mount', f'type=bind,source={policy.resolve()},target=/run/later-member.toml,readonly',
         '--env', 'CROWDB_NODE_POLICY_FILE=/run/later-member.toml',
