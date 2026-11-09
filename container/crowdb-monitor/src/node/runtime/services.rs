@@ -207,7 +207,7 @@ pub(super) fn failures(
     Ok(Value::Object(failures))
 }
 
-/// Couple each live managed PID to the durable execution that actually owns it.
+/// Couple each live managed PID to its completed, ready execution.
 pub(super) fn process_operations(
     root: &std::path::Path,
     live: &std::collections::BTreeMap<String, u32>,
@@ -235,7 +235,7 @@ pub(super) fn process_operations(
             } else {
                 &execution.intent.service_id
             };
-            if execution.pid.is_some() && execution.pid == live.get(process).copied() {
+            if execution.complete && execution.pid.is_some() && execution.pid == live.get(process).copied() {
                 if operations.len() >= 4096 {
                     return Err("service process observation exceeds bound".into());
                 }
