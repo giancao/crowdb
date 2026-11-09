@@ -14,7 +14,6 @@
 #include "btree/tree_options.h"
 #include "c_api_future_internal.h"
 #include "c_api_internal.h"
-#include "c_api_owned_budget.h"
 #include "crowdb-common/log.h"
 #include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/backend/backend_release_service.h"
@@ -1534,19 +1533,14 @@ try {
     impl->kind          = ct_future_impl::Kind::kGet;
     auto   signal       = t->completion;
     Status range_status = t->tree->validate_key(Slice(reinterpret_cast<const char *>(key), klen));
-    if (auto *core = TreeCoreAccess::get(*t->tree); core != nullptr && range_status.ok()) {
-        try {
-            impl->result_controls = c_api_result_controls(core->binding()->account());
-        }
-        catch (const std::bad_alloc &) {
-            range_status = Status::resource_exhausted("returned owner control reserve unavailable");
-        }
-    }
     if (!range_status.ok()) {
         impl->status = to_status(range_status);
         impl->done.store(true, std::memory_order_release);
         signal->notify();
         return reinterpret_cast<ct_future *>(make_ct_future_handle(std::move(impl)));
+    }
+    if (auto *core = TreeCoreAccess::get(*t->tree); core != nullptr) {
+        impl->result_controls = core->accepted_allocations();
     }
     t->tree->get_async(Slice(reinterpret_cast<const char *>(key), klen), [impl, signal](Status status, GetView view) {
         impl->status     = to_status(status);

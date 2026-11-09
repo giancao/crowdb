@@ -22,7 +22,8 @@ struct CapturedFrameLimits
     uint64_t max_pages = MappingView::kPageLimit;
     // Traverse and prepare final layouts without copying payload or reserving
     // overflow PIDs. Each result owns the returned dependency descriptors.
-    bool plan_only = false;
+    bool plan_only               = false;
+    bool retain_overflow_buffers = false;
     // Staged writeback can materialize one primary while retaining the complete
     // captured mapping for routing and immutable overflow ownership proofs.
     std::optional<uint64_t> selected_page = std::nullopt;
@@ -88,8 +89,8 @@ struct CapturedFrameStats
 };
 
 // Postorder materialization of one immutable captured L1 mapping. Each sender
-// invocation yields at most one raw frame; callers write/release that window
-// before requesting another. Existing overflow references are reported to the
+// invocation yields at most one raw frame. A Chunk writer can retain a buffer
+// while the stream encodes the next frame. Existing overflow references are reported to the
 // sink, not silently omitted from its persistence dependencies. This is not a
 // self-contained native export until that sink also emits the reused chains.
 class CapturedFrameStream

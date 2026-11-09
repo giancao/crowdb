@@ -5,6 +5,7 @@
 #include "c_api_internal.h"
 #include "c_api_owned_allocation.h"
 #include "crowdb-tree/owned_allocation_c_api.h"
+#include "crowdb-tree/owned_budget_c_api.h"
 #include "crowdb-tree/runtime_c_api.h"
 
 #include <gtest/gtest.h>
@@ -74,6 +75,38 @@ ct_owned_kv_ref input(ct_owned_allocation *owner, size_t offset = 0, size_t leng
 size_t payload_bytes(const std::shared_ptr<detail::ResourceBudget::Account> &account)
 {
     return account->snapshot().physical[static_cast<size_t>(AllocationKind::kPayload)];
+}
+
+TEST(OwnedAllocationCAbi, AsyncGetAdmitsByActualMemoryAboveRoutingLimit)
+{
+    TestHost      host;
+    const auto   *core  = host.core();
+    const uint8_t key   = 'k';
+    const uint8_t value = 'v';
+    ASSERT_EQ(ct_apply_put(host.tree, 1, &key, 1, &value, 1), 0);
+    const auto                 routing = static_cast<size_t>(detail::BudgetClass::kRouting);
+    const auto                 bytes   = core->binding()->resource_usage()[routing].limit;
+    MetadataAllocator<uint8_t> allocator(core->accepted_allocations());
+    auto                       release = [&](uint8_t *storage) { allocator.deallocate(storage, bytes); };
+    std::unique_ptr<uint8_t, decltype(release)> pressure(allocator.allocate(bytes), release);
+
+    std::unique_ptr<ct_future, decltype(&ct_future_free)> read(ct_get_async(host.tree, &key, 1), ct_future_free);
+    ASSERT_TRUE(read);
+    core->binding()->drain();
+    int32_t  done  = 0;
+    int32_t  found = 0;
+    uint64_t slot  = 0;
+    ct_buf   result{};
+    ASSERT_EQ(ct_future_poll(read.get(), &done, &found, &slot, &result), 0);
+    ASSERT_EQ(done, 1);
+    ASSERT_EQ(found, 1);
+    EXPECT_EQ(slot, 1U);
+    ASSERT_EQ(result.len, 1U);
+    EXPECT_EQ(*result.data, value);
+    ct_owned_budget *raw_owner = nullptr;
+    ASSERT_EQ(ct_future_owned_budget(read.get(), &raw_owner), 0);
+    std::unique_ptr<ct_owned_budget, decltype(&ct_owned_budget_free)> owner(raw_owner, ct_owned_budget_free);
+    EXPECT_TRUE(owner);
 }
 
 TEST(OwnedAllocationCAbi, SlicesRetainOneCapacityAndFinalForeignDrop)

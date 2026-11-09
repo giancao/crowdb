@@ -185,6 +185,10 @@ void CapturedWriteOperation::State::cancel_child() noexcept
 
 void CapturedWriteOperation::State::finish(Status status) noexcept
 {
+    if (overflow_writes) {
+        join_overflow(std::move(status));
+        return;
+    }
     if (lifecycle.exchange(3, std::memory_order_acq_rel) == 3) {
         return;
     }

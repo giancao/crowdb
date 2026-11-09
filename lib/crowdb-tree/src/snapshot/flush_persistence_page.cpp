@@ -112,6 +112,8 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         limits.frames.encode.cause        = work.budget.cause;
         limits.frames.cpu_progress        = work.budget.cpu_progress;
         limits.frames.plan_only           = false;
+        limits.frames.retain_overflow_buffers =
+            limits.write.chunk_backed && static_cast<bool>(work.budget.cpu_progress);
         result = CapturedFrameStream::create(input, work.loader, preparation.core->binding()->cpu(),
                                              preparation.core->binding()->lane(), limits.frames, reserve, &stream);
         if (!result.ok()) {

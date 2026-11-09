@@ -16,7 +16,9 @@ namespace captured_write_detail
 
 struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
 {
-    enum class Stage : uint8_t { Next, Frame, Dependencies, Write, ResidentWrite, RelocateRead };
+    enum class Stage : uint8_t { Next, Frame, Dependencies, Write, ResidentWrite, RelocateRead, JoinOverflow };
+
+    struct OverflowWrites;
 
     struct Dependencies
     {
@@ -63,9 +65,16 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     {
         using receiver_concept = stdexec::receiver_tag;
         std::shared_ptr<State> owner;
-        void                   set_value() noexcept;
-        void                   set_error(Status status) noexcept;
-        void                   set_stopped() noexcept;
+
+        [[nodiscard]] auto get_env() const noexcept
+            -> stdexec::prop<stdexec::get_start_scheduler_t, stdexec::inline_scheduler>
+        {
+            return {stdexec::get_start_scheduler, stdexec::inline_scheduler{}};
+        }
+
+        void set_value() noexcept;
+        void set_error(Status status) noexcept;
+        void set_stopped() noexcept;
     };
 
     using Connected = stdexec::connect_result_t<detail::CallbackSender, Receiver>;
@@ -90,6 +99,9 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     void                              received_frame();
     void                              reuse_step();
     void                              begin_write();
+    void                              submit_overflow(const CapturedFrame &encoded);
+    void                              join_overflow(Status status) noexcept;
+    void                              collect_overflow();
     PageWriteOperation::ReserveExtent reserve_page(bool protect_dependency);
     void                              use_resident_dependency(DurableCapturedFrame value);
     void                              begin_resident_write(DurableCapturedFrame value);
@@ -101,6 +113,7 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     Status                            rebind_primary();
     void                              attach_dependency(const DurableCapturedFrame &value, bool retain_owner = true);
     void                              received_write();
+    Status                            install_written(DurableCapturedFrame value, uint64_t physical_bytes);
     void                              finish_frame();
     Status                            insert(DurableCapturedFrame value, bool reused);
     void                              finish(Status status) noexcept;
@@ -118,6 +131,7 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     std::shared_ptr<NativeFrameRead>            relocation_read;
     std::shared_ptr<Dependencies>               dependencies;
     std::shared_ptr<OverflowBackingSet>         overflow_backing;
+    std::shared_ptr<OverflowWrites>             overflow_writes;
     std::optional<CapturedFrame>                frame;
     DurableCapturedFrame                        descriptor;
     DurableCapturedFrame                        resident_dependency;
@@ -136,6 +150,7 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     std::shared_ptr<State>                      queued_owner;
     std::atomic<uint8_t>                        lifecycle{0};
     std::atomic<bool>                           stopped{false};
+    std::atomic<bool>                           overflow_failed{false};
     std::atomic<bool>                           scheduled{false};
     std::atomic<bool>                           wake_requested{false};
     detail::CallbackComplete                    complete = nullptr;

@@ -221,8 +221,11 @@ void CapturedFrameStream::State::pump()
         begin_pending = false;
         report        = {};
         if (buffer && buffer.use_count() != 1) {
-            finish(Status::unavailable("previous snapshot frame is still pinned"));
-            return;
+            if (!limits.retain_overflow_buffers) {
+                finish(Status::unavailable("previous frame is still pinned"));
+                return;
+            }
+            buffer = detail::reserved_shared<CapturedFrameBuffer>(limits.encode.metadata, limits.encode);
         }
     }
     if (stopped.load(std::memory_order_acquire)) {

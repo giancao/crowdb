@@ -1,12 +1,15 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
+#include "backend/local/scheduled_page_store.h"
 #include "common/test_tree_core_chunk.h"
 #include "crowdb-tree/crowdb-tree.h"
 
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <future>
 #include <memory>
 #include <string>
 #include <utility>
@@ -130,6 +133,56 @@ TEST(ChunkSnapshotRetry, SmallFramesCheckpointLargeValues)
         EXPECT_EQ(value.slot(), slot);
         EXPECT_EQ(value.value().to_string(), std::string(64 * 1024, 'v'));
     }
+}
+
+TEST(ChunkSnapshotRetry, SingleLeafSubmitsAnotherOverflowPackBeforeFirstCompletes)
+{
+    std::promise<ChunkTransportCompletion> first_pack;
+    auto                                   held = first_pack.get_future();
+    std::promise<void>                     second_pack;
+    auto                                   second_started = second_pack.get_future();
+    std::atomic<size_t>                    allocations{0};
+    std::promise<Status>                   flushed;
+    auto                                   result = flushed.get_future();
+    test_chunk::TestCoreChunk              test;
+    ASSERT_TRUE(test.open().ok());
+    const std::string value(64 * 1024, 'v');
+    ASSERT_TRUE(test.put(1, value).ok());
+    test.backend.transport->after_allocate_async = [&](ChunkTransportCompletion completion) {
+        const auto index = allocations.fetch_add(1);
+        if (index == 0) {
+            first_pack.set_value(std::move(completion));
+            return true;
+        }
+        if (index == 1) {
+            second_pack.set_value();
+        }
+        return false;
+    };
+
+    test.tree->flush_with_persistent_async(
+        [&](Status status, uint64_t /*unused*/) { flushed.set_value(std::move(status)); });
+    ASSERT_EQ(held.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(second_started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(result.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    EXPECT_EQ(test.tree->durable_coverage(), 0U);
+    auto  receipt = std::make_shared<ChunkTransportCompletion>(held.get());
+    auto *backend = static_cast<ScheduledPageStore *>(TreeCoreAccess::get(*test.tree)->async_backend());
+    ASSERT_TRUE(backend
+                    ->submit_step(
+                        [receipt] {
+                            receipt->complete(Status::Ok());
+                            return Status::Ok();
+                        },
+                        {.complete_fn = +[](void *, Status status) { EXPECT_TRUE(status.ok()); }})
+                    .ok());
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto status = result.get();
+    ASSERT_TRUE(status.ok()) << status.to_string();
+    EXPECT_EQ(test.tree->durable_coverage(), 1U);
+    const auto read = test.tree->get_view("key");
+    ASSERT_TRUE(read.found());
+    EXPECT_EQ(read.value().to_string(), value);
 }
 
 TEST(ChunkSnapshotRetry, PublicationFailureDoesNotPoisonSynchronousSnapshotRetry)

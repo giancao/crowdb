@@ -5,6 +5,104 @@
 
 namespace crowdb::tree
 {
+struct CapturedWriteOperation::State::OverflowWrites
+{
+    struct Result
+    {
+        DurableCapturedFrame frame;
+        uint64_t             physical_bytes = 0;
+        Status               status;
+    };
+
+    using Join = stdexec::connect_result_t<decltype(std::declval<stdexec::simple_counting_scope &>().join()), Receiver>;
+
+    explicit OverflowWrites(std::shared_ptr<State> owner)
+        : results(detail::ReservationAllocator<std::shared_ptr<Result>>(owner->budget.bytes)),
+          joined(stdexec::connect(scope.join(), Receiver{std::move(owner)}))
+    {
+    }
+
+    detail::ReservedVector<std::shared_ptr<Result>> results;
+    stdexec::simple_counting_scope                  scope;
+    Join                                            joined;
+    Status                                          status;
+};
+
+void CapturedWriteOperation::State::submit_overflow(const CapturedFrame &encoded)
+{
+    if (!overflow_writes) {
+        overflow_writes = detail::reserved_shared<OverflowWrites>(budget.bytes, shared_from_this());
+    }
+    auto item   = detail::reserved_shared<OverflowWrites::Result>(budget.bytes);
+    item->frame = descriptor;
+    PageWriteInput                      input{.info                = encoded.info,
+                                              .frame               = encoded.buffer->bytes,
+                                              .owner               = encoded.buffer,
+                                              .reload_dependencies = dependencies};
+    std::shared_ptr<PageWriteOperation> operation;
+    auto                                status =
+        PageWriteOperation::create(store, runtime, lane, std::move(input), limits.write, budget, reserve, &operation);
+    if (!status.ok()) {
+        finish(std::move(status));
+        return;
+    }
+    overflow_writes->results.push_back(item);
+    auto fail = [this, item](Status result) noexcept {
+        item->status = std::move(result);
+        overflow_failed.store(true, std::memory_order_release);
+    };
+    auto sender = operation->sender() | stdexec::then([item, operation]() noexcept {
+                      const auto &written       = operation->result();
+                      item->frame.backing       = written.backing;
+                      item->frame.logical_bytes = written.logical_bytes;
+                      item->physical_bytes      = written.physical_bytes;
+                  }) |
+                  stdexec::upon_error(fail) | stdexec::upon_stopped([fail]() noexcept { fail(Status::unavailable()); });
+    stdexec::spawn(std::move(sender), overflow_writes->scope.get_token(),
+                   stdexec::env{
+                       stdexec::prop{stdexec::get_allocator, MetadataAllocator<std::byte>(budget.bytes)}
+    });
+    finish_frame();
+}
+
+void CapturedWriteOperation::State::join_overflow(Status status) noexcept
+{
+    if (stage == Stage::JoinOverflow) {
+        return;
+    }
+    stage   = Stage::JoinOverflow;
+    waiting = true;
+    child_ready.store(false, std::memory_order_release);
+    overflow_writes->status = std::move(status);
+    overflow_writes->scope.close();
+    stdexec::start(overflow_writes->joined);
+}
+
+void CapturedWriteOperation::State::collect_overflow()
+{
+    auto pending = std::move(overflow_writes);
+    if (!pending->status.ok() || stopped.load(std::memory_order_acquire)) {
+        finish(std::move(pending->status));
+        return;
+    }
+    for (auto &item : pending->results) {
+        if (!item->status.ok()) {
+            finish(std::move(item->status));
+            return;
+        }
+        // Each completed write still owns its protected extent. The primary
+        // carries those owners and the complete overflow map into publication.
+        dependencies->owners.push_back(item->frame.backing->physical_owner);
+        auto status = install_written(std::move(item->frame), item->physical_bytes);
+        if (!status.ok()) {
+            finish(std::move(status));
+            return;
+        }
+    }
+    stage = Stage::Dependencies;
+    wake();
+}
+
 void CapturedWriteOperation::State::begin_write()
 {
     if (!frame.has_value()) {
@@ -76,27 +174,34 @@ void CapturedWriteOperation::State::received_write()
     const auto &written      = write->result();
     descriptor.backing       = written.backing;
     descriptor.logical_bytes = written.logical_bytes;
-    if (descriptor.type == page_type::kOverflowFrame) {
-        overflow_backing->pages.emplace(descriptor.page_id,
-                                        OverflowBackingPage{.backing       = descriptor.backing,
-                                                            .next          = descriptor.next_overflow,
-                                                            .bytes         = descriptor.overflow_bytes,
-                                                            .frame_bytes   = descriptor.frame_bytes,
-                                                            .logical_bytes = descriptor.logical_bytes});
-    }
-    else if (descriptor.type == page_type::kLeafBase) {
-        auto primary       = detail::reserved_shared<BackingRef>(budget.bytes, *descriptor.backing);
-        primary->overflow  = overflow_backing;
-        descriptor.backing = std::move(primary);
-    }
-    auto status = insert(descriptor, false);
+    auto status              = install_written(descriptor, written.physical_bytes);
     if (!status.ok()) {
         finish(std::move(status));
         return;
     }
-    ++report.written_frames;
-    report.written_bytes += written.physical_bytes;
     finish_frame();
+}
+
+Status CapturedWriteOperation::State::install_written(DurableCapturedFrame value, uint64_t physical_bytes)
+{
+    if (value.type == page_type::kOverflowFrame) {
+        overflow_backing->pages.emplace(value.page_id, OverflowBackingPage{.backing       = value.backing,
+                                                                           .next          = value.next_overflow,
+                                                                           .bytes         = value.overflow_bytes,
+                                                                           .frame_bytes   = value.frame_bytes,
+                                                                           .logical_bytes = value.logical_bytes});
+    }
+    else if (value.type == page_type::kLeafBase) {
+        auto primary      = detail::reserved_shared<BackingRef>(budget.bytes, *value.backing);
+        primary->overflow = overflow_backing;
+        value.backing     = std::move(primary);
+    }
+    auto status = insert(std::move(value), false);
+    if (status.ok()) {
+        ++report.written_frames;
+        report.written_bytes += physical_bytes;
+    }
+    return status;
 }
 
 void CapturedWriteOperation::State::finish_frame()

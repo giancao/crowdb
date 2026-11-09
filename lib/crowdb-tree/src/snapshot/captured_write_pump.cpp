@@ -88,8 +88,16 @@ void CapturedWriteOperation::State::pump()
             return;
         }
     }
+    if (stage == Stage::JoinOverflow) {
+        collect_overflow();
+        return;
+    }
     if (stopped.load(std::memory_order_acquire)) {
         finish(Status::unavailable());
+        return;
+    }
+    if (overflow_failed.load(std::memory_order_acquire)) {
+        join_overflow(Status::Ok());
         return;
     }
     switch (stage) {
@@ -111,6 +119,8 @@ void CapturedWriteOperation::State::pump()
     case Stage::RelocateRead:
         received_relocated_read();
         break;
+    case Stage::JoinOverflow:
+        break;
     }
 }
 
@@ -118,7 +128,7 @@ void CapturedWriteOperation::State::received_frame()
 {
     const auto &result = stream->result();
     if (!result.frame) {
-        finish(result.complete ? Status::Ok() : Status::corruption());
+        finish(result.complete && !overflow_writes ? Status::Ok() : Status::corruption());
         return;
     }
     frame      = result.frame;
@@ -150,7 +160,15 @@ void CapturedWriteOperation::State::received_frame()
     }
     dependency_index = 0;
     dependency_pid   = kInvalidPageId;
-    stage            = Stage::Dependencies;
+    if (limits.frames.retain_overflow_buffers && descriptor.type == page_type::kOverflowFrame) {
+        submit_overflow(*result.frame);
+        return;
+    }
+    if (overflow_writes) {
+        join_overflow(Status::Ok());
+        return;
+    }
+    stage = Stage::Dependencies;
     wake();
 }
 
