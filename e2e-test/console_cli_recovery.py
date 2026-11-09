@@ -6,7 +6,7 @@ import json
 import subprocess
 import time
 
-from fixture import request
+from fixture import request, wait
 from console_cli_io_fault import DiskIoOutage
 from console_cli_readiness import OUTAGE_SECONDS, observe_unavailable
 
@@ -70,6 +70,22 @@ def managed_processes(cluster):
     return processes
 
 
+def placement_settled(catalog):
+    entries = catalog["entries"]
+    if not entries or catalog["next"] is not None:
+        return False
+    if not all(entry["state"] == "Serving" and entry["transition_id"] is None
+               and entry["artifact"].get("tail_overlay") is None for entry in entries):
+        return False
+    balance = catalog["balance"]
+    if balance.get("generation") != catalog["generation"]:
+        return False
+    return balance["reason"] == "within tolerance" or (
+        balance["reason"] == "no useful safe move" and all(
+            (entry["balance"] or {}).get("partition", {}).get("reason")
+            in ("no improving target", "insufficient benefit") for entry in entries))
+
+
 def terminal_writer_recovery(cluster, cluster_id):
     origin = f"http://{cluster.addresses[0]}:6135"
     inputs = cluster.state()
@@ -77,6 +93,9 @@ def terminal_writer_recovery(cluster, cluster_id):
     cluster.invoke("s3", "bucket", "put", "writer-recovery")
     cluster.invoke("s3", "object", "put", "writer-recovery", "before",
                    "--text", "acknowledged-before-fault")
+    catalog = wait(lambda: request(origin, "/api/chunk-kv/catalog"), placement_settled,
+                   "terminal writer fault requires settled ChunkKV placement", seconds=180)
+    (cluster.artifacts / "placement-before-fault.json").write_text(json.dumps(catalog, indent=2))
     before = request(origin, "/api/servers")
     processes_before = managed_processes(cluster)
     services = [service for service in before if service.get("service_type") == "diskio"]
