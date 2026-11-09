@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "allocation_account.h"
 #include "allocation_bound.h"
 #include "published_state.h"
 #include "source_admission_internal.h"
@@ -12,6 +13,19 @@ namespace crowdb::tree
 namespace
 {
 std::atomic<uint64_t> next_source_admission_identity{1};
+
+bool source_metadata_matches(const std::shared_ptr<AllocationBudget>                &budget,
+                             const std::shared_ptr<detail::ResourceBudget::Account> &account)
+{
+    if (!account) {
+        return true;
+    }
+    if (const auto credit = std::dynamic_pointer_cast<detail::AllocationReservation>(budget)) {
+        return credit->account() == account;
+    }
+    const auto actual = std::dynamic_pointer_cast<detail::AllocationAccount>(budget);
+    return actual && actual->belongs_to(account);
+}
 
 class AdminGuard
 {
@@ -66,8 +80,7 @@ struct SourceAdmission::State
 
         using Owner = std::unique_ptr<Root, Deleter>;
 
-        static Owner create(std::shared_ptr<const SourceCatalog>                  value,
-                            const std::shared_ptr<detail::AllocationReservation> &budget)
+        static Owner create(std::shared_ptr<const SourceCatalog> value, const std::shared_ptr<AllocationBudget> &budget)
         {
             AllocationLease credit(budget, sizeof(Root), AllocationKind::kMetadata);
             Owner           result(new Root(std::move(value), std::move(credit)));
@@ -272,12 +285,10 @@ std::optional<size_t> SourceAdmission::coverage_allocation_bound(size_t sources)
         .value();
 }
 
-Status SourceAdmission::prepare_coverage(uint64_t                                              frontier,
-                                         const std::shared_ptr<detail::AllocationReservation> &metadata,
-                                         std::shared_ptr<Coverage>                            *out)
+Status SourceAdmission::prepare_coverage(uint64_t frontier, const std::shared_ptr<AllocationBudget> &metadata,
+                                         std::shared_ptr<Coverage> *out)
 try {
-    if (!metadata || out == nullptr || *out ||
-        (state_->write_options.account && metadata->account() != state_->write_options.account)) {
+    if (!metadata || out == nullptr || *out || !source_metadata_matches(metadata, state_->write_options.account)) {
         return Status::invalid_argument("split coverage requires owned source credit and empty output");
     }
     AdminGuard admin(state_->admin);
@@ -553,15 +564,15 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted("source lifecycle participant credit exhausted");
 }
 
-Status SourceAdmission::try_capture(const std::atomic<uint64_t>                   &contiguous,
-                                    std::shared_ptr<detail::AllocationReservation> admission_owner,
-                                    std::shared_ptr<SourceCapture>                *out,
-                                    std::shared_ptr<const SourceCatalog>           expected_catalog)
+Status SourceAdmission::try_capture(const std::atomic<uint64_t>         &contiguous,
+                                    std::shared_ptr<AllocationBudget>    admission_owner,
+                                    std::shared_ptr<SourceCapture>      *out,
+                                    std::shared_ptr<const SourceCatalog> expected_catalog)
 try {
     if (out == nullptr || !admission_owner) {
         return Status::invalid_argument("capture requires admitted metadata credit");
     }
-    if (state_->write_options.account && admission_owner->account() != state_->write_options.account) {
+    if (!source_metadata_matches(admission_owner, state_->write_options.account)) {
         return Status::invalid_argument("capture credit belongs to another source account");
     }
     AdminGuard admin(state_->admin);
@@ -586,7 +597,8 @@ try {
     if (contiguous.load(std::memory_order_acquire) <= previous->floor) {
         return Status::unavailable("no completed prefix beyond source floor");
     }
-    if (admission_owner->available() == 0) {
+    const auto reserved = std::dynamic_pointer_cast<detail::AllocationReservation>(admission_owner);
+    if (reserved && reserved->available() == 0) {
         return Status::resource_exhausted("capture metadata credit exhausted");
     }
     auto next        = detail::reserved_shared<SourceCatalog>(admission_owner, admission_owner);

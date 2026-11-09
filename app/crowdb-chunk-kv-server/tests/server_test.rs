@@ -372,7 +372,7 @@ fn committed_transfer(artifact: &PreparedSplitWriterArtifact) -> TransferTransit
     machine.transition().clone()
 }
 
-fn install_local_split_catalog(
+async fn install_local_split_catalog(
     service: &ChunkKvService,
     retained: &Partition,
     child: &Partition,
@@ -435,6 +435,7 @@ fn install_local_split_catalog(
     head.seal().unwrap();
     service
         .install_catalog_and_reconcile(&head, &[page], &[])
+        .await
         .unwrap();
     let mut grant = ServingGrant {
         instance_id: INSTANCE_ID,
@@ -672,6 +673,7 @@ async fn matching_grant_activation_promotes_a_replayed_partition() {
     let (head, page) = catalog(Id128 { high: 1, low: 3 }, stream_name, EPOCH, 1, None);
     service
         .install_catalog_and_reconcile(&head, &[page], std::slice::from_ref(&partition))
+        .await
         .unwrap();
     let mut grant = ServingGrant {
         instance_id: INSTANCE_ID,
@@ -722,8 +724,8 @@ async fn matching_grant_activation_promotes_a_replayed_partition() {
     );
 }
 
-#[test]
-fn an_idle_stateless_instance_needs_no_owned_range_or_serving_grant() {
+#[tokio::test]
+async fn an_idle_stateless_instance_needs_no_owned_range_or_serving_grant() {
     let service = ChunkKvService::new(test_process::TestProcess::authority(INSTANCE_ID + 1), 4).unwrap();
     assert!(!service.health(50_100).ready, "A catalog must first be loaded");
     let (head, page) = catalog(
@@ -735,6 +737,7 @@ fn an_idle_stateless_instance_needs_no_owned_range_or_serving_grant() {
     );
     service
         .install_catalog_and_reconcile(&head, &[page], &[])
+        .await
         .unwrap();
     let health = service.health(50_100);
     assert!(health.ready);
@@ -779,6 +782,7 @@ async fn committed_transfer_activates_a_recovered_overlay() {
     let service = ChunkKvService::new(test_process::TestProcess::authority(INSTANCE_ID), 4).unwrap();
     service
         .install_catalog_and_reconcile(&head, &[page], std::slice::from_ref(&partition))
+        .await
         .unwrap();
 
     assert!(service
@@ -909,7 +913,7 @@ async fn prepared_split_lineage_suppresses_catalog_recovery() {
     assert_all_partition_loads_recoverable(&service, false).await;
 
     assert_old_parent_ordered_reads(&service).await;
-    install_local_split_catalog(&service, &retained, &child, &split_key);
+    install_local_split_catalog(&service, &retained, &child, &split_key).await;
     assert_all_partition_loads_recoverable(&service, true).await;
     assert_old_parent_ordered_reads(&service).await;
     assert_old_parent_scan_continuation(&service).await;
@@ -919,6 +923,20 @@ async fn prepared_split_lineage_suppresses_catalog_recovery() {
     service.remove_partition(Id128 { high: 1, low: 2 });
     service.remove_partition(Id128 { high: 22, low: 25 });
     assert_hosts_exact_child_assignment(&service, &child, split_key);
+    drop((parent, retained));
+    service.drain_writers().await.unwrap();
+    let mut closing = std::pin::pin!(service.release_hosted_trees());
+    // Only the old dispatcher owns this child inside the service.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), closing.as_mut())
+            .await
+            .is_err()
+    );
+    drop(child);
+    tokio::time::timeout(std::time::Duration::from_secs(5), closing)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -940,11 +958,13 @@ async fn newer_catalog_replaces_hosted_assignments_only_after_recovery() {
 
     assert!(service
         .install_catalog_and_reconcile(&head, std::slice::from_ref(&page), &[])
+        .await
         .is_err());
     assert_eq!(service.health(50_000).catalog_generation, 1);
 
     service
         .install_catalog_and_reconcile(&head, &[page], std::slice::from_ref(&partition))
+        .await
         .unwrap();
     let health = service.health(50_000);
     assert_eq!(health.catalog_generation, 2);
@@ -986,6 +1006,7 @@ async fn catching_up_target_appends_unconditional_write_before_initialization() 
     head.seal().unwrap();
     service
         .install_catalog_and_reconcile(&head, &[page], std::slice::from_ref(&target))
+        .await
         .unwrap();
     let stale = service
         .handle_point(
@@ -1068,6 +1089,7 @@ async fn catching_up_read_waits_are_time_and_count_bounded() {
     head.seal().unwrap();
     service
         .install_catalog_and_reconcile(&head, &[page], std::slice::from_ref(&target))
+        .await
         .unwrap();
     let request = |sequence| {
         let mut route = routing(sequence);

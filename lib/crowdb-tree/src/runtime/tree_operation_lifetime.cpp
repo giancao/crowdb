@@ -4,37 +4,63 @@
 
 #include "btree/allocation_bound.h"
 
-#include <stdexcept>
+#include <cassert>
 
 namespace crowdb::tree
 {
 struct TreeOperationLifetime::State
 {
     static constexpr uint64_t kClosed = uint64_t{1} << 63;
+    static constexpr uint64_t kNotify = uint64_t{1} << 62;
+    static constexpr uint64_t kCount  = ~(kClosed | kNotify);
 
-    State(size_t limit, std::shared_ptr<const void> owner) : maximum(limit), host_owner(std::move(owner))
+    explicit State(std::shared_ptr<const void> owner) : host_owner(std::move(owner))
     {
     }
 
     void release() noexcept
     {
-        active.fetch_sub(1, std::memory_order_acq_rel);
-        active.notify_all();
+        const auto previous = active.fetch_sub(1, std::memory_order_acq_rel);
+        if ((previous & kCount) == 1) {
+            active.notify_all();
+            if ((previous & kNotify) != 0) {
+                complete_drain();
+            }
+        }
     }
 
-    const size_t                maximum;
+    void arm_drain(uint64_t flags, AsyncCompletion complete) noexcept
+    {
+        on_drained          = std::move(complete);
+        const auto previous = active.fetch_or(flags | kNotify, std::memory_order_acq_rel);
+        assert((previous & kNotify) == 0);
+        if ((previous & kCount) == 0) {
+            complete_drain();
+        }
+    }
+
+    void complete_drain() noexcept
+    {
+        auto value = active.load(std::memory_order_acquire);
+        while ((value & (kCount | kNotify)) == kNotify) {
+            if (active.compare_exchange_weak(value, value & ~kNotify, std::memory_order_acq_rel)) {
+                auto done = std::move(on_drained);
+                done.complete(Status::Ok());
+                return;
+            }
+        }
+    }
+
     std::shared_ptr<const void> host_owner;
+    AsyncCompletion             on_drained;
     std::atomic<uint64_t>       active{0};
     std::atomic<uint64_t>       denied{0};
 };
 
-TreeOperationLifetime::TreeOperationLifetime(size_t maximum, const std::shared_ptr<AllocationBudget> &metadata,
-                                             std::shared_ptr<const void> host_owner)
+TreeOperationLifetime::TreeOperationLifetime(const std::shared_ptr<AllocationBudget> &metadata,
+                                             std::shared_ptr<const void>              host_owner)
 {
-    if (maximum == 0 || maximum >= State::kClosed) {
-        throw std::invalid_argument("invalid Tree operation capacity");
-    }
-    state_ = detail::reserved_shared<State>(metadata, maximum, std::move(host_owner));
+    state_ = detail::reserved_shared<State>(metadata, std::move(host_owner));
 }
 
 TreeOperationLifetime::~TreeOperationLifetime()
@@ -42,19 +68,13 @@ TreeOperationLifetime::~TreeOperationLifetime()
     close();
 }
 
-Status TreeOperationLifetime::acquire(const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<Ticket> *out)
-{
-    return acquire_impl(metadata, out, false);
-}
-
 Status TreeOperationLifetime::try_acquire(const std::shared_ptr<AllocationBudget> &metadata,
                                           std::shared_ptr<Ticket>                 *out)
 {
-    return acquire_impl(metadata, out, true);
+    return acquire(metadata, out);
 }
 
-Status TreeOperationLifetime::acquire_impl(const std::shared_ptr<AllocationBudget> &metadata,
-                                           std::shared_ptr<Ticket> *out, bool temporary_capacity)
+Status TreeOperationLifetime::acquire(const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<Ticket> *out)
 {
     if (out == nullptr || *out) {
         return Status::invalid_argument("operation ticket output must be empty");
@@ -64,10 +84,9 @@ Status TreeOperationLifetime::acquire_impl(const std::shared_ptr<AllocationBudge
         if ((active & State::kClosed) != 0) {
             return Status::unavailable("Tree operation admission closed");
         }
-        if (active >= state_->maximum) {
+        if (active == State::kCount) {
             state_->denied.fetch_add(1, std::memory_order_relaxed);
-            return temporary_capacity ? Status::unavailable("Tree operation capacity is occupied")
-                                      : Status::resource_exhausted("Tree operation capacity exhausted");
+            return Status::resource_exhausted("Tree operation tracking counter overflow");
         }
         if (state_->active.compare_exchange_weak(active, active + 1, std::memory_order_acq_rel)) {
             break;
@@ -86,6 +105,7 @@ Status TreeOperationLifetime::acquire_impl(const std::shared_ptr<AllocationBudge
         if (!constructed) {
             state_->release();
         }
+        state_->denied.fetch_add(1, std::memory_order_relaxed);
         return Status::resource_exhausted("Tree operation ticket allocation failed");
     }
     return Status::Ok();
@@ -113,13 +133,12 @@ size_t TreeOperationLifetime::ticket_allocation_bound() noexcept
 
 size_t TreeOperationLifetime::outstanding() const noexcept
 {
-    return state_->active.load(std::memory_order_acquire) & ~State::kClosed;
+    return state_->active.load(std::memory_order_acquire) & State::kCount;
 }
 
 ResourceUsage TreeOperationLifetime::resource_usage() const noexcept
 {
-    return {
-        .limit = state_->maximum, .used = outstanding(), .denied_tree = state_->denied.load(std::memory_order_relaxed)};
+    return {.limit = 0, .used = outstanding(), .denied_tree = state_->denied.load(std::memory_order_relaxed)};
 }
 
 bool TreeOperationLifetime::closed() const noexcept
@@ -132,6 +151,18 @@ void TreeOperationLifetime::close() noexcept
     state_->active.fetch_or(State::kClosed, std::memory_order_acq_rel);
 }
 
+void TreeOperationLifetime::close_async(AsyncCompletion complete) noexcept
+{
+    auto state = state_;
+    state->arm_drain(State::kClosed, std::move(complete));
+}
+
+void TreeOperationLifetime::drain_async(AsyncCompletion complete) noexcept
+{
+    auto state = state_;
+    state->arm_drain(0, std::move(complete));
+}
+
 void TreeOperationLifetime::close_and_drain() noexcept
 {
     close();
@@ -141,7 +172,7 @@ void TreeOperationLifetime::close_and_drain() noexcept
 void TreeOperationLifetime::drain_accepted() noexcept
 {
     auto active = state_->active.load(std::memory_order_acquire);
-    while ((active & ~State::kClosed) != 0) {
+    while ((active & State::kCount) != 0) {
         state_->active.wait(active, std::memory_order_acquire);
         active = state_->active.load(std::memory_order_acquire);
     }

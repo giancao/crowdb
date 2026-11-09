@@ -76,7 +76,6 @@ async fn registry_counts_one_physical_ledger_once_across_partition_views() {
     let expected = tree.backing_stats().unwrap().unwrap();
     assert!(expected.allocated_bytes >= 8192);
     assert_eq!(tree.estimated_bytes().unwrap(), expected.allocated_bytes);
-    assert!(tree.chunk_stats().is_err());
     let first = partition(1, tree.clone()).await;
     let second = partition(2, tree.clone()).await;
     assert_eq!(

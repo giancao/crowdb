@@ -43,9 +43,9 @@ CheckpointPendingMetrics::PreparedDelta::PreparedDelta(CheckpointPendingMetrics 
     edits_.reserve(max_pages);
 }
 
-CheckpointPendingMetrics::PreparedCapture::PreparedCapture(CheckpointPendingMetrics                      &owner,
-                                                           std::shared_ptr<detail::AllocationReservation> metadata,
-                                                           std::shared_ptr<const void> resource_owner)
+CheckpointPendingMetrics::PreparedCapture::PreparedCapture(CheckpointPendingMetrics         &owner,
+                                                           std::shared_ptr<AllocationBudget> metadata,
+                                                           std::shared_ptr<const void>       resource_owner)
     : owner_(owner),
       retired_(metadata && resource_owner
                    ? detail::reserved_shared<CaptureRetirement>(metadata, owner.pending_.resource(),

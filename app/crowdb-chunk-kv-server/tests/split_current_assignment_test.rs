@@ -50,7 +50,7 @@ fn entry(partition: &Partition) -> ChunkKvRangeCatalogEntry {
     }
 }
 
-fn publish(service: &ChunkKvService, generation: u64, partitions: &[Partition]) {
+async fn publish(service: &ChunkKvService, generation: u64, partitions: &[Partition]) {
     let mut page = ChunkKvRangeCatalogPage {
         generation,
         page_index: 0,
@@ -72,6 +72,7 @@ fn publish(service: &ChunkKvService, generation: u64, partitions: &[Partition]) 
     head.seal().unwrap();
     service
         .install_catalog_and_reconcile(&head, &[page], partitions)
+        .await
         .unwrap();
     let mut grant = ServingGrant {
         instance_id: 1,
@@ -137,7 +138,7 @@ async fn current_assignment_supersedes_historical_split_dispatcher() {
     let parent = open_parent(&storage, id, &parent_tree).await;
     write(&parent, 1, b"old-view").await;
     let service = ChunkKvService::new(test_process::TestProcess::authority(1), 8).unwrap();
-    publish(&service, 1, std::slice::from_ref(&parent));
+    publish(&service, 1, std::slice::from_ref(&parent)).await;
     let plan = SplitPlan {
         transition_id: TransitionId { high: 90, low: 2 },
         parent_id: id,
@@ -179,9 +180,9 @@ async fn current_assignment_supersedes_historical_split_dispatcher() {
         service.hosts_catalog_assignment(&entry(&parent)),
         "the unpublished parent assignment must reuse its live split dispatcher"
     );
-    publish(&service, 2, std::slice::from_ref(&parent));
+    publish(&service, 2, std::slice::from_ref(&parent)).await;
     let retained = parent.split_ingress().unwrap().retained_parent();
-    publish(&service, 3, &[retained.clone(), child.clone()]);
+    publish(&service, 3, &[retained.clone(), child.clone()]).await;
     let journal = storage
         .journal(crowdb_chunk_stream::StreamName { high: 92, low: 1 }, 3)
         .await;
@@ -195,7 +196,7 @@ async fn current_assignment_supersedes_historical_split_dispatcher() {
     )
     .unwrap();
     write(&current, 2, b"current-view").await;
-    publish(&service, 4, &[current.clone(), child]);
+    publish(&service, 4, &[current.clone(), child]).await;
     for (map_revision, owner_epoch) in [(1, 1), (4, 3)] {
         let response = service
             .handle_point(

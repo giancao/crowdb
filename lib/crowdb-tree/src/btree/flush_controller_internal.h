@@ -40,7 +40,9 @@ struct FlushController::State
     FlushBatchOptions                              options;
     FlushBatch::Maintenance                        maintenance;
     std::atomic<bool>                              closed{false};
-    std::atomic_flag                               preparing = ATOMIC_FLAG_INIT;
+    static constexpr uint8_t                       kPreparing = 1;
+    static constexpr uint8_t                       kRelease   = 2;
+    std::atomic<uint8_t>                           preparing{0};
     std::atomic<bool>                              preparing_waiter{false};
     std::shared_ptr<FlushOperation>                pending;
     std::shared_ptr<detail::AllocationReservation> lifecycle;

@@ -19,11 +19,11 @@ namespace
 Status snapshot(Crowdbtree &tree, bool asynchronous)
 {
     if (!asynchronous) {
-        return tree.snapshot();
+        return tree.flush_with_persistent();
     }
     Status            result;
     std::atomic<bool> done{false};
-    tree.snapshot_async([&](Status status, uint64_t /*unused*/) {
+    tree.flush_with_persistent_async([&](Status status, uint64_t /*unused*/) {
         result = std::move(status);
         done.store(true, std::memory_order_release);
         done.notify_one();
@@ -113,11 +113,11 @@ TEST(ChunkSnapshotRetry, SmallFramesCheckpointLargeValues)
                         .ok());
     }
     ASSERT_TRUE(test.tree->flush().ok());
-    const auto status = test.tree->snapshot();
+    const auto status = test.tree->flush_with_persistent();
     const auto pins   = test.backend.catalog->queue->snapshot();
     ASSERT_TRUE(status.ok()) << status.to_string() << " registered=" << pins.registered << " pending=" << pins.pending;
     EXPECT_GE(test.tree->last_snapshot_pages_written(), 512U);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 32U);
+    EXPECT_EQ(test.tree->durable_coverage(), 32U);
     test.tree.reset();
     test.config.backend_owner.reset();
     test.store.reset();

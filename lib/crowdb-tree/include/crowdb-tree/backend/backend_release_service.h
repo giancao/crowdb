@@ -8,6 +8,11 @@
 #include <atomic>
 #include <memory>
 
+namespace crowdb::common
+{
+class DiskIOUring;
+}
+
 namespace crowdb::tree
 {
 // A host-owned backend service has no executor or Tree reference. The host
@@ -18,11 +23,13 @@ class BackendReleaseService : public std::enable_shared_from_this<BackendRelease
   public:
     using Wake = void (*)(void *) noexcept;
 
+    enum class Disposal : uint8_t { kDone, kMore, kPending };
+
     struct Node
     {
-        // Each false result yields the same paid node for a later bounded step.
-        // A true result must have destroyed/freed the node and its resource.
-        bool (*dispose)(Node *) noexcept = nullptr;
+        // Pending leaves the node charged until its I/O owner resumes it.
+        // Done must have freed the node and its resource.
+        Disposal (*dispose)(Node *, common::DiskIOUring *) noexcept = nullptr;
         std::shared_ptr<BackendReleaseService> service;
         Node                                  *next   = nullptr;
         bool                                   queued = false;
@@ -68,8 +75,9 @@ class BackendReleaseService : public std::enable_shared_from_this<BackendRelease
     // is embedded in an independently paid owner that survives final release.
     [[nodiscard]] Status register_node(Node &node);
     static void          enqueue(Node &node) noexcept;
+    static void          resume(Node &node) noexcept;
     // Only the host backend consumer may pump. Concurrent pumps do not wait.
-    [[nodiscard]] Step     pump(size_t limit) noexcept;
+    [[nodiscard]] Step     pump(size_t limit, common::DiskIOUring *reactor = nullptr) noexcept;
     void                   stop_admission() noexcept;
     [[nodiscard]] Snapshot snapshot() const noexcept;
     [[nodiscard]] bool     drained() const noexcept;

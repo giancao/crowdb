@@ -53,5 +53,6 @@ bool valid_block_budget(const BlockPageStore &store, const std::shared_ptr<Alloc
 // implementation accounting; this adapter only binds the local Block backend.
 Status bind_block_account(PageStore *store, const std::shared_ptr<ResourceBudget::Account> &account,
                           size_t backend_workers, BackendOpenBudget *out);
+Status ongoing_backend_operation(PageStore *store, std::shared_ptr<AllocationBudget> *out);
 } // namespace detail
 } // namespace crowdb::tree

@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "btree/allocation_account.h"
 #include "btree/source_admission.h"
 
 #include <gtest/gtest.h>
@@ -103,6 +104,26 @@ TEST(MemTableFrozenNotification, ConcurrentRegistrationAndLastWriterCannotLoseNo
         subscriber.join();
         EXPECT_EQ(notifications.load(), 1U);
     }
+}
+
+TEST(SourceAdmission, ActualMetadataRejectsAnotherTreeOnTheSameHostBeforeClosingSources)
+{
+    Credits                                    credits;
+    SourceAdmission                            admission(0, 1, {.account = credits.account});
+    auto                                       other = credits.budget.make_account(Credits::limits());
+    std::shared_ptr<detail::AllocationAccount> owner;
+    std::shared_ptr<detail::AllocationAccount> foreign;
+    ASSERT_TRUE(detail::AllocationAccount::create_ongoing(credits.account, detail::BudgetClass::kHandoff, &owner).ok());
+    ASSERT_TRUE(detail::AllocationAccount::create_ongoing(other, detail::BudgetClass::kHandoff, &foreign).ok());
+    ASSERT_EQ(owner->domain(), foreign->domain());
+    const auto                     initial = admission.catalog();
+    std::atomic<uint64_t>          contiguous{1};
+    std::shared_ptr<SourceCapture> capture;
+    EXPECT_EQ(admission.try_capture(contiguous, foreign, &capture).code(), Code::kInvalidArgument);
+    EXPECT_FALSE(initial->active->closed());
+    ASSERT_TRUE(admission.try_capture(contiguous, owner, &capture).ok());
+    EXPECT_EQ(capture->admission_owner(), owner);
+    EXPECT_TRUE(initial->active->closed());
 }
 
 TEST(SourceAdmission, NoProgressOrMissingCreditLeavesActiveOpen)

@@ -51,14 +51,13 @@ PageWriteOperation::State::State(PageWriteInput source, PageWriteLimits bounds, 
     : input(std::move(source)),
       limits(bounds),
       budget(std::move(credits)),
-      io_credit(budget.io, 1),
-      io_resources(budget.reservation(), TreeResourceMetric::WriteInflightBytes),
+      io_resources(budget.bytes, TreeResourceMetric::WriteInflightBytes),
       blob(padded_blob_bound(limits) + limits.buffer_alignment - 1,
-           detail::ReservationAllocator<uint8_t, AllocationKind::kIo>(budget.reservation())),
+           detail::ReservationAllocator<uint8_t, AllocationKind::kIo>(budget.bytes)),
       scratch(durable_encode_scratch_bytes(limits.compression),
-              detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(budget.reservation())),
-      backing(detail::reserved_shared<BackingRef>(budget.reservation())),
-      protection(detail::reserved_shared<Protection>(budget.reservation()))
+              detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(budget.bytes)),
+      backing(detail::reserved_shared<BackingRef>(budget.bytes)),
+      protection(detail::reserved_shared<Protection>(budget.bytes))
 {
     void      *data     = blob.data();
     auto       capacity = blob.size();
@@ -68,12 +67,15 @@ PageWriteOperation::State::State(PageWriteInput source, PageWriteLimits bounds, 
     aligned                  = {static_cast<uint8_t *>(address), bytes};
     protection->dependencies = input.reload_dependencies;
     backing->owner           = protection;
-    if (limits.chunk_backed) {
+    if (limits.chunk_backed && budget.reservation()) {
         const auto bound = detail::ChunkFixedPackStore::write_allocation_bound(padded_blob_bound(limits));
-        if (!bound || !budget.reservation()) {
+        if (!bound || !budget.bytes) {
             throw std::bad_alloc();
         }
         chunk_credit = detail::AllocationReservation::create(budget.reservation(), *bound);
+    }
+    else if (limits.chunk_backed) {
+        chunk_credit = budget.bytes;
     }
 }
 
@@ -85,24 +87,23 @@ Status PageWriteOperation::create(std::shared_ptr<AsyncPageStore> store, std::sh
     if (!store || !runtime || !lane || !reserve || out == nullptr || !allocation_bound(limits) || !input.owner ||
         input.frame.size() != input.info.bytes || input.frame.size() > limits.max_frame_bytes ||
         input.frame.size() < kFrameHeaderSize + kFrameTrailerSize ||
-        static_cast<bool>(budget.reservation()) != static_cast<bool>(budget.io) ||
-        (budget.reservation() && ((budget.reservation()->category() != detail::BudgetClass::kRouting &&
-                                   budget.reservation()->category() != detail::BudgetClass::kReclaim) ||
-                                  budget.io->category() != detail::BudgetClass::kIo ||
-                                  budget.reservation()->account() != budget.io->account()))) {
-        return Status::invalid_argument("page write requires owned input and matching byte/I/O credit");
+        (budget.reservation() && budget.reservation()->category() != detail::BudgetClass::kRouting &&
+         budget.reservation()->category() != detail::BudgetClass::kReclaim) ||
+        (budget.io && (!budget.reservation() || budget.io->category() != detail::BudgetClass::kIo ||
+                       budget.reservation()->account() != budget.io->account()))) {
+        return Status::invalid_argument("page write requires owned input and valid allocation ownership");
     }
     if (limits.chunk_backed ? dynamic_cast<ScheduledPageStore *>(store.get()) == nullptr
                             : !store->write_completion_is_reloadable()) {
         return Status::not_supported("backend write needs checkpoint/seal before it is independently reloadable");
     }
     try {
-        auto state     = detail::reserved_shared<State>(budget.reservation(), std::move(input), limits, budget);
+        auto state     = detail::reserved_shared<State>(budget.bytes, std::move(input), limits, budget);
         state->store   = std::move(store);
         state->runtime = std::move(runtime);
         state->lane    = std::move(lane);
         state->reserve = std::move(reserve);
-        *out           = detail::reserved_construct<PageWriteOperation>(budget.reservation(), [&](auto *storage) {
+        *out           = detail::reserved_construct<PageWriteOperation>(budget.bytes, [&](auto *storage) {
             ::new (static_cast<void *>(storage)) PageWriteOperation(std::move(state));
         });
     }
@@ -141,10 +142,6 @@ void PageWriteOperation::State::start(detail::CallbackComplete callback, void *c
     pending  = weak_from_this().lock();
     complete = callback;
     receiver = context;
-    if (budget.cpu_progress) {
-        budget.cpu_progress->request(encode_node, pending);
-        return;
-    }
     Status status;
     try {
         status = runtime->try_submit(lane, &State::encode, this);
@@ -152,7 +149,10 @@ void PageWriteOperation::State::start(detail::CallbackComplete callback, void *c
     catch (...) {
         status = Status::resource_exhausted();
     }
-    if (!status.ok()) {
+    if (!status.ok() && budget.cpu_progress) {
+        budget.cpu_progress->request(encode_node, pending);
+    }
+    else if (!status.ok()) {
         finish(std::move(status));
     }
 }
@@ -186,7 +186,6 @@ void PageWriteOperation::State::written(void *context, Status status) noexcept
         state->backing->physical_metrics = state->backing->chunk->physical_metrics;
     }
     state->io_resources.reset();
-    state->io_credit.reset();
     state->finish(std::move(status));
 }
 
@@ -195,16 +194,13 @@ void PageWriteOperation::State::finish(Status status) noexcept
     if (finished.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    if (chunk_credit) {
-        chunk_credit->seal();
+    if (const auto reservation = std::dynamic_pointer_cast<detail::AllocationReservation>(chunk_credit)) {
+        reservation->seal();
     }
     const bool cancelled = stopped.load(std::memory_order_acquire);
     report.status        = cancelled ? Status::unavailable() : std::move(status);
     if (report.status.ok()) {
         report.backing = backing;
-    }
-    if (!io_submitted) {
-        io_credit.reset();
     }
     input.owner.reset();
     input.info.dependencies.reset();

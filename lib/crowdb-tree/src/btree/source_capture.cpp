@@ -114,7 +114,7 @@ const std::shared_ptr<MemTable> &SourceCapture::successor() const noexcept
     return state_->successor_catalog->active;
 }
 
-const std::shared_ptr<detail::AllocationReservation> &SourceCapture::admission_owner() const noexcept
+const std::shared_ptr<AllocationBudget> &SourceCapture::admission_owner() const noexcept
 {
     return state_->admission;
 }

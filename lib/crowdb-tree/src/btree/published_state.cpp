@@ -11,15 +11,15 @@
 
 namespace crowdb::tree
 {
-void PublishedTreeState::clear_merge_candidates(const std::shared_ptr<detail::AllocationReservation> &metadata)
+void PublishedTreeState::clear_merge_candidates(const std::shared_ptr<AllocationBudget> &metadata)
 {
     detail::ReservedVector<PageReplacement> changes{detail::ReservationAllocator<PageReplacement>(metadata)};
     changes.reserve(mapping.copy_bounds().merge_candidate_pages);
 
     struct Context
     {
-        detail::ReservedVector<PageReplacement>              &changes;
-        const std::shared_ptr<detail::AllocationReservation> &metadata;
+        detail::ReservedVector<PageReplacement> &changes;
+        const std::shared_ptr<AllocationBudget> &metadata;
     } context{.changes = changes, .metadata = metadata};
 
     mapping.visit(&context, [](void *argument, uint64_t pid, const auto &page) {
@@ -57,17 +57,16 @@ TreeOutcome publication_outcome(const PublicationResult &result) noexcept
 }
 } // namespace
 
-PublicationCoordinator::Root::Root(std::shared_ptr<const PublishedTreeState>      value,
-                                   std::shared_ptr<detail::AllocationReservation> reservation)
+PublicationCoordinator::Root::Root(std::shared_ptr<const PublishedTreeState> value,
+                                   std::shared_ptr<AllocationBudget>         reservation)
     : state(std::move(value)),
       metadata(std::move(reservation))
 {
     destroy = [](EpochManager::Deferred *entry) noexcept { dispose(static_cast<Root *>(entry)); };
 }
 
-PublicationCoordinator::Root *
-PublicationCoordinator::Root::create(std::shared_ptr<const PublishedTreeState>             value,
-                                     const std::shared_ptr<detail::AllocationReservation> &metadata)
+PublicationCoordinator::Root *PublicationCoordinator::Root::create(std::shared_ptr<const PublishedTreeState> value,
+                                                                   const std::shared_ptr<AllocationBudget>  &metadata)
 {
     detail::ReservationAllocator<Root> allocator(metadata);
     auto                              *root = allocator.allocate(1);
@@ -210,10 +209,7 @@ void PublicationCoordinator::complete(PublicationRequest *request) noexcept
     if (request->completion_slot_) {
         checkpoint_completion_.store(false, std::memory_order_release);
     }
-    else if (request->lane_) {
-        request->lane_->queued_.fetch_sub(1, std::memory_order_release);
-    }
-    else {
+    else if (!request->lane_) {
         ordinary_queued_.fetch_sub(1, std::memory_order_release);
     }
     // One request is submitted once. A retry uses a new request, the same

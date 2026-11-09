@@ -32,10 +32,20 @@ typedef struct ct_installed_split_overlay_v1
 // changed. The returned capability exclusively owns its next installation.
 ct_status ct_arm_split_overlay(ct_tree *source, ct_tree *destination, const ct_split_overlay_limits_v1 *limits,
                                ct_prepared_split_overlay **out, uint64_t *start_frontier);
+// On acceptance, completion may run inline and transfers the prepared handle
+// on success. A rejected submission never calls completion.
+typedef void (*ct_split_overlay_armed)(void *ctx, ct_status status, ct_prepared_split_overlay *prepared,
+                                       uint64_t start_frontier);
+ct_status ct_arm_split_overlay_async(ct_tree *source, ct_tree *destination, const ct_split_overlay_limits_v1 *limits,
+                                     ct_split_overlay_armed complete, void *ctx);
 // A is the pre-registration write high-watermark, including out-of-order
 // slots. Replay the private child to a fixed P >= A without
 // changing its durable checkpoint, then complete this background preparation.
 ct_status ct_prepared_split_overlay_prepare(ct_prepared_split_overlay *prepared, uint64_t replayed_prefix);
+// Accepted preparation retains native ownership through its one completion.
+typedef void (*ct_split_overlay_prepared)(void *ctx, ct_status status);
+ct_status ct_prepared_split_overlay_prepare_async(ct_prepared_split_overlay *prepared, uint64_t replayed_prefix,
+                                                  ct_split_overlay_prepared complete, void *ctx);
 
 // No allocation, I/O, memtable drain, or executor wait. Repeating the committed
 // frontier is idempotent; a different frontier never extends an installed
@@ -51,6 +61,10 @@ int ct_prepared_split_overlay_committed_frontier(const ct_prepared_split_overlay
 // Cancels an uninstalled capability. Installed children retain independent
 // owners; releasing this handle does not remove their inherited prefix.
 void ct_prepared_split_overlay_destroy(ct_prepared_split_overlay *prepared);
+// Consumes the handle on success and retires its old controls through the
+// existing Tree retirement queue. A non-null callback runs after destruction.
+ct_status ct_prepared_split_overlay_release_async(ct_prepared_split_overlay *prepared, void (*complete)(void *),
+                                                  void                      *ctx);
 
 #ifdef __cplusplus
 }

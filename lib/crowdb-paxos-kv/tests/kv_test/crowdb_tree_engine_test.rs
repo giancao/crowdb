@@ -217,7 +217,7 @@ async fn get_reloads_an_evicted_leaf() {
         .await
         .unwrap();
     e.handle().flush().expect("flush");
-    e.handle().snapshot().expect("snapshot");
+    e.handle().flush_with_persistent().expect("snapshot");
     // Checkpoint installs reloadable bases without keeping encoded frames resident.
     assert_eq!(e.get(b"k").await, Some((1, b"v".to_vec())));
     let evicted = e.handle().evict_clean_leaves(0);
@@ -242,7 +242,7 @@ async fn scan_reloads_an_evicted_leaf() {
         .await
         .unwrap();
     e.handle().flush().expect("flush");
-    e.handle().snapshot().expect("snapshot");
+    e.handle().flush_with_persistent().expect("snapshot");
     // Populate the read cache before verifying eviction followed by a cold scan.
     assert_eq!(e.get(b"k").await, Some((1, b"v".to_vec())));
     let evicted = e.handle().evict_clean_leaves(0);

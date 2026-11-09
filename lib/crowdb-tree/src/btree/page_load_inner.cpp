@@ -122,7 +122,6 @@ struct InnerLoad : PageLoadProgress, std::enable_shared_from_this<InnerLoad>
         catch (...) {
             status = Status::internal_error("index decode failed");
         }
-        release_if_idle();
         (void)metrics.finish(status.ok() ? TreeOutcome::Success : TreeOutcome::Error, tree_metrics_now_ns());
         auto callback = std::move(complete);
         complete_page_load(callback, std::move(status), std::move(inner));
@@ -183,10 +182,6 @@ void AsyncStorePageLoader::load_inner(std::shared_ptr<const BackingRef> backing,
         reject(Status::resource_exhausted("index blob exceeds load budget"));
         return;
     }
-    if (!acquire_page_load(state_->inflight, state_->limits.max_inflight)) {
-        reject(Status::resource_exhausted("index load concurrency budget exhausted"));
-        return;
-    }
     std::shared_ptr<InnerLoad> operation;
     try {
         operation               = detail::reserved_shared<InnerLoad>(state_->budget.bytes, state_->budget, started_at);
@@ -194,10 +189,10 @@ void AsyncStorePageLoader::load_inner(std::shared_ptr<const BackingRef> backing,
         operation->runtime      = state_->runtime;
         operation->lane         = state_->lane;
         operation->loader_owner = state_;
-        operation->inflight     = &state_->inflight;
-        operation->limits       = state_->limits;
-        operation->backing      = std::move(backing);
-        operation->complete     = std::move(complete);
+
+        operation->limits   = state_->limits;
+        operation->backing  = std::move(backing);
+        operation->complete = std::move(complete);
         if (operation->backing->storage == BackingStorage::kResidentFrame) {
             queue_page_load(operation, &InnerLoad::decode);
         }
@@ -211,7 +206,7 @@ void AsyncStorePageLoader::load_inner(std::shared_ptr<const BackingRef> backing,
             operation->finish(Status::resource_exhausted("index load allocation failed"));
         }
         else {
-            state_->inflight.fetch_sub(1, std::memory_order_release);
+
             reject(Status::resource_exhausted("index load allocation failed"));
         }
     }

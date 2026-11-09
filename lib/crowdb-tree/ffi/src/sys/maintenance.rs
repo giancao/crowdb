@@ -43,7 +43,7 @@ extern "C" {
     pub fn ct_durable_coverage(tree: *mut ct_tree) -> u64;
     pub fn ct_flush_report_async(tree: *mut ct_tree, out: *mut *mut ct_future) -> i32;
     pub fn ct_writeback_async(tree: *mut ct_tree, out: *mut *mut ct_future) -> i32;
-    pub fn ct_checkpoint_report_async(tree: *mut ct_tree, out: *mut *mut ct_future) -> i32;
+    pub fn ct_flush_with_persistent_report_async(tree: *mut ct_tree, out: *mut *mut ct_future) -> i32;
     pub fn ct_future_poll_flush_report(
         future: *mut ct_future,
         done: *mut i32,

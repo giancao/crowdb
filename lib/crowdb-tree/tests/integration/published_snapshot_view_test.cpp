@@ -78,7 +78,7 @@ TEST(PublishedSnapshotView, FixedL1GetAndEntriesSurviveSharedBackendTreeClose)
                                         {.key = "gone", .kind = OpKind::kDelete, .value = ""}}
     })
                     .ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     ASSERT_TRUE(test.tree->put("a", "pending").ok());
     std::shared_ptr<Snapshot> snapshot;
     status = test.capture(&snapshot);
@@ -107,7 +107,7 @@ TEST(PublishedSnapshotView, RawBackendMaterializesBeforeReturningAndReleasesDoma
     ASSERT_TRUE(status.ok()) << status.to_string();
     const std::string value(12000, 'r');
     ASSERT_TRUE(test.tree->put("a", value).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     std::shared_ptr<Snapshot> snapshot;
     status = test.capture(&snapshot);
     ASSERT_TRUE(status.ok()) << status.to_string();
@@ -173,9 +173,9 @@ TEST(PublishedSnapshotView, WholeResultLimitFailsExplicitlyWhilePointReadsStayUs
     auto             status = test.open();
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_TRUE(test.tree->put("a", std::string(12000, 'l')).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
-    std::shared_ptr<PublishedSnapshotContext> context;
-    ASSERT_TRUE(TreeCoreAccess::get(*test.tree)->capture_snapshot(&context).ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
+    std::shared_ptr<PublishedReadViewContext> context;
+    ASSERT_TRUE(TreeCoreAccess::get(*test.tree)->capture_read_only_view(&context).ok());
     std::shared_ptr<Snapshot> snapshot;
     status = PublishedSnapshotView::create(context, 1024, &snapshot);
     ASSERT_TRUE(status.ok()) << status.to_string();

@@ -4,10 +4,17 @@
 #pragma once
 
 #include "crowdb-rpc/c_api.h"
-#include "host_completion.h"
+#include "crowdb-tree/status.h"
 
-#include <atomic>
+#include <functional>
+#include <memory>
+#include <span>
 #include <utility>
+
+namespace crowdb::tree
+{
+class AllocationBudget;
+}
 
 namespace crowdb::tree::detail
 {
@@ -58,20 +65,9 @@ struct RpcResult
     }
 };
 
-struct RpcCallState
-{
-    HostCompletion done;
-    RpcResult      result;
-};
-
-inline void rpc_complete(uint64_t /*unused*/, crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                         crowdb_rpc_status status, void *context)
-{
-    auto *state           = static_cast<RpcCallState *>(context);
-    state->result.status  = status;
-    state->result.control = control;
-    state->result.data    = data;
-    state->done.signal();
-}
+struct RpcChunkRouteLease;
+using RpcComplete = std::function<void(Status, RpcResult)>;
+void submit_rpc(RpcChunkRouteLease route, uint64_t request_id, uint16_t message_type, std::span<const uint8_t> control,
+                std::span<const uint8_t> data, const std::shared_ptr<AllocationBudget> &metadata, RpcComplete complete);
 
 } // namespace crowdb::tree::detail

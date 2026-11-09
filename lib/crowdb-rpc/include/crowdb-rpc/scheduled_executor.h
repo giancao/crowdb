@@ -33,7 +33,7 @@ class ScheduledExecutor
 
     // Schedule a task to run after delay_ms. Returns the task_id (0 on
     // error — e.g. empty callback).
-    TaskId schedule(Task task, uint32_t delay_ms);
+    TaskId schedule(Task task, uint32_t delay_ms, Task cancelled = {});
 
     // Cancel a scheduled task. Returns true if the task was found and
     // removed, false if it already ran or was not found.
@@ -42,7 +42,11 @@ class ScheduledExecutor
     // Run all tasks whose deadline has passed. Returns the time until the
     // next due task (in ms), or -1 if no tasks are pending. The caller
     // (worker loop) uses this to set the next timer.
-    int run_due_tasks();
+    int run_due_tasks(const std::function<void(int)> &rearm = {});
+
+    // Reject new timers and cancel queued timers. Callbacks and context
+    // destruction execute outside the task-map lock.
+    void close();
 
     // Number of pending tasks (for diagnostics).
     size_t pending_count();
@@ -52,11 +56,13 @@ class ScheduledExecutor
     {
         Clock::time_point deadline;
         Task              callback;
+        Task              cancelled;
     };
 
     std::atomic<TaskId>                       next_id_{1};
     std::mutex                                mu_;
     std::unordered_map<TaskId, ScheduledTask> tasks_;
+    bool                                      closed_ = false;
 };
 
 } // namespace crowdb::rpc

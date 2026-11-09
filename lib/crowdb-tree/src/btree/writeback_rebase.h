@@ -12,7 +12,7 @@ namespace crowdb::tree
 // page as its expected value. A conflict requires replan, never a blind swap.
 Status build_writeback_rebase(const std::shared_ptr<const PublishedPage> &captured,
                               const std::shared_ptr<const PublishedPage> &current, const DurableCapturedFrame &written,
-                              uint64_t coverage, const std::shared_ptr<detail::AllocationReservation> &metadata,
+                              uint64_t coverage, const std::shared_ptr<AllocationBudget> &metadata,
                               std::shared_ptr<const PublishedPage> *out, size_t max_sources = 128,
                               uint64_t gc_floor = 0);
 // A private layout can write several durable leaves for one captured source.

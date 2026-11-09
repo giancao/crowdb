@@ -2,13 +2,31 @@
 // Licensed under the Apache License, Version 2.0.
 #include "snapshot/published_snapshot_entries.h"
 
-#include "snapshot/operation_wait.h"
+#include "btree/apply_dispatcher.h"
+#include "crowdb-common/log.h"
+#include "host_completion.h"
 
 namespace crowdb::tree
 {
+namespace
+{
+void complete_entries(const PublishedSnapshotEntries::Complete &complete, Status status,
+                      std::optional<PublishedScanEntry> entry, bool end) noexcept
+{
+    try {
+        complete(std::move(status), std::move(entry), end);
+    }
+    catch (...) {
+        CRB_LOG_ERROR("read-only view entry receiver threw after completion");
+    }
+}
+} // namespace
+
 struct PublishedSnapshotEntries::State
 {
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
+    struct Window;
+
+    std::shared_ptr<PublishedReadViewContext> snapshot;
     std::shared_ptr<AllocationBudget>         metadata;
     std::shared_ptr<SnapshotPageLoader>       loader;
     std::shared_ptr<PublishedScan>            scan;
@@ -17,7 +35,79 @@ struct PublishedSnapshotEntries::State
     bool                                      complete = false;
 };
 
-Status PublishedSnapshotEntries::create(std::shared_ptr<PublishedSnapshotContext>  snapshot,
+struct PublishedSnapshotEntries::State::Window
+{
+    struct Receiver
+    {
+        using receiver_concept = stdexec::receiver_tag;
+        Window *window;
+
+        void set_value() const noexcept
+        {
+            window->finish(Status::Ok());
+        }
+
+        void set_error(Status status) const noexcept
+        {
+            window->finish(std::move(status));
+        }
+
+        void set_stopped() const noexcept
+        {
+            window->finish(Status::unavailable());
+        }
+    };
+
+    Window(std::shared_ptr<State> state, SnapshotReadWindow window, Complete complete)
+        : state(std::move(state)),
+          window(std::move(window)),
+          complete(std::move(complete)),
+          connected(stdexec::connect(this->state->scan->next_sender(), Receiver{.window = this}))
+    {
+    }
+
+    static void start(void *context) noexcept
+    {
+        auto &work = *static_cast<Window *>(context);
+        auto  keep = work.owner;
+        stdexec::start(work.connected);
+    }
+
+    void finish(Status status) noexcept
+    {
+        auto                              keep = std::move(owner);
+        std::optional<PublishedScanEntry> entry;
+        if (status.ok()) {
+            const auto &result = state->scan->result();
+            try {
+                if (!result.entries.empty()) {
+                    entry.emplace(result.entries.front());
+                }
+                state->complete = result.done;
+            }
+            catch (const std::bad_alloc &) {
+                status = Status::resource_exhausted();
+            }
+        }
+        if (!status.ok()) {
+            state->failure = status.without_message();
+        }
+        const bool end = status.ok() && state->complete;
+        state->loader->end();
+        window.seal();
+        state->busy.store(false, std::memory_order_release);
+        complete_entries(complete, std::move(status), std::move(entry), end);
+    }
+
+    std::shared_ptr<State>                      state;
+    SnapshotReadWindow                          window;
+    Complete                                    complete;
+    std::shared_ptr<Window>                     owner;
+    detail::CallbackSender::Operation<Receiver> connected;
+    ApplyDispatcher::Node                       ready{&Window::start, this};
+};
+
+Status PublishedSnapshotEntries::create(std::shared_ptr<PublishedReadViewContext>  snapshot,
                                         std::shared_ptr<PublishedSnapshotEntries> *out, const KeyRange &range)
 try {
     if (!snapshot || out == nullptr || *out) {
@@ -76,78 +166,103 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot entry cursor allocation failed");
 }
 
-Status PublishedSnapshotEntries::next(std::optional<PublishedScanEntry> *out, bool *complete)
+Status PublishedSnapshotEntries::next_async(Complete complete)
 {
-    if (out == nullptr || complete == nullptr) {
-        return Status::invalid_argument("snapshot entry cursor needs result outputs");
+    return next_impl(std::move(complete), nullptr);
+}
+
+Status PublishedSnapshotEntries::next_impl(Complete complete, std::shared_ptr<TreeCore> *host_core)
+{
+    if (!complete) {
+        return Status::invalid_argument("read-only view entry cursor needs a completion");
     }
-    out->reset();
-    *complete = false;
-    if (state_->busy.exchange(true, std::memory_order_acq_rel)) {
-        return Status::unavailable("snapshot entry cursor already has an active window");
+    auto state = state_;
+    if (host_core == nullptr && !state->snapshot->detached()) {
+        return Status::unavailable("read-only view borrows its backend");
+    }
+    if (state->busy.exchange(true, std::memory_order_acq_rel)) {
+        return Status::unavailable("read-only view entry cursor already has an active window");
     }
 
     struct Leave
     {
-        State &state;
+        State *state;
 
         ~Leave()
         {
-            state.busy.store(false, std::memory_order_release);
+            if (state != nullptr) {
+                state->busy.store(false, std::memory_order_release);
+            }
         }
-    } leave{*state_};
+    } leave{state.get()};
 
-    if (!state_->failure.ok()) {
-        return state_->failure;
+    if (!state->failure.ok()) {
+        return state->failure;
     }
-    if (state_->complete) {
-        *complete = true;
+    if (state->complete) {
+        leave.state = nullptr;
+        state->busy.store(false, std::memory_order_release);
+        complete_entries(complete, Status::Ok(), {}, true);
         return Status::Ok();
     }
     try {
         SnapshotReadWindow window;
-
-        struct ActiveWindow
-        {
-            SnapshotPageLoader &loader;
-
-            ~ActiveWindow()
-            {
-                loader.end();
-            }
-        } active{*state_->loader};
-
-        auto status = state_->snapshot->prepare_window(&window);
-        if (status.ok()) {
-            status = state_->loader->begin(window.loader);
-        }
+        auto               status = state->snapshot->prepare_window(&window);
         if (!status.ok()) {
-            state_->failure = status.without_message();
+            state->failure = status.without_message();
             return status;
         }
-        detail::SnapshotWaitCompletion completion;
-        auto                           connected =
-            stdexec::connect(state_->scan->next_sender(), detail::SnapshotWaitReceiver{.completion = &completion});
-        stdexec::start(connected);
-        completion.done.wait();
-        const auto &result = state_->scan->result();
-        if (!result.status.ok()) {
-            state_->failure = result.status.without_message();
-            return result.status;
+        if (host_core != nullptr) {
+            // A borrowed backend must release its final Core on the host
+            // after the read ticket and callback have finished.
+            *host_core = std::move(window.host_core);
         }
-        if (!result.entries.empty()) {
-            *out = result.entries.front();
+        auto pending =
+            detail::reserved_shared<State::Window>(state->metadata, state, std::move(window), std::move(complete));
+        status = state->loader->begin(pending->window.loader);
+        if (!status.ok()) {
+            state->failure = status.without_message();
+            return status;
         }
-        state_->complete = result.done;
-        *complete        = result.done;
-        state_->loader->end();
-        window.seal();
+        pending->owner = pending;
+        leave.state    = nullptr;
+        if (host_core != nullptr) {
+            State::Window::start(pending.get());
+        }
+        else {
+            state->snapshot->binding()->view_cpu_progress()->request(pending->ready, pending);
+        }
         return Status::Ok();
     }
     catch (const std::bad_alloc &) {
-        state_->failure = Status::resource_exhausted();
-        return state_->failure;
+        state->failure = Status::resource_exhausted();
+        return state->failure;
     }
+}
+
+Status PublishedSnapshotEntries::next(std::optional<PublishedScanEntry> *out, bool *complete)
+{
+    if (out == nullptr || complete == nullptr) {
+        return Status::invalid_argument("read-only view entry cursor needs result outputs");
+    }
+    out->reset();
+    *complete = false;
+    std::shared_ptr<TreeCore> host_core;
+    detail::HostCompletion    done;
+    Status                    terminal;
+    auto                      status = next_impl(
+        [&](Status result, std::optional<PublishedScanEntry> entry, bool end) noexcept {
+            terminal  = std::move(result);
+            *out      = std::move(entry);
+            *complete = end;
+            done.signal();
+        },
+        &host_core);
+    if (!status.ok()) {
+        return status;
+    }
+    done.wait();
+    return terminal;
 }
 
 uint64_t PublishedSnapshotEntries::skipped_subtrees() const noexcept

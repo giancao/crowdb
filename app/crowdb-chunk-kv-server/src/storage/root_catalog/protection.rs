@@ -105,82 +105,142 @@ impl KvRootCatalogStore {
 }
 
 impl StageProtectionCatalog for KvRootCatalogStore {
-    fn recover_manifest_candidate(&self, tree: u64, id: StageId) -> Result<(), CtError> {
-        self.protection_identity(tree, id, false)?;
-        self.wait(self.recover_candidate(id))
-    }
-    fn writer_quiesced(&self, tree: u64, epoch: u64) -> Result<(), CtError> {
-        if tree != self.tree_id || epoch != self.owner_epoch {
-            return Err(CtError::InvalidArgument);
-        }
-        self.wait(self.publish_writer_quiescence())
-    }
     fn check_read_owner(&self) -> Result<(), CtError> {
         self.check_process_owner()
     }
-    fn prune_stage_pins(
+
+    fn recover_manifest_candidate_async(
+        &self,
+        tree: u64,
+        id: StageId,
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, ()> {
+        Box::pin(async move {
+            self.protection_identity(tree, id, false)?;
+            self.recover_candidate(id).await
+        })
+    }
+    fn writer_quiesced_async(&self, tree: u64, epoch: u64) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, ()> {
+        Box::pin(async move {
+            if tree != self.tree_id || epoch != self.owner_epoch {
+                return Err(CtError::InvalidArgument);
+            }
+            self.publish_writer_quiescence().await
+        })
+    }
+    fn prune_stage_pins_async(
         &self,
         tree: u64,
         stage: StageId,
         after: Option<StageId>,
         limit: u32,
-    ) -> Result<crowdb_tree_ffi::chunk::protection::PinPruneProgress, CtError> {
-        self.protection_identity(tree, stage, false)?;
-        self.wait(self.prune_pins(stage, after, limit))
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, crowdb_tree_ffi::chunk::protection::PinPruneProgress> {
+        Box::pin(async move {
+            self.protection_identity(tree, stage, false)?;
+            self.prune_pins(stage, after, limit).await
+        })
     }
-
-    fn load_manifest_candidate(&self, tree: u64, id: StageId) -> Result<Option<CandidateStatus>, CtError> {
-        self.protection_identity(tree, id, false)?;
-        self.wait(self.candidate_record(id))
-            .map(|record| record.map(|record| record.status))
+    fn load_manifest_candidate_async(
+        &self,
+        tree: u64,
+        id: StageId,
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, Option<CandidateStatus>> {
+        Box::pin(async move {
+            self.protection_identity(tree, id, false)?;
+            self.candidate_record(id)
+                .await
+                .map(|record| record.map(|record| record.status))
+        })
     }
-    fn list_manifest_candidates(
+    fn list_manifest_candidates_async(
         &self,
         tree: u64,
         after: Option<StageId>,
         limit: u32,
-    ) -> Result<Vec<CandidateStatus>, CtError> {
-        if tree != self.tree_id {
-            return Err(CtError::InvalidArgument);
-        }
-        self.wait(self.scan_candidates(after, limit))
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, Vec<CandidateStatus>> {
+        Box::pin(async move {
+            if tree != self.tree_id {
+                return Err(CtError::InvalidArgument);
+            }
+            self.scan_candidates(after, limit).await
+        })
     }
-    fn begin_manifest_candidate(&self, tree: u64, candidate: &ManifestCandidate) -> Result<(), CtError> {
-        candidate.validate()?;
-        self.protection_identity(tree, candidate.id, true)?;
-        self.wait(self.authorize_publication())?;
-        self.wait(self.begin_candidate(candidate))
+    fn begin_manifest_candidate_async<'a>(
+        &'a self,
+        tree: u64,
+        candidate: &'a ManifestCandidate,
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'a, ()> {
+        Box::pin(async move {
+            candidate.validate()?;
+            self.protection_identity(tree, candidate.id, true)?;
+            self.authorize_publication().await?;
+            self.begin_candidate(candidate).await
+        })
     }
-    fn prepare_manifest_references(
+    fn prepare_manifest_references_async<'a>(
+        &'a self,
+        tree: u64,
+        id: StageId,
+        window: u64,
+        refs: &'a [StageId],
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'a, ()> {
+        Box::pin(async move {
+            self.protection_identity(tree, id, true)?;
+            self.prepare_candidate(id, window, refs).await
+        })
+    }
+    fn commit_manifest_candidate_async(
+        &self,
+        tree: u64,
+        id: StageId,
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, ()> {
+        Box::pin(async move {
+            self.protection_identity(tree, id, true)?;
+            self.commit_candidate(id).await
+        })
+    }
+    fn abort_manifest_candidate_async(
+        &self,
+        tree: u64,
+        id: StageId,
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, ()> {
+        Box::pin(async move {
+            self.protection_identity(tree, id, true)?;
+            self.abort_candidate(id).await
+        })
+    }
+    fn release_manifest_references_async(
         &self,
         tree: u64,
         id: StageId,
         window: u64,
-        refs: &[StageId],
-    ) -> Result<(), CtError> {
-        self.protection_identity(tree, id, true)?;
-        self.wait(self.prepare_candidate(id, window, refs))
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, ()> {
+        Box::pin(async move {
+            self.protection_identity(tree, id, false)?;
+            self.release_candidate(id, window).await
+        })
     }
-    fn commit_manifest_candidate(&self, tree: u64, id: StageId) -> Result<(), CtError> {
-        self.protection_identity(tree, id, true)?;
-        self.wait(self.commit_candidate(id))
+    fn pin_stage_async(
+        &self,
+        tree: u64,
+        stage: StageId,
+        pin: StageId,
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, ()> {
+        Box::pin(async move {
+            self.protection_identity(tree, stage, false)?;
+            self.protection_identity(tree, pin, true)?;
+            self.change_stage_pin(stage, pin, true).await
+        })
     }
-    fn abort_manifest_candidate(&self, tree: u64, id: StageId) -> Result<(), CtError> {
-        self.protection_identity(tree, id, true)?;
-        self.wait(self.abort_candidate(id))
-    }
-    fn release_manifest_references(&self, tree: u64, id: StageId, window: u64) -> Result<(), CtError> {
-        self.protection_identity(tree, id, false)?;
-        self.wait(self.release_candidate(id, window))
-    }
-    fn pin_stage(&self, tree: u64, stage: StageId, pin: StageId) -> Result<(), CtError> {
-        self.protection_identity(tree, stage, false)?;
-        self.protection_identity(tree, pin, true)?;
-        self.wait(self.change_stage_pin(stage, pin, true))
-    }
-    fn unpin_stage(&self, tree: u64, stage: StageId, pin: StageId) -> Result<(), CtError> {
-        self.protection_identity(tree, stage, false)?;
-        self.protection_identity(tree, pin, true)?;
-        self.wait(self.change_stage_pin(stage, pin, false))
+    fn unpin_stage_async(
+        &self,
+        tree: u64,
+        stage: StageId,
+        pin: StageId,
+    ) -> crowdb_tree_ffi::chunk::CatalogFuture<'_, ()> {
+        Box::pin(async move {
+            self.protection_identity(tree, stage, false)?;
+            self.protection_identity(tree, pin, true)?;
+            self.change_stage_pin(stage, pin, false).await
+        })
     }
 }

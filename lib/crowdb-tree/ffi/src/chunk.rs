@@ -8,93 +8,33 @@ use std::sync::Arc;
 use crate::error::{check, CtError};
 use crate::{sys, PageStore};
 
-pub mod legacy;
 pub mod pin_service;
 mod runtime;
 pub use runtime::ChunkRuntimeOptions;
 pub mod protection;
+mod protection_async_callbacks;
 mod protection_callbacks;
 pub mod stage;
+mod stage_async_callbacks;
 mod stage_callbacks;
 use stage::{StageId, StageRecord};
 
-#[derive(Debug, Clone, Copy)]
-pub struct ChunkPageStoreOptions {
-    pub tree_id: u64,
-    pub owner_epoch: u64,
-    /// Zero opens the latest root; a nonzero value opens exactly that immutable
-    /// manifest generation without falling back to the current root.
-    pub open_generation: u64,
-    pub pack_bytes: usize,
-    pub iu_size: u32,
-    pub max_concurrent_packs: usize,
-    pub materialization_bytes_per_pass: u64,
-    pub max_chunk_bytes: u64,
-    pub mirror_copies: u32,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ChunkPageStoreStats {
-    pub generations_published: u64,
-    pub packs_written: u64,
-    pub pack_bytes_written: u64,
-    pub packs_reused: u64,
-    pub pack_bytes_reused: u64,
-    pub pack_reads: u64,
-    pub cache_hits: u64,
-    pub layout_queries: u64,
-    pub mirror_write_attempts: u64,
-    pub mirror_write_failures: u64,
-    pub retained_manifests: u64,
-    pub pinned_bytes: u64,
-    pub oldest_pin_age_ms: u64,
-    pub orphan_bytes: u64,
-    pub materialization_passes: u64,
-    pub materialization_failures: u64,
-    pub materialization_packs_written: u64,
-    pub materialization_bytes_written: u64,
-    pub shared_packs: u64,
-    pub rpc_operations: u64,
-    pub rpc_latency_ns: u64,
-    pub diskio_operations: u64,
-    pub diskio_latency_ns: u64,
-    pub coalesced_reads: u64,
-    pub coalesced_read_bytes: u64,
-    pub completion_wakeups: u64,
-    pub materialization_scan_bytes: u64,
-    pub shared_metadata_segments: u64,
-    pub materialized_metadata_segments: u64,
-    pub manifest_publication_latency_ns: u64,
-    pub recovery_latency_ns: u64,
-}
-
 pub struct ChunkRootCatalog {
     ptr: NonNull<sys::ct_root_catalog>,
+    callback: Option<Arc<CatalogContext>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootCatalogObject {
     CurrentManifest,
     Manifest(u64),
-    ReferenceSegment(u64),
 }
 
-/// Synchronous persistence contract used only by tree checkpoint and
-/// maintenance paths. Implementations may bridge to an asynchronous service
-/// on a dedicated worker; tree point reads never call this interface.
+/// Future returned by a catalog operation on the host runtime.
+pub type CatalogFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, CtError>> + Send + 'a>>;
+
 pub trait RootCatalogStore: Send + Sync + 'static {
-    /// Immutable original manifest retained before replacing a legacy root.
-    fn prepare_legacy_migration(
-        &self,
-        _tree_id: u64,
-        _generation: u64,
-        _manifest: &[u8],
-    ) -> Result<(), CtError> {
-        Err(CtError::NotSupported)
-    }
-    fn load_legacy_migration(&self, _tree_id: u64, _generation: u64) -> Result<Option<Vec<u8>>, CtError> {
-        Err(CtError::NotSupported)
-    }
     /// Durable reference intents share the same authority as pack deletion.
     fn stage_protection(&self) -> Option<&dyn protection::StageProtectionCatalog> {
         None
@@ -123,22 +63,49 @@ pub trait RootCatalogStore: Send + Sync + 'static {
     ) -> Result<Vec<StageRecord>, CtError> {
         Err(CtError::NotSupported)
     }
-    fn load(&self, tree_id: u64, object: RootCatalogObject) -> Result<Option<Vec<u8>>, CtError>;
-    fn store(&self, tree_id: u64, object: RootCatalogObject, data: &[u8]) -> Result<(), CtError>;
-    fn publish(
+    fn load_stage_async(&self, tree_id: u64, id: StageId) -> CatalogFuture<'_, Option<StageRecord>> {
+        Box::pin(async move { self.load_stage(tree_id, id) })
+    }
+    fn compare_stage_async<'a>(
+        &'a self,
+        tree_id: u64,
+        owner_epoch: u64,
+        expected: Option<&'a StageRecord>,
+        next: Option<&'a StageRecord>,
+    ) -> CatalogFuture<'a, ()> {
+        Box::pin(async move { self.compare_stage(tree_id, owner_epoch, expected, next) })
+    }
+    fn list_stages_async(
         &self,
         tree_id: u64,
-        expected_generation: u64,
-        owner_epoch: u64,
-        generation: u64,
-        manifest: &[u8],
-    ) -> Result<(), CtError>;
-    fn allocate_reference_segment_id(&self, tree_id: u64) -> Result<u64, CtError>;
-    fn discard_reference_segments(&self, _tree_id: u64, _object_ids: &[u64]) -> u64 {
-        0
+        after: Option<StageId>,
+        limit: u32,
+    ) -> CatalogFuture<'_, Vec<StageRecord>> {
+        Box::pin(async move { self.list_stages(tree_id, after, limit) })
+    }
+    fn load(&self, _tree_id: u64, _object: RootCatalogObject) -> Result<Option<Vec<u8>>, CtError> {
+        Err(CtError::NotSupported)
+    }
+    fn load_async(&self, tree_id: u64, object: RootCatalogObject) -> CatalogFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async move { self.load(tree_id, object) })
+    }
+    fn publish<'a>(
+        &'a self,
+        _tree_id: u64,
+        _expected_generation: u64,
+        _owner_epoch: u64,
+        _generation: u64,
+        _manifest: &'a [u8],
+    ) -> CatalogFuture<'a, ()> {
+        Box::pin(async { Err(CtError::NotSupported) })
     }
     fn reclaim_before(&self, _tree_id: u64, _generation: u64) -> u64 {
         0
+    }
+    /// Prunes retained root history without using the synchronous callback.
+    /// Callback stores that support history pruning on the async path override this.
+    fn reclaim_before_async(&self, _tree_id: u64, _generation: u64) -> CatalogFuture<'_, u64> {
+        Box::pin(async { Err(CtError::NotSupported) })
     }
     fn pin_generation(
         &self,
@@ -149,6 +116,16 @@ pub trait RootCatalogStore: Send + Sync + 'static {
     ) -> Result<(), CtError> {
         Ok(())
     }
+    /// Pins an exact generation without entering the synchronous callback.
+    fn pin_generation_async(
+        &self,
+        _tree_id: u64,
+        _transition_high: u64,
+        _transition_low: u64,
+        _generation: u64,
+    ) -> CatalogFuture<'_, ()> {
+        Box::pin(async { Err(CtError::NotSupported) })
+    }
     fn unpin_generation(
         &self,
         _tree_id: u64,
@@ -156,6 +133,15 @@ pub trait RootCatalogStore: Send + Sync + 'static {
         _transition_low: u64,
     ) -> Result<(), CtError> {
         Ok(())
+    }
+    /// Releases an exact generation pin without entering the synchronous callback.
+    fn unpin_generation_async(
+        &self,
+        _tree_id: u64,
+        _transition_high: u64,
+        _transition_low: u64,
+    ) -> CatalogFuture<'_, ()> {
+        Box::pin(async { Err(CtError::NotSupported) })
     }
 }
 
@@ -165,30 +151,24 @@ impl ChunkRootCatalog {
     pub fn supports_protection_schema(&self) -> bool {
         unsafe { sys::ct_root_catalog_protection_capabilities(self.ptr.as_ptr()) & 1 != 0 }
     }
-    pub fn open_memory(owner_epoch: u64) -> Result<Self, CtError> {
-        let mut out = std::ptr::null_mut();
-        check(unsafe { sys::ct_memory_root_catalog_open(owner_epoch, &mut out) })?;
-        Ok(Self {
-            ptr: NonNull::new(out).ok_or(CtError::Internal)?,
-        })
-    }
-
     /// Opens a catalog whose opaque manifests are persisted by `store`.
     ///
     /// # Errors
     ///
-    /// Returns an invalid callback configuration error.
+    /// Returns an invalid callback configuration error, or `Unavailable` if
+    /// staging is enabled and the caller has no Tokio runtime.
     pub fn open_callback(store: Arc<dyn RootCatalogStore>) -> Result<Self, CtError> {
         let supports_staging = store.supports_staging();
         let supports_protection = store.stage_protection().is_some();
-        let context = Box::into_raw(Box::new(store)).cast::<c_void>();
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        if supports_staging && runtime.is_none() {
+            return Err(CtError::Unavailable);
+        }
+        let callback = Arc::new(CatalogContext { store, runtime });
+        let context = Arc::into_raw(callback.clone()).cast_mut().cast::<c_void>();
         let callbacks = sys::ct_root_catalog_callbacks {
             load: Some(catalog_load),
             free_blob: Some(catalog_free_blob),
-            store: Some(catalog_store),
-            publish: Some(catalog_publish),
-            allocate_reference_segment_id: Some(catalog_allocate_reference_segment_id),
-            discard_reference_segments: Some(catalog_discard_reference_segments),
             reclaim_before: Some(catalog_reclaim_before),
             pin_generation: Some(catalog_pin_generation),
             unpin_generation: Some(catalog_unpin_generation),
@@ -216,16 +196,50 @@ impl ChunkRootCatalog {
             }
         };
         if let Err(error) = check(status) {
-            unsafe { drop(Box::from_raw(context.cast::<Arc<dyn RootCatalogStore>>())) };
+            unsafe { drop(Arc::from_raw(context.cast::<CatalogContext>())) };
             return Err(error);
         }
-        Ok(Self {
+        let catalog = Self {
             ptr: NonNull::new(out).ok_or(CtError::Internal)?,
-        })
+            callback: Some(callback),
+        };
+        if supports_staging {
+            check(unsafe {
+                sys::ct_callback_root_catalog_set_staging_async_v1(
+                    catalog.ptr.as_ptr(),
+                    &stage_async_callbacks::callbacks(),
+                )
+            })?;
+        }
+        if supports_staging && supports_protection {
+            check(unsafe {
+                sys::ct_callback_root_catalog_set_protection_async_v1(
+                    catalog.ptr.as_ptr(),
+                    &protection_async_callbacks::callbacks(),
+                )
+            })?;
+        }
+        Ok(catalog)
     }
 
     pub fn reclaim_before(&self, tree_id: u64, generation: u64) -> u64 {
         unsafe { sys::ct_root_catalog_reclaim_before(self.ptr.as_ptr(), tree_id, generation) }
+    }
+
+    /// Prunes root history on the catalog runtime. Dropping the waiter does
+    /// not cancel a submitted authority mutation or its local cleanup.
+    /// # Errors
+    /// Returns an error if async reclamation is unavailable or the task fails.
+    pub async fn reclaim_before_async(&self, tree_id: u64, generation: u64) -> Result<u64, CtError> {
+        let Some(callback) = &self.callback else {
+            return Ok(self.reclaim_before(tree_id, generation));
+        };
+        let runtime = callback.runtime.as_ref().ok_or(CtError::Unavailable)?;
+        let store = callback.store.clone();
+        runtime
+            .spawn(async move { store.reclaim_before_async(tree_id, generation).await })
+            .await
+            .map_err(|_| CtError::Internal)?
     }
 
     pub fn pin_generation(
@@ -256,13 +270,63 @@ impl ChunkRootCatalog {
             sys::ct_root_catalog_unpin_generation(self.ptr.as_ptr(), tree_id, transition_high, transition_low)
         })
     }
+
+    /// Pins a generation on the catalog runtime. Canceling the waiter leaves
+    /// a submitted pin running with the original transition identity.
+    /// # Errors
+    /// Returns the catalog or runtime error for the pin.
+    pub async fn pin_generation_async(
+        &self,
+        tree_id: u64,
+        transition_high: u64,
+        transition_low: u64,
+        generation: u64,
+    ) -> Result<(), CtError> {
+        let Some(callback) = &self.callback else {
+            return self.pin_generation(tree_id, transition_high, transition_low, generation);
+        };
+        let runtime = callback.runtime.as_ref().ok_or(CtError::Unavailable)?;
+        let store = callback.store.clone();
+        runtime
+            .spawn(async move {
+                store
+                    .pin_generation_async(tree_id, transition_high, transition_low, generation)
+                    .await
+            })
+            .await
+            .map_err(|_| CtError::Internal)?
+    }
+
+    /// Releases a generation pin on the catalog runtime. Canceling the
+    /// waiter leaves a submitted release running.
+    /// # Errors
+    /// Returns the catalog or runtime error for the release.
+    pub async fn unpin_generation_async(
+        &self,
+        tree_id: u64,
+        transition_high: u64,
+        transition_low: u64,
+    ) -> Result<(), CtError> {
+        let Some(callback) = &self.callback else {
+            return self.unpin_generation(tree_id, transition_high, transition_low);
+        };
+        let runtime = callback.runtime.as_ref().ok_or(CtError::Unavailable)?;
+        let store = callback.store.clone();
+        runtime
+            .spawn(async move {
+                store
+                    .unpin_generation_async(tree_id, transition_high, transition_low)
+                    .await
+            })
+            .await
+            .map_err(|_| CtError::Internal)?
+    }
 }
 
 fn catalog_object(kind: i32, object_id: u64) -> Result<RootCatalogObject, CtError> {
     match kind {
         1 => Ok(RootCatalogObject::CurrentManifest),
         2 => Ok(RootCatalogObject::Manifest(object_id)),
-        3 => Ok(RootCatalogObject::ReferenceSegment(object_id)),
         _ => Err(CtError::InvalidArgument),
     }
 }
@@ -280,8 +344,13 @@ fn error_code(error: CtError) -> i32 {
     }
 }
 
+struct CatalogContext {
+    store: Arc<dyn RootCatalogStore>,
+    runtime: Option<tokio::runtime::Handle>,
+}
+
 unsafe fn catalog_store_ref<'a>(context: *mut c_void) -> &'a Arc<dyn RootCatalogStore> {
-    &*context.cast::<Arc<dyn RootCatalogStore>>()
+    &(*context.cast::<CatalogContext>()).store
 }
 
 unsafe extern "C" fn catalog_load(
@@ -296,12 +365,8 @@ unsafe extern "C" fn catalog_load(
         if context.is_null() || out.is_null() || len.is_null() {
             return -2;
         }
-        let result = if kind == 4 {
-            catalog_store_ref(context).load_legacy_migration(tree_id, object_id)
-        } else {
-            catalog_object(kind, object_id)
-                .and_then(|object| catalog_store_ref(context).load(tree_id, object))
-        };
+        let result = catalog_object(kind, object_id)
+            .and_then(|object| catalog_store_ref(context).load(tree_id, object));
         match result {
             Ok(Some(bytes)) if !bytes.is_empty() => {
                 let bytes = bytes.into_boxed_slice();
@@ -323,104 +388,6 @@ unsafe extern "C" fn catalog_free_blob(_context: *mut c_void, data: *const u8, l
             len,
         )));
     }
-}
-
-unsafe extern "C" fn catalog_store(
-    context: *mut c_void,
-    kind: i32,
-    tree_id: u64,
-    object_id: u64,
-    data: *const u8,
-    len: usize,
-) -> i32 {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if context.is_null() || (data.is_null() && len != 0) {
-            return -2;
-        }
-        let bytes = if len == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(data, len)
-        };
-        let result = if kind == 4 {
-            catalog_store_ref(context).prepare_legacy_migration(tree_id, object_id, bytes)
-        } else {
-            catalog_object(kind, object_id)
-                .and_then(|object| catalog_store_ref(context).store(tree_id, object, bytes))
-        };
-        result.map_or_else(error_code, |()| 0)
-    }))
-    .unwrap_or(-6)
-}
-
-unsafe extern "C" fn catalog_publish(
-    context: *mut c_void,
-    tree_id: u64,
-    expected_generation: u64,
-    owner_epoch: u64,
-    generation: u64,
-    data: *const u8,
-    len: usize,
-) -> i32 {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if context.is_null() || (data.is_null() && len != 0) {
-            return -2;
-        }
-        catalog_store_ref(context)
-            .publish(
-                tree_id,
-                expected_generation,
-                owner_epoch,
-                generation,
-                if len == 0 {
-                    &[]
-                } else {
-                    std::slice::from_raw_parts(data, len)
-                },
-            )
-            .map_or_else(error_code, |()| 0)
-    }))
-    .unwrap_or(-6)
-}
-
-unsafe extern "C" fn catalog_allocate_reference_segment_id(
-    context: *mut c_void,
-    tree_id: u64,
-    out: *mut u64,
-) -> i32 {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if context.is_null() || out.is_null() {
-            return -2;
-        }
-        match catalog_store_ref(context).allocate_reference_segment_id(tree_id) {
-            Ok(value) => {
-                *out = value;
-                0
-            }
-            Err(error) => error_code(error),
-        }
-    }))
-    .unwrap_or(-6)
-}
-
-unsafe extern "C" fn catalog_discard_reference_segments(
-    context: *mut c_void,
-    tree_id: u64,
-    object_ids: *const u64,
-    object_count: usize,
-) -> u64 {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if context.is_null() || (object_ids.is_null() && object_count != 0) {
-            return 0;
-        }
-        let ids = if object_count == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(object_ids, object_count)
-        };
-        catalog_store_ref(context).discard_reference_segments(tree_id, ids)
-    }))
-    .unwrap_or(0)
 }
 
 unsafe extern "C" fn catalog_reclaim_before(context: *mut c_void, tree_id: u64, generation: u64) -> u64 {
@@ -471,7 +438,7 @@ unsafe extern "C" fn catalog_unpin_generation(
 unsafe extern "C" fn catalog_drop_context(context: *mut c_void) {
     if !context.is_null() {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            drop(Box::from_raw(context.cast::<Arc<dyn RootCatalogStore>>()));
+            drop(Arc::from_raw(context.cast::<CatalogContext>()));
         }));
     }
 }
@@ -497,92 +464,6 @@ pub use transport::{ChunkRpcDiskRoute, ChunkRpcRoute, ChunkRpcTransportOptions, 
 pub use transport::{ChunkRpcRouteResolver, OwnedChunkRpcDiskRoute, OwnedChunkRpcTransportOptions};
 
 impl PageStore {
-    /// Opens the legacy mutable-address storage adapter for explicit migration.
-    /// Ordinary Tree open rejects this adapter. New writers use
-    /// `PageStore::open_chunk_runtime`; old roots use `Crowdbtree::migrate_legacy_chunk`.
-    pub fn open_chunk(
-        options: ChunkPageStoreOptions,
-        catalog: Arc<ChunkRootCatalog>,
-        transport: Option<&ChunkTransport>,
-    ) -> Result<Self, CtError> {
-        let raw = sys::ct_chunk_page_store_options {
-            tree_id: options.tree_id,
-            owner_epoch: options.owner_epoch,
-            open_generation: options.open_generation,
-            pack_bytes: options.pack_bytes,
-            iu_size: options.iu_size,
-            max_concurrent_packs: options.max_concurrent_packs,
-            materialization_bytes_per_pass: options.materialization_bytes_per_pass,
-            max_chunk_bytes: options.max_chunk_bytes,
-            mirror_copies: options.mirror_copies,
-        };
-        let mut out = std::ptr::null_mut();
-        let status = match transport {
-            Some(transport) => unsafe {
-                sys::ct_chunk_page_store_open_with_transport(
-                    &raw,
-                    catalog.ptr.as_ptr(),
-                    transport.ptr.as_ptr(),
-                    &mut out,
-                )
-            },
-            None => unsafe { sys::ct_chunk_page_store_open(&raw, catalog.ptr.as_ptr(), &mut out) },
-        };
-        check(status)?;
-        Ok(Self {
-            ptr: NonNull::new(out).ok_or(CtError::Internal)?,
-            chunk_catalog: Some(catalog),
-        })
-    }
-
-    /// Legacy mutable-address layout estimate. Runtime-backed stores return
-    /// `NotSupported`; use `Crowdbtree::backing_stats` for actual physical bytes.
-    pub fn chunk_estimated_bytes(&self) -> Result<u64, CtError> {
-        let mut bytes = 0;
-        check(unsafe { sys::ct_chunk_page_store_estimated_bytes(self.ptr.as_ptr(), &mut bytes) })?;
-        Ok(bytes)
-    }
-
-    /// Legacy mutable-address counters. Runtime-backed stores return
-    /// `NotSupported`; use Tree work and backing snapshots for current metrics.
-    pub fn chunk_stats(&self) -> Result<ChunkPageStoreStats, CtError> {
-        let mut raw = sys::ct_chunk_page_store_stats::default();
-        check(unsafe { sys::ct_chunk_page_store_get_stats(self.ptr.as_ptr(), &mut raw) })?;
-        Ok(ChunkPageStoreStats {
-            generations_published: raw.generations_published,
-            packs_written: raw.packs_written,
-            pack_bytes_written: raw.pack_bytes_written,
-            packs_reused: raw.packs_reused,
-            pack_bytes_reused: raw.pack_bytes_reused,
-            pack_reads: raw.pack_reads,
-            cache_hits: raw.cache_hits,
-            layout_queries: raw.layout_queries,
-            mirror_write_attempts: raw.mirror_write_attempts,
-            mirror_write_failures: raw.mirror_write_failures,
-            retained_manifests: raw.retained_manifests,
-            pinned_bytes: raw.pinned_bytes,
-            oldest_pin_age_ms: raw.oldest_pin_age_ms,
-            orphan_bytes: raw.orphan_bytes,
-            materialization_passes: raw.materialization_passes,
-            materialization_failures: raw.materialization_failures,
-            materialization_packs_written: raw.materialization_packs_written,
-            materialization_bytes_written: raw.materialization_bytes_written,
-            shared_packs: raw.shared_packs,
-            rpc_operations: raw.rpc_operations,
-            rpc_latency_ns: raw.rpc_latency_ns,
-            diskio_operations: raw.diskio_operations,
-            diskio_latency_ns: raw.diskio_latency_ns,
-            coalesced_reads: raw.coalesced_reads,
-            coalesced_read_bytes: raw.coalesced_read_bytes,
-            completion_wakeups: raw.completion_wakeups,
-            materialization_scan_bytes: raw.materialization_scan_bytes,
-            shared_metadata_segments: raw.shared_metadata_segments,
-            materialized_metadata_segments: raw.materialized_metadata_segments,
-            manifest_publication_latency_ns: raw.manifest_publication_latency_ns,
-            recovery_latency_ns: raw.recovery_latency_ns,
-        })
-    }
-
     /// Sets the WAL byte offset that the next chunk-root publication makes
     /// recoverable. Non-chunk stores accept the hint without persisting it.
     ///
@@ -594,7 +475,7 @@ impl PageStore {
     }
 
     /// Returns the WAL replay offset persisted with the current chunk root.
-    /// Legacy and non-chunk stores return zero.
+    /// Non-chunk stores return zero.
     ///
     /// # Errors
     ///
@@ -616,10 +497,6 @@ impl PageStore {
         Ok(generation)
     }
 
-    pub fn reclaim_chunk_orphans(&self) -> u64 {
-        unsafe { sys::ct_chunk_page_store_reclaim_orphans(self.ptr.as_ptr()) }
-    }
-
     /// Reclaim catalog generations older than the supplied published
     /// retention watermark. Non-chunk stores have no catalog generations.
     #[must_use]
@@ -627,6 +504,20 @@ impl PageStore {
         self.chunk_catalog
             .as_ref()
             .map_or(0, |catalog| catalog.reclaim_before(tree_id, generation))
+    }
+
+    /// Prunes retained catalog history without blocking the caller's worker.
+    /// # Errors
+    /// Returns a catalog or runtime error when the async operation cannot complete.
+    pub async fn reclaim_chunk_generations_before_async(
+        &self,
+        tree_id: u64,
+        generation: u64,
+    ) -> Result<u64, CtError> {
+        match &self.chunk_catalog {
+            Some(catalog) => catalog.reclaim_before_async(tree_id, generation).await,
+            None => Ok(0),
+        }
     }
 
     pub fn pin_chunk_generation(
@@ -650,6 +541,45 @@ impl PageStore {
         self.chunk_catalog.as_ref().map_or(Ok(()), |catalog| {
             catalog.unpin_generation(tree_id, transition_high, transition_low)
         })
+    }
+
+    /// Pins a Chunk generation asynchronously. Local stores have no catalog pins.
+    /// # Errors
+    /// Returns the catalog or runtime error for the pin.
+    pub async fn pin_chunk_generation_async(
+        &self,
+        tree_id: u64,
+        transition_high: u64,
+        transition_low: u64,
+        generation: u64,
+    ) -> Result<(), CtError> {
+        match &self.chunk_catalog {
+            Some(catalog) => {
+                catalog
+                    .pin_generation_async(tree_id, transition_high, transition_low, generation)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Releases a Chunk generation pin asynchronously.
+    /// # Errors
+    /// Returns the catalog or runtime error for the release.
+    pub async fn unpin_chunk_generation_async(
+        &self,
+        tree_id: u64,
+        transition_high: u64,
+        transition_low: u64,
+    ) -> Result<(), CtError> {
+        match &self.chunk_catalog {
+            Some(catalog) => {
+                catalog
+                    .unpin_generation_async(tree_id, transition_high, transition_low)
+                    .await
+            }
+            None => Ok(()),
+        }
     }
 }
 

@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstring>
+#include <future>
 
 namespace crowdb::tree
 {
@@ -50,8 +51,8 @@ TEST(PublishedSnapshotScan, TotalCountsSpanFixedWindowsInBothDirectionsAfterTree
         ASSERT_TRUE(tree->put(key(index), "value").ok());
     }
     ASSERT_TRUE(tree->flush().ok());
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
-    ASSERT_TRUE(TreeCoreAccess::get(*tree)->capture_snapshot(&snapshot).ok());
+    std::shared_ptr<PublishedReadViewContext> snapshot;
+    ASSERT_TRUE(TreeCoreAccess::get(*tree)->capture_read_only_view(&snapshot).ok());
     ASSERT_TRUE(tree->put("later", "outside the captured L1").ok());
     tree.reset();
     for (const size_t limit : {size_t{0}, size_t{129}, size_t{257}}) {
@@ -59,10 +60,28 @@ TEST(PublishedSnapshotScan, TotalCountsSpanFixedWindowsInBothDirectionsAfterTree
             CoreScanOptions options;
             options.limit   = limit;
             options.reverse = reverse;
-            ScanPackedBuf packed;
-            size_t        count     = 0;
-            bool          truncated = false;
-            const auto    status    = snapshot->scan(options, &packed, &count, &truncated);
+
+            struct Result
+            {
+                Status        status;
+                ScanPackedBuf packed;
+                size_t        count;
+                bool          truncated;
+            };
+
+            std::promise<Result> complete;
+            auto                 result = complete.get_future();
+            ASSERT_TRUE(snapshot
+                            ->scan_async(options,
+                                         [&](Status status, ScanPackedBuf packed, size_t count, bool truncated) {
+                                             complete.set_value({.status    = std::move(status),
+                                                                 .packed    = std::move(packed),
+                                                                 .count     = count,
+                                                                 .truncated = truncated});
+                                         })
+                            .ok());
+            ASSERT_EQ(result.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+            auto [status, packed, count, truncated] = result.get();
             ASSERT_TRUE(status.ok()) << status.to_string();
             ASSERT_EQ(count, limit == 0 ? 513 : limit);
             EXPECT_EQ(truncated, limit != 0);
@@ -82,8 +101,8 @@ TEST(PublishedSnapshotScan, TombstonesUseThePhysicalCountBoundAcrossWindows)
     }
     ASSERT_TRUE(tree.apply(1, batch).ok());
     ASSERT_TRUE(tree.flush().ok());
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
-    ASSERT_TRUE(TreeCoreAccess::get(tree)->capture_snapshot(&snapshot).ok());
+    std::shared_ptr<PublishedReadViewContext> snapshot;
+    ASSERT_TRUE(TreeCoreAccess::get(tree)->capture_read_only_view(&snapshot).ok());
     for (const size_t limit : {size_t{0}, size_t{129}, size_t{257}}) {
         for (const bool reverse : {false, true}) {
             CoreScanOptions options;
@@ -111,8 +130,8 @@ TEST(PublishedSnapshotScan, PublicByteLimitsSpanWindowsAndPermitOneLargerWindowE
     }
     ASSERT_TRUE(tree.flush().ok());
     auto                                     *core = TreeCoreAccess::get(tree);
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
-    ASSERT_TRUE(core->capture_snapshot(&snapshot).ok());
+    std::shared_ptr<PublishedReadViewContext> snapshot;
+    ASSERT_TRUE(core->capture_read_only_view(&snapshot).ok());
     for (const bool reverse : {false, true}) {
         for (const size_t budget : {size_t{0}, size_t{3 * 1024 * 1024}}) {
             CoreScanOptions options;
@@ -150,8 +169,8 @@ TEST(PublishedSnapshotScan, StrictFirstOverflowReturnsEmptyTruncatedAndResumes)
     ASSERT_TRUE(tree.put("a", std::string(128 * 1024, 'v')).ok());
     ASSERT_TRUE(tree.put("b", "small").ok());
     ASSERT_TRUE(tree.flush().ok());
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
-    ASSERT_TRUE(TreeCoreAccess::get(tree)->capture_snapshot(&snapshot).ok());
+    std::shared_ptr<PublishedReadViewContext> snapshot;
+    ASSERT_TRUE(TreeCoreAccess::get(tree)->capture_read_only_view(&snapshot).ok());
     CoreScanOptions options;
     options.byte_budget        = 1024;
     options.strict_byte_budget = true;

@@ -4,8 +4,10 @@
 //! Shared host CPU capacity and resource limits for budgeted runtime Trees.
 //! Cloned runtime owners share the same CPU pool and allocation ledger.
 
-use std::ptr::NonNull;
+use std::{ffi::c_void, ptr::NonNull, sync::Arc};
+use tokio::sync::oneshot;
 
+use crate::close::CloseState;
 use crate::error::{check, CtError};
 use crate::sys;
 
@@ -117,6 +119,16 @@ impl TreeBindingOptions {
 #[derive(Debug)]
 pub struct TreeRuntime {
     ptr: NonNull<sys::ct_runtime>,
+    shutdown: CloseState,
+}
+
+type ShutdownStage =
+    unsafe extern "C" fn(*mut sys::ct_runtime, unsafe extern "C" fn(*mut c_void, i32), *mut c_void) -> i32;
+
+unsafe extern "C" fn shutdown_stage_done(context: *mut c_void, status: i32) {
+    // The accepted native stage owns this sender through its only callback.
+    let sender = unsafe { Box::from_raw(context.cast::<oneshot::Sender<i32>>()) };
+    let _ = sender.send(status);
 }
 
 impl TreeRuntime {
@@ -146,6 +158,7 @@ impl TreeRuntime {
         check(unsafe { sys::ct_runtime_create(&raw, &mut out) })?;
         Ok(Self {
             ptr: NonNull::new(out).ok_or(CtError::Internal)?,
+            shutdown: CloseState::new(false),
         })
     }
 
@@ -159,6 +172,44 @@ impl TreeRuntime {
     /// Closes CPU submission and waits for CPU jobs only, not external I/O.
     pub fn drain_cpu(&self) {
         unsafe { sys::ct_runtime_drain_cpu(self.as_ptr()) };
+    }
+
+    /// Stops the shared workers after all Tree bindings and accepted runtime
+    /// work have drained. Close Tree and backend owners first. Keep Tokio alive
+    /// through completion, then drop the runtime from the external host.
+    /// Repeated waits share the same shutdown. Canceling a wait leaves it live.
+    ///
+    /// # Errors
+    /// Returns a missing Tokio context or a native shutdown error.
+    pub async fn shutdown(self: &Arc<Self>) -> Result<(), CtError> {
+        let executor = tokio::runtime::Handle::try_current().map_err(|_| CtError::InvalidArgument)?;
+        if self.shutdown.start() {
+            let runtime = self.clone();
+            executor.spawn(async move {
+                let drained = runtime.wait_shutdown_stage(sys::ct_runtime_drain_async).await;
+                let status = if drained == 0 {
+                    runtime
+                        .wait_shutdown_stage(sys::ct_runtime_stop_workers_async)
+                        .await
+                } else {
+                    drained
+                };
+                runtime.shutdown.finish(status);
+            });
+        }
+        self.shutdown.wait().await
+    }
+
+    async fn wait_shutdown_stage(&self, submit: ShutdownStage) -> i32 {
+        let (sender, receiver) = oneshot::channel();
+        let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
+        let status = unsafe { submit(self.as_ptr(), shutdown_stage_done, context) };
+        if status != 0 {
+            // A rejection leaves the callback context with the caller.
+            drop(unsafe { Box::from_raw(context.cast::<oneshot::Sender<i32>>()) });
+            return status;
+        }
+        receiver.await.unwrap_or(-6)
     }
 
     pub(crate) fn as_ptr(&self) -> *mut sys::ct_runtime {

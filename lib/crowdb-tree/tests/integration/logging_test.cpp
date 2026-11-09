@@ -77,7 +77,7 @@ TEST(Logging, WritesFormattedFileOnOpenAndSnapshot)
         ASSERT_TRUE(Crowdbtree::open(opt, &t).ok());
         ASSERT_TRUE(t->apply(1, put_one("a", "1")).ok());
         ASSERT_TRUE(t->flush().ok());
-        ASSERT_TRUE(t->snapshot(nullptr).ok());
+        ASSERT_TRUE(t->flush_with_persistent(nullptr).ok());
     }
     // Flush + join the async logger so the file is complete before we read it.
     shutdown_logging();
@@ -99,7 +99,7 @@ TEST(Logging, WritesFormattedFileOnOpenAndSnapshot)
     EXPECT_NE(body.find("[info]"), std::string::npos);
     // The open() and snapshot() info lines both fired.
     EXPECT_NE(body.find("open:"), std::string::npos);
-    EXPECT_NE(body.find("snapshot committed:"), std::string::npos);
+    EXPECT_NE(body.find("flush with persistent committed:"), std::string::npos);
 }
 
 TEST(Logging, StderrWhenNoLogDir)
@@ -116,5 +116,6 @@ TEST(Logging, StderrWhenNoLogDir)
     ASSERT_TRUE(Crowdbtree::open(opt, &t).ok());
     ASSERT_TRUE(t->apply(1, put_one("k", "v")).ok());
     ASSERT_TRUE(t->flush().ok());
+    t.reset();
     shutdown_logging();
 }

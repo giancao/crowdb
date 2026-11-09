@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/allocation_bound.h"
+#include "btree/apply_dispatcher.h"
 #include "tree_runtime_internal.h"
 
 namespace crowdb::tree
@@ -13,6 +14,9 @@ detail::ResourceBudget::Limits resource_limits(TreeResourceLimits limits) noexce
 
 namespace
 {
+constexpr size_t kHostCpuProgressSlots     = 2;
+constexpr size_t kHostBackendProgressSlots = 1;
+
 detail::ResourceBudget::Limits operation_limits(const TreeRuntimeOptions &options) noexcept
 {
     auto limits = resource_limits(options.limits);
@@ -36,29 +40,45 @@ TreeRuntime::State::State(TreeRuntimeOptions options, std::shared_ptr<detail::Bo
       lifecycle(std::move(credit)),
       budget(operation_limits(options), options.max_waiters_per_class, lifecycle)
 {
-    const auto storage =
-        detail::AllocationBound()
-            .add(detail::FlushRuntime::allocation_bound(options.workers, options.cpu_queue_limit + 1))
-            .add(detail::FlushRuntime::allocation_bound(options.backend_workers, options.backend_queue_limit))
-            .add(2 * detail::shared_allocation_bound<detail::FlushRuntime>())
-            .add(detail::shared_allocation_bound<TreeRuntime>())
-            .add(detail::RetirementQueue::allocation_bound())
-            .add(detail::shared_allocation_bound<detail::FlushRuntime::Lane>())
-            .value();
+    const auto storage = detail::AllocationBound()
+                             .add(detail::FlushRuntime::allocation_bound(options.workers, options.cpu_queue_limit +
+                                                                                              kHostCpuProgressSlots))
+                             .add(detail::FlushRuntime::allocation_bound(
+                                 options.backend_workers, options.backend_queue_limit + kHostBackendProgressSlots))
+                             .add(2 * detail::shared_allocation_bound<detail::FlushRuntime>())
+                             .add(detail::shared_allocation_bound<TreeRuntime>())
+                             .add(detail::RetirementQueue::allocation_bound())
+                             .add(2 * ApplyDispatcher::allocation_bound())
+                             .add((kHostCpuProgressSlots + kHostBackendProgressSlots) *
+                                  detail::shared_allocation_bound<detail::FlushRuntime::Lane>())
+                             .value();
     if (!storage) {
         throw std::invalid_argument("runtime storage size overflow");
     }
     if (*storage > lifecycle->available()) {
         throw std::bad_alloc();
     }
-    cpu = std::allocate_shared<detail::FlushRuntime>(MetadataAllocator<detail::FlushRuntime>(lifecycle),
-                                                     options.workers, options.cpu_queue_limit + 1, lifecycle);
-    backend =
-        std::allocate_shared<detail::FlushRuntime>(MetadataAllocator<detail::FlushRuntime>(lifecycle),
-                                                   options.backend_workers, options.backend_queue_limit, lifecycle);
+    cpu =
+        std::allocate_shared<detail::FlushRuntime>(MetadataAllocator<detail::FlushRuntime>(lifecycle), options.workers,
+                                                   options.cpu_queue_limit + kHostCpuProgressSlots, lifecycle);
+    backend = std::allocate_shared<detail::FlushRuntime>(
+        MetadataAllocator<detail::FlushRuntime>(lifecycle), options.backend_workers,
+        options.backend_queue_limit + kHostBackendProgressSlots, lifecycle);
+    auto view_lane =
+        std::allocate_shared<detail::FlushRuntime::Lane>(MetadataAllocator<detail::FlushRuntime::Lane>(lifecycle), 1);
+    auto status = ApplyDispatcher::create(cpu, std::move(view_lane), 16, lifecycle, &view_cpu_progress);
+    if (!status.ok()) {
+        throw std::bad_alloc();
+    }
+    auto view_backend_lane =
+        std::allocate_shared<detail::FlushRuntime::Lane>(MetadataAllocator<detail::FlushRuntime::Lane>(lifecycle), 1);
+    status = ApplyDispatcher::create(backend, std::move(view_backend_lane), 1, lifecycle, &view_backend_progress);
+    if (!status.ok()) {
+        throw std::bad_alloc();
+    }
     auto retirement_lane =
         std::allocate_shared<detail::FlushRuntime::Lane>(MetadataAllocator<detail::FlushRuntime::Lane>(lifecycle), 1);
-    auto status = detail::RetirementQueue::create(*cpu, std::move(retirement_lane), lifecycle, &retirement);
+    status = detail::RetirementQueue::create(*cpu, std::move(retirement_lane), lifecycle, &retirement);
     if (!status.ok()) {
         throw std::bad_alloc();
     }
@@ -67,21 +87,28 @@ TreeRuntime::State::State(TreeRuntimeOptions options, std::shared_ptr<detail::Bo
 
 TreeRuntime::State::~State()
 {
-    stopped.store(true, std::memory_order_release);
-    budget.close();
-    retirement->close_and_drain();
-    cpu->close();
-    backend->close();
-    cpu->drain();
-    backend->drain();
+    if (shutdown.load(std::memory_order_acquire) != Shutdown::kExited) {
+        // Standalone tools still own the synchronous host boundary.
+        bindings.fetch_or(kClosed, std::memory_order_release);
+        budget.close();
+        retirement->close_and_drain();
+        view_cpu_progress->close_and_drain();
+        view_backend_progress->close_and_drain();
+        cpu->close();
+        backend->close();
+        cpu->drain();
+        backend->drain();
+    }
     lifecycle->seal();
 }
 
 Status TreeRuntime::create(TreeRuntimeOptions options, std::shared_ptr<TreeRuntime> *out)
 try {
-    if (out == nullptr || options.workers == 0 || options.cpu_queue_limit == 0 || options.cpu_queue_limit == SIZE_MAX ||
-        options.max_waiters_per_class == 0 || options.backend_workers == 0 || options.backend_queue_limit == 0 ||
-        options.lifecycle_bytes == 0 || options.lifecycle_bytes > options.limits.routing_bytes) {
+    if (out == nullptr || options.workers == 0 || options.cpu_queue_limit == 0 ||
+        options.cpu_queue_limit > SIZE_MAX - kHostCpuProgressSlots || options.max_waiters_per_class == 0 ||
+        options.backend_workers == 0 || options.backend_queue_limit == 0 ||
+        options.backend_queue_limit > SIZE_MAX - kHostBackendProgressSlots || options.lifecycle_bytes == 0 ||
+        options.lifecycle_bytes > options.limits.routing_bytes) {
         return Status::invalid_argument();
     }
     auto lifecycle = detail::BootstrapBudget::create(options.lifecycle_bytes);
@@ -112,7 +139,7 @@ TreeRuntime::~TreeRuntime() = default;
 
 void TreeRuntime::stop_admission() noexcept
 {
-    state_->stopped.store(true, std::memory_order_release);
+    state_->bindings.fetch_or(State::kClosed, std::memory_order_acq_rel);
     state_->budget.close();
 }
 
@@ -127,7 +154,7 @@ void TreeRuntime::drain_cpu() noexcept
 
 bool TreeRuntime::stopped() const noexcept
 {
-    return state_->stopped.load(std::memory_order_acquire);
+    return (state_->bindings.load(std::memory_order_acquire) & State::kClosed) != 0;
 }
 
 TreeRuntimeSnapshot TreeRuntime::snapshot() const noexcept
@@ -150,7 +177,7 @@ TreeRuntimeSnapshot TreeRuntime::snapshot() const noexcept
     };
     return {.reserved         = public_limits(budget.reserved),
             .allocated        = public_limits(budget.allocated),
-            .bindings         = state_->bindings.load(std::memory_order_relaxed),
+            .bindings         = state_->bindings.load(std::memory_order_relaxed) & State::kBindings,
             .queued           = cpu.queued + backend.queued,
             .inflight         = cpu.inflight + backend.inflight,
             .stopped          = stopped(),
@@ -177,13 +204,13 @@ ResourceUsageSnapshot TreeRuntime::resource_usage() const noexcept
     result[1].used += bootstrap.reserved + bootstrap.allocated;
     const auto cpu     = state_->cpu->snapshot();
     const auto backend = state_->backend->snapshot();
-    result[6]          = {.limit       = state_->options.cpu_queue_limit + 1,
+    result[6]          = {.limit       = state_->options.cpu_queue_limit + kHostCpuProgressSlots,
                           .used        = state_->cpu->queue_permits(),
                           .denied_host = cpu.rejected,
                           .waits       = cpu.submitted,
                           .wait_ns     = cpu.queue_ns,
                           .waiters     = cpu.queued};
-    result[7]          = {.limit       = state_->options.backend_queue_limit,
+    result[7]          = {.limit       = state_->options.backend_queue_limit + kHostBackendProgressSlots,
                           .used        = state_->backend->queue_permits(),
                           .denied_host = backend.rejected,
                           .waits       = backend.submitted,

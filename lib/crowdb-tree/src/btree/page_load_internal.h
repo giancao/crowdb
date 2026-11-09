@@ -16,7 +16,6 @@ struct AsyncStorePageLoader::State
     PageLoadLimits                              limits;
     OverflowBackingResolver                     overflow;
     PageLoadBudget                              budget;
-    std::atomic<size_t>                         inflight{0};
 };
 
 inline std::optional<size_t> chunk_load_window_bound(const PageLoadLimits &limits) noexcept
@@ -106,14 +105,4 @@ void complete_page_load(Callback &callback, Status status, Result result) noexce
     }
 }
 
-inline bool acquire_page_load(std::atomic<size_t> &inflight, size_t maximum)
-{
-    size_t current = inflight.load(std::memory_order_relaxed);
-    while (current < maximum) {
-        if (inflight.compare_exchange_weak(current, current + 1, std::memory_order_acq_rel)) {
-            return true;
-        }
-    }
-    return false;
-}
 } // namespace crowdb::tree

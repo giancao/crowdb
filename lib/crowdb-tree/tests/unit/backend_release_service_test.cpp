@@ -27,11 +27,11 @@ struct TestRelease : BackendReleaseService::Node
           completed(done),
           remaining(steps)
     {
-        dispose = [](BackendReleaseService::Node *base) noexcept {
+        dispose = [](BackendReleaseService::Node *base, common::DiskIOUring *) noexcept {
             auto *node = static_cast<TestRelease *>(base);
             if (node->remaining != 0) {
                 --node->remaining;
-                return false;
+                return BackendReleaseService::Disposal::kMore;
             }
             if (node->entered != nullptr) {
                 node->entered->count_down();
@@ -41,7 +41,7 @@ struct TestRelease : BackendReleaseService::Node
             node->completed->fetch_add(1);
             std::destroy_at(node);
             allocator.deallocate(node, 1);
-            return true;
+            return BackendReleaseService::Disposal::kDone;
         };
     }
 };

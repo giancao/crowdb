@@ -12,14 +12,14 @@ bool anchors_differ(const std::array<std::shared_ptr<const ProtectedCheckpoint>,
 }
 } // namespace
 
-Status LocalCheckpointRegistry::create(std::shared_ptr<ExtentLedger>                             ledger,
-                                       std::shared_ptr<detail::AllocationReservation>            metadata,
+Status LocalCheckpointRegistry::create(std::shared_ptr<ExtentLedger> ledger, std::shared_ptr<AllocationBudget> metadata,
                                        std::array<std::shared_ptr<const ProtectedCheckpoint>, 2> recovered,
                                        std::shared_ptr<LocalCheckpointRegistry>                 *out)
 {
+    const auto prepaid = std::dynamic_pointer_cast<detail::AllocationReservation>(metadata);
     if (!ledger || out == nullptr || ledger->limits().iu_size == 0 ||
         ledger->limits().region_begin < snapshot::region_base_for(ledger->limits().iu_size) ||
-        (metadata && metadata->category() == detail::BudgetClass::kIo)) {
+        (prepaid && prepaid->category() == detail::BudgetClass::kIo)) {
         return Status::invalid_argument();
     }
     try {

@@ -8,13 +8,12 @@ namespace crowdb::tree
 {
 struct RecoveredStateLimits
 {
-    size_t max_pages            = 1024 * 1024;
-    size_t max_depth            = 64;
-    size_t max_children         = 4096;
-    size_t max_leaf_entries     = 4096;
-    size_t max_key_bytes        = 256 * 1024;
-    size_t max_step_entries     = 128;
-    size_t max_dependency_steps = 1024 * 1024;
+    size_t max_pages        = 1024 * 1024;
+    size_t max_depth        = 64;
+    size_t max_children     = 4096;
+    size_t max_leaf_entries = 4096;
+    size_t max_key_bytes    = 256 * 1024;
+    size_t max_step_entries = 128;
 };
 
 struct RecoveredStateResult
@@ -37,13 +36,12 @@ class RecoveredStateOperation
     static Status create(std::shared_ptr<const CapturedDurablePages> captured, std::shared_ptr<PageLoader> loader,
                          std::shared_ptr<detail::FlushRuntime>       runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, RecoveredStateLimits limits,
-                         std::shared_ptr<detail::AllocationReservation> metadata,
-                         std::shared_ptr<RecoveredStateOperation>      *out);
+                         std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<RecoveredStateOperation> *out);
     static Status create_readable(std::shared_ptr<const ReadablePageCatalog> captured,
                                   std::shared_ptr<PageLoader> loader, std::shared_ptr<detail::FlushRuntime> runtime,
                                   std::shared_ptr<detail::FlushRuntime::Lane> lane, RecoveredStateLimits limits,
-                                  std::shared_ptr<detail::AllocationReservation> metadata,
-                                  std::shared_ptr<RecoveredStateOperation>      *out);
+                                  std::shared_ptr<AllocationBudget>         metadata,
+                                  std::shared_ptr<RecoveredStateOperation> *out);
     [[nodiscard]] static std::optional<size_t> allocation_bound(size_t frames, size_t primary_pages,
                                                                 size_t max_key_bytes) noexcept;
     [[nodiscard]] detail::CallbackSender       sender() noexcept;

@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <bit>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -176,9 +177,35 @@ DiskIOUring::DiskIOUring(Topology topo)
     valid_ = true;
 
     // Start poll threads.
+    pollers_remaining_.store(poll_threads_.size(), std::memory_order_relaxed);
     for (auto &pt : poll_threads_) {
-        pt->thread = std::thread([this, ptp = pt.get()] { poll_thread_run(*ptp); });
+        pt->thread = std::thread([this, ptp = pt.get()] {
+            poll_thread_run(*ptp);
+            if (pollers_remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                auto done = std::move(pollers_stopped_);
+                done.complete(0);
+            }
+        });
     }
+}
+
+void DiskIOUring::stop_pollers() noexcept
+{
+    for (auto &pt : poll_threads_) {
+        pt->stopped.store(true, std::memory_order_release);
+        wake_poll_thread(*pt);
+    }
+}
+
+void DiskIOUring::stop_after_drain(IOCompletion complete) noexcept
+{
+    assert(total_in_flight_.load(std::memory_order_acquire) == 0);
+    if (pollers_remaining_.load(std::memory_order_acquire) == 0) {
+        complete.complete(0);
+        return;
+    }
+    pollers_stopped_ = std::move(complete);
+    stop_pollers();
 }
 
 DiskIOUring::~DiskIOUring()
@@ -192,14 +219,7 @@ DiskIOUring::~DiskIOUring()
         }
         std::this_thread::yield();
     }
-    // Stop all poll threads.
-    for (auto &pt : poll_threads_) {
-        pt->stopped.store(true, std::memory_order_release);
-    }
-    // Wake any sleeping threads.
-    for (auto &pt : poll_threads_) {
-        wake_poll_thread(*pt);
-    }
+    stop_pollers();
     for (auto &pt : poll_threads_) {
         if (pt->thread.joinable()) {
             pt->thread.join();
@@ -530,6 +550,63 @@ void DiskIOUring::submit_entry(Pipeline &p, int fd, CallbackEntry *entry, const 
     uring_in_flight.fetch_sub(1, std::memory_order_relaxed);
 }
 
+void DiskIOUring::enqueue_owned(Pipeline &pipeline, CallbackEntry *entry)
+{
+    if (entry->fd >= 0) {
+        fd_in_flight_[entry->fd].fetch_add(1, std::memory_order_acq_rel);
+    }
+    total_in_flight_.fetch_add(1, std::memory_order_relaxed);
+    uring_in_flight.fetch_add(1, std::memory_order_relaxed);
+    auto *head = pipeline.owned_incoming.load(std::memory_order_relaxed);
+    do {
+        entry->next_free = head;
+    } while (!pipeline.owned_incoming.compare_exchange_weak(head, entry, std::memory_order_release,
+                                                            std::memory_order_relaxed));
+    mark_pending(pipeline);
+}
+
+void DiskIOUring::submit_pending_owned(Pipeline &p)
+{
+    // One SQ-sized CPU window keeps other pipelines and completions moving.
+    for (unsigned prepared = 0; prepared < p.ring.sq.ring_entries; ++prepared) {
+        if (p.owned_pending == nullptr) {
+            auto *incoming = p.owned_incoming.exchange(nullptr, std::memory_order_acquire);
+            while (incoming != nullptr) {
+                auto *next          = incoming->next_free;
+                incoming->next_free = p.owned_pending;
+                p.owned_pending     = incoming;
+                incoming            = next;
+            }
+        }
+        auto *entry = p.owned_pending;
+        if (entry == nullptr) {
+            return;
+        }
+        unsigned tail = p.sq_tail.load(std::memory_order_acquire);
+        for (;;) {
+            if (tail - io_uring_load_sq_head(&p.ring) >= p.ring.sq.ring_entries) {
+                if (!entry->observed_full) {
+                    entry->observed_full = true;
+                    uring_sq_full_metric().inc();
+                    sq_full_count_.fetch_add(1, std::memory_order_relaxed);
+                }
+                return;
+            }
+            if (p.sq_tail.compare_exchange_weak(tail, tail + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                break;
+            }
+        }
+        const unsigned idx = tail & p.ring.sq.ring_mask;
+        auto          *sqe = &p.ring.sq.sqes[idx << p.sq_shift];
+        *sqe               = entry->command;
+        entry->opcode      = sqe->opcode;
+        p.owned_pending    = entry->next_free;
+        entry->next_free   = nullptr;
+        io_uring_sqe_set_data(sqe, entry);
+        p.sqe_ready[idx].store(true, std::memory_order_release);
+    }
+}
+
 void DiskIOUring::publish_ready_sqes(Pipeline &p)
 {
     unsigned tail = p.sq_tail.load(std::memory_order_acquire);
@@ -586,10 +663,9 @@ void DiskIOUring::poll_thread_run(PollThread &pt)
                 delete_entry(p.free_list);
                 p.free_list = next;
             }
-            // Publish contiguous filled SQE slots.
-            if (p.pending_submit.exchange(false, std::memory_order_acq_rel)) {
-                publish_ready_sqes(p);
-            }
+            p.pending_submit.exchange(false, std::memory_order_acq_rel);
+            submit_pending_owned(p);
+            publish_ready_sqes(p);
         }
 
         // Determine the minimum busy_poll_budget across assigned Hybrid pipelines.
@@ -626,8 +702,16 @@ void DiskIOUring::poll_thread_run(PollThread &pt)
             // The private wake fd receives both submissions and kernel CQ
             // completions. External reactors use separate completion fds.
             pt.thread_sleeping.store(true, std::memory_order_release);
+            bool pending_owned = false;
+            for (size_t pi : pt.pipelines) {
+                const auto &p = *pipelines_[pi];
+                pending_owned = pending_owned || p.owned_pending != nullptr ||
+                                p.owned_incoming.load(std::memory_order_acquire) != nullptr;
+            }
+            // SQPOLL can consume a slot without generating a CQE. While
+            // accepted commands remain, the I/O owner also polls SQ progress.
             struct epoll_event events[16];
-            int                n = ::epoll_wait(pt.epoll_fd, events, 16, 50); // 50ms timeout
+            int                n = ::epoll_wait(pt.epoll_fd, events, 16, pending_owned ? 0 : -1);
             pt.thread_sleeping.store(false, std::memory_order_release);
 
             if (n > 0) {
@@ -640,7 +724,9 @@ void DiskIOUring::poll_thread_run(PollThread &pt)
             // completions so it does not wait for the next iteration.
             for (size_t pi : pt.pipelines) {
                 auto &p = *pipelines_[pi];
-                if (p.valid && p.pending_submit.exchange(false, std::memory_order_acq_rel)) {
+                if (p.valid) {
+                    p.pending_submit.exchange(false, std::memory_order_acq_rel);
+                    submit_pending_owned(p);
                     publish_ready_sqes(p);
                 }
             }

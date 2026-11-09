@@ -31,10 +31,7 @@ bool BlockDirectory::retire_step() noexcept
         if (retire_depth_ == 3) {
             auto *leaf = static_cast<Segment *>(retire_path_[3]);
             if (position < leaf->slots.size()) {
-                auto *entry = leaf->slots[position++].exchange(nullptr, std::memory_order_relaxed);
-                if (entry != &busy_) {
-                    destroy_released(entry);
-                }
+                destroy_released(live_entry(leaf->slots[position++].exchange(0, std::memory_order_relaxed)));
             }
             else {
                 destroy_released(leaf);

@@ -47,7 +47,7 @@ void CapturedWriteOperation::State::begin_relocated_read(DurableCapturedFrame va
     loads.max_blob_bytes =
         ((limits.write.max_frame_bytes + kDurableBlobHeader + limits.write.iu_size - 1) / limits.write.iu_size) *
         limits.write.iu_size;
-    loads.max_inflight = 1;
+
     OverflowBackingPage source{.backing       = value.backing,
                                .next          = value.next_overflow,
                                .bytes         = value.overflow_bytes,
@@ -105,7 +105,7 @@ void CapturedWriteOperation::State::reuse_durable_dependency(DurableCapturedFram
         finish(Status::not_supported("dependency rebind requires independent physical extent ownership"));
         return;
     }
-    auto backing   = detail::reserved_shared<BackingRef>(budget.reservation(), *value.backing);
+    auto backing   = detail::reserved_shared<BackingRef>(budget.bytes, *value.backing);
     backing->owner = dependencies;
     value.backing  = std::move(backing);
     if (found == pages->frames.end()) {
@@ -123,7 +123,7 @@ Status CapturedWriteOperation::State::rebind_primary()
     if (!descriptor.backing->physical_owner) {
         return Status::not_supported("relocation requires independent primary extent ownership");
     }
-    auto backing = detail::reserved_shared<BackingRef>(budget.reservation(), *descriptor.backing);
+    auto backing = detail::reserved_shared<BackingRef>(budget.bytes, *descriptor.backing);
     dependencies->owners.push_back(backing->physical_owner);
     backing->owner     = dependencies;
     backing->overflow  = overflow_backing;

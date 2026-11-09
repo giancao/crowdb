@@ -337,7 +337,7 @@ async fn run_session(
                         expected: exporter.offset(),
                     })
                 } else {
-                    match exporter.read(offset) {
+                    match exporter.read(offset).await {
                         Ok(chunk) => Ok(SnapshotRead {
                             payload_crc32c: crowdb_tree_ffi::crc32c(&chunk.bytes),
                             chunk,
@@ -392,6 +392,7 @@ mod tests {
         data: Vec<u8>,
         offset: usize,
         chunk_bytes: usize,
+        pause: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
     }
 
     impl SnapshotExporter for Exporter {
@@ -409,15 +410,21 @@ mod tests {
             self.offset as u64
         }
 
-        fn read(&mut self, offset: u64) -> Result<SnapshotChunk, String> {
-            let end = self.data.len().min(self.offset + self.chunk_bytes);
-            let chunk = SnapshotChunk {
-                offset,
-                bytes: self.data[self.offset..end].to_vec().into(),
-                done: end == self.data.len(),
-            };
-            self.offset = end;
-            Ok(chunk)
+        fn read(&mut self, offset: u64) -> futures::future::BoxFuture<'_, Result<SnapshotChunk, String>> {
+            Box::pin(async move {
+                if let Some((started, resume)) = self.pause.take() {
+                    let _ = started.send(());
+                    resume.await.unwrap();
+                }
+                let end = self.data.len().min(self.offset + self.chunk_bytes);
+                let chunk = SnapshotChunk {
+                    offset,
+                    bytes: self.data[self.offset..end].to_vec().into(),
+                    done: end == self.data.len(),
+                };
+                self.offset = end;
+                Ok(chunk)
+            })
         }
     }
 
@@ -426,6 +433,7 @@ mod tests {
             data: b"abcdefgh".to_vec(),
             offset: 0,
             chunk_bytes: 4,
+            pause: None,
         })
     }
 
@@ -458,6 +466,29 @@ mod tests {
         registry.finish(first.id, 8).await.unwrap();
         tokio::task::yield_now().await;
         assert!(registry.reserve().is_ok());
+    }
+
+    #[tokio::test]
+    async fn exact_retry_uses_the_result_after_the_original_waiter_is_canceled() {
+        let registry = SnapshotRegistry::new(1, Duration::from_secs(30), None);
+        let (started, waiting) = oneshot::channel();
+        let (resume, paused) = oneshot::channel();
+        let exporter = Box::new(Exporter {
+            data: b"abcdefgh".to_vec(),
+            offset: 0,
+            chunk_bytes: 4,
+            pause: Some((started, paused)),
+        });
+        let id = registry.begin(2, 3, exporter, registry.reserve().unwrap()).id;
+        let session = Arc::clone(&registry);
+        let read = tokio::spawn(async move { session.read(id, 0).await });
+        waiting.await.unwrap();
+        read.abort();
+        assert!(read.await.unwrap_err().is_cancelled());
+        resume.send(()).unwrap();
+        assert_eq!(&registry.read(id, 0).await.unwrap().chunk.bytes[..], b"abcd");
+        assert_eq!(&registry.read(id, 4).await.unwrap().chunk.bytes[..], b"efgh");
+        registry.finish(id, 8).await.unwrap();
     }
 
     #[tokio::test]

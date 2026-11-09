@@ -3,6 +3,7 @@
 #pragma once
 
 #include "allocation_reservation.h"
+#include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/status.h"
 
 namespace crowdb::tree
@@ -16,7 +17,7 @@ struct SourceMemoryStats;
 // The caller retains TreeCore throughout this host operation. Acquiring the
 // lease drains accepted work in the background; commit only installs storage
 // which preparation already owns. Cancellation reopens the unchanged child.
-class TreeGenerationLease
+class TreeGenerationLease : public std::enable_shared_from_this<TreeGenerationLease>
 {
   public:
     static Status prepare(TreeCore &owner, std::shared_ptr<const PublishedTreeState> candidate,
@@ -24,6 +25,9 @@ class TreeGenerationLease
     ~TreeGenerationLease();
 
     Status acquire();
+    // On acceptance, retains the lease through the drain. The caller retains
+    // the Tree through completion, and then commits or cancels the lease.
+    Status acquire_async(AsyncCompletion complete) noexcept;
     Status commit() noexcept;
     // Before publication only: the independent tail has stopped growing.
     Status set_split_frontier(uint64_t frontier, SourceMemoryStats memory) noexcept;
@@ -31,6 +35,16 @@ class TreeGenerationLease
 
   private:
     explicit TreeGenerationLease(detail::ReservedUnique<TreeGenerationPreparation> state);
-    detail::ReservedUnique<TreeGenerationPreparation> state_;
+    Status                                                                  check_replacement() const;
+    Status                                                                  mark_prepared();
+    void                                                                    drain_rotation() noexcept;
+    void                                                                    drain_operations() noexcept;
+    void                                                                    drain_cpu() noexcept;
+    void                                                                    drain_backend() noexcept;
+    void                                                                    drain_retirements() noexcept;
+    void                                                                    finish_acquire() noexcept;
+    void                                                                    complete_acquire(Status status) noexcept;
+    template <void (TreeGenerationLease::*Next)() noexcept> AsyncCompletion continue_acquire() noexcept;
+    detail::ReservedUnique<TreeGenerationPreparation>                       state_;
 };
 } // namespace crowdb::tree

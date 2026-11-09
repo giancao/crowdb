@@ -23,6 +23,7 @@ struct TreeGenerationPreparation
     uint64_t                                             frontier            = 0;
     std::shared_ptr<SplitSourceSession>                  previous_split_sources;
     std::shared_ptr<SplitHandoff>                        previous_split_handoff;
+    AsyncCompletion                                      on_acquired;
     bool                                                 held      = false;
     bool                                                 committed = false;
 };

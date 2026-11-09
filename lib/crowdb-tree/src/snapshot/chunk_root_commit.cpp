@@ -24,7 +24,7 @@ bool same_state(const ChunkRootIdentity &a, const ChunkRootIdentity &b)
 }
 } // namespace
 
-ChunkRootCommit::ChunkRootCommit(ConstructionKey /*unused*/, std::shared_ptr<detail::AllocationReservation> metadata)
+ChunkRootCommit::ChunkRootCommit(ConstructionKey /*unused*/, std::shared_ptr<AllocationBudget> metadata)
     : metadata_(std::move(metadata)),
       root_(metadata_),
       manifest_(detail::ReservationAllocator<uint8_t>(metadata_)),
@@ -36,14 +36,11 @@ ChunkRootCommit::ChunkRootCommit(ConstructionKey /*unused*/, std::shared_ptr<det
 Status ChunkRootCommit::create(std::shared_ptr<const CapturedDurablePages> pages,
                                std::shared_ptr<const ChunkBackingDomain>   domain,
                                std::shared_ptr<detail::ChunkRuntimeIds> ids, ChunkRootIdentity identity,
-                               std::shared_ptr<detail::AllocationReservation> metadata,
-                               std::shared_ptr<detail::AllocationReservation> window,
-                               std::shared_ptr<ChunkRootCommit> *out, size_t max_dependency_steps,
-                               std::shared_ptr<const ChunkRootManifest>    previous,
+                               std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<AllocationBudget> window,
+                               std::shared_ptr<ChunkRootCommit> *out, std::shared_ptr<const ChunkRootManifest> previous,
                                std::shared_ptr<const CapturedDurablePages> baseline)
 try {
-    if (max_dependency_steps == 0 || max_dependency_steps > detail::kMaxCandidateReferences || !pages || !domain ||
-        !domain->supported() || !ids || !metadata || !window || out == nullptr || *out ||
+    if (!pages || !domain || !domain->supported() || !ids || !metadata || !window || out == nullptr || *out ||
         identity.tree != domain->tree || identity.owner_epoch != domain->epoch || identity.root_generation == 0 ||
         identity.page_generation != pages->generation || identity.coverage != pages->coverage ||
         identity.root_page_id != pages->root_page_id || identity.next_page_id != pages->next_page_id ||
@@ -51,14 +48,13 @@ try {
         !allocation_bound(pages->frames.size(), previous ? previous->indexes.size() : 0)) {
         return Status::invalid_argument();
     }
-    auto result                   = detail::reserved_shared<ChunkRootCommit>(metadata, ConstructionKey{}, metadata);
-    result->max_dependency_steps_ = max_dependency_steps;
-    result->window_               = std::move(window);
-    result->pages_                = std::move(pages);
-    result->domain_               = std::move(domain);
-    result->ids_                  = std::move(ids);
-    result->root_.identity        = identity;
-    result->root_.frame_count     = result->pages_->frames.size();
+    auto result               = detail::reserved_shared<ChunkRootCommit>(metadata, ConstructionKey{}, metadata);
+    result->window_           = std::move(window);
+    result->pages_            = std::move(pages);
+    result->domain_           = std::move(domain);
+    result->ids_              = std::move(ids);
+    result->root_.identity    = identity;
+    result->root_.frame_count = result->pages_->frames.size();
     if (previous && baseline && previous->identity.tree == identity.tree &&
         previous->identity.root_generation + 1 == identity.root_generation &&
         previous->identity.snapshot_sequence + 1 == identity.snapshot_sequence &&

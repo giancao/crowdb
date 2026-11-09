@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 #include "chunk_stage.h"
+#include "crowdb-tree/backend/async_page_store.h"
 
 namespace crowdb::tree::detail
 {
@@ -73,6 +74,62 @@ class ChunkProtectionCatalog
     virtual Status change_pin(uint64_t tree, ChunkStageId stage, ChunkStageId pin, bool acquire)                   = 0;
     virtual Status prune_pins(uint64_t tree, ChunkStageId, std::optional<ChunkStageId> after, uint32_t limit,
                               ChunkPinProgress *out)                                                               = 0;
+
+    virtual void submit_writer_quiesced(uint64_t tree, uint64_t epoch, AsyncCompletion done)
+    {
+        done.complete(writer_quiesced(tree, epoch));
+    }
+
+    virtual void submit_load_root_owned(uint64_t tree, uint64_t generation, ChunkRootBytes *out,
+                                        AsyncCompletion done) const
+    {
+        done.complete(load_root_owned(tree, generation, out));
+    }
+
+    virtual void submit_begin_candidate(uint64_t tree, const ChunkManifestCandidate &candidate, AsyncCompletion done)
+    {
+        done.complete(begin_candidate(tree, candidate));
+    }
+
+    virtual void submit_load_candidate(uint64_t tree, ChunkStageId id, std::optional<ChunkCandidateStatus> *out,
+                                       AsyncCompletion done) const
+    {
+        done.complete(load_candidate(tree, id, out));
+    }
+
+    virtual void submit_list_candidates(uint64_t tree, std::optional<ChunkStageId> after, uint32_t limit,
+                                        std::vector<ChunkCandidateStatus> *out, AsyncCompletion done) const
+    {
+        done.complete(list_candidates(tree, after, limit, out));
+    }
+
+    virtual void submit_prepare_references(uint64_t tree, ChunkStageId id, uint64_t window,
+                                           std::span<const ChunkStageId> references, AsyncCompletion done)
+    {
+        done.complete(prepare_references(tree, id, window, references));
+    }
+
+    virtual void submit_finish_candidate(uint64_t tree, ChunkStageId id, uint32_t action, AsyncCompletion done)
+    {
+        done.complete(finish_candidate(tree, id, action));
+    }
+
+    virtual void submit_release_references(uint64_t tree, ChunkStageId id, uint64_t window, AsyncCompletion done)
+    {
+        done.complete(release_references(tree, id, window));
+    }
+
+    virtual void submit_change_pin(uint64_t tree, ChunkStageId stage, ChunkStageId pin, bool acquire,
+                                   AsyncCompletion done)
+    {
+        done.complete(change_pin(tree, stage, pin, acquire));
+    }
+
+    virtual void submit_prune_pins(uint64_t tree, ChunkStageId stage, std::optional<ChunkStageId> after, uint32_t limit,
+                                   ChunkPinProgress *out, AsyncCompletion done)
+    {
+        done.complete(prune_pins(tree, stage, after, limit, out));
+    }
 };
 
 uint32_t chunk_reference_checksum(uint32_t initial, std::span<const ChunkStageId> references) noexcept;

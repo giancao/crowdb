@@ -241,8 +241,10 @@ void Worker::run_loop()
                 switch (ev.type) {
                 case SocketEvent::Notify:
                     drain_notified();
+                    transport_->run_scheduled();
                     break;
                 case SocketEvent::Timer:
+                    transport_->run_scheduled(true);
                     break;
                 case SocketEvent::Readable:
                     process_readable(ev, closed_fds);
@@ -587,6 +589,7 @@ SocketTransport::SocketTransport(uint32_t io_engines, uint32_t io_workers, Buffe
     }
 #ifdef CROWDB_RPC_HAVE_RDMA
     if (rdma_transport_ != nullptr) {
+        rdma_transport_->socket_transport_ = this;
         rdma_transport_->set_connection_handler([this](const std::shared_ptr<Connection> &conn) {
             attach_rdma_connection(conn);
             if (rdma_accept_handler_)
@@ -624,6 +627,7 @@ void SocketTransport::start()
 
 void SocketTransport::stop()
 {
+    scheduled_.close();
     for (auto &w : workers_) {
         w->request_stop();
     }
@@ -641,6 +645,38 @@ void SocketTransport::stop()
         rdma_transport_->shutdown();
 #endif
     started_.store(false, std::memory_order_release);
+}
+
+ScheduledExecutor::TaskId SocketTransport::schedule(ScheduledExecutor::Task task, uint32_t delay_ms,
+                                                    ScheduledExecutor::Task cancelled)
+{
+    if (!started_.load(std::memory_order_acquire)) {
+        return 0;
+    }
+    const auto id = scheduled_.schedule(std::move(task), delay_ms, std::move(cancelled));
+    if (id != 0) {
+        scheduled_changed_.store(true, std::memory_order_release);
+        engines_.front()->notify_worker();
+    }
+    return id;
+}
+
+bool SocketTransport::cancel_scheduled(ScheduledExecutor::TaskId id)
+{
+    if (!scheduled_.cancel(id)) {
+        return false;
+    }
+    scheduled_changed_.store(true, std::memory_order_release);
+    engines_.front()->notify_worker();
+    return true;
+}
+
+void SocketTransport::run_scheduled(bool timer_event)
+{
+    if (!scheduled_changed_.exchange(false, std::memory_order_acq_rel) && !timer_event) {
+        return;
+    }
+    scheduled_.run_due_tasks([this](int delay) { engines_.front()->set_timer(delay < 0 ? 0 : delay); });
 }
 
 void SocketTransport::add_listen_fd(int fd)

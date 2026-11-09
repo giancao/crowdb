@@ -82,8 +82,8 @@ struct TestRootBackend
         return pages;
     }
 
-    [[nodiscard]] std::shared_ptr<ChunkRootCommit>
-    commit(const std::shared_ptr<const CapturedDurablePages> &pages) const
+    [[nodiscard]] std::shared_ptr<ChunkRootCommit> commit(const std::shared_ptr<const CapturedDurablePages> &pages,
+                                                          std::shared_ptr<AllocationBudget> metadata = {}) const
     {
         ChunkRootIdentity                identity{.tree              = 19,
                                                   .root_generation   = 7,
@@ -96,9 +96,10 @@ struct TestRootBackend
                                                   .next_page_id      = pages->next_page_id,
                                                   .wal_replay_offset = 4096};
         std::shared_ptr<ChunkRootCommit> result;
-        EXPECT_TRUE(ChunkRootCommit::create(pages, domain, ids, identity, credits.credits.reservation(),
-                                            credits.credits.reservation(), &result)
-                        .ok());
+        if (!metadata) {
+            metadata = credits.credits.bytes;
+        }
+        EXPECT_TRUE(ChunkRootCommit::create(pages, domain, ids, identity, metadata, metadata, &result).ok());
         return result;
     }
 };

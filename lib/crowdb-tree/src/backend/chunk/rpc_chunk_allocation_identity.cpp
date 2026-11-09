@@ -4,28 +4,16 @@
 
 namespace crowdb::tree::detail
 {
-Status RpcChunkTransport::inspect_fixed_allocation(ChunkId id, uint64_t epoch, ChunkAllocationIdentity *out) const
+namespace
+{
+Status decode_allocation(const crowdb::chunkdb::proto::FBQueryChunkResponse *response, ChunkId id, uint64_t epoch,
+                         ChunkAllocationIdentity *out)
 {
     using namespace crowdb::chunkdb::proto;
-    if (!valid() || id.empty() || epoch == 0 || out == nullptr) {
-        return Status::invalid_argument();
-    }
-    const auto                     request_id = impl_->next_request_id();
-    const FBInt128                 wire_id(id.high, id.low);
-    flatbuffers::FlatBufferBuilder query;
-    query.Finish(CreateFBQueryChunkRequest(query, request_id, monotonic_nanos(), &wire_id));
-    std::vector<uint8_t> control(query.GetBufferPointer(), query.GetBufferPointer() + query.GetSize());
-    RpcResult            result;
-    auto                 status = impl_->call_chunkdb<FBQueryChunkResponse>(
-        id, request_id, crowdb::rpc::proto::FBMsgType_EQueryChunkRequest, control, &result);
-    if (!status.ok()) {
-        return status;
-    }
-    const auto *response = verified_response<FBQueryChunkResponse>(result.control);
     if (response == nullptr) {
         return Status::corruption("Chunk allocation query is malformed");
     }
-    status = chunkdb_status(response->ret_code(), response->error_msg());
+    auto status = chunkdb_status(response->ret_code(), response->error_msg());
     if (!status.ok()) {
         return status;
     }
@@ -61,5 +49,41 @@ Status RpcChunkTransport::inspect_fixed_allocation(ChunkId id, uint64_t epoch, C
     }
     *out = {.chunk = id, .owner_epoch = epoch, .created_ms = chunk->create_ts_ms(), .physical_bytes = bytes};
     return Status::Ok();
+}
+} // namespace
+
+void RpcChunkTransport::submit_inspect_fixed_allocation(ChunkId id, uint64_t epoch, ChunkAllocationIdentity *out,
+                                                        ChunkTransportCompletion completion) const
+try {
+    using namespace crowdb::chunkdb::proto;
+    if (!valid() || id.empty() || epoch == 0 || out == nullptr) {
+        completion.complete(Status::invalid_argument());
+        return;
+    }
+    const auto                     request_id = impl_->next_request_id();
+    const FBInt128                 wire_id(id.high, id.low);
+    flatbuffers::FlatBufferBuilder query;
+    query.Finish(CreateFBQueryChunkRequest(query, request_id, monotonic_nanos(), &wire_id));
+    impl_->submit_chunkdb<FBQueryChunkResponse>(
+        id, request_id, crowdb::rpc::proto::FBMsgType_EQueryChunkRequest, {query.GetBufferPointer(), query.GetSize()},
+        completion.allocations,
+        [id, epoch, out, completion](Status status, RpcResult result) {
+            try {
+                if (status.ok()) {
+                    status = decode_allocation(verified_response<FBQueryChunkResponse>(result.control), id, epoch, out);
+                }
+                completion.complete(std::move(status));
+            }
+            catch (const std::bad_alloc &) {
+                completion.complete(Status::resource_exhausted());
+            }
+            catch (...) {
+                completion.complete(Status::internal_error());
+            }
+        },
+        true, [completion] { return completion.stop_requested(); });
+}
+catch (const std::bad_alloc &) {
+    completion.complete(Status::resource_exhausted());
 }
 } // namespace crowdb::tree::detail

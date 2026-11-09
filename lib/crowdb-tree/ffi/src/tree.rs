@@ -4,7 +4,7 @@
 mod split_overlay;
 pub use split_overlay::{InstalledSplit, PreparedSplitOverlay, SplitOverlayLimits};
 
-use std::ffi::CString;
+use std::ffi::{c_void, CString, OsString};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::raw::c_int;
 use std::ptr::NonNull;
@@ -12,9 +12,12 @@ use std::sync::Arc;
 use std::sync::Once;
 
 use tokio::io::unix::AsyncFd;
+use tokio::sync::oneshot;
 
+use crate::close::CloseState;
 use crate::config::{Config, KeyRange, PageStoreBackend};
 use crate::error::{check, take_buf, CtError};
+use crate::page::PageInspection;
 use crate::reactor::{drain_eventfd, duplicate_eventfd, EventfdPump};
 use crate::stats::RangeRebuildStats;
 use crate::sys;
@@ -24,6 +27,9 @@ use crate::sys;
 pub struct Crowdbtree {
     ptr: NonNull<sys::ct_tree>,
     backend_release: Option<crate::BackendReleaseService>,
+    runtime: Option<Arc<crate::TreeRuntime>>,
+    hosted_close: Option<(tokio::runtime::Handle, TreeClose)>,
+    close_started: bool,
     // Lazily-spawned eventfd pumps for this tree's DiskIOUring eventfds
     // (one per pipeline), shared by every concurrently-pending
     // drive_ct_future call. Empty once resolved means no DiskIOUring is
@@ -34,12 +40,84 @@ pub struct Crowdbtree {
 unsafe impl Send for Crowdbtree {}
 unsafe impl Sync for Crowdbtree {}
 
+/// The result of one Tree close. Waiting may be canceled or retried.
+#[derive(Clone, Debug)]
+pub struct TreeClose(Arc<CloseState>);
+
+impl TreeClose {
+    /// Waits for the native Tree facade and its accepted work to retire.
+    pub async fn wait(&self) -> Result<(), CtError> {
+        self.0.wait().await
+    }
+}
+
+unsafe extern "C" fn tree_closed(context: *mut c_void, status: c_int) {
+    // The accepted native close calls this exactly once and owns this Arc.
+    unsafe { Arc::from_raw(context.cast::<CloseState>()) }.finish(status);
+}
+
+struct OpenReply {
+    status: c_int,
+    tree: Option<NonNull<sys::ct_tree>>,
+}
+
+// The accepted reply exclusively owns its facade until Tokio takes it.
+unsafe impl Send for OpenReply {}
+
+impl Drop for OpenReply {
+    fn drop(&mut self) {
+        if let Some(tree) = self.tree.take() {
+            let status =
+                unsafe { sys::ct_close_async(tree.as_ptr(), undelivered_tree_closed, std::ptr::null_mut()) };
+            if status != 0 {
+                eprintln!("critical: undelivered Tree close rejected with status {status}");
+            }
+        }
+    }
+}
+
+unsafe extern "C" fn undelivered_tree_closed(_: *mut c_void, status: c_int) {
+    if status != 0 {
+        eprintln!("critical: undelivered Tree close failed with status {status}");
+    }
+}
+
+unsafe extern "C" fn tree_opened(context: *mut c_void, status: c_int, tree: *mut sys::ct_tree) {
+    let sender = unsafe { Box::from_raw(context.cast::<oneshot::Sender<OpenReply>>()) };
+    let _ = sender.send(OpenReply {
+        status,
+        tree: NonNull::new(tree),
+    });
+}
+
 impl std::fmt::Debug for Crowdbtree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Crowdbtree")
             .field("ptr", &self.ptr)
             .finish_non_exhaustive()
     }
+}
+
+type InspectionReply = oneshot::Sender<Result<PageInspection, CtError>>;
+
+unsafe extern "C" fn page_inspected(
+    context: *mut c_void,
+    status: c_int,
+    version: u64,
+    root: u64,
+    page: u64,
+    deltas: u32,
+    frame: sys::ct_buf,
+) {
+    let sender = unsafe { Box::from_raw(context.cast::<InspectionReply>()) };
+    let frame = take_buf(frame);
+    let result = check(status).and_then(|()| PageInspection::decode(version, root, page, deltas, frame));
+    let _ = sender.send(result);
+}
+
+unsafe extern "C" fn pages_evicted(context: *mut c_void, count: u64) {
+    let sender = unsafe { Box::from_raw(context.cast::<oneshot::Sender<u64>>()) };
+    let _ = sender.send(count);
 }
 
 impl Crowdbtree {
@@ -70,23 +148,178 @@ impl Crowdbtree {
         crate::page::PageInspection::decode(revision, root, page, deltas, take_buf(frame))
     }
 
+    /// Copies a structural page, awaiting cold reads on the native runtime.
+    ///
+    /// # Errors
+    /// Returns a stale version, invalid path, or native read error.
+    pub async fn inspect_page_async(
+        &self,
+        path: &[u32],
+        version: Option<u64>,
+    ) -> Result<PageInspection, CtError> {
+        let (sender, received) = oneshot::channel();
+        {
+            let context = Box::into_raw(Box::<InspectionReply>::new(sender)).cast::<c_void>();
+            let status = unsafe {
+                sys::ct_inspect_page_async(
+                    self.as_ptr(),
+                    path.as_ptr(),
+                    path.len(),
+                    version.unwrap_or(u64::MAX),
+                    page_inspected,
+                    context,
+                )
+            };
+            if let Err(error) = check(status) {
+                unsafe { drop(Box::from_raw(context.cast::<InspectionReply>())) };
+                return Err(error);
+            }
+        }
+        received.await.map_err(|_| CtError::Internal)?
+    }
+
     /// Open (recovering durable state when `path` is set, else fresh in-memory).
     pub fn open(opt: &Config) -> Result<Self, CtError> {
-        Self::open_impl(opt, None)
+        Self::open_impl(opt)
     }
 
-    /// Converts a legacy Chunk root using its runtime backend and shared host.
-    /// Stop and drain every old-format writer in the catalog namespace first.
-    /// Retry an unknown commit with the same generation and a fresh catalog owner;
-    /// the durable migration receipt resolves it without copying the data twice.
-    pub fn migrate_legacy_chunk(opt: &Config, expected_generation: u64) -> Result<Self, CtError> {
-        if expected_generation == 0 || expected_generation == u64::MAX || opt.runtime.is_none() {
+    /// Opens a typed Chunk or a `MemBlock` Tree on its selected runtime.
+    /// Omitting a runtime uses the process-owned host.
+    /// A canceled waiter leaves recovery running and closes any undelivered Tree.
+    /// Keep the Tokio host and the shared runtime alive through shutdown.
+    ///
+    /// # Errors
+    /// Returns an invalid binding or native recovery error.
+    pub async fn open_async(opt: &Config) -> Result<Self, CtError> {
+        Self::open_async_impl(opt, None).await
+    }
+
+    /// Opens a Linux Block Tree using basenames already discovered by the host.
+    /// An empty list creates the first extent. On failure, waits for the
+    /// accepted opens and their file releases before reporting the error.
+    ///
+    /// # Errors
+    /// Returns invalid options, unavailable io_uring, or a native open error.
+    pub async fn open_block_from_names(opt: &Config, names: &[OsString]) -> Result<Self, CtError> {
+        Self::open_async_impl(opt, Some(names)).await
+    }
+
+    async fn open_async_impl(opt: &Config, block_names: Option<&[OsString]>) -> Result<Self, CtError> {
+        let runtime = opt.runtime.clone();
+        if block_names.is_some() && runtime.is_none() {
             return Err(CtError::InvalidArgument);
         }
-        Self::open_impl(opt, Some(expected_generation))
+        let executor = tokio::runtime::Handle::try_current().map_err(|_| CtError::InvalidArgument)?;
+        let names = block_names
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| CString::new(name.as_encoded_bytes()).map_err(|_| CtError::InvalidArgument))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let (release, received) = loop {
+            let (sender, received) = oneshot::channel::<OpenReply>();
+            let mut retry = false;
+            let release = Self::with_open_options(opt, |options| {
+                let native_runtime = runtime
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |host| host.as_ptr());
+                let binding = opt.runtime_binding.as_raw();
+                let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
+                let result = if let Some(names) = &names {
+                    let pointers: Vec<_> = names.iter().map(|name| name.as_ptr()).collect();
+                    crate::BackendReleaseService::attach_with(
+                        &executor,
+                        |wake, drop, wake_context, native| unsafe {
+                            sys::ct_open_block_with_runtime_async(
+                                options,
+                                native_runtime,
+                                &binding,
+                                pointers.as_ptr(),
+                                pointers.len(),
+                                tree_opened,
+                                context,
+                                wake,
+                                drop,
+                                wake_context,
+                                native,
+                            )
+                        },
+                    )
+                    .map(Some)
+                } else {
+                    let status = unsafe {
+                        sys::ct_open_with_runtime_async(
+                            options,
+                            native_runtime,
+                            &binding,
+                            tree_opened,
+                            context,
+                        )
+                    };
+                    retry = status == sys::CT_OPEN_RETRY;
+                    check(status).map(|()| None)
+                };
+                if result.is_err() {
+                    unsafe { drop(Box::from_raw(context.cast::<oneshot::Sender<OpenReply>>())) };
+                }
+                result
+            });
+            if !retry {
+                break (release?, received);
+            }
+            tokio::task::yield_now().await;
+        };
+        let (delivery, wait) = oneshot::channel();
+        executor.spawn(async move {
+            let result = received
+                .await
+                .map_err(|_| CtError::Internal)
+                .and_then(|mut reply| {
+                    check(reply.status)?;
+                    let native = reply.tree.take().ok_or(CtError::Internal)?;
+                    let mut tree = Self::from_native(native.as_ptr(), runtime)?;
+                    tree.backend_release = release.clone();
+                    tree.hosted_close = Some((
+                        tokio::runtime::Handle::current(),
+                        TreeClose(Arc::new(CloseState::new(true))),
+                    ));
+                    Ok(tree)
+                });
+            if result.is_err() {
+                if let Some(release) = release {
+                    release.shutdown().await;
+                }
+            }
+            let _ = delivery.send(result);
+        });
+        wait.await.map_err(|_| CtError::Internal)?
     }
 
-    fn open_impl(opt: &Config, migration_generation: Option<u64>) -> Result<Self, CtError> {
+    fn open_impl(opt: &Config) -> Result<Self, CtError> {
+        let out = Self::with_open_options(opt, |options| {
+            let mut out: *mut sys::ct_tree = std::ptr::null_mut();
+            let status = unsafe {
+                sys::ct_open_with_runtime(
+                    options,
+                    opt.runtime
+                        .as_ref()
+                        .map_or(std::ptr::null_mut(), |host| host.as_ptr()),
+                    &opt.runtime_binding.as_raw(),
+                    &mut out,
+                )
+            };
+            check(status)?;
+            Ok(out)
+        })?;
+        Self::from_opened(out, opt.runtime.clone())
+    }
+
+    fn with_open_options<T>(
+        opt: &Config,
+        submit: impl FnOnce(&sys::ct_options) -> Result<T, CtError>,
+    ) -> Result<T, CtError> {
         #[cfg(feature = "test-util")]
         ct_init_test_logging();
 
@@ -147,42 +380,84 @@ impl Crowdbtree {
             log_max_files: opt.log_max_files,
             tuning: &tuning,
         };
-        let mut out: *mut sys::ct_tree = std::ptr::null_mut();
-        let status = match (&opt.runtime, migration_generation) {
-            (Some(runtime), Some(generation)) => unsafe {
-                sys::ct_migrate_legacy_chunk_with_runtime(
-                    &copt,
-                    runtime.as_ptr(),
-                    &opt.runtime_binding.as_raw(),
-                    generation,
-                    &mut out,
-                )
-            },
-            (Some(runtime), None) => unsafe {
-                sys::ct_open_with_runtime(&copt, runtime.as_ptr(), &opt.runtime_binding.as_raw(), &mut out)
-            },
-            (None, None) => unsafe {
-                sys::ct_open_with_runtime(
-                    &copt,
-                    std::ptr::null_mut(),
-                    &opt.runtime_binding.as_raw(),
-                    &mut out,
-                )
-            },
-            (None, Some(_)) => return Err(CtError::InvalidArgument),
-        };
-        check(status)?;
-        Self::from_opened(out)
+        submit(&copt)
     }
 
-    fn from_opened(out: *mut sys::ct_tree) -> Result<Self, CtError> {
-        let mut tree = Self {
-            ptr: NonNull::new(out).ok_or(CtError::Internal)?,
-            backend_release: None,
-            eventfd_pumps: std::sync::OnceLock::new(),
-        };
+    fn from_opened(
+        out: *mut sys::ct_tree,
+        runtime: Option<Arc<crate::TreeRuntime>>,
+    ) -> Result<Self, CtError> {
+        let mut tree = Self::from_native(out, runtime)?;
         tree.backend_release = crate::BackendReleaseService::attach(tree.ptr)?;
         Ok(tree)
+    }
+
+    fn from_native(
+        out: *mut sys::ct_tree,
+        runtime: Option<Arc<crate::TreeRuntime>>,
+    ) -> Result<Self, CtError> {
+        Ok(Self {
+            ptr: NonNull::new(out).ok_or(CtError::Internal)?,
+            backend_release: None,
+            runtime,
+            hosted_close: None,
+            close_started: false,
+            eventfd_pumps: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Transfers the native handle to an asynchronous close. A rejected
+    /// submission returns the Tree. Keep the Tokio host, its explicit Tree
+    /// runtime and backend release services alive through shutdown.
+    ///
+    /// # Errors
+    /// Returns the native rejection or a missing Tokio host for an explicit
+    /// runtime. Retrying a wait on the result does not resubmit the close.
+    pub fn begin_close(mut self) -> Result<TreeClose, (CtError, Self)> {
+        let (executor, close) = match &self.hosted_close {
+            Some((executor, close)) => (Some(executor.clone()), close.clone()),
+            None => {
+                let executor = if self.runtime.is_some() {
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(executor) => Some(executor),
+                        Err(_) => return Err((CtError::InvalidArgument, self)),
+                    }
+                } else {
+                    None
+                };
+                (executor, TreeClose(Arc::new(CloseState::new(true))))
+            }
+        };
+        match check(self.submit_close(executor, &close)) {
+            Ok(()) => Ok(close),
+            Err(error) => Err((error, self)),
+        }
+    }
+
+    fn submit_close(&mut self, executor: Option<tokio::runtime::Handle>, close: &TreeClose) -> i32 {
+        let context = Arc::into_raw(close.0.clone()).cast_mut().cast::<c_void>();
+        let status = unsafe { sys::ct_close_async(self.as_ptr(), tree_closed, context) };
+        if status != 0 {
+            // Rejected submissions never take the facade or callback context.
+            drop(unsafe { Arc::from_raw(context.cast::<CloseState>()) });
+            return status;
+        }
+        self.close_started = true;
+        if let (Some(executor), Some(runtime)) = (executor, self.runtime.take()) {
+            let close = close.clone();
+            executor.spawn(async move {
+                let _ = close.wait().await;
+                drop(runtime);
+            });
+        }
+        status
+    }
+
+    /// Observes the close of a hosted Tree without retaining the native facade.
+    /// The close starts when the last owner drops or transfers the Tree.
+    #[must_use]
+    pub fn close_result(&self) -> Option<TreeClose> {
+        self.hosted_close.as_ref().map(|(_, close)| close.clone())
     }
 
     /// Host release handle, present for filesystem Block backends opened from
@@ -267,7 +542,7 @@ impl Crowdbtree {
             },
         };
         check(status)?;
-        let tree = Self::from_opened(out)?;
+        let tree = Self::from_opened(out, opt.runtime.clone())?;
         Ok((
             tree,
             RangeRebuildStats {
@@ -492,6 +767,43 @@ impl Crowdbtree {
         unsafe { sys::ct_evict_clean_inner(self.as_ptr(), max_resident_inner) }
     }
 
+    /// Evicts clean leaf bases and awaits the number of references removed.
+    ///
+    /// # Errors
+    /// Returns a native admission error if eviction cannot start.
+    pub async fn evict_clean_leaves_async(&self, max_resident: u64) -> Result<u64, CtError> {
+        self.evict_clean_pages_async(false, max_resident).await
+    }
+
+    /// Evicts clean index bases and awaits the number of references removed.
+    ///
+    /// # Errors
+    /// Returns a native admission error if eviction cannot start.
+    pub async fn evict_clean_inner_async(&self, max_resident: u64) -> Result<u64, CtError> {
+        self.evict_clean_pages_async(true, max_resident).await
+    }
+
+    async fn evict_clean_pages_async(&self, inner: bool, max_resident: u64) -> Result<u64, CtError> {
+        let (sender, received) = oneshot::channel::<u64>();
+        {
+            let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
+            let status = unsafe {
+                sys::ct_evict_clean_pages_async(
+                    self.as_ptr(),
+                    u8::from(inner),
+                    max_resident,
+                    pages_evicted,
+                    context,
+                )
+            };
+            if let Err(error) = check(status) {
+                unsafe { drop(Box::from_raw(context.cast::<oneshot::Sender<u64>>())) };
+                return Err(error);
+            }
+        }
+        received.await.map_err(|_| CtError::Internal)
+    }
+
     /// The tree's DiskIOUring eventfds (one per pipeline), or empty if
     /// none is wired (an in-memory tree, or a build without liburing).
     /// DiskIOUring-owned -- callers
@@ -606,7 +918,21 @@ impl Drop for Crowdbtree {
                 pump.task.abort();
             }
         }
-        unsafe { sys::ct_close(self.ptr.as_ptr()) }
+        if self.close_started {
+            return;
+        }
+        if let Some((executor, close)) = self.hosted_close.take() {
+            let status = self.submit_close(Some(executor), &close);
+            if status != 0 {
+                // Hosted constructors guarantee async close capability. A
+                // rejected close must be visible to the host and must not
+                // synchronously drain on the thread releasing the last owner.
+                close.0.finish(status);
+                eprintln!("critical: hosted Tree close rejected with status {status}");
+            }
+        } else {
+            unsafe { sys::ct_close(self.ptr.as_ptr()) };
+        }
     }
 }
 
@@ -702,4 +1028,61 @@ fn test_log_dir() -> std::path::PathBuf {
         .join("log");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+#[cfg(test)]
+mod open_reply_tests {
+    use super::*;
+    use crate::{PageStore, TreeRuntime, TreeRuntimeOptions};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn undelivered_native_open_releases_its_runtime_binding() {
+        let runtime = Arc::new(
+            TreeRuntime::new(TreeRuntimeOptions {
+                workers: 1,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        for receive in [true, false] {
+            let config = Config {
+                page_store: Some(Arc::new(PageStore::open_mem(1).unwrap())),
+                ..Default::default()
+            };
+            let (sender, received) = oneshot::channel::<OpenReply>();
+            let received = if receive {
+                Some(received)
+            } else {
+                drop(received);
+                None
+            };
+            Crowdbtree::with_open_options(&config, |options| {
+                let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
+                let status = unsafe {
+                    sys::ct_open_with_runtime_async(
+                        options,
+                        runtime.as_ptr(),
+                        &config.runtime_binding.as_raw(),
+                        tree_opened,
+                        context,
+                    )
+                };
+                if status != 0 {
+                    unsafe { drop(Box::from_raw(context.cast::<oneshot::Sender<OpenReply>>())) };
+                }
+                check(status)
+            })
+            .unwrap();
+            if let Some(received) = received {
+                let reply = received.await.unwrap();
+                check(reply.status).unwrap();
+                assert!(reply.tree.is_some());
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), runtime.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.snapshot().unwrap().bindings, 0);
+    }
 }

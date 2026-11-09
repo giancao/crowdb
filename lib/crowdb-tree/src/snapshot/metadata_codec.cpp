@@ -27,16 +27,14 @@ Status encode_segment_into(const SegmentImageHeader &header, std::span<const uin
         output.size() < segment_image_encoded_size(header.slot_count)) {
         return Status::invalid_argument();
     }
-    bool refs = false;
     for (const auto word : words) {
         if (!slot_word::is_empty(word) && !slot_word::is_unloaded(word)) {
             return Status::invalid_argument();
         }
-        refs = refs || slot_word::is_page_ref(word);
     }
     put(output, 0, uint32_t{0x534D5443});
-    put(output, 4, refs ? uint16_t{2} : uint16_t{1});
-    put(output, 6, refs ? uint16_t{1} : uint16_t{0});
+    put(output, 4, uint16_t{1});
+    put(output, 6, uint16_t{0});
     put(output, 8, header.seg_idx);
     put(output, 12, header.generation);
     put(output, 20, header.slot_count);

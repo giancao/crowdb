@@ -15,8 +15,13 @@ pub(super) async fn join(
     State(state): State<RegistryArc>,
     Json(request): Json<JoinGroupRequest>,
 ) -> Result<StatusCode, ManagementError> {
-    let _execution = super::system_bootstrap::begin(&state)?;
-    super::system_bootstrap::accept(&state, request.replica_id, request.bootstrap.as_ref())?;
+    super::system_bootstrap::begin(&state)?
+        .run(join_owned(state, request))
+        .await
+}
+
+async fn join_owned(state: RegistryArc, request: JoinGroupRequest) -> Result<StatusCode, ManagementError> {
+    super::system_bootstrap::accept(&state, request.replica_id, request.bootstrap.as_ref()).await?;
     let store = super::system_store::ensure(&state).await?;
     if let Some(group) = store.get_group(0) {
         return if group.local_replica().id == request.replica_id && request.bootstrap.is_some() {

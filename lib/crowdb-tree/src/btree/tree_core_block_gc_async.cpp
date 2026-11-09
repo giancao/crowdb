@@ -50,14 +50,16 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
         Connected connected;
     };
 
-    std::shared_ptr<detail::AllocationReservation> metadata;
+    std::shared_ptr<AllocationBudget>              metadata;
     std::shared_ptr<AllocationBudget>              backend;
     std::shared_ptr<LocalBackendState>             local;
     std::shared_ptr<TreeRuntimeBinding>            binding;
     std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
     TreeCore                                      *core = nullptr;
-    std::shared_ptr<Cleanup>                       self;
-    bool                                           owns_gate = false;
+    ApplyDispatcher::Node                          node{&Cleanup::run, this};
+    bool                                           owns_gate             = false;
+    bool                                           retirements_drained   = false;
+    bool                                           free_blocks_collected = false;
     ProtectedExtent                                exclusion;
     std::shared_ptr<CheckpointOperation>           operation;
     std::optional<Attempt>                         attempt;
@@ -67,18 +69,14 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
     void completed(Status status) noexcept
     {
         outcome = std::move(status);
-        self    = weak_from_this().lock();
-        assert(self);
-        Status submitted;
-        try {
-            submitted = binding->backend_cpu()->try_submit(binding->backend_lane(), &Cleanup::run, this);
-        }
-        catch (...) {
-            submitted = Status::resource_exhausted();
-        }
-        if (!submitted.ok()) {
-            self.reset();
-        }
+        binding->backend_progress()->request(node, weak_from_this().lock());
+    }
+
+    void collect(BlockPageStore &store, uint64_t first, LocalBlockGcLimits limits,
+                 detail::InlineFunction<void(LocalBlockGcResult)> complete)
+    {
+        collect_free_file_blocks(store, local->ledger, first, limits, metadata, backend,
+                                 core->config().async_page_store, binding->backend_progress(), std::move(complete));
     }
 
     void advance()
@@ -87,12 +85,14 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
             if (!outcome.ok()) {
                 return;
             }
-            const auto result =
-                collect_free_local_blocks(*memory, *local->ledger, local->gc_cursor.load(), {}, metadata);
-            local->gc_cursor.store(result.complete ? 0 : result.next_block, std::memory_order_relaxed);
-            if (result.status.ok() && !result.complete) {
-                completed(Status::Ok());
-            }
+            collect_free_memory_blocks(*memory, local->ledger, local->gc_cursor.load(), {}, metadata,
+                                       [owner = shared_from_this()](LocalBlockGcResult result) {
+                                           owner->local->gc_cursor.store(result.complete ? 0 : result.next_block,
+                                                                         std::memory_order_relaxed);
+                                           if (result.status.ok() && !result.complete) {
+                                               owner->completed(Status::Ok());
+                                           }
+                                       });
             return;
         }
         auto *store = dynamic_cast<BlockPageStore *>(core->config().page_store);
@@ -114,16 +114,45 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
                 stdexec::start(attempt->connected);
                 return;
             }
-            core->publisher().reclaim();
-            core->binding()->account()->drain_retirements();
-            reclaim_free_blocks(*core, metadata, backend);
-            auto candidate = select_sparse_local_block(
-                *store, *local->ledger, local->gc_cursor.load(std::memory_order_relaxed), metadata, 0.5, backend);
-            local->gc_cursor.store(candidate.next_block, std::memory_order_relaxed);
-            if (!candidate.status.ok()) {
+            if (!retirements_drained) {
+                core->publisher().reclaim();
+                binding->account()->when_retirements_drained({
+                    .context = this,
+                    .complete_fn =
+                        [](void *context, Status status) noexcept {
+                            auto &self               = *static_cast<Cleanup *>(context);
+                            self.retirements_drained = true;
+                            self.completed(std::move(status));
+                        },
+                    .owner = shared_from_this(),
+                });
                 return;
             }
-            exclusion = std::move(candidate.exclusion);
+            if (!free_blocks_collected) {
+                collect(*store, local->gc_cursor.load(std::memory_order_relaxed), {},
+                        [owner = shared_from_this()](LocalBlockGcResult result) {
+                            owner->local->gc_cursor.store(result.complete ? 0 : result.next_block,
+                                                          std::memory_order_relaxed);
+                            if (!result.status.ok()) {
+                                if (result.status.code() != Code::kResourceExhausted &&
+                                    result.status.code() != Code::kUnavailable) {
+                                    CRB_LOG_WARN("post-flush block cleanup deferred: {}", result.status.to_string());
+                                }
+                                return;
+                            }
+                            owner->free_blocks_collected = true;
+                            owner->completed(Status::Ok());
+                        });
+                return;
+            }
+            select_sparse_local_block_async(
+                *store, local->ledger, local->gc_cursor.load(std::memory_order_relaxed), metadata, 0.5, backend,
+                [owner = shared_from_this()](LocalSparseBlock candidate) {
+                    owner->local->gc_cursor.store(candidate.next_block, std::memory_order_relaxed);
+                    owner->exclusion = std::move(candidate.exclusion);
+                    owner->completed(std::move(candidate.status));
+                });
+            return;
         }
         if (remaining == 0) {
             core->cache()->evict();
@@ -131,8 +160,12 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
             // until the epoch batch reaches its normal collection threshold.
             core->publisher().reclaim();
             const LocalBlockGcLimits limits{.max_blocks = 1, .max_deleted_bytes = store->block_size()};
-            (void)collect_free_local_blocks(*store, *local->ledger, exclusion.address / store->block_size(), limits,
-                                            metadata, backend);
+            collect(*store, exclusion.address / store->block_size(), limits,
+                    [owner = shared_from_this()](LocalBlockGcResult result) {
+                        if (!result.status.ok()) {
+                            owner->local->gc_cursor.store(result.next_block, std::memory_order_relaxed);
+                        }
+                    });
             return;
         }
         --remaining;
@@ -153,18 +186,15 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
         if (owns_gate) {
             local->gc_active.store(false, std::memory_order_release);
         }
-        if (metadata) {
-            metadata->seal();
-        }
+        detail::seal_reservation(metadata);
     }
 
     static void run(void *context) noexcept
     {
-        auto owner = std::move(static_cast<Cleanup *>(context)->self);
-        // The accepted checkpoint's Ticket keeps Core/backend lifetime valid
-        // while close or generation replacement drains this continuation.
+        // The dispatcher holds this node's owner through the continuation.
+        auto &cleanup = *static_cast<Cleanup *>(context);
         try {
-            owner->advance();
+            cleanup.advance();
         }
         catch (const std::bad_alloc &) {
             // The existing anchors and live backing still protect their bytes.
@@ -201,22 +231,10 @@ try {
     } gate{local.get()};
 
     using namespace detail;
-    const auto bound = AllocationBound(local_block_gc_metadata_bound(limits).value_or(SIZE_MAX))
-                           .add(shared_allocation_bound<Cleanup>() + shared_allocation_bound<AllocationReservation>())
-                           .value();
-    if (!bound) {
-        return;
-    }
-    auto reserved = ResourceBudget::try_reserve(core.binding()->account(), BudgetClass::kReclaim, *bound);
-    if (!reserved) {
-        return;
-    }
-    auto metadata     = AllocationReservation::create(std::move(*reserved));
-    auto cleanup      = reserved_shared<Cleanup>(metadata);
-    cleanup->metadata = std::move(metadata);
-    auto backend_status =
-        reserve_backend_operation(store, core.binding()->account(),
-                                  {.workers = core.binding()->backend_cpu()->worker_count()}, &cleanup->backend);
+    auto metadata       = core.accepted_allocations();
+    auto cleanup        = reserved_shared<Cleanup>(metadata);
+    cleanup->metadata   = std::move(metadata);
+    auto backend_status = ongoing_backend_operation(store, &cleanup->backend);
     if (!backend_status.ok()) {
         return;
     }
@@ -226,19 +244,7 @@ try {
     cleanup->core      = &core;
     cleanup->owns_gate = true;
     gate.local         = nullptr;
-    cleanup->self      = cleanup;
-    Status status;
-    try {
-        status =
-            cleanup->binding->backend_cpu()->try_submit(cleanup->binding->backend_lane(), &Cleanup::run, cleanup.get());
-    }
-    catch (...) {
-        cleanup->self.reset();
-        throw;
-    }
-    if (!status.ok()) {
-        cleanup->self.reset();
-    }
+    cleanup->completed(Status::Ok());
 }
 catch (const std::bad_alloc &) {
     // This checkpoint is already durable; a later pass can retry admission.

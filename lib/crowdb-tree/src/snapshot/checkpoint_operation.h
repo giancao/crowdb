@@ -93,7 +93,7 @@ class CheckpointOperation
                          std::shared_ptr<LocalBackendState> backend, std::shared_ptr<AsyncPageStore> operation_store,
                          std::shared_ptr<detail::FlushRuntime>       runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, CheckpointOptions options,
-                         PageLoadBudget budget, std::shared_ptr<detail::AllocationReservation> finish_metadata,
+                         PageLoadBudget budget, std::shared_ptr<AllocationBudget> finish_metadata,
                          std::shared_ptr<PageLoader> loader, PrepareHandoff prepare_handoff, PrepareWork prepare_work,
                          std::shared_ptr<CheckpointOperation> *out, PrepareCleanup prepare_cleanup = {},
                          PrepareWorkAsync prepare_work_async = {}, PrepareCleanup on_terminal = {},

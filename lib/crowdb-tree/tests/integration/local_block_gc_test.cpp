@@ -8,6 +8,10 @@
 #include "test_tmp.h"
 
 #include <future>
+#ifdef CROWDB_HAVE_LIBURING
+#    include <filesystem>
+#    include <latch>
+#endif
 
 namespace crowdb::tree
 {
@@ -93,6 +97,109 @@ TEST(LocalBlockGc, MetadataFailureAndPartialTailCannotDeleteUnleasedStorage)
     EXPECT_TRUE(test.store->file_for_offset(16384, &offset));
 }
 
+#ifdef CROWDB_HAVE_LIBURING
+TEST(LocalBlockGc, KernelUnlinkKeepsLeaseThroughCompletionAndRestoresFailedEntry)
+{
+    TestBlockGc test;
+    ASSERT_TRUE(test.ledger.activate().status.ok());
+    common::Topology topology;
+    topology.pipelines.push_back({});
+    common::DiskIOUring uring(std::move(topology));
+    if (!uring.valid()) {
+        GTEST_SKIP() << "io_uring unavailable";
+    }
+    BlockAsyncPageStore      async(test.store.get(), &uring);
+    const auto               metadata = test.ledger.credits.credits.reservation();
+    const LocalBlockGcLimits limits{.max_blocks = 1};
+    constexpr uint64_t       index  = 2;
+    constexpr uint64_t       offset = index * 4096;
+    uint64_t                 local  = 0;
+    const auto               old    = test.store->file_for_offset(offset, &local);
+    ASSERT_TRUE(old);
+    uring.register_fd(old->fd());
+    const auto path  = std::filesystem::path(test.directory.path) / "1-2.blk-0002";
+    const auto saved = path.string() + ".saved";
+    std::filesystem::rename(path, saved);
+    ASSERT_TRUE(std::filesystem::create_directory(path));
+
+    auto collect = [&](auto promise) {
+        collect_free_file_blocks(*test.store, test.ledger.ledger, index, limits, metadata, {}, &async, {},
+                                 [promise](LocalBlockGcResult result) { promise->set_value(std::move(result)); });
+    };
+    auto failed  = std::make_shared<std::promise<LocalBlockGcResult>>();
+    auto failure = failed->get_future();
+    collect(failed);
+    ASSERT_EQ(failure.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto result = failure.get();
+    EXPECT_EQ(result.status.code(), Code::kIoError);
+    EXPECT_EQ(result.next_block, index);
+    EXPECT_EQ(result.deleted_blocks, 0U);
+    ASSERT_EQ(test.store->file_for_offset(offset, &local), old);
+    ASSERT_TRUE(std::filesystem::remove(path));
+    std::filesystem::rename(saved, path);
+
+    struct PollPause
+    {
+        std::promise<int> entered;
+        std::latch        resume{1};
+    };
+
+    auto pause = std::make_shared<PollPause>();
+
+    struct Resume
+    {
+        std::shared_ptr<PollPause> pause;
+
+        ~Resume()
+        {
+            if (pause != nullptr) {
+                pause->resume.count_down();
+            }
+        }
+    } resume{pause};
+
+    auto entered = pause->entered.get_future();
+    uring.submit_fsync(old->fd(), [pause](int result) {
+        pause->entered.set_value(result);
+        pause->resume.wait();
+    });
+    ASSERT_EQ(entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(entered.get(), 0);
+
+    auto completed  = std::make_shared<std::promise<LocalBlockGcResult>>();
+    auto completion = completed->get_future();
+    // The nested claim must queue on this same ledger and return from its callback.
+    ASSERT_TRUE(test.ledger.ledger
+                    ->claim_free(12288, 4096, metadata,
+                                 [&](ExtentLedgerResult other) {
+                                     EXPECT_TRUE(other.status.ok());
+                                     collect(completed);
+                                 })
+                    .ok());
+    EXPECT_EQ(completion.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_TRUE(std::filesystem::exists(path));
+    EXPECT_FALSE(test.store->file_for_offset(offset, &local));
+    auto held = await_ledger(
+        [&](auto done) { return test.ledger.ledger->claim_free(offset, 4096, metadata, std::move(done)); });
+    EXPECT_EQ(held.status.code(), Code::kNotFound);
+
+    pause->resume.count_down();
+    resume.pause.reset();
+    ASSERT_EQ(completion.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto deleted = completion.get();
+    EXPECT_TRUE(deleted.status.ok()) << deleted.status.to_string();
+    EXPECT_EQ(deleted.deleted_blocks, 1U);
+    EXPECT_FALSE(std::filesystem::exists(path));
+    EXPECT_FALSE(test.store->file_for_offset(offset, &local));
+    auto reusable = await_ledger(
+        [&](auto done) { return test.ledger.ledger->claim_free(offset, 4096, metadata, std::move(done)); });
+    EXPECT_TRUE(reusable.status.ok());
+    uint8_t value = 0;
+    ASSERT_TRUE(old->pread_at(0, &value, 1).ok());
+    EXPECT_EQ(value, 42U);
+}
+#endif
+
 TEST(LocalBlockGc, PublicCheckpointReclaimsCrashTailWithoutLosingRecovery)
 {
     tree_test::TempDir              dir("checkpoint_gc_");
@@ -113,7 +220,7 @@ TEST(LocalBlockGc, PublicCheckpointReclaimsCrashTailWithoutLosingRecovery)
     ASSERT_TRUE(opened_status.ok()) << opened_status.to_string();
     ASSERT_TRUE(tree->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = "value"}}}).ok());
     uint64_t coverage = 0;
-    auto     status   = tree->snapshot(&coverage);
+    auto     status   = tree->flush_with_persistent(&coverage);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 1U);
     TreeCoreAccess::get(*tree)->operation_lifetime().drain_accepted();

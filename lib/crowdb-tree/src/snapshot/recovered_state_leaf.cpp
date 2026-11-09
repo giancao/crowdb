@@ -80,14 +80,15 @@ void RecoveredStateOperation::State::dependency_step()
     const auto &references = *top.descriptor->stored_overflow;
     size_t      work       = 0;
     while (top.dependency < references.size() && work++ < limits.max_step_entries) {
-        if (dependency_steps++ == limits.max_dependency_steps) {
-            finish(Status::resource_exhausted());
-            return;
-        }
         if (top.chain_pid == kInvalidPageId) {
             const auto &reference = references[top.dependency];
             top.chain_pid         = reference.head;
             top.chain_bytes       = reference.bytes;
+            top.chain_steps       = 0;
+        }
+        if (++top.chain_steps > captured->frames.size()) {
+            finish(Status::corruption("overflow dependency cycle"));
+            return;
         }
         const auto found = captured->frames.find(top.chain_pid);
         if (top.chain_pid >= captured->next_page_id || found == captured->frames.end()) {

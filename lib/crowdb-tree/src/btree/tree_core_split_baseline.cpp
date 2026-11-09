@@ -69,7 +69,7 @@ Status TreeCore::install_split_baseline(const SplitSourceSession &session, uint6
         }
     }
     RuntimeRangeImport staging;
-    auto               status = copy_snapshot_range(session.baseline, *this, config().key_range, staging);
+    auto               status = copy_read_only_view_range(session.baseline, *this, config().key_range, staging);
     if (!status.ok()) {
         return status;
     }

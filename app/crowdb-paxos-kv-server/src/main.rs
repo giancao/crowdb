@@ -155,7 +155,7 @@ async fn main() {
 
     let registry = Arc::new(
         PaxosKvStoreRegistry::try_with_config(config.clone())
-            .unwrap_or_else(|error| panic!("failed to initialize WAL backend: {error}"))
+            .unwrap_or_else(|error| panic!("failed to initialize server storage: {error}"))
             .with_metrics_registry(metrics_runner.as_ref().map_or_else(
                 || {
                     Arc::new(std::sync::Mutex::new(
@@ -260,6 +260,7 @@ async fn main() {
             }
         };
     let cleanup_pending = mgmt::system_cleanup_pending(&registry.config.config_root)
+        .await
         .expect("cannot inspect system cleanup fence");
     if cleanup_pending {
         local_groups.retain(|group| group.store_id != 0);
@@ -384,6 +385,18 @@ async fn main() {
 
     operation_cleanup.abort();
     let _ = operation_cleanup.await;
+
+    let timeout = std::time::Duration::from_millis(registry.config.server.shutdown_timeout_ms);
+    if tokio::time::timeout(timeout, registry.wait_management_idle())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_ms = timeout.as_millis(),
+            "waiting for an accepted management directory operation"
+        );
+        registry.wait_management_idle().await;
+    }
 
     // Graceful cascade shutdown (PxKvStore → PxGroup → replicas)
     if let Some(ref mut runner) = metrics_runner {
@@ -610,7 +623,12 @@ async fn graceful_shutdown(
     crowdb_tree_ffi::ct_flush_logging();
     crowdb_rpc_ffi::flush_logging();
 
-    let report = crowdb_paxos_kv_server::shutdown::shutdown_stores(&registry).await;
+    let mut report = crowdb_paxos_kv_server::shutdown::shutdown_stores(&registry).await;
+    member_routes.stop().await;
+    drop(metrics_runner);
+    let closed = crowdb_paxos_kv_server::shutdown::release_hosted_trees(registry).await;
+    let trees_closed = closed.is_clean();
+    report.merge(closed);
     if report.is_clean() {
         info!("crowdb-paxos-kv-server shut down cleanly");
     } else {
@@ -622,15 +640,11 @@ async fn graceful_shutdown(
             "crowdb-paxos-kv-server shut down with errors"
         );
     }
-    member_routes.stop().await;
-    drop(metrics_runner);
-    registry.tree_runtime.stop_admission();
-    // Drop stores and their Trees before the shared runtime and loggers. An
-    // incomplete accepted drain above never reaches this destruction point.
-    drop(registry);
+    if !trees_closed {
+        return;
+    }
 
-    // Final flush + stop the C++ spdlog async loggers. All Crowdbtree
-    // instances are now dropped (or about to be), so this is safe.
+    // Tree and backend completions have returned. Stop the native loggers.
     crowdb_tree_ffi::ct_flush_logging();
     crowdb_tree_ffi::ct_shutdown_logging();
     crowdb_rpc_ffi::flush_logging();

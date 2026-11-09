@@ -27,9 +27,10 @@ void FlushRuntime::ProgressState::schedule(const std::shared_ptr<const void> &ow
 {
     // The registration owns the cell and its queue permits for its lifetime.
     // Connecting a static-pool scheduler constructs only the inline operation.
-    runtime->lifecycle->fetch_add(1, std::memory_order_acq_rel);
-    jobs.fetch_add(1, std::memory_order_acq_rel);
-    lane->jobs_.fetch_add(1, std::memory_order_acq_rel);
+    runtime->lifecycle->jobs.fetch_add(1, std::memory_order_acq_rel);
+    work.fetch_add(1, std::memory_order_acq_rel);
+    [[maybe_unused]] const auto previous = lane->jobs_.fetch_add(1, std::memory_order_acq_rel);
+    assert((previous & Lane::kClosing) == 0 && "progress must join before closing its lane");
     auto *job = ::new (static_cast<void *>(runtime->slots[slot].storage.data()))
         State::Job(runtime, slot, lane, task, context, weak_from_this().lock(), owner);
     runtime->queued.fetch_add(1, std::memory_order_relaxed);
@@ -40,18 +41,17 @@ void FlushRuntime::ProgressState::schedule(const std::shared_ptr<const void> &ow
 void FlushRuntime::ProgressState::request(const std::shared_ptr<const void> &owner) noexcept
 {
     assert(owner);
-    auto value = ingress.load(std::memory_order_acquire);
+    auto value = work.load(std::memory_order_acquire);
     do {
-        if ((value & State::kClosed) != 0) {
+        if ((value & (State::kClosed | kStopArmed)) != 0) {
             return;
         }
-    } while (!ingress.compare_exchange_weak(value, value + 1, std::memory_order_acq_rel));
+    } while (!work.compare_exchange_weak(value, value + 1, std::memory_order_acq_rel));
     requested.store(true, std::memory_order_release);
     if (!active.exchange(true, std::memory_order_acq_rel)) {
         schedule(owner);
     }
-    ingress.fetch_sub(1, std::memory_order_acq_rel);
-    ingress.notify_all();
+    finish_work();
 }
 
 void FlushRuntime::ProgressState::complete(const std::shared_ptr<const void> &owner) noexcept
@@ -63,26 +63,64 @@ void FlushRuntime::ProgressState::complete(const std::shared_ptr<const void> &ow
     if (requested.load(std::memory_order_acquire) && !active.exchange(true, std::memory_order_acq_rel)) {
         schedule(owner);
     }
-    jobs.fetch_sub(1, std::memory_order_acq_rel);
-    jobs.notify_all();
+}
+
+void FlushRuntime::ProgressState::finish_work() noexcept
+{
+    const auto previous = work.fetch_sub(1, std::memory_order_acq_rel);
+    if ((previous & kWork) == 1) {
+        work.notify_all();
+        if ((previous & kCloseArmed) != 0) {
+            finish_close(previous - 1);
+        }
+    }
 }
 
 void FlushRuntime::ProgressState::drain() noexcept
 {
-    auto value = jobs.load(std::memory_order_acquire);
-    while (value != 0) {
-        jobs.wait(value, std::memory_order_acquire);
-        value = jobs.load(std::memory_order_acquire);
+    auto value = work.load(std::memory_order_acquire);
+    while ((value & kWork) != 0) {
+        work.wait(value, std::memory_order_acquire);
+        value = work.load(std::memory_order_acquire);
     }
+}
+
+void FlushRuntime::ProgressState::close_async(AsyncCompletion complete) noexcept
+{
+    on_drained = std::move(complete);
+    arm_close(0);
+}
+
+void FlushRuntime::ProgressState::stop_async(AsyncCompletion complete) noexcept
+{
+    on_drained = std::move(complete);
+    arm_close(kStopArmed);
+}
+
+void FlushRuntime::ProgressState::arm_close(uint64_t flags) noexcept
+{
+    const auto armed    = kCloseArmed | flags;
+    const auto previous = work.fetch_or(armed, std::memory_order_acq_rel);
+    if ((previous & kWork) == 0) {
+        finish_close(previous | armed);
+    }
+}
+
+void FlushRuntime::ProgressState::finish_close(uint64_t idle) noexcept
+{
+    assert((idle & kWork) == 0);
+    if ((idle & State::kClosed) != 0 ||
+        !work.compare_exchange_strong(idle, idle | State::kClosed, std::memory_order_acq_rel)) {
+        return;
+    }
+    detach();
+    auto done = std::move(on_drained);
+    done.complete(Status::Ok());
 }
 
 void FlushRuntime::ProgressState::close_and_drain() noexcept
 {
-    auto value = ingress.fetch_or(State::kClosed, std::memory_order_acq_rel) | State::kClosed;
-    while ((value & ~State::kClosed) != 0) {
-        ingress.wait(value, std::memory_order_acquire);
-        value = ingress.load(std::memory_order_acquire);
-    }
+    work.fetch_or(State::kClosed, std::memory_order_acq_rel);
     drain();
     detach();
 }
@@ -101,6 +139,18 @@ void FlushRuntime::Progress::drain() noexcept
     state_->drain();
 }
 
+void FlushRuntime::Progress::close_async(AsyncCompletion complete) noexcept
+{
+    auto state = state_;
+    state->close_async(std::move(complete));
+}
+
+void FlushRuntime::Progress::stop_async(AsyncCompletion complete) noexcept
+{
+    auto state = state_;
+    state->stop_async(std::move(complete));
+}
+
 void FlushRuntime::Progress::close_and_drain() noexcept
 {
     state_->close_and_drain();
@@ -117,12 +167,15 @@ Status FlushRuntime::reserve_progress(std::shared_ptr<Lane> lane, Task task, voi
     if (!lane || task == nullptr || out == nullptr) {
         return Status::invalid_argument("runtime progress requires lane, task and output");
     }
-    auto value = state_->lifecycle->load(std::memory_order_acquire);
+    if ((lane->jobs_.load(std::memory_order_acquire) & Lane::kClosing) != 0) {
+        return Status::unavailable("flush runtime lane closed");
+    }
+    auto value = state_->lifecycle->jobs.load(std::memory_order_acquire);
     do {
         if ((value & State::kClosed) != 0) {
             return Status::unavailable("flush runtime closed");
         }
-    } while (!state_->lifecycle->compare_exchange_weak(value, value + 1, std::memory_order_acq_rel));
+    } while (!state_->lifecycle->jobs.compare_exchange_weak(value, value + 1, std::memory_order_acq_rel));
     const bool lane_acquired = flush_runtime_acquire(lane->queued_, lane->limit_);
     if (!lane_acquired || !flush_runtime_acquire(state_->queue_permits, state_->queue_limit)) {
         if (lane_acquired) {

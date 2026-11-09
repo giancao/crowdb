@@ -12,7 +12,7 @@ namespace crowdb::tree
 {
 CapturedLayoutPlanner::CapturedLayoutPlanner(uint64_t next_page_id, uint64_t backend_id, CapturedWriteLimits limits,
                                              size_t max_segments, std::shared_ptr<const CapturedDurablePages> inherited,
-                                             std::shared_ptr<detail::AllocationReservation> metadata)
+                                             std::shared_ptr<AllocationBudget> metadata)
     : next_(next_page_id),
       backend_(backend_id),
       limits_(std::move(limits)),
@@ -57,11 +57,16 @@ Status CapturedLayoutPlanner::segment(uint64_t pid)
 
 Status CapturedLayoutPlanner::accept(CapturedFrameResult::Plan page)
 {
-    if (page_ || plan_.primary_frames == limits_.max_frames ||
-        page.summary.new_overflow_frames > limits_.max_frames - plan_.primary_frames - 1 ||
-        plan_.new_overflow_frames > limits_.max_frames - plan_.primary_frames - 1 - page.summary.new_overflow_frames ||
-        page.reused_overflow.size() > limits_.max_dependency_steps - plan_.reference_heads) {
-        return Status::resource_exhausted("checkpoint layout exceeds its descriptor bound");
+    if (page_) {
+        return Status::invalid_argument("previous layout page is incomplete");
+    }
+    if (!detail::AllocationBound(plan_.primary_frames)
+             .add(1)
+             .add(plan_.new_overflow_frames)
+             .add(page.summary.new_overflow_frames)
+             .value() ||
+        !detail::AllocationBound(plan_.reference_heads).add(page.reused_overflow.size()).value()) {
+        return Status::resource_exhausted("checkpoint layout count overflow");
     }
     auto status = segment(page.page_id);
     if (!status.ok()) {
@@ -93,13 +98,24 @@ Status CapturedLayoutPlanner::step()
         page_.reset();
         return Status::Ok();
     }
-    if (plan_.reused_dependency_entries == limits_.max_dependency_steps) {
-        return Status::resource_exhausted("checkpoint overflow dependency step limit");
+    if (plan_.reused_dependency_entries == SIZE_MAX) {
+        return Status::resource_exhausted("checkpoint dependency count overflow");
     }
     const auto &reference = page_->reused_overflow[reference_];
     if (pid_ == kInvalidPageId) {
-        pid_       = reference.head;
-        remaining_ = reference.bytes;
+        pid_         = reference.head;
+        remaining_   = reference.bytes;
+        chain_steps_ = 0;
+    }
+    size_t count = 0;
+    if (reference.backing) {
+        count = reference.backing->pages.size();
+    }
+    else if (inherited_) {
+        count = inherited_->frames.size();
+    }
+    if (count != 0 && ++chain_steps_ > count) {
+        return Status::corruption("captured overflow dependency cycle");
     }
     OverflowBackingPage old;
     if (reference.backing) {
@@ -164,12 +180,19 @@ Status CapturedLayoutPlanner::finish()
     if (plan_.segments > max_segments_) {
         return Status::resource_exhausted("checkpoint segment limit");
     }
-    plan_.frame_count_upper = plan_.primary_frames + plan_.new_overflow_frames;
-    plan_.frame_count_upper += std::min(limits_.max_frames - plan_.frame_count_upper, plan_.reused_dependency_entries);
+    const auto frames = detail::AllocationBound(plan_.primary_frames)
+                            .add(plan_.new_overflow_frames)
+                            .add(plan_.reused_dependency_entries)
+                            .value();
+    const auto heads  = detail::AllocationBound(plan_.reference_heads).add(plan_.new_overflow_frames).value();
+    if (!frames || !heads) {
+        return Status::resource_exhausted("checkpoint layout count overflow");
+    }
+    plan_.frame_count_upper = *frames;
     // Each newly spilled value needs at most one stored reference per emitted
     // overflow frame. Reused chains may share PIDs, so descriptor counts above
     // are conservative; physical dependency ownership still counts each use.
-    plan_.reference_heads += plan_.new_overflow_frames;
+    plan_.reference_heads = *heads;
     return Status::Ok();
 }
 } // namespace crowdb::tree

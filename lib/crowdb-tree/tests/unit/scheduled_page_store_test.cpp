@@ -126,24 +126,20 @@ TEST(ScheduledPageStore, BlockingReadDoesNotOccupyTheOnlyTreeCpuWorker)
     EXPECT_EQ(output, source);
 }
 
-TEST(ScheduledPageStore, FullCpuQueueUsesThePrepaidBoundedIoWindow)
+TEST(ScheduledPageStore, FullBackendCpuQueueRetainsEveryAcceptedOperation)
 {
     TestBlockingStore  device;
-    TestScheduledStore test(8, 1);
+    TestScheduledStore test(1, 1);
     ASSERT_TRUE(test.create(&device).ok());
     std::array<uint8_t, 4> bytes{};
     ASSERT_TRUE(device.write_at(0, bytes.data(), bytes.size()).ok());
-    std::array<TestCompletion, 8> accepted;
-    TestCompletion                rejected;
+    std::array<TestCompletion, 9> accepted;
     test.scheduled->submit_read(0, bytes.data(), bytes.size(), accepted[0].callback());
     device.wait();
     for (size_t index = 1; index < accepted.size(); ++index) {
         test.scheduled->submit_read(0, bytes.data(), bytes.size(), accepted[index].callback());
         EXPECT_EQ(accepted[index].calls.load(), 0U);
     }
-    test.scheduled->submit_read(0, bytes.data(), bytes.size(), rejected.callback());
-    EXPECT_EQ(rejected.calls.load(), 1U);
-    EXPECT_EQ(rejected.status.code(), Code::kResourceExhausted);
     device.release();
     for (auto &completion : accepted) {
         completion.wait();
@@ -204,28 +200,30 @@ TEST(ScheduledPageStore, UncertainThrowKeepsBufferUntilLateTransportDisposalAndC
     EXPECT_TRUE(weak.expired());
 }
 
-TEST(ScheduledPageStore, DroppedAcceptedCallbackReturnsTerminalAndInFlightAdmission)
+TEST(ScheduledPageStore, DroppedAcceptedCallbackTerminatesOnceWhileOtherWorkContinues)
 {
     TestUncertainStore device;
     TestScheduledStore test(1);
     ASSERT_TRUE(test.create(nullptr, &device).ok());
     std::array<uint8_t, 4> bytes{};
     TestCompletion         first;
-    TestCompletion         rejected;
-    TestCompletion         retry;
+    TestCompletion         second;
     test.scheduled->submit_read(0, bytes.data(), bytes.size(), first.callback());
     test.binding->drain();
-    test.scheduled->submit_read(0, bytes.data(), bytes.size(), rejected.callback());
-    EXPECT_EQ(rejected.status.code(), Code::kResourceExhausted);
-    device.retained = {};
+    auto retained = std::move(device.retained);
+    test.scheduled->submit_read(0, bytes.data(), bytes.size(), second.callback());
+    test.binding->drain();
+    EXPECT_EQ(first.calls.load(), 0U);
+    EXPECT_EQ(second.calls.load(), 0U);
+    retained = {};
     first.wait();
     EXPECT_EQ(first.status.code(), Code::kUnavailable);
-    test.scheduled->submit_read(0, bytes.data(), bytes.size(), retry.callback());
-    test.binding->drain();
     device.retained.complete(Status::Ok());
     device.retained = {};
-    retry.wait();
-    EXPECT_TRUE(retry.status.ok());
+    second.wait();
+    EXPECT_TRUE(second.status.ok());
+    EXPECT_EQ(first.calls.load(), 1U);
+    EXPECT_EQ(second.calls.load(), 1U);
 }
 
 TEST(ScheduledPageStore, CountersIncludeMetadataAndCountOnlyFirstRealTerminal)

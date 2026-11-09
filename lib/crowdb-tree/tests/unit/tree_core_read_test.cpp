@@ -303,10 +303,10 @@ TEST_F(TreeCoreRead, TerminalScanReturnsIoCreditBeforeCallingConsumer)
     Status            second_status;
     size_t            first_bytes  = 0;
     size_t            second_bytes = 0;
-    core->scan_async({}, [&](Status status, ScanPackedBuf packed, bool) {
+    core->scan_async({}, [&](Status status, ScanPackedBuf packed, size_t, bool) {
         first_status = std::move(status);
         first_bytes  = packed.size();
-        core->scan_async({}, [&](Status next_status, ScanPackedBuf next_packed, bool) {
+        core->scan_async({}, [&](Status next_status, ScanPackedBuf next_packed, size_t, bool) {
             second_status = std::move(next_status);
             second_bytes  = next_packed.size();
             done.store(true, std::memory_order_release);

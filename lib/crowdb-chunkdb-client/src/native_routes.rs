@@ -25,6 +25,22 @@ struct State {
     refresh: Notify,
 }
 
+struct NativeTransport(Option<(Arc<ChunkdbClient>, ChunkdbRpcTransport)>);
+
+impl NativeTransport {
+    fn get(&self) -> &(Arc<ChunkdbClient>, ChunkdbRpcTransport) {
+        self.0.as_ref().expect("live native transport")
+    }
+}
+
+impl Drop for NativeTransport {
+    fn drop(&mut self) {
+        if let Some(transport) = self.0.take() {
+            OwnedClientRoute::retire_transport(transport);
+        }
+    }
+}
+
 /// A synchronous resolver whose returned route retains its connection owners
 /// across endpoint refresh. No discovery, connection setup or runtime blocking
 /// occurs in `resolve`; failed calls request an asynchronous refresh.
@@ -63,14 +79,14 @@ impl ChunkdbClient {
     /// Rejects missing/invalid maps or initial discovery failures.
     pub async fn native_routes(self: &Arc<Self>) -> Result<Arc<NativeChunkRoutes>> {
         // Native request IDs are independent of the async Rust transport.
-        let transport = Arc::new(ChunkdbRpcTransport::new());
+        let transport = NativeTransport(Some((Arc::clone(self), ChunkdbRpcTransport::new())));
         let state = Arc::new(State {
-            snapshot: ArcSwap::from_pointee(self.native_snapshot(&transport).await?),
+            snapshot: ArcSwap::from_pointee(self.native_snapshot(&transport.get().1).await?),
             refresh: Notify::new(),
         });
-        let client = Arc::clone(self);
         let worker_state = Arc::clone(&state);
         let worker = tokio::spawn(async move {
+            let (client, native) = transport.get();
             let mut tick = tokio::time::interval(Duration::from_secs(5));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -78,7 +94,7 @@ impl ChunkdbClient {
                     _ = tick.tick() => {},
                     () = worker_state.refresh.notified() => {},
                 }
-                match client.native_snapshot(&transport).await {
+                match client.native_snapshot(native).await {
                     Ok(snapshot) => worker_state.snapshot.store(Arc::new(snapshot)),
                     Err(error) => tracing::warn!(%error, "native chunk service route refresh failed"),
                 }
@@ -102,7 +118,7 @@ impl ChunkdbClient {
             let route = if binding.rpc_endpoint.is_empty() {
                 None
             } else {
-                match transport.owned_route(&binding.rpc_endpoint) {
+                match transport.owned_native_route(&binding.rpc_endpoint).await {
                     Ok(route) => Some(route),
                     Err(error) => {
                         tracing::warn!(owner = binding.instance_id, %error, "native chunk owner endpoint unavailable");

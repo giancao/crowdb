@@ -111,6 +111,10 @@ void    ct_runtime_stop_admission(ct_runtime *runtime);
 // Host blocking boundary after all Tree operations and backend tickets end.
 // This closes CPU submission and waits for CPU jobs only, not external I/O.
 void ct_runtime_drain_cpu(ct_runtime *runtime);
+// Each phase accepts one callback. A rejection leaves the context with the
+// caller. Keep the runtime through both callbacks and release it on the host.
+int32_t ct_runtime_drain_async(ct_runtime *runtime, void (*complete)(void *, int32_t), void *context);
+int32_t ct_runtime_stop_workers_async(ct_runtime *runtime, void (*complete)(void *, int32_t), void *context);
 // Release the caller's reference. Live Trees/operations retain their owners;
 // this call does not wait for them or stop their admission.
 void ct_runtime_free(ct_runtime *runtime);

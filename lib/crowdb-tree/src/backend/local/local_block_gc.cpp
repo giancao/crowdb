@@ -11,7 +11,7 @@ namespace crowdb::tree
 namespace
 {
 ExtentLedgerResult claim_block(ExtentLedger &ledger, uint64_t begin, uint64_t bytes,
-                               const std::shared_ptr<detail::AllocationReservation> &metadata)
+                               const std::shared_ptr<AllocationBudget> &metadata)
 {
     ExtentLedgerResult     result;
     detail::HostCompletion done;
@@ -44,9 +44,9 @@ uint64_t local_block_gc_unit(const PageStore &store) noexcept
 }
 
 LocalBlockGcResult collect_free_local_blocks(PageStore &store, ExtentLedger &ledger, uint64_t first_block,
-                                             LocalBlockGcLimits                                    limits,
-                                             const std::shared_ptr<detail::AllocationReservation> &metadata,
-                                             const std::shared_ptr<AllocationBudget>              &backend)
+                                             LocalBlockGcLimits                       limits,
+                                             const std::shared_ptr<AllocationBudget> &metadata,
+                                             const std::shared_ptr<AllocationBudget> &backend)
 {
     LocalBlockGcResult result;
     const auto         bytes = local_block_gc_unit(store);

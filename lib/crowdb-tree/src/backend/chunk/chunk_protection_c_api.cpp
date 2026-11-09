@@ -10,18 +10,16 @@ ct_status ct_callback_root_catalog_open_v3(const ct_root_catalog_callbacks      
 try {
     using namespace crowdb::tree;
     using namespace crowdb::tree::detail;
-    if (callbacks == nullptr || callbacks->load == nullptr || callbacks->free_blob == nullptr ||
-        callbacks->store == nullptr || callbacks->publish == nullptr ||
-        callbacks->allocate_reference_segment_id == nullptr || staging == nullptr || staging->version != 1 ||
-        staging->struct_bytes != sizeof(*staging) || staging->capabilities != CT_CHUNK_STAGE_SCHEMA_V1 ||
-        staging->load == nullptr || staging->compare == nullptr || staging->list == nullptr || protection == nullptr ||
-        !protection_callback::supported(*protection) || out == nullptr || *out != nullptr) {
+    if (callbacks == nullptr || callbacks->load == nullptr || callbacks->free_blob == nullptr || staging == nullptr ||
+        staging->version != 1 || staging->struct_bytes != sizeof(*staging) ||
+        staging->capabilities != CT_CHUNK_STAGE_SCHEMA_V1 || staging->load == nullptr || staging->compare == nullptr ||
+        staging->list == nullptr || protection == nullptr || !protection_callback::supported(*protection) ||
+        out == nullptr || *out != nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    auto handle       = std::make_unique<ct_root_catalog>();
-    handle->transport = std::make_shared<MemoryChunkTransport>();
-    handle->catalog   = std::make_shared<CallbackRootCatalog>(*callbacks, *staging, *protection, context);
-    *out              = handle.release();
+    auto handle     = std::make_unique<ct_root_catalog>();
+    handle->catalog = std::make_shared<CallbackRootCatalog>(*callbacks, *staging, *protection, context);
+    *out            = handle.release();
     return 0;
 }
 catch (const std::bad_alloc &) {

@@ -122,7 +122,7 @@ TEST(ChunkRuntimeIds, PurposeAndCounterShareOneNamespaceWithoutReusingOperations
 TEST(ChunkRuntimePageStore, UnsupportedCatalogDoesNotExposeAnIndependentAddressSpace)
 {
     test_read::LoadCredits        credits;
-    auto                          catalog   = std::make_shared<detail::MemoryRootCatalog>(1);
+    auto                          catalog   = std::make_shared<detail::RootCatalog>();
     auto                          transport = std::make_shared<detail::MemoryChunkTransport>();
     detail::ChunkRuntimePageStore store({.tree = 19, .owner_epoch = 1}, catalog, transport,
                                         credits.credits.reservation());

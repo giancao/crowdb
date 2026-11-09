@@ -15,7 +15,7 @@ struct CheckpointMetadata
 {
     using Segment = std::pair<DirEntry, ProtectedExtent>;
 
-    explicit CheckpointMetadata(const std::shared_ptr<detail::AllocationReservation> &budget)
+    explicit CheckpointMetadata(const std::shared_ptr<AllocationBudget> &budget)
         : extents(detail::ReservationAllocator<ProtectedExtent>(budget)),
           segments(detail::ReservationAllocator<Segment>(budget))
     {
@@ -43,7 +43,7 @@ struct CheckpointMetadata
 
 struct ProtectedCheckpoint
 {
-    explicit ProtectedCheckpoint(const std::shared_ptr<detail::AllocationReservation> &budget)
+    explicit ProtectedCheckpoint(const std::shared_ptr<AllocationBudget> &budget)
         : metadata(detail::reserved_shared<CheckpointMetadata>(budget, budget))
     {
     }
@@ -69,7 +69,7 @@ class LocalCheckpointOperation;
 class LocalCheckpointRegistry
 {
   public:
-    static Status create(std::shared_ptr<ExtentLedger> ledger, std::shared_ptr<detail::AllocationReservation> metadata,
+    static Status create(std::shared_ptr<ExtentLedger> ledger, std::shared_ptr<AllocationBudget> metadata,
                          std::array<std::shared_ptr<const ProtectedCheckpoint>, 2> recovered,
                          std::shared_ptr<LocalCheckpointRegistry>                 *out);
 

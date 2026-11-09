@@ -12,6 +12,8 @@
 #    include <unistd.h>
 
 #    include <algorithm>
+#    include <cerrno>
+#    include <new>
 
 namespace crowdb::rpc
 {
@@ -20,21 +22,17 @@ int RdmaTransport::drain_cq(uint32_t max_completions)
 {
     int drained = 0;
     for (uint32_t index = 0; index < completion_queues_.size(); ++index)
-        drained += drain_queue(index, max_completions);
+        drained += std::max(0, drain_queue(index, max_completions));
     return drained;
 }
 
-int RdmaTransport::drain_queue(uint32_t index, uint32_t max_completions, bool wait_for_owner)
+int RdmaTransport::drain_queue(uint32_t index, uint32_t max_completions)
 {
     auto &queue = *completion_queues_[index];
     if (queue.cq == nullptr)
         return 0;
-    if (wait_for_owner) {
-        while (queue.polling.test_and_set(std::memory_order_acquire))
-            std::this_thread::yield();
-    }
-    else if (queue.polling.test_and_set(std::memory_order_acquire)) {
-        return 0;
+    if (queue.polling.test_and_set(std::memory_order_acquire)) {
+        return -EAGAIN;
     }
     // Only the CQ consumer may clear its continuation. A competing worker
     // must leave the wakeup readable when it cannot acquire the CQ.
@@ -112,8 +110,9 @@ void RdmaTransport::register_events(SocketEngine *engine)
     if (event_engine_ != nullptr && event_engine_ != engine)
         return;
     event_engine_ = engine;
-    if (cm_event_fd() >= 0)
+    if (cm_event_fd() >= 0 && !cm_event_registered_.exchange(true, std::memory_order_acq_rel)) {
         engine->add_external_fd(cm_event_fd(), CM_EVENT_TAG);
+    }
     for (const auto &queue : completion_queues_) {
         if (queue->managed.load(std::memory_order_acquire))
             continue;
@@ -133,27 +132,58 @@ int RdmaTransport::handle_external_event(uint64_t tag, uint32_t max_completions)
         const auto index = static_cast<uint32_t>((tag - CQ_EVENT_BASE) / 2);
         if (completion_queues_[index]->managed.load(std::memory_order_acquire))
             return 0;
-        return drain_queue(index, max_completions);
+        return std::max(0, drain_queue(index, max_completions));
     }
     if (tag == CM_EVENT_TAG) {
-        // The shared CM channel has one consumer while passive setup waits
-        // for ESTABLISHED. Another worker must not consume that event.
-        if (cm_polling_.test_and_set(std::memory_order_acquire))
-            return 0;
-        auto release = [](std::atomic_flag *flag) { flag->clear(std::memory_order_release); };
-        const std::unique_ptr<std::atomic_flag, decltype(release)> owner(&cm_polling_, release);
-        int                                                        accepted = 0;
-        while (true) {
-            auto connection = accept();
-            if (connection == nullptr)
-                break;
-            ++accepted;
-            if (connection_handler_)
-                connection_handler_(connection);
-        }
-        return accepted;
+        return handle_cm_events(false);
     }
     return 0;
+}
+
+int RdmaTransport::handle_cm_events(bool retry)
+{
+    if (cm_polling_.test_and_set(std::memory_order_acquire)) {
+        if (retry) {
+            schedule_cm_retry();
+        }
+        return 0;
+    }
+    auto release = [](std::atomic_flag *flag) { flag->clear(std::memory_order_release); };
+    const std::unique_ptr<std::atomic_flag, decltype(release)> owner(&cm_polling_, release);
+    if (cm_retry_pending_ && !retry) {
+        return 0;
+    }
+    int accepted = 0;
+    while (auto connection = accept_cm_events()) {
+        ++accepted;
+        if (connection_handler_) {
+            connection_handler_(connection);
+        }
+    }
+    if (cm_retirement_.pending() && schedule_cm_retry()) {
+        if (!cm_retry_pending_) {
+            cm_retry_pending_ = true;
+            event_engine_->remove_external_fd(cm_event_fd());
+        }
+    }
+    else if (cm_retry_pending_) {
+        cm_retry_pending_ = false;
+        event_engine_->add_external_fd(cm_event_fd(), CM_EVENT_TAG);
+    }
+    return accepted;
+}
+
+bool RdmaTransport::schedule_cm_retry()
+{
+    // SocketTransport closes the scheduler before it joins the workers and
+    // hands the still-registered CM resources to shutdown.
+    try {
+        return socket_transport_->schedule([this] { (void)handle_cm_events(true); }, 1) != 0;
+    }
+    catch (const std::bad_alloc &) {
+        CRB_LOG_ERROR("RDMA CM retirement could not schedule retry; retaining the connection owner");
+        return false;
+    }
 }
 
 bool RdmaTransport::prime_receive(const std::shared_ptr<Connection> &connection)

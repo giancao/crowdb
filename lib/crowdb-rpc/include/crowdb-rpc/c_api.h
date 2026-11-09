@@ -32,6 +32,15 @@ typedef int32_t crowdb_rpc_status;
 #define CROWDB_RPC_ERR_ALL_DOWN     (-6)
 #define CROWDB_RPC_ERR_INVALID_ARG  (-7)
 
+// Low-frequency service retry/liveness timers use the server's existing
+// socket worker. A nonzero ID transfers context until exactly one callback:
+// fired=1 at expiry, fired=0 on cancellation/transport stop. Zero rejects
+// without a callback. The caller retains the server while scheduling/cancelling.
+typedef void (*crowdb_rpc_on_timer)(void *context, int fired);
+uint64_t crowdb_rpc_server_schedule(crowdb_rpc_server_t server, uint32_t delay_ms, crowdb_rpc_on_timer complete,
+                                    void *context);
+bool     crowdb_rpc_server_cancel_scheduled(crowdb_rpc_server_t server, uint64_t id);
+
 // ── Buffer ────────────────────────────────────────────────────────
 crowdb_rpc_buffer_t crowdb_rpc_buffer_alloc(crowdb_rpc_pool_t pool, uint32_t capacity);
 void                crowdb_rpc_buffer_write(crowdb_rpc_buffer_t buf, const uint8_t *data, uint32_t len);
@@ -326,6 +335,32 @@ crowdb_rpc_status crowdb_rpc_client_send_conn(crowdb_rpc_client_t client, crowdb
 
 // ── Connection (for client-side use) ──────────────────────────────
 crowdb_rpc_conn_t crowdb_rpc_connect(crowdb_rpc_server_t server, const char *addr, int port);
+
+typedef struct crowdb_rpc_connect_s *crowdb_rpc_connect_t;
+// An immediate TCP connection or failure sets out_conn and returns NULL.
+// A pending attempt borrows the started server until destroy. Only one caller
+// may drive it. Destroy all attempts before explicitly stopping their server.
+crowdb_rpc_connect_t crowdb_rpc_connect_begin(crowdb_rpc_server_t server, const char *addr, int port,
+                                              crowdb_rpc_conn_t *out_conn);
+
+#define CROWDB_RPC_CONNECT_FAILED (-1)
+#define CROWDB_RPC_CONNECT_DONE   0
+#define CROWDB_RPC_CONNECT_READ   1
+#define CROWDB_RPC_CONNECT_WRITE  2
+#define CROWDB_RPC_CONNECT_RETRY  3
+// Pass 0 to query interest or retry setup, 1 for readiness, -1 for expiry.
+// A READ/WRITE result borrows fd until the next step or destroy. Unregister
+// readiness before either. DONE transfers out_conn and ends the attempt.
+int crowdb_rpc_connect_step(crowdb_rpc_connect_t attempt, int event, int *fd, uint32_t *timeout_ms,
+                            crowdb_rpc_conn_t *out_conn);
+// After setup stops, check whether private QP work needs retirement. Step
+// returns 1 when drained, 0 when an owner is busy, or -1 on error. Destroy
+// is still required. The setup driver must have released fd readiness.
+bool crowdb_rpc_connect_requires_retirement(crowdb_rpc_connect_t attempt);
+int  crowdb_rpc_connect_retire_step(crowdb_rpc_connect_t attempt);
+// Final destruction can retire provider resources. Do it at the host boundary.
+void crowdb_rpc_connect_destroy(crowdb_rpc_connect_t attempt);
+
 // Destroy a connection wrapper created by crowdb_rpc_connect. Releases
 // the shared_ptr<Connection> held inside the wrapper, allowing the
 // transport to reclaim the connection when all references are gone.

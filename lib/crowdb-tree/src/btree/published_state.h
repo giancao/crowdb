@@ -250,7 +250,7 @@ struct PublishedSources
         return detail::shared_allocation_bound<PublishedSources>();
     }
 
-    explicit PublishedSources(std::shared_ptr<detail::AllocationReservation> metadata = {})
+    explicit PublishedSources(std::shared_ptr<AllocationBudget> metadata = {})
         : tables(TableAllocator(std::move(metadata)))
     {
     }
@@ -287,7 +287,7 @@ struct PendingHandoff
 struct PublishedTreeState
 {
 
-    void                       clear_merge_candidates(const std::shared_ptr<detail::AllocationReservation> &metadata);
+    void                       clear_merge_candidates(const std::shared_ptr<AllocationBudget> &metadata);
     detail::RetirementObserver retirement;
     static constexpr bool      observe_retirement = true;
 
@@ -296,8 +296,7 @@ struct PublishedTreeState
         return true;
     }
 
-    explicit PublishedTreeState(std::shared_ptr<detail::AllocationReservation> metadata     = {},
-                                uint64_t                                       source_floor = 0);
+    explicit PublishedTreeState(std::shared_ptr<AllocationBudget> metadata = {}, uint64_t source_floor = 0);
 
     MappingView                             mapping;
     SnapshotChanges                         snapshot_changes;
@@ -405,11 +404,11 @@ struct PublicationTransaction
     std::shared_ptr<const PublishedSources> expected_sources      = nullptr;
     std::shared_ptr<const PublishedSources> sources               = nullptr;
     // Coverage publication waits for every range, including empty ranges.
-    Records required_installs{detail::ReservationAllocator<std::shared_ptr<InstallRecord>>{}};
-    std::shared_ptr<detail::AllocationReservation> metadata = nullptr;
+    Records                           required_installs{detail::ReservationAllocator<std::shared_ptr<InstallRecord>>{}};
+    std::shared_ptr<AllocationBudget> metadata = nullptr;
     // Persistent maintenance selection uses independent prepaid Routing credit.
-    std::shared_ptr<detail::AllocationReservation> snapshot_metadata = nullptr;
-    SnapshotChangeEffect                           snapshot_effect   = SnapshotChangeEffect::FullContent;
+    std::shared_ptr<AllocationBudget> snapshot_metadata = nullptr;
+    SnapshotChangeEffect              snapshot_effect   = SnapshotChangeEffect::FullContent;
     // Capture names an exact frontier or an asynchronous minimum frontier.
     // Commit is submitted only after durable checkpoint commit succeeds.
     // Checkpoint actions cannot be combined with page/catalog mutations.
@@ -446,7 +445,7 @@ class PublicationLane;
 
 struct PublicationRequest
 {
-    explicit PublicationRequest(const std::shared_ptr<detail::AllocationReservation> &metadata = {})
+    explicit PublicationRequest(const std::shared_ptr<AllocationBudget> &metadata = {})
         : transaction{.pages = PublicationTransaction::Pages(detail::ReservationAllocator<PageReplacement>(metadata)),
                       .required_installs = PublicationTransaction::Records(
                           detail::ReservationAllocator<std::shared_ptr<InstallRecord>>(metadata)),
@@ -476,9 +475,9 @@ struct SourceCatalog;
 
 struct PublicationBootstrap
 {
-    std::shared_ptr<detail::AllocationReservation> metadata       = nullptr;
-    std::shared_ptr<const PublishedTreeState>      initial        = nullptr;
-    std::shared_ptr<const SourceCatalog>           source_catalog = nullptr;
+    std::shared_ptr<AllocationBudget>         metadata       = nullptr;
+    std::shared_ptr<const PublishedTreeState> initial        = nullptr;
+    std::shared_ptr<const SourceCatalog>      source_catalog = nullptr;
 };
 
 // Bounded MPSC ingress. The thread winning running_ drains short metadata
@@ -547,8 +546,7 @@ class PublicationCoordinator
     bool try_submit(const std::shared_ptr<PublicationRequest> &request);
     // A Tree owns one prepaid window for its single active handoff. Prepare
     // before accepting proposals; the fixed lane cannot be enlarged later.
-    Status prepare_lane(size_t capacity, const std::shared_ptr<detail::AllocationReservation> &metadata,
-                        std::shared_ptr<PublicationLane> *out);
+    Status prepare_lane(const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<PublicationLane> *out);
     bool   try_submit(const std::shared_ptr<PublicationRequest> &request, const std::shared_ptr<PublicationLane> &lane);
     // One dedicated slot finishes the already captured checkpoint even after
     // ordinary ingress closes. It never consumes ordinary queue capacity.
@@ -583,8 +581,8 @@ class PublicationCoordinator
   private:
     struct Root : EpochManager::Deferred
     {
-        std::shared_ptr<const PublishedTreeState>      state    = nullptr;
-        std::shared_ptr<detail::AllocationReservation> metadata = nullptr;
+        std::shared_ptr<const PublishedTreeState> state    = nullptr;
+        std::shared_ptr<AllocationBudget>         metadata = nullptr;
         // Retired checkpoint sets use this ledger's allocator after a later
         // generation has installed a different ledger.
         std::shared_ptr<CheckpointLedger> checkpoint_allocator = nullptr;
@@ -593,16 +591,15 @@ class PublicationCoordinator
         std::shared_ptr<const void> merge_retired      = nullptr;
         // Source-free fallback only while this root owns an incomplete handoff.
         std::shared_ptr<const PublishedTreeState> complete_l1 = nullptr;
-        Root(std::shared_ptr<const PublishedTreeState>      value,
-             std::shared_ptr<detail::AllocationReservation> reservation);
-        static Root *create(std::shared_ptr<const PublishedTreeState>             value,
-                            const std::shared_ptr<detail::AllocationReservation> &metadata = {});
+        Root(std::shared_ptr<const PublishedTreeState> value, std::shared_ptr<AllocationBudget> reservation);
+        static Root *create(std::shared_ptr<const PublishedTreeState> value,
+                            const std::shared_ptr<AllocationBudget>  &metadata = {});
         static void  dispose(Root *root) noexcept;
     };
 
     static std::shared_ptr<const PublishedTreeState>
                       prepare_complete_view(const Root &current, const PublishedTreeState &next,
-                                            const std::shared_ptr<detail::AllocationReservation> &metadata);
+                                            const std::shared_ptr<AllocationBudget> &metadata);
     PublicationResult commit(const PublicationTransaction &transaction);
     void              drain() noexcept;
     void              complete(PublicationRequest *request) noexcept;

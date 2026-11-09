@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_bound.h"
+#include "host_completion.h"
 #include "page_cache_internal.h"
 #include "page_load_internal.h"
 
@@ -35,7 +36,7 @@ class SharedPageCache::Binding final : public PageLoader
         }
         auto *request = claim();
         if (request == nullptr) {
-            if (priority_ == PageLoadPriority::Maintenance) {
+            if (!state_->closed.load(std::memory_order_acquire)) {
                 upstream_->load_leaf(std::move(base), std::move(complete));
                 return;
             }
@@ -59,7 +60,7 @@ class SharedPageCache::Binding final : public PageLoader
         }
         auto *request = claim();
         if (request == nullptr) {
-            if (priority_ == PageLoadPriority::Maintenance) {
+            if (!state_->closed.load(std::memory_order_acquire)) {
                 upstream_->load_inner(std::move(backing), std::move(complete));
                 return;
             }
@@ -139,8 +140,7 @@ SharedPageCache::~SharedPageCache()
 
 std::optional<size_t> SharedPageCache::allocation_bound(PageCacheLimits limits) noexcept
 {
-    if (limits.max_pages == 0 || limits.max_waiters == 0 || limits.max_read_burst == 0 ||
-        limits.low_resident_bytes > limits.max_resident_bytes) {
+    if (limits.max_pages == 0 || limits.max_waiters == 0 || limits.low_resident_bytes > limits.max_resident_bytes) {
         return {};
     }
     return detail::AllocationBound(detail::shared_allocation_bound<State>() +
@@ -203,7 +203,16 @@ Status SharedPageCache::bind_reserved(std::shared_ptr<PageLoader>              u
     }
     auto *slot = state_->claim(false);
     if (slot == nullptr) {
-        return Status::unavailable("cache waiter reservation unavailable");
+        if (state_->closed.load(std::memory_order_acquire)) {
+            return Status::unavailable("cache is closed");
+        }
+        try {
+            *out = bind(std::move(upstream), metadata, priority);
+            return Status::Ok();
+        }
+        catch (const std::bad_alloc &) {
+            return Status::resource_exhausted("cache binding allocation failed");
+        }
     }
     std::shared_ptr<State::Reservation> reservation;
     try {
@@ -254,16 +263,30 @@ void SharedPageCache::evict() noexcept
 
 void SharedPageCache::close() noexcept
 {
-    state_->closed.store(true, std::memory_order_release);
-    evict();
+    if (!state_->closed.exchange(true, std::memory_order_acq_rel)) {
+        evict();
+    }
+}
+
+void SharedPageCache::close_async(AsyncCompletion complete) noexcept
+{
+    auto state = state_;
+    close();
+    if (state->residency) {
+        state->residency->close_async(std::move(complete));
+    }
+    else {
+        complete.complete(Status::Ok());
+    }
 }
 
 void SharedPageCache::close_and_drain() noexcept
 {
-    close();
-    if (state_->residency) {
-        state_->residency->close_and_drain();
-    }
+    detail::HostCompletion done;
+    close_async({.context = &done, .complete_fn = [](void *context, Status /*status*/) noexcept {
+                     static_cast<detail::HostCompletion *>(context)->signal();
+                 }});
+    done.wait();
 }
 
 SharedPageCache::State::State(PageCacheLimits bounds, const std::shared_ptr<AllocationBudget> &metadata,

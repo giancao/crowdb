@@ -71,7 +71,7 @@ TEST(Compression, CheckpointReopenWithCompressedPages)
         Crowdbtree t(opt);
         fill_buf(&t, 200, &oracle);
         ASSERT_GT(t.height(), 1);
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         compressed_size = store.size();
     }
 
@@ -96,7 +96,7 @@ TEST(Compression, CheckpointReopenWithCompressedPages)
         Crowdbtree                         raw(raw_opt);
         std::map<std::string, std::string> raw_oracle;
         fill_buf(&raw, 200, &raw_oracle);
-        ASSERT_TRUE(raw.snapshot(nullptr).ok());
+        ASSERT_TRUE(raw.flush_with_persistent(nullptr).ok());
         EXPECT_LT(compressed_size, raw_store.size());
     }
 }
@@ -114,7 +114,7 @@ TEST(Compression, EvictionReloadOfCompressedPages)
 
     std::map<std::string, std::string> oracle;
     fill_buf(&t, 200, &oracle);
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     // Force all clean leaves out of the pool, then read everything back: each
     // access demand-loads + decompresses the durable blob.
@@ -138,7 +138,7 @@ TEST(Compression, CrcTamperRejectedOnReopen)
         Crowdbtree t(opt);
         ASSERT_TRUE(t.apply(1, put_one("a", make_val(1))).ok());
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     }
 
     // Corrupt a page's stored bytes deep in the page region (past both 4 KiB

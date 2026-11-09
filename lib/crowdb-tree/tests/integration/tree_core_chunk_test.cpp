@@ -20,7 +20,7 @@ TEST(TreeCoreChunk, SingleIoCheckpointColdReadAndReopenKeepWalCoveragePair)
     test.store->request_wal_offset(8192);
     uint64_t coverage = 0;
     uint64_t sequence = 0;
-    status            = test.tree->snapshot(&coverage, &sequence);
+    status            = test.tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 1U);
     EXPECT_EQ(sequence, 1U);
@@ -41,10 +41,10 @@ TEST(TreeCoreChunk, SingleIoCheckpointColdReadAndReopenKeepWalCoveragePair)
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_TRUE(reopened.found());
     EXPECT_EQ(reopened.value().to_string(), value);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 1U);
+    EXPECT_EQ(test.tree->durable_coverage(), 1U);
     ASSERT_TRUE(test.put(2, "next").ok());
     test.store->request_wal_offset(12288);
-    status = test.tree->snapshot(&coverage, &sequence);
+    status = test.tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 2U);
     EXPECT_EQ(sequence, 2U);
@@ -60,12 +60,12 @@ TEST(TreeCoreChunk, LostCommitReplyResolvesOneRootWithoutDuplicateWindows)
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, "value").ok());
     test.backend.catalog->lose_commit = true;
-    auto status                       = test.tree->snapshot();
+    auto status                       = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(test.backend.catalog->commit_calls, 1U);
     EXPECT_EQ(test.backend.catalog->prepare_calls, 1U);
     EXPECT_EQ(test.backend.catalog->abort_calls, 0U);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 1U);
+    EXPECT_EQ(test.tree->durable_coverage(), 1U);
 }
 
 TEST(TreeCoreChunk, ANewWalRequestCannotChangeThePairOfAnAcceptedCheckpoint)
@@ -75,11 +75,11 @@ TEST(TreeCoreChunk, ANewWalRequestCannotChangeThePairOfAnAcceptedCheckpoint)
     ASSERT_TRUE(test.put(1, "value").ok());
     test.store->request_wal_offset(4096);
     test.backend.transport->before_allocate = [&] { test.store->request_wal_offset(8192); };
-    auto status                             = test.tree->snapshot();
+    auto status                             = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(test.store->requested_wal_offset(), 8192U);
     EXPECT_EQ(test.store->durable_wal_offset(), 4096U);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 1U);
+    EXPECT_EQ(test.tree->durable_coverage(), 1U);
 }
 
 TEST(TreeCoreChunk, UnqueryableCommitBlocksAnotherCheckpointUntilValidatedReopen)
@@ -90,16 +90,16 @@ TEST(TreeCoreChunk, UnqueryableCommitBlocksAnotherCheckpointUntilValidatedReopen
     test.store->request_wal_offset(4096);
     test.backend.catalog->lose_commit = true;
     test.backend.catalog->fail_query  = true;
-    EXPECT_EQ(test.tree->snapshot().code(), Code::kUnavailable);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 0U);
+    EXPECT_EQ(test.tree->flush_with_persistent().code(), Code::kUnavailable);
+    EXPECT_EQ(test.tree->durable_coverage(), 0U);
     EXPECT_EQ(test.store->durable_wal_offset(), 0U);
-    EXPECT_EQ(test.tree->snapshot().code(), Code::kUnavailable);
+    EXPECT_EQ(test.tree->flush_with_persistent().code(), Code::kUnavailable);
     EXPECT_EQ(test.backend.catalog->begin_calls, 1U);
     test.tree.reset();
     test.backend.catalog->fail_query = false;
     auto status                      = test.open();
     ASSERT_TRUE(status.ok()) << status.to_string();
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 1U);
+    EXPECT_EQ(test.tree->durable_coverage(), 1U);
     EXPECT_EQ(test.store->durable_wal_offset(), 4096U);
     EXPECT_EQ(test.tree->get_view("key").value().to_string(), "value");
 }
@@ -121,7 +121,7 @@ TEST(TreeCoreChunk, DetachedNativeCursorReadsExactPacksAfterTreeClose)
     TestCoreChunk test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, std::string(20000, 's')).ok());
-    auto status = test.tree->snapshot();
+    auto status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     std::unique_ptr<NativeFrameIterator> cursor;
     status = test.tree->open_native_frame_iterator(nullptr, &cursor);
@@ -148,7 +148,7 @@ TEST(TreeCoreChunk, ReopenRejectsCorruptPhysicalPackEvenWhenCatalogMetadataIsVal
     TestCoreChunk test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, std::string(12000, 'x')).ok());
-    auto status = test.tree->snapshot();
+    auto status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     test.tree.reset();
     const auto found =
@@ -169,16 +169,16 @@ TEST(TreeCoreChunk, ExactBootstrapReadsOnlyNamedRootAndCannotPublishADivergentSu
     TestCoreChunk test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, "first").ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     ASSERT_TRUE(test.put(2, "second").ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     test.tree.reset();
     auto status = test.open(1);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(test.store->manifest_generation(), 1U);
     EXPECT_EQ(test.tree->get_view("key").value().to_string(), "first");
     ASSERT_TRUE(test.put(2, "branch").ok());
-    EXPECT_EQ(test.tree->snapshot().code(), Code::kUnavailable);
+    EXPECT_EQ(test.tree->flush_with_persistent().code(), Code::kUnavailable);
     EXPECT_EQ(test.backend.catalog->current_generation, 2U);
     test.tree.reset();
     ASSERT_TRUE(test.open().ok());
@@ -190,7 +190,7 @@ TEST(TreeCoreChunk, ClosedWriterQueuesQuiescenceWhileIndependentReaderRemainsUsa
     TestCoreChunk test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, "value").ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     std::unique_ptr<NativeFrameIterator> cursor;
     ASSERT_TRUE(test.tree->open_native_frame_iterator(nullptr, &cursor).ok());
     auto owner = test.backend.catalog;

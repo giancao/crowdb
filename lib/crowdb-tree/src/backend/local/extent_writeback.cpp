@@ -4,8 +4,8 @@
 
 namespace crowdb::tree
 {
-PageWriteOperation::ReserveExtent extent_write_reservation(std::shared_ptr<ExtentLedger>                  ledger,
-                                                           std::shared_ptr<detail::AllocationReservation> metadata)
+PageWriteOperation::ReserveExtent extent_write_reservation(std::shared_ptr<ExtentLedger>     ledger,
+                                                           std::shared_ptr<AllocationBudget> metadata)
 {
     return [ledger = std::move(ledger), metadata = std::move(metadata)](uint64_t                           length,
                                                                         PageWriteOperation::ExtentComplete complete) {

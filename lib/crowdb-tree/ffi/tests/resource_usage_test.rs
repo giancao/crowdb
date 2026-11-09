@@ -120,9 +120,9 @@ fn native_host_and_tree_resource_samples_keep_distinct_limits_and_scopes() {
     let second = tree.resource_usage().unwrap();
     assert_eq!(host.resource_mask, 0x3ff);
     assert_eq!(first.resource_mask, 0xffcff);
-    assert_eq!(first.resources[13].limit, first.resources[6].limit);
-    assert_eq!(first.resources[14].limit, first.resources[6].limit);
-    assert_eq!(first.resources[15].limit, first.resources[6].limit + 2);
+    assert_eq!(first.resources[13].limit, 0);
+    assert_eq!(first.resources[14].limit, 0);
+    assert_eq!(first.resources[15].limit, 0);
     assert_eq!(first.resources[16].limit, 4096);
     assert_eq!(first.resources[18].limit, 1024);
     assert_eq!(first.scope_id, second.scope_id);

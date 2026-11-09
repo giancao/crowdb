@@ -412,6 +412,7 @@ TEST(ParallelFlush, SubtreeConsolidatesWhileAnotherLeafHandoffIsPending)
                               ), table({{"a", 2}, {"z", 2}}
                               )
     });
+    const auto          before = publisher.capture();
     std::promise<void>  right_entered;
     auto                right_ready = right_entered.get_future().share();
     std::promise<void>  left_finished;
@@ -433,7 +434,10 @@ TEST(ParallelFlush, SubtreeConsolidatesWhileAnotherLeafHandoffIsPending)
     };
     options.after_page_for_tests = [&](uint64_t pid, uint32_t level) {
         if (level == 0) {
-            EXPECT_EQ(publisher.capture()->mapping.get(pid)->leaf->lookup(pid == 0 ? "a" : "z").cell.slot, 2U);
+            const auto during = publisher.capture();
+            EXPECT_TRUE(during->mapping.same_root(before->mapping));
+            EXPECT_EQ(during->coverage, before->coverage);
+            EXPECT_EQ(during->sources, before->sources);
             leaves.fetch_add(1);
             if (pid == 0) {
                 left_finished.set_value();
@@ -448,10 +452,14 @@ TEST(ParallelFlush, SubtreeConsolidatesWhileAnotherLeafHandoffIsPending)
     ASSERT_TRUE(stdexec::sync_wait(batch->sender()).has_value());
     runtime.drain();
     ASSERT_TRUE(batch->result().handoff_status.ok()) << batch->result().handoff_status.to_string();
-    EXPECT_EQ(publisher.capture()->coverage, 2U);
-    EXPECT_EQ(publisher.capture()->stats.leaf_pages, 2U);
-    EXPECT_EQ(publisher.capture()->mapping.get(0)->metrics.overlay_runs, 1U);
-    EXPECT_EQ(publisher.capture()->mapping.get(1)->metrics.overlay_runs, 1U);
+    const auto after = publisher.capture();
+    EXPECT_EQ(after->coverage, 2U);
+    EXPECT_EQ(after->stats.leaf_pages, 2U);
+    EXPECT_TRUE(after->sources->tables.empty());
+    EXPECT_EQ(after->mapping.get(0)->leaf->lookup("a").cell.slot, 2U);
+    EXPECT_EQ(after->mapping.get(1)->leaf->lookup("z").cell.slot, 2U);
+    EXPECT_EQ(after->mapping.get(0)->metrics.overlay_runs, 1U);
+    EXPECT_EQ(after->mapping.get(1)->metrics.overlay_runs, 1U);
 }
 
 TEST(ParallelFlush, CompleteSubtreeSplitContinuesAcrossEveryWorkAndOutputWindow)
@@ -556,17 +564,24 @@ TEST(ParallelFlush, FailedChildDrainsAcceptedSiblingsAndRetryReusesHandoff)
                               table({{"a", 1}, {"z", 1}}
                               )
     });
-    std::promise<void> failed;
-    auto               saw_failure = failed.get_future();
-    std::promise<void> release;
-    auto               released = release.get_future().share();
-    std::atomic<bool>  inject{true};
-    FlushBatchOptions  options;
+    const auto            before = publisher.capture();
+    std::promise<void>    failed;
+    auto                  saw_failure = failed.get_future();
+    std::promise<void>    release;
+    auto                  released = release.get_future().share();
+    std::atomic<bool>     inject{true};
+    std::atomic<unsigned> left_runs{0};
+    FlushBatchOptions     options;
     options.consolidation.emplace();
     options.consolidation->pages.merge_trigger_bytes = 0;
     options.before_handoff_for_tests                 = [&](uint64_t pid) {
         if (pid == 1) {
             EXPECT_EQ(released.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        }
+    };
+    options.after_run_for_tests = [&](size_t pid, size_t) {
+        if (pid == 0) {
+            left_runs.fetch_add(1, std::memory_order_relaxed);
         }
     };
     options.after_page_for_tests = [&](uint64_t pid, uint32_t level) {
@@ -588,13 +603,18 @@ TEST(ParallelFlush, FailedChildDrainsAcceptedSiblingsAndRetryReusesHandoff)
     finished.get();
     runtime.drain();
     EXPECT_FALSE(batch->result().handoff_status.ok());
-    EXPECT_EQ(publisher.capture()->coverage, 0U);
-    const auto left_runs = publisher.capture()->mapping.get(0)->leaf->overlays.size();
+    const auto after_failure = publisher.capture();
+    EXPECT_EQ(after_failure->coverage, before->coverage);
+    EXPECT_TRUE(after_failure->mapping.same_root(before->mapping));
+    EXPECT_EQ(after_failure->sources, before->sources);
     ASSERT_TRUE(stdexec::sync_wait(batch->sender()));
     runtime.drain();
     ASSERT_TRUE(batch->result().handoff_status.ok()) << batch->result().handoff_status.to_string();
-    EXPECT_EQ(publisher.capture()->coverage, 1U);
-    EXPECT_EQ(publisher.capture()->mapping.get(0)->leaf->overlays.size(), left_runs);
+    const auto after = publisher.capture();
+    EXPECT_EQ(after->coverage, 1U);
+    EXPECT_EQ(left_runs.load(std::memory_order_relaxed), 1U);
+    EXPECT_EQ(after->mapping.get(0)->leaf->overlays.size(), 1U);
+    EXPECT_EQ(after->mapping.get(0)->leaf->lookup("a").cell.slot, 1U);
 }
 
 TEST(ParallelFlush, NoOpFrontierPreservesUnchangedRouting)

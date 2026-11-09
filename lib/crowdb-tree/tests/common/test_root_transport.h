@@ -18,6 +18,9 @@ class TestRootTransport : public detail::ChunkTransport
     detail::MemoryChunkTransport                                       memory;
     std::map<std::array<uint64_t, 2>, detail::ChunkAllocationIdentity> receipts;
     std::function<void()>                                              before_allocate;
+    std::function<bool(detail::ChunkTransportCompletion)>              after_allocate_async;
+    std::function<bool(uint32_t, detail::ChunkTransportCompletion)>    after_write_async;
+    std::function<bool(detail::ChunkTransportCompletion)>              after_read_async;
     size_t                                                             writes        = 0;
     size_t                                                             written_bytes = 0;
     std::map<std::array<uint64_t /*unused*/, 2>, detail::ChunkId>      ids;
@@ -53,6 +56,16 @@ class TestRootTransport : public detail::ChunkTransport
         return status;
     }
 
+    void submit_allocate_fixed_chunk(detail::ChunkId id, uint64_t bytes, uint64_t epoch, PagePurpose purpose,
+                                     detail::ChunkTransportCompletion completion) override
+    {
+        auto status = allocate_fixed_chunk(id, bytes, epoch, purpose);
+        if (status.ok() && after_allocate_async && after_allocate_async(completion)) {
+            return;
+        }
+        completion.complete(std::move(status));
+    }
+
     Status inspect_fixed_allocation(detail::ChunkId id, uint64_t epoch,
                                     detail::ChunkAllocationIdentity *out) const override
     {
@@ -67,12 +80,6 @@ class TestRootTransport : public detail::ChunkTransport
         return {};
     }
 
-    Status allocate_mirror_chunk(uint64_t /*unused*/, uint64_t /*unused*/, detail::ChunkId * /*unused*/,
-                                 PagePurpose /*unused*/) override
-    {
-        return Status::not_supported();
-    }
-
     Status verify_fixed_read_fence(detail::ChunkId /*unused*/, uint32_t /*unused*/,
                                    detail::ChunkIoContext /*unused*/) const override
     {
@@ -85,20 +92,42 @@ class TestRootTransport : public detail::ChunkTransport
         return write_mirror(id, mirror, offset, data, size);
     }
 
+    void submit_write_fixed_mirror(detail::ChunkId id, uint32_t mirror, uint64_t offset, const uint8_t *data,
+                                   size_t size, detail::ChunkIoContext context,
+                                   detail::ChunkTransportCompletion completion) override
+    {
+        auto status = write_fixed_mirror(id, mirror, offset, data, size, context);
+        if (status.ok() && after_write_async && after_write_async(mirror, completion)) {
+            return;
+        }
+        completion.complete(std::move(status));
+    }
+
     Status read_fixed_mirror(detail::ChunkId id, uint32_t mirror, uint64_t offset, uint8_t *data, size_t size,
                              detail::ChunkIoContext /*unused*/) const override
     {
         return read_mirror(id, mirror, offset, data, size);
     }
 
-    Status write_mirror(detail::ChunkId id, uint32_t mirror, uint64_t offset, const uint8_t *data, size_t size) override
+    void submit_read_fixed_mirror(detail::ChunkId id, uint32_t mirror, uint64_t offset, uint8_t *data, size_t size,
+                                  detail::ChunkIoContext           context,
+                                  detail::ChunkTransportCompletion complete) const override
+    {
+        auto status = read_fixed_mirror(id, mirror, offset, data, size, context);
+        if (status.ok() && after_read_async && after_read_async(complete)) {
+            return;
+        }
+        complete.complete(std::move(status));
+    }
+
+    Status write_mirror(detail::ChunkId id, uint32_t mirror, uint64_t offset, const uint8_t *data, size_t size)
     {
         ++writes;
         written_bytes += size;
         return memory.write_mirror(ids.at({id.high, id.low}), mirror, offset, data, size);
     }
 
-    Status read_mirror(detail::ChunkId id, uint32_t mirror, uint64_t offset, uint8_t *data, size_t size) const override
+    Status read_mirror(detail::ChunkId id, uint32_t mirror, uint64_t offset, uint8_t *data, size_t size) const
     {
         return memory.read_mirror(ids.at({id.high, id.low}), mirror, offset, data, size);
     }

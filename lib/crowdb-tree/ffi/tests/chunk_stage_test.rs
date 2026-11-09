@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crowdb_tree_ffi::chunk::stage::{validate_stage_transition, StageId, StagePack, StageRecord, StageState};
-use crowdb_tree_ffi::{ChunkRootCatalog, CtError};
+use crowdb_tree_ffi::CtError;
 
 fn reserved() -> StageRecord {
     StageRecord {
@@ -86,16 +86,4 @@ fn transitions_keep_provisional_identity_and_never_treat_unknown_write_as_reclai
         checksum: 0,
     });
     assert_eq!(complete.validate(), Err(CtError::InvalidArgument));
-}
-#[test]
-fn legacy_catalog_explicitly_disables_staging_records() {
-    let catalog = ChunkRootCatalog::open_memory(1).unwrap();
-    assert!(!catalog.supports_staging());
-    let first = reserved();
-    assert_eq!(catalog.load_stage(42, first.id), Err(CtError::NotSupported));
-    assert_eq!(
-        catalog.compare_stage(42, 7, None, Some(&first)),
-        Err(CtError::NotSupported)
-    );
-    assert_eq!(catalog.list_stages(42, None, 1), Err(CtError::NotSupported));
 }

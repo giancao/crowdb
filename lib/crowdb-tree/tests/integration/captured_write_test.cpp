@@ -170,22 +170,24 @@ TEST(CapturedWrite, UnknownWriteSubmissionKeepsPhysicalProtectionUntilLateComple
     EXPECT_EQ(test.ledger->stats().protected_ranges, 0U);
 }
 
-TEST(CapturedWrite, FrameLimitFailsAndReleasesAllCompletedOrphanWrites)
+TEST(CapturedWrite, CompletesEveryOverflowFrameAndReleasesOutputAfterTheLastOwner)
 {
     TestCapturedWrite test;
     ASSERT_TRUE(test.prepare(captured_leaf(page({
                                  {.key = "a", .value = std::string(2000, 'v')}
     })),
                              {},
-                             {.frames     = {.encode = {.frame_bytes = 512, .inline_value_bytes = 16}},
-                              .write      = {.max_frame_bytes = 512},
-                              .max_frames = 2})
+                             {.frames = {.encode = {.frame_bytes = 512, .inline_value_bytes = 16}},
+                              .write  = {.max_frame_bytes = 512}})
                     .ok());
     Completion done;
     test.run(&done);
-    EXPECT_EQ(done.errors.load(), 1U);
-    EXPECT_EQ(done.status.code(), Code::kResourceExhausted);
-    EXPECT_FALSE(test.operation->result().pages);
+    ASSERT_EQ(done.values.load(), 1U) << done.status.to_string();
+    const auto &result = test.operation->result();
+    ASSERT_TRUE(result.pages);
+    EXPECT_GT(result.written_frames, 2U);
+    EXPECT_EQ(result.pages->frames.size(), result.written_frames);
+    EXPECT_GT(test.ledger->stats().protected_ranges, 2U);
     test.operation.reset();
     EXPECT_EQ(test.ledger->stats().protected_ranges, 0U);
 }

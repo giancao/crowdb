@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core.h"
+#include "crowdb-tree/btree/scan_packed.h"
 
 namespace crowdb::tree
 {
@@ -73,7 +74,12 @@ void Crowdbtree::scan_async(Slice prefix, Slice start_after, Slice end_key, size
     options.deadline_ms     = deadline_ms;
     options.keys_only       = keys_only;
     options.has_start_bound = !start_after.empty();
-    core_->scan_async(options, std::move(on_done));
+    if (on_done) {
+        core_->scan_async(options, [on_done = std::move(on_done)](Status status, ScanPackedBuf packed, size_t /*count*/,
+                                                                  bool truncated) {
+            on_done(std::move(status), std::move(packed), truncated);
+        });
+    }
 }
 
 void Crowdbtree::scan_directional_async(Slice prefix, Slice start_after, Slice end_key, size_t limit,
@@ -90,6 +96,11 @@ void Crowdbtree::scan_directional_async(Slice prefix, Slice start_after, Slice e
     options.keys_only       = keys_only;
     options.reverse         = reverse;
     options.has_start_bound = !start_after.empty();
-    core_->scan_async(options, std::move(on_done));
+    if (on_done) {
+        core_->scan_async(options, [on_done = std::move(on_done)](Status status, ScanPackedBuf packed, size_t /*count*/,
+                                                                  bool truncated) {
+            on_done(std::move(status), std::move(packed), truncated);
+        });
+    }
 }
 } // namespace crowdb::tree

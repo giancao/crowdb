@@ -263,6 +263,7 @@ async fn graceful_drain_releases_an_unactivated_prepared_writer() {
     );
     service
         .install_catalog_and_reconcile(&head, &[page], std::slice::from_ref(&partition))
+        .await
         .unwrap();
     assert_eq!(partition.lifecycle(), PartitionLifecycle::Prepared);
     assert!(partition.suspend_for_transfer(EPOCH).await.is_err());

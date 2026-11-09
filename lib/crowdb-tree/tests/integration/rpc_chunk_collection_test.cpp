@@ -90,7 +90,7 @@ class RpcChunkCollection : public ::testing::Test
   protected:
     TestChunkRouteFixture              fixture;
     TestChunkCollectionService         service;
-    std::unique_ptr<RpcChunkTransport> transport;
+    std::shared_ptr<RpcChunkTransport> transport;
     std::shared_ptr<TestStageCatalog>  catalog = std::make_shared<TestStageCatalog>();
     ChunkStageId                       stage{.owner_epoch = 17, .operation_high = 10, .operation_low = 20};
     ChunkId                            id{0x0200'0000'0000'0042ULL, 144};
@@ -110,7 +110,7 @@ class RpcChunkCollection : public ::testing::Test
         options.disk_route_count = 1;
         options.rpc_timeout_ms   = 50;
         options.chunkdb_resolver = fixture.resolver();
-        transport                = std::make_unique<RpcChunkTransport>(options);
+        transport                = std::make_shared<RpcChunkTransport>(options);
         catalog->record          = ChunkStageRecord{.tree_id             = 19,
                                                     .id                  = stage,
                                                     .revision            = 2,
@@ -122,13 +122,32 @@ class RpcChunkCollection : public ::testing::Test
                                                     .state               = ChunkStageState::Retired,
                                                     .packs               = {}};
     }
+
+    ChunkStageGcResult reclaim(uint64_t epoch, const std::shared_ptr<AllocationBudget> &budget,
+                               const std::shared_ptr<ChunkPhysicalRegistry> &registry = {})
+    {
+        ChunkStageGcResult result;
+        auto               terminal  = std::make_shared<std::promise<Status>>();
+        auto               completed = terminal->get_future();
+        submit_reclaim_retired_stage(catalog, transport, 19, epoch, stage, budget, registry, &result,
+                                     {.context = terminal.get(),
+                                      .complete_fn =
+                                          +[](void *context, Status status) {
+                                              static_cast<std::promise<Status> *>(context)->set_value(
+                                                  std::move(status));
+                                          },
+                                      .owner = terminal});
+        result.status = completed.get();
+        return result;
+    }
 };
 } // namespace
 
 TEST_F(RpcChunkCollection, PhysicalReceiptCountsRoundedSegmentsAcrossAllMirrors)
 {
     ChunkAllocationIdentity receipt;
-    const auto              status = transport->inspect_fixed_allocation(id, 17, &receipt);
+    const auto              status =
+        await_chunk_rpc<&RpcChunkTransport::submit_inspect_fixed_allocation>(*transport, id, 17, &receipt);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(receipt.chunk, id);
     EXPECT_EQ(receipt.owner_epoch, 17U);
@@ -143,8 +162,9 @@ TEST_F(RpcChunkCollection, PhysicalReceiptCountsRoundedSegmentsAcrossAllMirrors)
 
 TEST_F(RpcChunkCollection, LostDeleteReplyAndDurableDeletingNotFoundConverge)
 {
+    test_chunk::TestPhysicalHost host;
     service.lose_delete.store(true);
-    auto result = reclaim_retired_stage(*catalog, *transport, 19, 17, stage);
+    auto result = reclaim(17, host.budget);
     EXPECT_EQ(result.status.code(), Code::kUnavailable);
     EXPECT_FALSE(result.deletion_acknowledged);
     EXPECT_FALSE(result.stage_removed);
@@ -154,7 +174,7 @@ TEST_F(RpcChunkCollection, LostDeleteReplyAndDurableDeletingNotFoundConverge)
     }
     EXPECT_EQ(catalog->record->state, ChunkStageState::Deleting);
     EXPECT_EQ(service.physical_deletes.load(), 1U);
-    result = reclaim_retired_stage(*catalog, *transport, 19, 17, stage);
+    result = reclaim(17, host.budget);
     EXPECT_TRUE(result.status.ok()) << result.status.to_string();
     EXPECT_TRUE(result.deletion_acknowledged);
     EXPECT_TRUE(result.stage_removed);
@@ -165,8 +185,9 @@ TEST_F(RpcChunkCollection, LostDeleteReplyAndDurableDeletingNotFoundConverge)
 
 TEST_F(RpcChunkCollection, ANewPhysicalOwnerCannotBeDeletedByAnOldStage)
 {
+    test_chunk::TestPhysicalHost host;
     service.epoch.store(18);
-    const auto result = reclaim_retired_stage(*catalog, *transport, 19, 18, stage);
+    const auto result = reclaim(18, host.budget);
     EXPECT_EQ(result.status.code(), Code::kUnavailable);
     EXPECT_FALSE(result.deletion_acknowledged);
     EXPECT_FALSE(result.stage_removed);
@@ -186,15 +207,16 @@ TEST_F(RpcChunkCollection, PhysicalAllocationRemainsCountedUntilActualDeleteAckn
     ASSERT_TRUE(transport->physical_registry(19, host.budget, &registry).ok());
     const auto              initial_scope = registry->backing_stats().scope_id;
     ChunkAllocationIdentity receipt;
-    ASSERT_TRUE(transport->inspect_fixed_allocation(id, 17, &receipt).ok());
+    ASSERT_TRUE(
+        await_chunk_rpc<&RpcChunkTransport::submit_inspect_fixed_allocation>(*transport, id, 17, &receipt).ok());
     std::shared_ptr<ChunkPhysicalPack> physical;
     ASSERT_TRUE(registry->prepare(stage, id, host.budget, &physical).ok());
     ASSERT_TRUE(registry->observe(physical, receipt, host.budget).ok());
     service.lose_delete.store(true);
-    auto result = reclaim_retired_stage(*catalog, *transport, 19, 17, stage, host.budget, registry);
+    auto result = reclaim(17, host.budget, registry);
     EXPECT_EQ(result.status.code(), Code::kUnavailable);
     EXPECT_EQ(registry->backing_metrics()->snapshot().allocated_backing_bytes, receipt.physical_bytes);
-    result = reclaim_retired_stage(*catalog, *transport, 19, 17, stage, host.budget, registry);
+    result = reclaim(17, host.budget, registry);
     ASSERT_TRUE(result.status.ok()) << result.status.to_string();
     EXPECT_TRUE(result.deletion_acknowledged);
     EXPECT_EQ(service.physical_deletes.load(), 1U);

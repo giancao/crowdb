@@ -71,17 +71,17 @@ TEST(TreeCoreCheckpoint, PublicFreshCheckpointColdReadAndReopen)
     ASSERT_TRUE(test.tree->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = large}}}).ok());
     uint64_t coverage = 0;
     uint64_t sequence = 0;
-    auto     status   = test.tree->snapshot(&coverage, &sequence);
+    auto     status   = test.tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 1U);
     EXPECT_EQ(sequence, 1U);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 1U);
+    EXPECT_EQ(test.tree->durable_coverage(), 1U);
     test.read(large, 1);
     test.tree.reset();
     ASSERT_TRUE(test.open().ok()) << test.last_open.to_string();
     test.read(large, 1);
     ASSERT_TRUE(test.tree->apply(2, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = "new"}}}).ok());
-    status = test.tree->snapshot(&coverage, &sequence);
+    status = test.tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 2U);
     EXPECT_EQ(sequence, 2U);
@@ -107,13 +107,13 @@ TEST(TreeCoreCheckpoint, ActualWritebackCheckpointReuseAndColdReadKeepSeparateCa
     auto       pressure = work->counters.snapshot()[static_cast<size_t>(TreeWorkCause::CachePressure)];
     EXPECT_EQ(pressure[static_cast<size_t>(TreeWorkCounter::WriteOperations)], written);
     EXPECT_EQ(pressure[static_cast<size_t>(TreeWorkCounter::EncodedFrameBytes)], written * test.config.frame_bytes);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 0U);
+    EXPECT_EQ(test.tree->durable_coverage(), 0U);
     writeback.reset();
     test.read(value, 1);
     EXPECT_GT(work->counters.snapshot()[static_cast<size_t>(TreeWorkCause::Read)]
                                        [static_cast<size_t>(TreeWorkCounter::ReadBytes)],
               0U);
-    status = test.tree->snapshot();
+    status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     const auto checkpoint = work->counters.snapshot()[static_cast<size_t>(TreeWorkCause::Checkpoint)];
     EXPECT_EQ(checkpoint[static_cast<size_t>(TreeWorkCounter::ReusedFrames)], written);
@@ -155,12 +155,12 @@ TEST(TreeCoreCheckpoint, SingleIoCreditDoesNotOverlapHandoffAndCheckpoint)
     test.config.runtime_binding.limits.io_operations = 1;
     ASSERT_TRUE(test.open().ok()) << test.last_open.to_string();
     ASSERT_TRUE(test.tree->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = "one"}}}).ok());
-    auto status = test.tree->snapshot();
+    auto status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     // The second handoff retains the first checkpoint's cold base. Its
     // preflight must release the read window before reserving write I/O.
     ASSERT_TRUE(test.tree->apply(2, Batch{.ops = {{.key = "b", .kind = OpKind::kPut, .value = "two"}}}).ok());
-    status = test.tree->snapshot();
+    status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     test.read("one", 1);
     GetView view;
@@ -169,7 +169,7 @@ TEST(TreeCoreCheckpoint, SingleIoCreditDoesNotOverlapHandoffAndCheckpoint)
     ASSERT_TRUE(view.found());
     EXPECT_EQ(view.slot(), 2U);
     EXPECT_EQ(view.value().to_string(), "two");
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 2U);
+    EXPECT_EQ(test.tree->durable_coverage(), 2U);
 }
 
 TEST(TreeCoreCheckpoint, RecoveredOverflowCanBeCheckpointedWithoutGlobalResolver)
@@ -178,16 +178,16 @@ TEST(TreeCoreCheckpoint, RecoveredOverflowCanBeCheckpointedWithoutGlobalResolver
     ASSERT_TRUE(test.open().ok()) << test.last_open.to_string();
     const std::string large(12000, 'r');
     ASSERT_TRUE(test.tree->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = large}}}).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     test.tree.reset();
     ASSERT_TRUE(test.open().ok()) << test.last_open.to_string();
     ASSERT_TRUE(test.tree->apply(2, Batch{.ops = {{.key = "b", .kind = OpKind::kPut, .value = "other"}}}).ok());
-    auto status = test.tree->snapshot();
+    auto status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     test.tree.reset();
     ASSERT_TRUE(test.open().ok()) << test.last_open.to_string();
     test.read(large, 1);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 2U);
+    EXPECT_EQ(test.tree->durable_coverage(), 2U);
 }
 } // namespace
 } // namespace crowdb::tree

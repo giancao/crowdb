@@ -38,15 +38,15 @@ class TreeOperationLifetime
         std::shared_ptr<State> state_;
     };
 
-    explicit TreeOperationLifetime(size_t maximum, const std::shared_ptr<AllocationBudget> &metadata = {},
-                                   std::shared_ptr<const void> host_owner = {});
+    explicit TreeOperationLifetime(const std::shared_ptr<AllocationBudget> &metadata   = {},
+                                   std::shared_ptr<const void>              host_owner = {});
     ~TreeOperationLifetime();
     TreeOperationLifetime(const TreeOperationLifetime &)            = delete;
     TreeOperationLifetime &operator=(const TreeOperationLifetime &) = delete;
 
     [[nodiscard]] Status acquire(const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<Ticket> *out);
-    // Before consensus, a full operation window is temporary admission
-    // pressure. Allocation failure remains a resource error.
+    // Proposal and replay callers share actual-allocation admission. Pending
+    // ticket count does not limit the ready CPU pool or suspended operations.
     [[nodiscard]] Status try_acquire(const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<Ticket> *out);
     [[nodiscard]] ResourceUsage resource_usage() const noexcept;
     [[nodiscard]] static size_t allocation_bound() noexcept;
@@ -54,16 +54,19 @@ class TreeOperationLifetime
     [[nodiscard]] size_t        outstanding() const noexcept;
     [[nodiscard]] bool          closed() const noexcept;
     void                        close() noexcept;
+    // Register once, including after close() fenced admission. Completion may
+    // run inline or on the thread releasing the last accepted ticket.
+    void close_async(AsyncCompletion complete) noexcept;
     // Host thread only. Accepted operations may continue submitting child I/O
     // through their existing Ticket after ingress closes. Do not call from a
     // callback holding a Ticket, or before releasing controller repair owners.
     void close_and_drain() noexcept;
     // Caller fences new admission separately. Keeps this lifetime reusable.
     void drain_accepted() noexcept;
+    // Caller fences admission and serializes drain/close registrations.
+    void drain_async(AsyncCompletion complete) noexcept;
 
   private:
-    Status                 acquire_impl(const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<Ticket> *out,
-                                        bool temporary_capacity);
     std::shared_ptr<State> state_;
 };
 } // namespace crowdb::tree

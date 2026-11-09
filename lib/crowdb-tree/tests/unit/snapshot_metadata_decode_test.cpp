@@ -59,9 +59,9 @@ void expect_entries(std::span<const DirEntry> actual, std::span<const DirEntry> 
 }
 } // namespace
 
-TEST(SnapshotMetadataDecode, SegmentMatchesExistingFormatsAndIgnoresIuPadding)
+TEST(SnapshotMetadataDecode, SegmentMatchesLocalFormatAndIgnoresIuPadding)
 {
-    for (const auto word : {slot_word::pack_unloaded(0, 2), slot_word::pack_page_ref(17, 3)}) {
+    for (const auto word : {slot_word::pack_unloaded(0, 2), slot_word::pack_unloaded(17, 3)}) {
         const std::vector<uint64_t> expected{0, word, slot_word::pack_unloaded(9, 1), 0};
         auto                        input = segment(expected, 2);
         input.resize(4096, 0xAA);
@@ -74,7 +74,7 @@ TEST(SnapshotMetadataDecode, SegmentMatchesExistingFormatsAndIgnoresIuPadding)
         EXPECT_EQ(header.generation, 7U);
         EXPECT_EQ(header.slot_count, expected.size());
         EXPECT_EQ(header.live_count, 2U);
-        EXPECT_EQ(header.format_version, slot_word::is_page_ref(word) ? 2 : 1);
+        EXPECT_EQ(header.format_version, 1U);
         EXPECT_EQ(header.body_crc, common::crc32c(input.data() + 32, expected.size() * sizeof(uint64_t)));
     }
     SegmentImageHeader header;
@@ -106,19 +106,18 @@ TEST(SnapshotMetadataDecode, SegmentRejectsMagicCrcVersionFlagsCountsAndIllegalW
         input[offset] ^= 1;
         EXPECT_EQ(decode_segment_into(input, &header, words).code(), Code::kCorruption);
     }
-    for (const auto [offset, value] : std::array<std::pair<size_t, uint32_t>, 5>{
-             {{4, 3}, {4, 0x10001}, {20, UINT32_MAX}, {24, 0}, {24, 2}}
+    for (const auto [offset, value] : std::array<std::pair<size_t, uint32_t>, 6>{
+             {{4, 3}, {4, 0x10002}, {4, 0x10001}, {20, UINT32_MAX}, {24, 0}, {24, 2}}
     }) {
         auto input = valid;
         put_u32(input, offset, value);
         header_crc(input, 28);
         EXPECT_EQ(decode_segment_into(input, &header, words).code(), Code::kCorruption);
     }
-    for (const uint64_t word :
-         {uint64_t{4}, uint64_t{6}, uint64_t{8}, slot_word::pack_unloaded(1, 0), slot_word::pack_page_ref(1, 0)}) {
+    for (const uint64_t word : {uint64_t{4}, uint64_t{6}, uint64_t{8}, slot_word::pack_unloaded(1, 0), uint64_t{2}}) {
         EXPECT_EQ(decode_segment_into(segment({word}, 1), &header, words).code(), Code::kCorruption);
     }
-    auto legacy_ref = segment({slot_word::pack_page_ref(1, 1)}, 1);
+    auto legacy_ref = segment({(uint64_t{1} << 24) | uint64_t{10}}, 1);
     put_u32(legacy_ref, 4, 1);
     header_crc(legacy_ref, 28);
     EXPECT_EQ(decode_segment_into(legacy_ref, &header, words).code(), Code::kCorruption);
@@ -171,7 +170,7 @@ TEST(SnapshotMetadataDecode, DirectoryHeaderValidatesFlagsCountsAndExactLength)
     for (size_t length = 0; length < 16; ++length) {
         EXPECT_EQ(directory_entry_count(std::span(valid).first(length), bytes, &count).code(), Code::kCorruption);
     }
-    for (const auto [offset, value] : std::array<std::pair<size_t, uint32_t>, 5>{
+    for (const auto [offset, value] : std::array<std::pair<size_t, uint32_t>, 6>{
              {{0, 0}, {4, 2}, {4, 0x10001}, {8, UINT32_MAX}, {8, 1}}
     }) {
         auto input = valid;

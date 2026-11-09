@@ -30,7 +30,7 @@ struct LocalRecoveryOperation::State : std::enable_shared_from_this<State>
     struct Window
     {
         Window(size_t blob_bytes, size_t frame_bytes, size_t alignment,
-               const std::shared_ptr<detail::AllocationReservation> &metadata);
+               const std::shared_ptr<AllocationBudget> &metadata);
         detail::ReservedVector<uint8_t, AllocationKind::kIo>      storage;
         detail::ReservedVector<uint8_t, AllocationKind::kScratch> frame;
         std::span<uint8_t>                                        bytes;
@@ -38,21 +38,17 @@ struct LocalRecoveryOperation::State : std::enable_shared_from_this<State>
 
     struct ReadStep
     {
-        explicit ReadStep(const PageLoadBudget &budget) : credit(budget.io, 1)
-        {
-        }
-
         static void             completed(void *context, Status status) noexcept;
         void                    returned(Status status) noexcept;
         void                    publish() noexcept;
         std::shared_ptr<State>  owner;
         std::shared_ptr<Window> window;
-        AllocationLease         credit;
-        Status                  completion_status;
-        Status                  submission_status;
-        std::atomic<unsigned>   events{0};
-        std::atomic<bool>       claimed{false};
-        std::atomic<bool>       reported{false};
+
+        Status                completion_status;
+        Status                submission_status;
+        std::atomic<unsigned> events{0};
+        std::atomic<bool>     claimed{false};
+        std::atomic<bool>     reported{false};
     };
 
     struct LeafReference
@@ -72,7 +68,7 @@ struct LocalRecoveryOperation::State : std::enable_shared_from_this<State>
             return overflow.empty();
         }
 
-        explicit LeafProtection(const std::shared_ptr<detail::AllocationReservation> &budget)
+        explicit LeafProtection(const std::shared_ptr<AllocationBudget> &budget)
             : overflow(detail::ReservationAllocator<std::shared_ptr<const void>>(budget))
         {
         }

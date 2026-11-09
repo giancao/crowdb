@@ -41,4 +41,15 @@ try {
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot chunk allocation failed");
 }
+
+Status SnapshotExport::next_owned_async(std::function<void(Status, SnapshotChunk, bool)> complete)
+{
+    if (!runtime_ || !complete) {
+        return Status::invalid_argument("asynchronous chunk read requires a runtime export and completion");
+    }
+    return runtime_->next_async([this, complete = std::move(complete)](Status status, SnapshotChunk chunk, bool done) {
+        pos_ = runtime_->info().offset;
+        complete(std::move(status), std::move(chunk), done);
+    });
+}
 } // namespace crowdb::tree

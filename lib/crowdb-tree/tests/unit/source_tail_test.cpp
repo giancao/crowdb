@@ -5,11 +5,13 @@
 
 #include <gtest/gtest.h>
 
+#include <future>
+
 namespace crowdb::tree
 {
 namespace
 {
-TEST(SourceTail, RegistrationBarrierWaitsForThePreviouslyAdmittedWriter)
+TEST(SourceTail, RegistrationBarrierCompletesAfterThePreviouslyAdmittedWriter)
 {
     Config config;
     ASSERT_TRUE(TreeRuntime::create({}, &config.runtime).ok());
@@ -28,14 +30,16 @@ TEST(SourceTail, RegistrationBarrierWaitsForThePreviouslyAdmittedWriter)
     std::shared_ptr<SourceTailDomain::Barrier> barrier;
     auto                                       status = source.tail_domain()->arm(tail, metadata, &barrier);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    EXPECT_FALSE(barrier->ready.load());
+    auto complete = std::make_shared<std::promise<void>>();
+    auto done     = complete->get_future();
+    barrier->on_ready([complete] { complete->set_value(); });
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
     SourceAdmission::Writer::Prepared old;
     ASSERT_TRUE(before.prepare_write("k", 0, encode_cell_buf(1, OpKind::kPut, "old"), &old).ok());
     EXPECT_TRUE(before.commit_write(std::move(old), 1));
-    EXPECT_FALSE(barrier->ready.load());
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
     before.release(); // real Core callers acknowledge frontier before this
-    barrier->wait();
-    EXPECT_TRUE(barrier->ready.load());
+    ASSERT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     EXPECT_TRUE(tail->table()->empty());
     SourceAdmission::Writer after;
     ASSERT_TRUE(source.try_admit(1, {.entries = 1, .key_bytes = 1}, &after).ok());

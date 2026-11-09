@@ -4,6 +4,7 @@
 #include "common/test_chunk_physical.h"
 #include "common/test_chunk_root.h"
 
+#include <future>
 #include <latch>
 
 namespace crowdb::tree
@@ -11,6 +12,19 @@ namespace crowdb::tree
 namespace
 {
 using namespace test_chunk;
+
+Status register_store(detail::ChunkRuntimePageStore &store, const std::shared_ptr<AllocationBudget> &budget)
+{
+    std::promise<Status> terminal;
+    auto                 result = terminal.get_future();
+    auto                 status = store.submit_registry(budget, {.complete_fn =
+                                                                     [](void *context, Status status) noexcept {
+                                                         static_cast<std::promise<Status> *>(context)->set_value(
+                                                             std::move(status));
+                                                                     },
+                                                                 .context = &terminal});
+    return status.ok() ? result.get() : status;
+}
 
 TEST(ChunkPhysicalRegistry, RepeatedObserversCountAllMirrorCapacityOnceUntilActualDelete)
 {
@@ -48,7 +62,9 @@ TEST(ChunkPhysicalRegistry, OnePageStoreReopensIntoTheOriginalCanonicalPhysicalL
     other->queue                        = host.queue;
     std::shared_ptr<const ChunkBackingDomain> first;
     std::shared_ptr<const ChunkBackingDomain> second;
+    ASSERT_TRUE(register_store(store, host.budget).ok());
     ASSERT_TRUE(store.make_domain(51, host.budget, &first).ok());
+    ASSERT_TRUE(register_store(store, other).ok());
     ASSERT_TRUE(store.make_domain(52, other, &second).ok());
     ASSERT_EQ(first->physical_registry, second->physical_registry);
     std::shared_ptr<ChunkPhysicalPack> one;
@@ -76,10 +92,9 @@ TEST(ChunkPhysicalRegistry, ExistingPageStoreCannotMixCanonicalRolesAcrossHostQu
     detail::ChunkRuntimePageStore             store({.tree = 19, .owner_epoch = 1}, backend.catalog, backend.transport,
                                                     first_host.budget);
     std::shared_ptr<const ChunkBackingDomain> first;
-    std::shared_ptr<const ChunkBackingDomain> rejected;
+    ASSERT_TRUE(register_store(store, first_host.budget).ok());
     ASSERT_TRUE(store.make_domain(51, first_host.budget, &first).ok());
-    EXPECT_EQ(store.make_domain(52, other_host.budget, &rejected).code(), Code::kInvalidArgument);
-    EXPECT_FALSE(rejected);
+    EXPECT_EQ(register_store(store, other_host.budget).code(), Code::kInvalidArgument);
     EXPECT_TRUE(first->physical_registry->uses_queue(first_host.queue.get()));
 }
 

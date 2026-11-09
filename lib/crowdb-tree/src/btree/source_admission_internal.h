@@ -17,7 +17,7 @@ struct SourceCapture::State : std::enable_shared_from_this<State>
     };
 
     State(std::shared_ptr<const SourceCatalog> previous, std::shared_ptr<const SourceCatalog> next,
-          std::shared_ptr<detail::AllocationReservation> credit)
+          std::shared_ptr<AllocationBudget> credit)
         : expected(std::move(previous)),
           successor_catalog(std::move(next)),
           admission(std::move(credit)),
@@ -37,7 +37,7 @@ struct SourceCapture::State : std::enable_shared_from_this<State>
     std::shared_ptr<const SourceCatalog>                  expected;
     std::shared_ptr<const SourceCatalog>                  successor_catalog;
     std::shared_ptr<SourceCatalog>                        covered_catalog;
-    std::shared_ptr<detail::AllocationReservation>        admission;
+    std::shared_ptr<AllocationBudget>                     admission;
     std::vector<Node, detail::ReservationAllocator<Node>> nodes;
     uint64_t                                              batch          = 0;
     uint64_t                                              frontier       = 0;

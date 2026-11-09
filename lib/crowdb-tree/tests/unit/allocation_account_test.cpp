@@ -58,6 +58,46 @@ TEST(AllocationAccount, ActualMemoryCanReachTheMaximumAndStopsNewGrowthAboveOneA
     EXPECT_EQ(account->snapshot().allocated[kRouting], 0U);
 }
 
+TEST(AllocationAccount, OngoingWorkCanFinishAboveTheMemoryCeilingWithoutAdmittingNewGrowth)
+{
+    constexpr size_t       maximum = 1024 * 1024;
+    ResourceBudget::Limits configured{};
+    configured[kRouting] = maximum;
+    ResourceBudget                     host(configured, 4);
+    auto                               account = host.make_account(configured);
+    std::shared_ptr<AllocationAccount> ordinary;
+    std::shared_ptr<AllocationAccount> ongoing;
+    ASSERT_TRUE(AllocationAccount::create(account, BudgetClass::kRouting, &ordinary).ok());
+    ASSERT_TRUE(AllocationAccount::create_ongoing(account, BudgetClass::kRouting, &ongoing).ok());
+    const auto baseline = account->snapshot().allocated[kRouting];
+    {
+        BudgetAllocator<uint8_t, AllocationAccount, AllocationKind::kFrame> work(ongoing);
+        BudgetAllocator<uint8_t, AllocationAccount, AllocationKind::kFrame> next(ordinary);
+        auto                                                               *retained = work.allocate(2 * maximum);
+        EXPECT_TRUE(ResourceBudget::memory_exhausted(account));
+        EXPECT_EQ(account->snapshot().allocated[kRouting], baseline + (2 * maximum));
+        EXPECT_THROW(
+            {
+                auto *rejected = next.allocate(1);
+                next.deallocate(rejected, 1);
+            },
+            std::bad_alloc);
+        auto *completion = work.allocate(256);
+        EXPECT_EQ(account->snapshot().allocated[kRouting], baseline + (2 * maximum) + 256);
+        EXPECT_EQ(account->snapshot().physical[kFrame], (2 * maximum) + 256);
+        work.deallocate(completion, 256);
+        work.deallocate(retained, 2 * maximum);
+        EXPECT_FALSE(ResourceBudget::memory_exhausted(account));
+        auto *resumed = next.allocate(1);
+        next.deallocate(resumed, 1);
+        EXPECT_EQ(account->snapshot().allocated[kRouting], baseline);
+    }
+    ongoing.reset();
+    ordinary.reset();
+    EXPECT_EQ(host.snapshot().allocated[kRouting], 0U);
+    EXPECT_EQ(account->snapshot().physical[kFrame], 0U);
+}
+
 TEST(AllocationAccount, UnusedHostReservationDoesNotBlockActualAllocationOrOwnershipTransfer)
 {
     TestAccounts test;

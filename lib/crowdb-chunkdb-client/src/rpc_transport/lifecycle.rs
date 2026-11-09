@@ -114,4 +114,35 @@ impl ChunkdbRpcTransport {
             connection.into_connection(),
         ))
     }
+
+    // The native resolver owns a one-connection pool per endpoint and is its
+    // only installer. Reuse the index's existing generation publication.
+    pub(crate) async fn owned_native_route(&self, rpc_endpoint: &str) -> Result<OwnedClientRoute> {
+        let normalized = normalize_endpoint(rpc_endpoint);
+        let selected = if let Some(selected) = self.connections.get(&normalized) {
+            selected
+        } else {
+            let (host, port) = parse_endpoint(&normalized).map_err(|reason| {
+                ChunkdbClientError::Unreachable(format!("invalid endpoint {rpc_endpoint}: {reason}"))
+            })?;
+            let connection = self
+                .server
+                .connect_native_route(&host, port)
+                .await
+                .map_err(|error| {
+                    ChunkdbClientError::ConnectFailed(format!("rpc connect to {host}:{port}: {error:?}"))
+                })?;
+            self.rpc.attach(&connection);
+            self.connections
+                .get_or_try_install(&normalized, || {
+                    Ok::<_, std::convert::Infallible>(connection.clone())
+                })
+                .map_err(|error| ChunkdbClientError::ConnectFailed(format!("native route: {error:?}")))?
+        };
+        Ok(OwnedClientRoute::new(
+            Arc::clone(&self.rpc),
+            Arc::clone(&self.server),
+            selected.into_connection(),
+        ))
+    }
 }

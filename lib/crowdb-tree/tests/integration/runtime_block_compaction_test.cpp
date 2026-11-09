@@ -22,7 +22,7 @@ TEST(RuntimeBlockCompaction, DisabledPublicFacadeDoesNotWriteACheckpoint)
     MergeGcStats stats{.blocks_selected = 99};
     ASSERT_TRUE(tree->compact_sparse_blocks(&stats).ok());
     EXPECT_EQ(stats.blocks_selected, 0U);
-    EXPECT_EQ(tree->durable_snapshot_seq(), 0U);
+    EXPECT_EQ(tree->durable_sequence(), 0U);
 }
 
 TEST(RuntimeBlockCompaction, PublicPassRelocatesSparseStorageAndReopens)

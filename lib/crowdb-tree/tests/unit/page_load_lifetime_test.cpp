@@ -122,7 +122,7 @@ struct Reads
             }
         }
         loader = std::make_shared<AsyncStorePageLoader>(
-            store, runtime, lane, PageLoadLimits{.max_inflight = 1},
+            store, runtime, lane, PageLoadLimits{},
             [captured = backings](uint64_t id, std::shared_ptr<const BackingRef> *out) {
                 *out = captured.at(id);
                 return Status::Ok();
@@ -191,23 +191,25 @@ TEST(PageLoadLifetime, PrepaidDecodeContinuesAcrossColdReadsWithAllOrdinaryCpuSl
     }
 }
 
-TEST(PageLoadLifetime, UnknownAcceptancePinsWindowAndProgressUntilLateCallback)
+TEST(PageLoadLifetime, UnknownAcceptancePinsMemoryUntilLateCallbacksWithoutBlockingOtherReads)
 {
     for (auto kind : {Kind::kLeaf, Kind::kInner, Kind::kOverflow}) {
         Reads test(kind);
         test.start(kind);
         ASSERT_EQ(test.calls, 1U);
         EXPECT_EQ(test.last, Code::kIoError);
-        EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+        EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
         test.start(kind);
         EXPECT_EQ(test.calls, 2U);
-        EXPECT_EQ(test.last, Code::kResourceExhausted);
-        EXPECT_EQ(test.store->reads, 1U);
+        EXPECT_EQ(test.last, Code::kIoError);
+        EXPECT_EQ(test.store->reads, 2U);
         test.loader.reset();
         test.credits.seal();
         EXPECT_GT(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
         EXPECT_EQ(test.credits.resources->snapshot().read_inflight_bytes,
                   test.credits.account->snapshot().physical[static_cast<size_t>(AllocationKind::kIo)]);
+        EXPECT_GT(test.credits.resources->snapshot().read_inflight_bytes, 0U);
+        test.store->finish();
         EXPECT_GT(test.credits.resources->snapshot().read_inflight_bytes, 0U);
         test.store->finish();
         EXPECT_EQ(test.credits.resources->snapshot().read_inflight_bytes, 0U);
@@ -222,12 +224,12 @@ TEST(PageLoadLifetime, TreeShutdownWaitsForUnknownTransportOwnershipAfterLogical
 {
     for (const bool callback : {true, false}) {
         Reads                                          test(Kind::kLeaf);
-        TreeOperationLifetime                          lifetime(1, test.credits.credits.reservation());
+        TreeOperationLifetime                          lifetime(test.credits.credits.reservation());
         std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
         ASSERT_TRUE(lifetime.acquire(test.credits.credits.reservation(), &ticket).ok());
-        test.loader = std::make_shared<AsyncStorePageLoader>(ticket->backend(test.store.get()), test.runtime, test.lane,
-                                                             PageLoadLimits{.max_inflight = 1},
-                                                             OverflowBackingResolver{}, test.credits.credits);
+        test.loader =
+            std::make_shared<AsyncStorePageLoader>(ticket->backend(test.store.get()), test.runtime, test.lane,
+                                                   PageLoadLimits{}, OverflowBackingResolver{}, test.credits.credits);
         test.start(Kind::kLeaf);
         ASSERT_EQ(test.calls, 1U);
         EXPECT_EQ(test.last, Code::kIoError);
@@ -264,7 +266,7 @@ TEST(PageLoadLifetime, InlineSuccessThenThrowDoesNotDecodeOrPublishSuccess)
     }
 }
 
-TEST(PageLoadLifetime, AcceptedReadAllocationFailureAlsoRetainsItsProgressCredit)
+TEST(PageLoadLifetime, AcceptedReadAllocationFailureRetainsMemoryUntilTheBackendReleasesItsOwner)
 {
     for (auto kind : {Kind::kLeaf, Kind::kInner, Kind::kOverflow}) {
         Reads test(kind);
@@ -272,7 +274,7 @@ TEST(PageLoadLifetime, AcceptedReadAllocationFailureAlsoRetainsItsProgressCredit
         test.start(kind);
         EXPECT_EQ(test.calls, 1U);
         EXPECT_EQ(test.last, Code::kResourceExhausted);
-        EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+        EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
         test.loader.reset();
         test.credits.seal();
         test.store->finish();
@@ -283,7 +285,7 @@ TEST(PageLoadLifetime, AcceptedReadAllocationFailureAlsoRetainsItsProgressCredit
     }
 }
 
-TEST(PageLoadLifetime, TransportDiscardOfUnknownCallbackReleasesAdmissionForNextRead)
+TEST(PageLoadLifetime, TransportDiscardOfUnknownCallbackReleasesItsMemoryBeforeTheNextRead)
 {
     for (auto kind : {Kind::kLeaf, Kind::kInner, Kind::kOverflow}) {
         Reads test(kind);
@@ -316,7 +318,7 @@ TEST(PageLoadLifetime, PriorOverflowCallbackCannotAffectNextInflightFrame)
     duplicate.complete(Status::io_error());
     test.runtime->drain();
     EXPECT_EQ(test.calls, 0U);
-    EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+    EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     test.store->finish();
     test.runtime->drain();
     EXPECT_EQ(test.calls, 1U);
@@ -328,7 +330,7 @@ TEST(PageLoadLifetime, PriorOverflowCallbackCannotAffectNextInflightFrame)
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
 }
 
-TEST(PageLoadMetrics, ErrorAndBudgetRejectionHaveOneTerminalBeforeLateDuplicateCallback)
+TEST(PageLoadMetrics, IndependentReadErrorsHaveOneTerminalBeforeLateDuplicateCallbacks)
 {
     for (auto kind : {Kind::kLeaf, Kind::kInner, Kind::kOverflow}) {
         Reads test(kind);
@@ -340,6 +342,7 @@ TEST(PageLoadMetrics, ErrorAndBudgetRejectionHaveOneTerminalBeforeLateDuplicateC
         EXPECT_EQ(terminal.inflight, 0U);
         EXPECT_EQ(terminal.outcomes[static_cast<size_t>(TreeOutcome::Error)], 2U);
         test.loader.reset();
+        test.store->finish();
         test.store->finish();
         test.runtime->drain();
         const auto late = test.metrics->totals()[static_cast<size_t>(TreeStage::PageLoadPipeline)];

@@ -40,12 +40,12 @@ TEST(FacadeCheckpointDiagnostics, PhysicalWritesExcludeCleanReuseAndIncludeOverf
     ASSERT_TRUE(test.tree);
     EXPECT_EQ(test.tree->last_snapshot_pages_written(), 0U);
     ASSERT_TRUE(test.tree->put("large", std::string(12000, 'v')).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     EXPECT_GT(test.tree->last_snapshot_pages_written(), 1U);
     EXPECT_EQ(test.tree->stats().snapshot_pages_written, test.tree->last_snapshot_pages_written());
     const auto written = test.tree->last_snapshot_pages_written();
     EXPECT_EQ(test.tree->stats().snapshot_pages_total, written);
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     EXPECT_EQ(test.tree->last_snapshot_pages_written(), 0U);
     EXPECT_EQ(test.tree->stats().snapshot_pages_total, written);
     EXPECT_EQ(test.tree->last_snapshot_segments_written(), 0U);
@@ -62,16 +62,16 @@ TEST(FacadeCheckpointDiagnostics, FailedAndStagedWritesPreserveLastDurableObserv
     test.open();
     ASSERT_TRUE(test.tree);
     ASSERT_TRUE(test.tree->put("a", "one").ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     const auto first = test.tree->last_snapshot_pages_written();
     ASSERT_GT(first, 0U);
     ASSERT_TRUE(test.tree->put("a", "two").ok());
     test.store.fail_at = test.store.events.size() + 1;
-    EXPECT_FALSE(test.tree->snapshot().ok());
+    EXPECT_FALSE(test.tree->flush_with_persistent().ok());
     EXPECT_EQ(test.tree->last_snapshot_pages_written(), first);
     test.store.fail_at = 0;
-    ASSERT_TRUE(test.tree->snapshot().ok());
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 2U);
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
+    EXPECT_EQ(test.tree->durable_coverage(), 2U);
     const auto repaired = test.tree->last_snapshot_pages_written();
     ASSERT_TRUE(test.tree->put("a", "three").ok());
     auto                                *core = TreeCoreAccess::get(*test.tree);
@@ -81,10 +81,10 @@ TEST(FacadeCheckpointDiagnostics, FailedAndStagedWritesPreserveLastDurableObserv
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_TRUE(writeback->result().writeback_completed);
     EXPECT_EQ(test.tree->last_snapshot_pages_written(), repaired);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 2U);
+    EXPECT_EQ(test.tree->durable_coverage(), 2U);
     writeback.reset();
-    ASSERT_TRUE(test.tree->snapshot().ok());
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 3U);
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
+    EXPECT_EQ(test.tree->durable_coverage(), 3U);
     EXPECT_EQ(test.tree->last_snapshot_pages_written(), 0U);
 }
 
@@ -96,7 +96,7 @@ TEST(FacadeCheckpointDiagnostics, SmallerDefaultFrameDerivesSplitButRejectsExpli
     ASSERT_TRUE(test.tree);
     EXPECT_LT(TreeCoreAccess::get(*test.tree)->config().leaf_split_bytes, test.config.frame_bytes);
     ASSERT_TRUE(test.tree->put("key", "value").ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     test.tree.reset();
     test.config.frame_bytes = 256;
     auto status             = Crowdbtree::open(test.config, &test.tree);

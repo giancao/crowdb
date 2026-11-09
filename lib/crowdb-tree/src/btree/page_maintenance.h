@@ -8,19 +8,19 @@ namespace crowdb::tree
 {
 struct PageMaintenanceLimits
 {
-    RunLimits                                      run;
-    size_t                                         max_sources         = 64;
-    size_t                                         max_base_views      = 64;
-    size_t                                         max_output_pages    = 64;
-    size_t                                         max_work_entries    = 65536;
-    size_t                                         max_metadata_bytes  = 16 * 1024 * 1024;
-    size_t                                         primary_page_bytes  = 64 * 1024;
-    size_t                                         target_page_bytes   = 48 * 1024;
-    size_t                                         merge_trigger_bytes = 16 * 1024;
-    size_t                                         merge_target_bytes  = 40 * 1024;
-    size_t                                         inline_value_bytes  = 8 * 1024;
-    uint64_t                                       gc_floor            = 0;
-    std::shared_ptr<detail::AllocationReservation> metadata            = nullptr;
+    RunLimits                         run;
+    size_t                            max_sources         = 64;
+    size_t                            max_base_views      = 64;
+    size_t                            max_output_pages    = 64;
+    size_t                            max_work_entries    = 65536;
+    size_t                            max_metadata_bytes  = 16 * 1024 * 1024;
+    size_t                            primary_page_bytes  = 64 * 1024;
+    size_t                            target_page_bytes   = 48 * 1024;
+    size_t                            merge_trigger_bytes = 16 * 1024;
+    size_t                            merge_target_bytes  = 40 * 1024;
+    size_t                            inline_value_bytes  = 8 * 1024;
+    uint64_t                          gc_floor            = 0;
+    std::shared_ptr<AllocationBudget> metadata            = nullptr;
     // Persistent range slices use Routing credit, independently of scratch.
 };
 
@@ -42,7 +42,7 @@ struct PageMaintenanceResult
 {
     PageMaintenanceResult() = default;
 
-    explicit PageMaintenanceResult(const std::shared_ptr<detail::AllocationReservation> &metadata)
+    explicit PageMaintenanceResult(const std::shared_ptr<AllocationBudget> &metadata)
         : loads(detail::ReservationAllocator<BaseLoadRequest>(metadata))
     {
     }
@@ -61,7 +61,7 @@ struct LeafLayoutPlan
 {
     LeafLayoutPlan() = default;
 
-    explicit LeafLayoutPlan(const std::shared_ptr<detail::AllocationReservation> &metadata)
+    explicit LeafLayoutPlan(const std::shared_ptr<AllocationBudget> &metadata)
         : loads(detail::ReservationAllocator<BaseLoadRequest>(metadata)),
           separators(detail::ReservationAllocator<OwnedKey>(metadata)),
           primary_bytes(detail::ReservationAllocator<size_t>(metadata))
@@ -96,7 +96,7 @@ struct LeafSplitResult
 {
     LeafSplitResult() = default;
 
-    explicit LeafSplitResult(const std::shared_ptr<detail::AllocationReservation> &metadata)
+    explicit LeafSplitResult(const std::shared_ptr<AllocationBudget> &metadata)
         : pages(detail::ReservationAllocator<std::shared_ptr<const PageState>>(metadata))
     {
     }

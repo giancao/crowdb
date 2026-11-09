@@ -7,7 +7,7 @@ using namespace crowdb::tree;
 
 uint64_t ct_durable_coverage(ct_tree *tree)
 {
-    return tree == nullptr ? 0 : c_api_tree(tree)->durable_snapshot_last_applied_slot();
+    return tree == nullptr ? 0 : c_api_tree(tree)->durable_coverage();
 }
 
 namespace crowdb::tree::c_api_detail

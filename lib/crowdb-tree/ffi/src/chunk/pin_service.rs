@@ -34,8 +34,8 @@ pub struct ChunkPinReleaseService {
     state: Arc<ServiceState>,
 }
 impl ChunkPinReleaseService {
-    /// Reserve the native queue in the host ledger and start one bounded pump
-    /// on the existing Tokio blocking pool; this creates no private thread.
+    /// Reserve the native queue in the host ledger and start its nonblocking
+    /// completion-driven pump on the existing Tokio runtime.
     /// # Errors
     /// Rejects missing Tokio context, zero capacity, or insufficient host credit.
     pub fn new(runtime: &TreeRuntime, capacity: usize) -> Result<Self, CtError> {
@@ -109,16 +109,7 @@ async fn pump(state: Arc<ServiceState>) {
         let wake = state.wake.notified();
         tokio::pin!(wake);
         wake.as_mut().enable();
-        let owner = state.clone();
-        let step = tokio::task::spawn_blocking(move || unsafe {
-            sys::ct_chunk_pin_service_pump(owner.native.as_ptr(), 8)
-        })
-        .await;
-        let Ok(step) = step else {
-            // No native step throws. A host runtime cancelling its blocking
-            // pool is an incomplete shutdown; never report pins as released.
-            return;
-        };
+        let step = unsafe { sys::ct_chunk_pin_service_pump(state.native.as_ptr(), 8) };
         if step.drained != 0 {
             state.done.store(true, Ordering::Release);
             state.completion.notify_waiters();

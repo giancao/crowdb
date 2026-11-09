@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "backend/chunk/chunk_backend_state.h"
 #include "backend/chunk/chunk_collection_operation.h"
 #include "backend/chunk/chunk_runtime_page_store.h"
 #include "btree/tree_core_access.h"
@@ -119,24 +120,45 @@ TEST(ChunkCollectionOperation, CloseDrainsAcceptedDeleteWithoutWaitingForCallerH
     TestCollectionCore test;
     ASSERT_TRUE(test.open().ok());
     test.catalog->record = detail::test_collector_stage();
-    std::latch entered(1);
-    std::latch release(1);
-    std::latch close_started(1);
-    test.transport->before_drain = [&] {
-        entered.count_down();
-        release.wait();
+    std::promise<detail::ChunkTransportCompletion> pending;
+    auto                                           receipt = pending.get_future();
+    std::latch                                     close_started(1);
+    test.transport->after_drain_async = [&](auto complete) {
+        pending.set_value(std::move(complete));
+        return true;
     };
     std::shared_ptr<ChunkCollectionOperation> operation;
     ASSERT_TRUE(test.prepare(&operation).ok());
     auto run = std::async(std::launch::async, [&] { return detail::wait_snapshot_operation(operation); });
-    entered.wait();
+    ASSERT_EQ(receipt.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    auto backend   = std::dynamic_pointer_cast<ChunkBackendState>(TreeCoreAccess::get(*test.tree)->chunk_backend());
+    auto scheduled = std::static_pointer_cast<ScheduledPageStore>(backend->store);
+    std::promise<Status> other;
+    auto                 ready = other.get_future();
+    ASSERT_TRUE(scheduled
+                    ->submit_step([] { return Status::Ok(); },
+                                  {.context = &other,
+                                   .complete_fn =
+                                       +[](void *raw, Status status) {
+                                           static_cast<std::promise<Status> *>(raw)->set_value(std::move(status));
+                                       }})
+                    .ok());
+    ASSERT_EQ(ready.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_TRUE(ready.get().ok());
     auto close = std::async(std::launch::async, [&] {
         close_started.count_down();
         TreeCoreAccess::get(*test.tree)->close_and_drain();
     });
     close_started.wait();
     EXPECT_EQ(close.wait_for(std::chrono::milliseconds(1)), std::future_status::timeout);
-    release.count_down();
+    ASSERT_TRUE(scheduled
+                    ->submit_step(
+                        [reply = receipt.get()] {
+                            reply.complete(Status::Ok());
+                            return Status::Ok();
+                        },
+                        {.complete_fn = +[](void *, Status status) { EXPECT_TRUE(status.ok()); }})
+                    .ok());
     EXPECT_TRUE(run.get().ok());
     close.get();
     EXPECT_EQ(operation->result().stages_removed, 1U);

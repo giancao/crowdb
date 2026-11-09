@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "backend/chunk/chunk_page_store.h"
+#include "backend/chunk/chunk_root_catalog.h"
 #include "backend/chunk/chunk_stage.h"
 
 #include <gtest/gtest.h>
@@ -72,7 +72,7 @@ TEST(ChunkStage, ProvisionalIdentityAndReferencesNeverChangeDuringTransition)
 
 TEST(ChunkStage, OldCatalogKeepsIndependentStagingUnavailable)
 {
-    MemoryRootCatalog catalog(7);
+    RootCatalog catalog;
     EXPECT_FALSE(catalog.stage_schema_supported());
     const auto                      first = reserved();
     std::optional<ChunkStageRecord> loaded;

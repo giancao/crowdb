@@ -11,7 +11,7 @@ TEST(ChunkBackingVisibility, PublicNextOwnerKeepsTheLedgerAfterThePreviousTreeCo
     test_chunk::TestCoreChunk test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, std::string(9000, 'a')).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     auto *core = TreeCoreAccess::get(*test.tree);
     core->binding()->cpu()->drain();
     const auto sampler = core->backing_sampler();
@@ -32,7 +32,7 @@ TEST(ChunkBackingVisibility, PublicNextOwnerKeepsTheLedgerAfterThePreviousTreeCo
     EXPECT_EQ(test.tree->tree_state_stats().resources.allocated_backing_bytes, before.allocated_bytes);
     EXPECT_GT(test.tree->tree_state_stats().resources.allocated_bytes, 0U);
     ASSERT_TRUE(test.put(2, std::string(12000, 'b')).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     core->binding()->cpu()->drain();
     const auto newer = test.tree->backing_stats();
     EXPECT_EQ(newer.scope_id, before.scope_id);

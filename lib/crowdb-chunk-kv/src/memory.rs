@@ -296,7 +296,7 @@ impl PartitionTree for MemoryPartitionTree {
         Ok((applied, applied))
     }
 
-    async fn checkpoint_snapshot(
+    async fn flush_with_persistent_view(
         &self,
         _wal_replay_offset: u64,
     ) -> Result<(u64, u64, Arc<dyn PartitionTree>)> {
@@ -375,51 +375,12 @@ impl PartitionTree for MemoryPartitionTree {
         Ok(())
     }
 
-    async fn begin_split_memtable_view(&self) -> Result<(u64, u64)> {
-        let generation = self
-            .next_split_view
-            .fetch_add(1, Ordering::AcqRel)
-            .checked_add(1)
-            .ok_or_else(|| crate::ChunkKvError::Faulted("split view generation exhausted".into()))?;
-        let values = self.values.read().await.clone();
-        let mut views = self.split_views.lock().await;
-        if !views.is_empty() {
-            return Err(crate::ChunkKvError::SplitRetry(
-                "split memtable view is already active".into(),
-            ));
-        }
-        views.insert(generation, values);
-        Ok((generation, self.last_applied.load(Ordering::Acquire)))
-    }
-
     async fn arm_split_overlay(
         &self,
         destination: &dyn PartitionTree,
         limits: crate::SplitOverlayLimits,
     ) -> Result<(Arc<dyn crate::PreparedSplitOverlay>, u64)> {
         prepared_split::arm(self, destination, limits).await
-    }
-
-    async fn install_split_memtable_overlay(
-        &self,
-        source: &dyn PartitionTree,
-        journal_frontier: u64,
-    ) -> Result<()> {
-        let source = source.as_any().downcast_ref::<Self>().ok_or_else(|| {
-            crate::ChunkKvError::InvalidRequest("memory split overlay requires a memory source".into())
-        })?;
-        let inherited = source.values.read().await.clone();
-        let mut values = self.values.write().await;
-        // The inherited view replaces the older base in this child's range,
-        // including deletions. Independently newer child revisions still win.
-        values.retain(|key, value| !self.range.contains(key) || value.revision > journal_frontier);
-        for (key, value) in inherited {
-            if self.range.contains(&key) && value.revision <= journal_frontier {
-                values.entry(key).or_insert(value);
-            }
-        }
-        self.last_applied.fetch_max(journal_frontier, Ordering::AcqRel);
-        Ok(())
     }
 
     async fn clear_split_memtable_overlay(&self, _source: &dyn PartitionTree) -> Result<()> {

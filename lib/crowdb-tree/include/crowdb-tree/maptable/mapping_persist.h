@@ -1,14 +1,10 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Durable segment image and directory codecs. Local checkpoints and explicit
-// legacy migration use these backend-neutral blobs. Anchor encoding and
-// validation are separate snapshot metadata operations.
+// Durable Local segment images contain byte locations and empty slots.
+// Anchor encoding and validation are separate metadata operations. Recovery
+// validates each word before constructing typed backing descriptors.
 //
-// Segment images hold packed durable words (mapping_slot.h), never resident
-// pointers. Version 1 carries local byte descriptors; version 2 additionally
-// permits immutable-store page references for legacy migration. Recovery
-// validates the words before constructing typed backing descriptors.
 //
 // A directory records each live segment's generation, image location and CRC.
 // The existing on-disk encoding is independent of the mutable mapping test

@@ -7,9 +7,8 @@
 
 namespace crowdb::tree
 {
-ChunkRootRecovery::ChunkRootRecovery(ConstructionKey /*unused*/,
-                                     std::shared_ptr<detail::AllocationReservation> metadata,
-                                     std::shared_ptr<detail::AllocationReservation> window)
+ChunkRootRecovery::ChunkRootRecovery(ConstructionKey /*unused*/, std::shared_ptr<AllocationBudget> metadata,
+                                     std::shared_ptr<AllocationBudget> window)
     : metadata_(std::move(metadata)),
       window_(std::move(window)),
       root_(metadata_),
@@ -51,18 +50,13 @@ std::optional<size_t> ChunkRootRecovery::window_allocation_bound(ChunkRecoveryLi
 
 Status ChunkRootRecovery::create(ChunkRootManifest root, std::shared_ptr<const ChunkBackingDomain> domain,
                                  std::shared_ptr<detail::ChunkRuntimeIds> ids, ChunkRecoveryLimits limits,
-                                 std::shared_ptr<detail::AllocationReservation> metadata,
-                                 std::shared_ptr<detail::AllocationReservation> window,
-                                 std::shared_ptr<ChunkRootRecovery>            *out)
+                                 std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<AllocationBudget> window,
+                                 std::shared_ptr<ChunkRootRecovery> *out)
 try {
     if (!domain || !domain->supported() || !ids || !metadata || !window || out == nullptr || *out ||
         root.identity.tree != domain->tree || root.identity.root_generation == 0 ||
         limits.max_frame_bytes <= kFrameHeaderSize + kFrameTrailerSize || limits.max_blob_bytes < kDurableBlobHeader) {
         return Status::invalid_argument();
-    }
-    if (root.frame_count > limits.max_pages || root.stored_references > limits.max_references ||
-        root.dependency_entries > limits.max_dependency_steps) {
-        return Status::resource_exhausted();
     }
     auto result          = detail::reserved_shared<ChunkRootRecovery>(metadata, ConstructionKey{}, metadata, window);
     result->domain_      = std::move(domain);
@@ -77,11 +71,7 @@ try {
     pages.coverage       = identity.coverage;
     pages.generation     = identity.page_generation;
     pages.backend_id     = result->domain_->backend_id;
-    // Fixed capacities eliminate vector growth overlap across later windows.
-    result->index_bytes_.reserve(kChunkIndexWindowBytes);
-    result->blob_.reserve(limits.max_blob_bytes);
-    result->raw_.reserve(limits.max_frame_bytes);
-    *out = std::move(result);
+    *out                 = std::move(result);
     return Status::Ok();
 }
 catch (const std::bad_alloc &) {

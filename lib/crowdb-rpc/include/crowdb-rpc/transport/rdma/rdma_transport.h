@@ -28,6 +28,7 @@ namespace crowdb::rpc
 {
 
 class SocketEngine;
+class SocketTransport;
 struct RdmaDevice;
 struct RdmaMemoryStats;
 struct RdmaCmOffer;
@@ -167,9 +168,8 @@ class RdmaTransport : public Transport
     // RDMA-specific: listen on an endpoint (server side).
     bool listen(const std::string &addr, int port);
 
-    // Accept one pending CM request and create an RC QP-backed connection.
-    // The caller owns the returned logical connection and should register it
-    // with the common RPC worker before submitting frames.
+    // Advance available CM events without waiting. Returns a connection
+    // after its QP is established and published, or nullptr while pending.
     std::shared_ptr<Connection> accept();
 
     // Start one dedicated polling/event worker per initialized CQ.
@@ -211,6 +211,7 @@ class RdmaTransport : public Transport
 #    endif
 
   private:
+    friend class SocketTransport;
 #    ifdef CROWDB_RPC_TEST_UTIL
     friend struct TestRdmaTransport;
     std::atomic<uint64_t> control_fragment_limit_for_tests_{UINT64_MAX};
@@ -229,7 +230,8 @@ class RdmaTransport : public Transport
     uint8_t                                                              port_ = 1;
     std::vector<struct rdma_cm_id *>                                     cm_ids_;
     std::unordered_map<struct rdma_cm_id *, std::shared_ptr<Connection>> cm_connections_;
-    SocketEngine                                                        *event_engine_ = nullptr;
+    SocketEngine                                                        *event_engine_     = nullptr;
+    SocketTransport                                                     *socket_transport_ = nullptr;
     std::mutex                                                           cm_mu_;
 
     SystemBufferPool                default_application_pool_;
@@ -241,6 +243,39 @@ class RdmaTransport : public Transport
 
     std::atomic<bool> running_{false};
     std::atomic_flag  cm_polling_ = ATOMIC_FLAG_INIT;
+    std::atomic<bool> cm_event_registered_{false};
+
+    // Only the shared CM consumer advances this record. Shutdown takes over
+    // after the socket workers and their scheduled callbacks have exited.
+    struct CmRetirement
+    {
+        rdma_cm_event              *event = nullptr;
+        rdma_cm_id                 *id    = nullptr;
+        std::shared_ptr<Connection> connection;
+        bool                        cq_drained = false;
+        bool                        qp_retired = false;
+
+        [[nodiscard]] bool pending() const noexcept
+        {
+            return event != nullptr || id != nullptr;
+        }
+    } cm_retirement_;
+
+    bool cm_retry_pending_ = false;
+
+    // The existing CM consumer owns the accepted requests until publication
+    // or retirement. Timer callbacks retain only a weak reference.
+    struct PassiveAccept;
+    std::unordered_map<rdma_cm_id *, std::shared_ptr<PassiveAccept>> passive_accepts_;
+    std::shared_ptr<Connection>                                      accept_cm_events();
+    void                                                             start_passive_accept(rdma_cm_event *event);
+    std::shared_ptr<Connection> advance_passive_accept(const std::shared_ptr<PassiveAccept> &attempt);
+    bool                        prepare_passive_accept(PassiveAccept &attempt);
+    bool                        try_retire_passive_accept(PassiveAccept &attempt);
+    void                        retire_passive_accepts_at_shutdown();
+    bool                        retry_passive_accept(const std::shared_ptr<PassiveAccept> &attempt);
+    uint64_t schedule_passive_accept(std::weak_ptr<PassiveAccept> attempt, uint32_t delay_ms, bool deadline);
+    void     on_passive_accept_timer(const std::weak_ptr<PassiveAccept> &attempt, bool deadline);
 
     bool                            prime_receive(const std::shared_ptr<Connection> &connection);
     std::unique_ptr<RdmaBufferPool> make_pool(uint64_t bytes, uint32_t buffers);
@@ -250,13 +285,13 @@ class RdmaTransport : public Transport
     enum class WorkKind : uint8_t { Send, Receive };
     struct ConnectionPools;
     struct ControlSendState;
-    bool                        create_connection_pools(ConnectionPools &pools);
-    void                        configure_peer(ConnectionPools &pools, const RdmaCmOffer &peer);
-    std::shared_ptr<Connection> create_active_connection(rdma_cm_id *id, const std::string &addr,
-                                                         std::shared_ptr<ConnectionPools> &pools,
-                                                         const RdmaEndpointCapability     *expected_peer);
-    bool establish_active_connection(rdma_cm_id *id, rdma_event_channel *channel, const std::string &addr,
-                                     const RdmaEndpointCapability *expected_peer, RdmaCmOffer &peer_offer);
+    class ActiveConnect;
+    std::unique_ptr<ActiveConnect> start_connect(const std::string &addr, int port,
+                                                 const RdmaEndpointCapability *expected_peer);
+    bool                           create_connection_pools(ConnectionPools &pools);
+    void                           configure_peer(ConnectionPools &pools, const RdmaCmOffer &peer);
+    bool create_active_connection(rdma_cm_id *id, const std::string &addr, std::shared_ptr<Connection> &connection,
+                                  std::shared_ptr<ConnectionPools> &pools, const RdmaEndpointCapability *expected_peer);
 
     struct WorkRequest
     {
@@ -306,7 +341,11 @@ class RdmaTransport : public Transport
     CompletionQueue                              *reserve_cq(uint32_t capacity);
     bool                                          create_completion_queues(ibv_context *context);
     void                                          destroy_completion_queues();
-    int      drain_queue(uint32_t index, uint32_t max_completions, bool wait_for_owner = false);
+    // Returns -EAGAIN when another worker owns the CQ.
+    int      drain_queue(uint32_t index, uint32_t max_completions);
+    int      handle_cm_events(bool retry);
+    bool     schedule_cm_retry();
+    bool     advance_cm_retirement();
     uint32_t process_deferred(CompletionQueue &queue, uint32_t max_completions);
     void     cancel_deferred(CompletionQueue &queue, Connection *connection);
     void     start_pollers();
@@ -343,14 +382,16 @@ class RdmaTransport : public Transport
     WorkRequest            *claim_work(uint64_t token);
     void                    release_work(WorkRequest *work);
     void                    dispatch_completion(const struct ibv_wc &wc);
+    bool                    try_cancel_queue_work(CompletionQueue &queue, Connection *connection);
     void                    cancel_work(Connection *connection = nullptr);
-    void                    close_after_drain(Connection *connection);
-    void                    destroy_connection_qp(Connection *connection, rdma_cm_id *id);
+    bool                    try_destroy_connection_qp(Connection *connection, rdma_cm_id *id);
     static ConnectionPools *pools_for(Connection *connection);
     static void             set_connection_pools(Connection *connection, std::shared_ptr<ConnectionPools> pools);
     static void             request_disconnect(ConnectionPools &pools);
-    bool                    publish_cm_connection(rdma_cm_id *id, const std::shared_ptr<Connection> &connection,
-                                                  std::shared_ptr<ConnectionPools> pools);
+    enum class CmPublish : uint8_t { kPublished, kBusy, kFailed };
+    void      set_cm_connection_info(Connection *connection, const ConnectionPools &pools);
+    CmPublish try_publish_cm_connection(rdma_cm_id *id, const std::shared_ptr<Connection> &connection,
+                                        const std::shared_ptr<ConnectionPools> &pools);
 
     struct RepostState
     {
@@ -453,7 +494,8 @@ class RdmaTransport : public Transport
     bool        release_completed_packed_receive(WorkRequest *work, const struct ibv_wc &wc);
     void        record_completion_error(const struct ibv_wc &wc, bool expected_flush = false);
     static void repost_frame_release(void *context, Buffer *slot);
-    bool        adopt_cm_context(struct ibv_context *context);
+    enum class CmContext : uint8_t { kReady, kBusy, kFailed };
+    CmContext adopt_cm_context(struct ibv_context *context, bool wait_for_owner);
 };
 
 } // namespace crowdb::rpc

@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <future>
+#include <semaphore>
 #include <thread>
 
 namespace crowdb::tree
@@ -18,8 +20,7 @@ class SourceRotationWait : public ::testing::Test
     void SetUp() override
     {
         TreeRuntimeOptions host;
-        host.workers         = 1;
-        host.backend_workers = 1;
+        host.workers = host.backend_workers = 1;
         ASSERT_TRUE(TreeRuntime::create(host, &config.runtime).ok());
         config.memtable_flush_entries = 1;
         config.memtable_flush_bytes   = SIZE_MAX;
@@ -27,51 +28,56 @@ class SourceRotationWait : public ::testing::Test
         tree                          = std::make_unique<Crowdbtree>(config);
         core                          = TreeCoreAccess::get(*tree);
         ASSERT_TRUE(tree->put("first", "value").ok());
-        const auto     account   = core->binding()->account();
-        const auto     snapshot  = account->snapshot();
-        constexpr auto index     = static_cast<size_t>(detail::BudgetClass::kHandoff);
-        const auto     available = detail::ResourceBudget::capacity(account, detail::BudgetClass::kHandoff) -
-                                   snapshot.allocated[index] - snapshot.reserved[index];
-        blocker = detail::ResourceBudget::try_reserve(account, detail::BudgetClass::kHandoff, available);
-        ASSERT_TRUE(blocker);
-        const auto initial_waits = wait_count();
+        core->binding()->drain();
+        core->set_flush_handoff_wait_for_tests([&](uint64_t, std::function<void()> ready) {
+            if (!armed.exchange(false)) {
+                return false;
+            }
+            resume = std::move(ready);
+            paused.release();
+            return true;
+        });
+        std::promise<Status> written;
+        auto                 result = written.get_future();
         tree->get_async("first", [&](Status read, GetView value) {
             EXPECT_TRUE(read.ok()) << read.to_string();
             EXPECT_TRUE(value.found());
-            written = tree->put("second", "next");
-            done.store(true, std::memory_order_release);
-            done.notify_all();
+            written.set_value(tree->put("second", "next"));
         });
-        while (!done.load(std::memory_order_acquire)) {
-            done.wait(false, std::memory_order_acquire);
-        }
-        ASSERT_TRUE(written.ok()) << written.to_string();
-        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (wait_count() == initial_waits && std::chrono::steady_clock::now() < until) {
-            std::this_thread::yield();
-        }
-        ASSERT_GT(wait_count(), initial_waits);
+        ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        const auto status = result.get();
+        ASSERT_TRUE(status.ok()) << status.to_string();
+        ASSERT_TRUE(paused.try_acquire_for(std::chrono::seconds(5)));
     }
 
-    [[nodiscard]] uint64_t wait_count() const
+    void resume_handoff()
     {
-        return core->publisher().work_metrics()->counters.snapshot()[static_cast<size_t>(
-            TreeWorkCause::Allocation)][static_cast<size_t>(TreeWorkCounter::AdmissionWaits)];
+        if (resume) {
+            auto ready = std::exchange(resume, {});
+            ready();
+        }
     }
 
-    Config                                        config;
-    std::unique_ptr<Crowdbtree>                   tree;
-    TreeCore                                     *core = nullptr;
-    std::optional<detail::ResourceBudget::Credit> blocker;
-    std::atomic<bool>                             done{false};
-    Status                                        written;
+    void TearDown() override
+    {
+        resume_handoff();
+        if (core != nullptr) {
+            core->binding()->drain();
+            core->set_flush_handoff_wait_for_tests({});
+        }
+    }
+
+    Config                      config;
+    std::unique_ptr<Crowdbtree> tree;
+    TreeCore                   *core = nullptr;
+    std::atomic<bool>           armed{true};
+    std::binary_semaphore       paused{0};
+    std::function<void()>       resume;
 };
 
-TEST_F(SourceRotationWait, BudgetReleaseResumesFiniteHandoffWithoutAnotherWrite)
+TEST_F(SourceRotationWait, ReadyHandoffResumesWithoutAnotherWrite)
 {
-    blocker.reset();
-    // Scheduler-tail drain requires operation tickets to have finished first.
-    // Observe automatic publication without submitting another write or flush.
+    resume_handoff();
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (core->capture()->coverage != 2 && std::chrono::steady_clock::now() < until) {
         std::this_thread::yield();
@@ -82,36 +88,40 @@ TEST_F(SourceRotationWait, BudgetReleaseResumesFiniteHandoffWithoutAnotherWrite)
     ASSERT_TRUE(tree->put("third", "continued").ok());
 }
 
-TEST_F(SourceRotationWait, CloseCancelsOnlyTheUnacceptedSoftBudgetWait)
+TEST_F(SourceRotationWait, CloseDrainsAcceptedHandoffBeforeReleasingSources)
 {
-    core->close_and_drain();
+    auto close = std::async(std::launch::async, [&] { core->close_and_drain(); });
+    EXPECT_EQ(close.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    resume_handoff();
+    close.get();
     EXPECT_TRUE(core->closed());
     EXPECT_EQ(tree->contiguous_slot(), 2U);
-    blocker.reset();
 }
 
 TEST_F(SourceRotationWait, CloseReleasesAHostWriterWaitingForTheSoftPause)
 {
     core->binding()->drain();
-    const auto        baseline = core->operation_lifetime().outstanding();
-    std::atomic<bool> written_done{false};
-    Status            status;
-    std::thread       writer([&] {
-        status = tree->put("third", "accepted ingress");
-        written_done.store(true, std::memory_order_release);
-    });
-    const auto        until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (core->operation_lifetime().outstanding() <= baseline && !written_done.load(std::memory_order_acquire) &&
+    const auto           baseline = core->operation_lifetime().outstanding();
+    std::promise<Status> written;
+    auto                 result = written.get_future();
+    std::thread          writer([&] { written.set_value(tree->put("third", "accepted ingress")); });
+    const auto           until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (core->operation_lifetime().outstanding() <= baseline &&
+           result.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready &&
            std::chrono::steady_clock::now() < until) {
         std::this_thread::yield();
     }
     EXPECT_GT(core->operation_lifetime().outstanding(), baseline);
-    EXPECT_FALSE(written_done.load(std::memory_order_acquire));
-    core->close_and_drain();
+    EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    auto       close    = std::async(std::launch::async, [&] { core->close_and_drain(); });
+    const auto released = result.wait_for(std::chrono::seconds(5));
+    resume_handoff();
     writer.join();
+    close.get();
+    EXPECT_EQ(released, std::future_status::ready);
+    const auto status = result.get();
     EXPECT_EQ(status.code(), Code::kUnavailable) << status.to_string();
     EXPECT_EQ(tree->contiguous_slot(), 2U);
-    blocker.reset();
 }
 
 TEST(SourceRotationProgress, RetainedReclaimCannotStrandAnAlreadyAppliedHostWrite)

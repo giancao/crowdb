@@ -9,7 +9,6 @@ class TestStageCatalog : public RootCatalog
 {
   public:
     std::optional<ChunkStageRecord> record;
-    mutable size_t                  manifest_loads = 0;
 
     bool stage_schema_supported() const noexcept override
     {
@@ -37,75 +36,6 @@ class TestStageCatalog : public RootCatalog
         }
         record = next;
         return Status::Ok();
-    }
-
-    std::shared_ptr<const ChunkManifest> load(uint64_t /*unused*/) const override
-    {
-        ++manifest_loads;
-        return {};
-    }
-
-    std::shared_ptr<const ChunkManifest> load_generation(uint64_t /*unused*/, uint64_t /*unused*/) const override
-    {
-        return {};
-    }
-
-    Status persist_reference_segment(uint64_t /*unused*/,
-                                     std::shared_ptr<const ChunkReferenceSegmentImage> /*segment*/) override
-    {
-        return Status::not_supported();
-    }
-
-    std::shared_ptr<const ChunkReferenceSegmentImage> load_reference_segment(uint64_t /*unused*/,
-                                                                             uint64_t /*unused*/) const override
-    {
-        return {};
-    }
-
-    uint64_t allocate_reference_segment_id(uint64_t /*unused*/) override
-    {
-        return 0;
-    }
-
-    uint64_t discard_reference_segments(uint64_t /*unused*/, const std::vector<uint64_t> & /*objects*/) override
-    {
-        return 0;
-    }
-
-    Status publish(uint64_t /*unused*/, uint64_t /*unused*/, uint64_t /*unused*/,
-                   std::shared_ptr<const ChunkManifest> /*manifest*/) override
-    {
-        return Status::not_supported();
-    }
-
-    Status pin_generation(uint64_t /*unused*/, uint64_t /*unused*/, uint64_t /*unused*/, uint64_t /*unused*/) override
-    {
-        return Status::not_supported();
-    }
-
-    Status unpin_generation(uint64_t /*unused*/, uint64_t /*unused*/, uint64_t /*unused*/) override
-    {
-        return Status::not_supported();
-    }
-
-    uint64_t reclaim_before(uint64_t /*unused*/, uint64_t /*unused*/) override
-    {
-        return 0;
-    }
-
-    uint64_t retained_manifest_count(uint64_t /*unused*/) const override
-    {
-        return 0;
-    }
-
-    uint64_t pinned_bytes(uint64_t /*unused*/) const override
-    {
-        return 0;
-    }
-
-    uint64_t oldest_pin_age_ms(uint64_t /*unused*/) const override
-    {
-        return 0;
     }
 };
 

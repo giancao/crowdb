@@ -58,7 +58,6 @@ struct OverflowLoad : PageLoadProgress, std::enable_shared_from_this<OverflowLoa
         if (terminal.exchange(true)) {
             return;
         }
-        release_if_idle();
         (void)metrics.finish(status.ok() ? TreeOutcome::Success : TreeOutcome::Error, tree_metrics_now_ns());
         auto callback = std::move(complete);
         auto result   = std::move(value);
@@ -241,10 +240,6 @@ void AsyncStorePageLoader::load_overflow(std::shared_ptr<const BackingRef> prima
         reject(Status::resource_exhausted("overflow value exceeds read budget"));
         return;
     }
-    if (!acquire_page_load(state_->inflight, state_->limits.max_inflight)) {
-        reject(Status::resource_exhausted("overflow read concurrency budget exhausted"));
-        return;
-    }
     std::shared_ptr<OverflowLoad> operation;
     try {
         operation          = detail::reserved_shared<OverflowLoad>(state_->budget.bytes, state_->budget, started_at);
@@ -252,12 +247,12 @@ void AsyncStorePageLoader::load_overflow(std::shared_ptr<const BackingRef> prima
         operation->runtime = state_->runtime;
         operation->lane    = state_->lane;
         operation->loader_owner = state_;
-        operation->inflight     = &state_->inflight;
-        operation->limits       = state_->limits;
-        operation->complete     = std::move(complete);
-        operation->resolve      = std::move(resolver);
-        operation->next         = head;
-        operation->length       = static_cast<size_t>(length);
+
+        operation->limits   = state_->limits;
+        operation->complete = std::move(complete);
+        operation->resolve  = std::move(resolver);
+        operation->next     = head;
+        operation->length   = static_cast<size_t>(length);
         queue_page_load(operation, &OverflowLoad::start);
     }
     catch (const std::bad_alloc &) {
@@ -265,7 +260,7 @@ void AsyncStorePageLoader::load_overflow(std::shared_ptr<const BackingRef> prima
             operation->finish(Status::resource_exhausted("overflow operation allocation failed"));
         }
         else {
-            state_->inflight.fetch_sub(1, std::memory_order_release);
+
             reject(Status::resource_exhausted("overflow operation allocation failed"));
         }
     }

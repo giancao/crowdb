@@ -37,15 +37,15 @@ TEST(TreeCoreGenerationCheckpoint, ClearPersistsZeroCoverageWithoutInvalidatingO
     ASSERT_TRUE(tree->apply(1, Batch{.ops = {{.key = "old", .kind = OpKind::kPut, .value = value}}}).ok());
     uint64_t coverage = 0;
     uint64_t sequence = 0;
-    status            = tree->snapshot(&coverage, &sequence);
+    status            = tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_EQ(coverage, 1U);
     ASSERT_EQ(sequence, 1U);
 
     auto                                     *core       = TreeCoreAccess::get(*tree);
     const auto                                generation = core->capture()->generation;
-    std::shared_ptr<PublishedSnapshotContext> captured;
-    status = core->capture_snapshot(&captured);
+    std::shared_ptr<PublishedReadViewContext> captured;
+    status = core->capture_read_only_view(&captured);
     ASSERT_TRUE(status.ok()) << status.to_string();
     GetView retained;
     status = captured->get("old", &retained);
@@ -56,11 +56,11 @@ TEST(TreeCoreGenerationCheckpoint, ClearPersistsZeroCoverageWithoutInvalidatingO
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(core->capture()->generation, generation + 1);
     EXPECT_EQ(core->capture()->coverage, 0U);
-    status = tree->snapshot(&coverage, &sequence);
+    status = tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 0U);
     EXPECT_EQ(sequence, 2U);
-    EXPECT_EQ(tree->durable_snapshot_last_applied_slot(), 0U);
+    EXPECT_EQ(tree->durable_coverage(), 0U);
     GetView absent;
     status = core->get("old", &absent);
     ASSERT_TRUE(status.ok()) << status.to_string();
@@ -76,7 +76,7 @@ TEST(TreeCoreGenerationCheckpoint, ClearPersistsZeroCoverageWithoutInvalidatingO
     captured.reset();
     status = Crowdbtree::open(config, &tree);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    EXPECT_EQ(tree->durable_snapshot_last_applied_slot(), 0U);
+    EXPECT_EQ(tree->durable_coverage(), 0U);
     EXPECT_EQ(tree->contiguous_slot(), 0U);
     core   = TreeCoreAccess::get(*tree);
     status = core->get("old", &absent);
@@ -84,7 +84,7 @@ TEST(TreeCoreGenerationCheckpoint, ClearPersistsZeroCoverageWithoutInvalidatingO
     EXPECT_FALSE(absent.found());
     EXPECT_EQ(retained.value().to_string(), value);
     ASSERT_TRUE(tree->put("new", "after-clear").ok());
-    status = tree->snapshot(&coverage, &sequence);
+    status = tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 1U);
     EXPECT_EQ(sequence, 3U);

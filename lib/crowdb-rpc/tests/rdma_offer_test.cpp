@@ -243,6 +243,71 @@ TEST(RdmaOfferTest, RawTcpPreflightConsumesOnlyCapabilityAndLeavesFallbackUsable
     server.stop();
 }
 
+TEST(RdmaOfferTest, PreflightReturnsReadInterestBetweenPartialHeaderAndBody)
+{
+    struct Socket
+    {
+        int fd;
+
+        ~Socket()
+        {
+            if (fd >= 0) {
+                ::close(fd);
+            }
+        }
+    };
+
+    using Progress = RdmaPreflight::Progress;
+    const Socket listener{::socket(AF_INET, SOCK_STREAM, 0)};
+    ASSERT_GE(listener.fd, 0);
+    sockaddr_in address{};
+    address.sin_family      = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    ASSERT_EQ(::bind(listener.fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
+    ASSERT_EQ(::listen(listener.fd, 1), 0);
+    socklen_t length = sizeof(address);
+    ASSERT_EQ(::getsockname(listener.fd, reinterpret_cast<sockaddr *>(&address), &length), 0);
+
+    auto probe = RdmaPreflight::start("127.0.0.1", ntohs(address.sin_port), test_capability(1), {});
+    ASSERT_NE(probe, nullptr);
+    const auto wait_ready = [](int fd, short events) {
+        pollfd descriptor{.fd = fd, .events = events, .revents = 0};
+        return ::poll(&descriptor, 1, 1000) == 1 && (descriptor.revents & events) != 0;
+    };
+    ASSERT_TRUE(wait_ready(listener.fd, POLLIN));
+    const Socket peer{::accept(listener.fd, nullptr, nullptr)};
+    ASSERT_GE(peer.fd, 0);
+    EXPECT_EQ(probe->interest(), Progress::kWrite);
+    ASSERT_TRUE(wait_ready(probe->fd, POLLOUT));
+    EXPECT_EQ(probe->advance(), Progress::kRead);
+
+    Header header;
+    header.msg_type = RDMA_HANDSHAKE_MSG_TYPE;
+    header.msg_size = RDMA_HANDSHAKE_SIZE;
+    header.flags    = FLAG_ONE_WAY;
+    std::array<uint8_t, HEADER_SIZE> bytes{};
+    serialize_header(bytes.data(), header);
+    const auto wire = serialize_rdma_handshake(test_capability(42));
+    ASSERT_EQ(::send(peer.fd, bytes.data(), 2, 0), 2);
+    ASSERT_TRUE(wait_ready(probe->fd, POLLIN));
+    EXPECT_EQ(probe->advance(), Progress::kRead);
+    EXPECT_EQ(probe->release_fd(), -1);
+    ASSERT_EQ(::send(peer.fd, bytes.data() + 2, bytes.size() - 2, 0), bytes.size() - 2);
+    ASSERT_EQ(::send(peer.fd, wire.data(), wire.size() - 1, 0), wire.size() - 1);
+    ASSERT_TRUE(wait_ready(probe->fd, POLLIN));
+    EXPECT_EQ(probe->advance(), Progress::kRead);
+
+    const std::array<uint8_t, 2> tail{wire.back(), 0x42};
+    ASSERT_EQ(::send(peer.fd, tail.data(), tail.size(), 0), tail.size());
+    ASSERT_TRUE(wait_ready(probe->fd, POLLIN));
+    EXPECT_EQ(probe->advance(), Progress::kComplete);
+    EXPECT_EQ(probe->peer.generation, 42U);
+    const Socket fallback{probe->release_fd()};
+    uint8_t      application_byte = 0;
+    ASSERT_EQ(::recv(fallback.fd, &application_byte, sizeof(application_byte), MSG_DONTWAIT), 1);
+    EXPECT_EQ(application_byte, 0x42);
+}
+
 #if defined(CROWDB_RPC_HAVE_RDMA) && defined(CROWDB_RPC_TEST_UTIL)
 TEST(RdmaHardwareTest, TcpOnlyPeerSkipsCmAndHonorsFallbackPolicy)
 {

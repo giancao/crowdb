@@ -19,7 +19,7 @@ use crowdb_common::metrics::{MetricsRegistry, MetricsSampler};
 use crowdb_paxos_kv_client::{StreamProcessAuthority, StreamProcessLeaseClient, StreamProcessLeaseTiming};
 use crowdb_protocol::chunk_kv::Id128;
 use crowdb_protocol::chunkdb::rpc::{ChunkState, ChunkType};
-use crowdb_tree_ffi::{ChunkPageStoreOptions, Config};
+use crowdb_tree_ffi::{ChunkRuntimeOptions, Config};
 use std::{sync::Arc, time::Instant};
 
 async fn storage(
@@ -163,14 +163,11 @@ async fn checkpoint_values(
         .unwrap();
     let pages = host
         .open_durable_tree_page_store(
-            ChunkPageStoreOptions {
+            ChunkRuntimeOptions {
                 tree_id: 42,
                 owner_epoch: 1,
                 open_generation: 0,
-                pack_bytes: 0,
                 iu_size: 0,
-                max_concurrent_packs: 0,
-                materialization_bytes_per_pass: 0,
                 max_chunk_bytes: 0,
                 mirror_copies: 0,
             },
@@ -312,14 +309,11 @@ async fn runtime_host_recovers_root_wal_pair_and_collects_real_allocations() {
 async fn runtime_tree_config(host: &ChunkKvStorage, tree_id: u64) -> Config {
     let pages = host
         .open_durable_tree_page_store(
-            ChunkPageStoreOptions {
+            ChunkRuntimeOptions {
                 tree_id,
                 owner_epoch: 1,
                 open_generation: 0,
-                pack_bytes: 0,
                 iu_size: 0,
-                max_concurrent_packs: 0,
-                materialization_bytes_per_pass: 0,
                 max_chunk_bytes: 0,
                 mirror_copies: 0,
             },
@@ -364,7 +358,7 @@ async fn chunk_partition_snapshot_rebuilds_after_writer_close_without_reopening_
         )
         .await
         .unwrap();
-    let (_, coverage, snapshot) = source.checkpoint_snapshot(0).await.unwrap();
+    let (_, coverage, snapshot) = source.flush_with_persistent_view(0).await.unwrap();
     source
         .apply(
             3,

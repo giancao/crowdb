@@ -288,11 +288,11 @@ void MaintenanceOperation::finish(Status status) noexcept
             status = Status::resource_exhausted();
         }
     }
-    if (publication.metadata) {
-        publication.metadata->seal();
+    if (const auto credit = std::dynamic_pointer_cast<AllocationReservation>(publication.metadata)) {
+        credit->seal();
     }
-    if (publication.snapshot_metadata) {
-        publication.snapshot_metadata->seal();
+    if (const auto credit = std::dynamic_pointer_cast<AllocationReservation>(publication.snapshot_metadata)) {
+        credit->seal();
     }
     auto self = lifetime;
     lifetime.reset();
@@ -346,7 +346,9 @@ FlushBatch::Maintenance make_page_maintenance(PublicationCoordinator &publisher,
             }
             else if (!credit) {
                 if (factory->options.acquire_snapshot) {
-                    status = factory->options.acquire_snapshot(&factory->options.publication.snapshot_metadata);
+                    std::shared_ptr<detail::AllocationReservation> snapshot;
+                    status                                         = factory->options.acquire_snapshot(&snapshot);
+                    factory->options.publication.snapshot_metadata = std::move(snapshot);
                 }
                 if (status.ok()) {
                     status = factory->options.acquire ? factory->options.acquire(&credit)
@@ -372,8 +374,9 @@ FlushBatch::Maintenance make_page_maintenance(PublicationCoordinator &publisher,
         }
         if (!operation) {
             factory->loader.reset();
-            if (factory->options.publication.snapshot_metadata) {
-                factory->options.publication.snapshot_metadata->seal();
+            if (const auto snapshot = std::dynamic_pointer_cast<detail::AllocationReservation>(
+                    factory->options.publication.snapshot_metadata)) {
+                snapshot->seal();
             }
             if (credit && credit->category() == detail::BudgetClass::kReclaim) {
                 credit->seal();

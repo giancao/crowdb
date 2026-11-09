@@ -3,12 +3,11 @@
 
 // PT8.5: C ABI / Rust integration tests through the safe adapter.
 use crowdb_tree_ffi::{
-    AsyncCrowdbtree, BatchOp, ChunkPageStoreOptions, ChunkRootCatalog, Config, Crowdbtree, CtError, ExtOp,
-    KeyRange, PageStore, PageStoreBackend, PinnedGetOutcome, RootCatalogObject, RootCatalogStore,
-    ScanDirection,
+    AsyncCrowdbtree, BatchOp, ChunkRootCatalog, Config, Crowdbtree, CtError, ExtOp, KeyRange, PageStore,
+    PageStoreBackend, PinnedGetOutcome, RootCatalogObject, RootCatalogStore, ScanDirection,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 // Independent test fixtures must not compete for the process-default host's
@@ -41,8 +40,6 @@ fn open_async_tree(config: &Config) -> Result<AsyncCrowdbtree, CtError> {
 
 struct FileRootCatalogStore {
     dir: PathBuf,
-    generation: AtomicU64,
-    next_reference: AtomicU64,
     hide_current: AtomicBool,
 }
 
@@ -51,9 +48,12 @@ impl FileRootCatalogStore {
         let suffix = match object {
             RootCatalogObject::CurrentManifest => "current".to_owned(),
             RootCatalogObject::Manifest(generation) => format!("manifest-{generation}"),
-            RootCatalogObject::ReferenceSegment(id) => format!("reference-{id}"),
         };
         self.dir.join(format!("{tree_id}-{suffix}"))
+    }
+
+    fn store(&self, tree_id: u64, object: RootCatalogObject, data: &[u8]) -> Result<(), CtError> {
+        std::fs::write(self.path(tree_id, object), data).map_err(|_| CtError::IoError)
     }
 
     fn pin_path(&self, tree_id: u64, transition_high: u64, transition_low: u64) -> PathBuf {
@@ -73,34 +73,6 @@ impl RootCatalogStore for FileRootCatalogStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err(CtError::IoError),
         }
-    }
-
-    fn store(&self, tree_id: u64, object: RootCatalogObject, data: &[u8]) -> Result<(), CtError> {
-        std::fs::write(self.path(tree_id, object), data).map_err(|_| CtError::IoError)
-    }
-
-    fn publish(
-        &self,
-        tree_id: u64,
-        expected_generation: u64,
-        _owner_epoch: u64,
-        generation: u64,
-        manifest: &[u8],
-    ) -> Result<(), CtError> {
-        self.generation
-            .compare_exchange(
-                expected_generation,
-                generation,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map_err(|_| CtError::Unavailable)?;
-        self.store(tree_id, RootCatalogObject::Manifest(generation), manifest)?;
-        self.store(tree_id, RootCatalogObject::CurrentManifest, manifest)
-    }
-
-    fn allocate_reference_segment_id(&self, _tree_id: u64) -> Result<u64, CtError> {
-        Ok(self.next_reference.fetch_add(1, Ordering::Relaxed))
     }
 
     fn pin_generation(
@@ -184,20 +156,17 @@ fn owned_chunk_rpc_transport_retains_route_handles() {
         strip_capacity_bytes: 0,
     })
     .unwrap();
-    let store = PageStore::open_chunk(
-        ChunkPageStoreOptions {
+    let backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(41, 7).unwrap();
+    let store = PageStore::open_chunk_runtime(
+        &backend.runtime,
+        crowdb_tree_ffi::ChunkRuntimeOptions {
             tree_id: 41,
             owner_epoch: 7,
-            open_generation: 0,
-            pack_bytes: 4096,
             iu_size: 1,
-            max_concurrent_packs: 2,
-            materialization_bytes_per_pass: 4096,
-            max_chunk_bytes: 0,
-            mirror_copies: 0,
+            ..Default::default()
         },
-        Arc::new(ChunkRootCatalog::open_memory(7).unwrap()),
-        Some(&transport),
+        backend.catalog.clone(),
+        &transport,
     )
     .unwrap();
     drop(transport);
@@ -391,9 +360,9 @@ fn injected_chunk_runtime_round_trip_and_backing_stats() {
     let backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(41, 7).unwrap();
     let (store, tree) = open_runtime_chunk(&backend, 0);
     tree.apply_put(1, b"chunk-key", b"chunk-value").unwrap();
-    let published = tree.snapshot_info().unwrap();
+    let published = tree.flush_with_persistent_info().unwrap();
     assert_eq!(published.0, 1);
-    assert_eq!(tree.snapshot_state().unwrap(), published);
+    assert_eq!(tree.durable_state().unwrap(), published);
     assert_eq!(
         tree.get(b"chunk-key").unwrap(),
         Some((1, b"chunk-value".to_vec()))
@@ -402,8 +371,6 @@ fn injected_chunk_runtime_round_trip_and_backing_stats() {
     assert!(stats.allocated_bytes > 0);
     assert_eq!(tree.materialize_ownership().unwrap(), (0, true));
     assert_eq!(store.chunk_manifest_generation().unwrap(), 1);
-    assert_eq!(store.chunk_estimated_bytes(), Err(CtError::NotSupported));
-    assert!(matches!(store.chunk_stats(), Err(CtError::NotSupported)));
 }
 
 #[test]
@@ -413,7 +380,7 @@ fn runtime_root_catalog_reopens_published_manifest_and_wal() {
     store.set_wal_replay_offset(4096).unwrap();
     store.set_wal_replay_offset(4095).unwrap();
     tree.apply_put(1, b"durable-root", b"chunk-value").unwrap();
-    assert_eq!(tree.snapshot_info().unwrap(), (1, 1));
+    assert_eq!(tree.flush_with_persistent_info().unwrap(), (1, 1));
     let before = tree.backing_stats().unwrap();
     assert_eq!(store.wal_replay_offset().unwrap(), 4096);
     drop(tree);
@@ -432,13 +399,101 @@ fn runtime_root_catalog_reopens_published_manifest_and_wal() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_chunk_open_closes_the_undelivered_tree() {
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    let mut backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(47, 9).unwrap();
+    let (pages, tree) = open_runtime_chunk(&backend, 0);
+    tree.apply_put(1, b"durable-root", b"chunk-value").unwrap();
+    assert_eq!(tree.flush_with_persistent_info().unwrap(), (1, 1));
+    tree.begin_close().unwrap().wait().await.unwrap();
+    drop(pages);
+    backend.next_writer().unwrap();
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, gate) = mpsc::channel();
+    let gate = Mutex::new(gate);
+    let notify = entered.clone();
+    backend
+        .on_root_load_for_tests(move || {
+            notify.notify_one();
+            let _ = gate.lock().unwrap().recv();
+        })
+        .unwrap();
+    let pages = backend.page_store(0).unwrap();
+    let config = Config {
+        page_store: Some(pages.clone()),
+        ..backend.config()
+    };
+    let waiter = tokio::spawn(async move { Crowdbtree::open_async(&config).await });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(backend.runtime.snapshot().unwrap().bindings, 1);
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    assert_eq!(backend.runtime.snapshot().unwrap().bindings, 1);
+    release.send(()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while backend.runtime.snapshot().unwrap().bindings != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(pages.chunk_manifest_generation().unwrap(), 1);
+    drop(pages);
+    backend.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn async_open_uses_the_default_runtime_for_concurrent_standalone_trees() {
+    let start = Arc::new(tokio::sync::Barrier::new(4));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let start = start.clone();
+        tasks.spawn(async move {
+            let config = Config {
+                page_store: Some(Arc::new(PageStore::open_mem(1).unwrap())),
+                ..Default::default()
+            };
+            start.wait().await;
+            let tree = Arc::new(Crowdbtree::open_async(&config).await.unwrap());
+            tree.apply_put(1, b"key", b"value").unwrap();
+            AsyncCrowdbtree::from_handle(tree.clone())
+                .flush_with_persistent()
+                .await
+                .unwrap();
+            Arc::try_unwrap(tree)
+                .unwrap()
+                .begin_close()
+                .unwrap()
+                .wait()
+                .await
+                .unwrap();
+
+            let reopened = Crowdbtree::open_async(&config).await.unwrap();
+            assert_eq!(reopened.get(b"key").unwrap(), Some((1, b"value".to_vec())));
+            reopened.begin_close().unwrap().wait().await.unwrap();
+        });
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[test]
 fn callback_root_catalog_persists_transition_generation_pin() {
     let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-callback-root-pin");
     let backend = Arc::new(FileRootCatalogStore {
         dir: dir.path().to_path_buf(),
-        generation: AtomicU64::new(1),
-        next_reference: AtomicU64::new(1),
         hide_current: AtomicBool::new(false),
     });
     backend
@@ -462,7 +517,7 @@ fn checkpoint_backing_survives_history_reclamation_and_reopen() {
     for sequence in 1..=4 {
         tree.apply_put(sequence, b"retained-key", &vec![sequence as u8; 64 * 1024])
             .unwrap();
-        tree.snapshot_info().unwrap();
+        tree.flush_with_persistent_info().unwrap();
     }
     let generation = store.chunk_manifest_generation().unwrap();
     let before = tree.backing_stats().unwrap();
@@ -488,7 +543,7 @@ fn runtime_catalog_pin_blocks_generation_reclaim_until_unpin() {
     let (store, tree) = open_runtime_chunk(&backend, 0);
     for sequence in 1..=3 {
         tree.apply_put(sequence, b"key", &[sequence as u8]).unwrap();
-        tree.snapshot_info().unwrap();
+        tree.flush_with_persistent_info().unwrap();
         if sequence == 1 {
             store.pin_chunk_generation(45, 9, 10, 1).unwrap();
         }
@@ -519,18 +574,18 @@ fn runtime_root_catalog_opens_exact_manifest_without_latest_fallback() {
     let mut backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(44, 11).unwrap();
     let (store, latest) = open_runtime_chunk(&backend, 0);
     latest.apply_put(1, b"key", b"generation-one").unwrap();
-    assert_eq!(latest.snapshot_info().unwrap(), (1, 1));
+    assert_eq!(latest.flush_with_persistent_info().unwrap(), (1, 1));
     latest.apply_put(2, b"key", b"generation-two").unwrap();
-    assert_eq!(latest.snapshot_info().unwrap(), (2, 2));
+    assert_eq!(latest.flush_with_persistent_info().unwrap(), (2, 2));
     drop(latest);
     drop(store);
     backend.next_writer().unwrap();
     let (store, exact) = open_runtime_chunk(&backend, 1);
     assert_eq!(store.chunk_manifest_generation().unwrap(), 1);
-    assert_eq!(exact.snapshot_state().unwrap(), (1, 1));
+    assert_eq!(exact.durable_state().unwrap(), (1, 1));
     assert_eq!(exact.get(b"key").unwrap(), Some((1, b"generation-one".to_vec())));
     exact.apply_put(2, b"key", b"stale-branch").unwrap();
-    assert_eq!(exact.snapshot_info(), Err(CtError::Unavailable));
+    assert_eq!(exact.flush_with_persistent_info(), Err(CtError::Unavailable));
     drop(exact);
     drop(store);
     backend.next_writer().unwrap();
@@ -561,16 +616,16 @@ fn exact_manifest_tracks_durable_snapshot_after_range_rebuild() {
             ..backend.config()
         })
         .unwrap();
-    assert_eq!(rebuilt.snapshot_state().unwrap(), (1, 1));
+    assert_eq!(rebuilt.durable_state().unwrap(), (1, 1));
     rebuilt.apply_put(2, b"c", b"tail").unwrap();
-    let checkpoint = rebuilt.snapshot_info().unwrap();
+    let checkpoint = rebuilt.flush_with_persistent_info().unwrap();
     let generation = store.chunk_manifest_generation().unwrap();
-    assert_eq!(rebuilt.snapshot_state().unwrap(), checkpoint);
+    assert_eq!(rebuilt.durable_state().unwrap(), checkpoint);
     drop(rebuilt);
     drop(store);
     backend.next_writer().unwrap();
     let (_, exact) = open_runtime_chunk(&backend, generation);
-    assert_eq!(exact.snapshot_state().unwrap(), checkpoint);
+    assert_eq!(exact.durable_state().unwrap(), checkpoint);
     assert_eq!(exact.get(b"c").unwrap(), Some((2, b"tail".to_vec())));
 }
 
@@ -579,8 +634,8 @@ fn runtime_root_publication_is_visible_and_reusing_a_writer_is_rejected() {
     let backend = crowdb_tree_ffi::chunk::test_util::TestChunkBackend::new(43, 10).unwrap();
     let (store, tree) = open_runtime_chunk(&backend, 0);
     tree.apply_put(1, b"durable-root", b"chunk-value").unwrap();
-    let published = tree.snapshot_info().unwrap();
-    assert_eq!(tree.snapshot_state().unwrap(), published);
+    let published = tree.flush_with_persistent_info().unwrap();
+    assert_eq!(tree.durable_state().unwrap(), published);
     assert_eq!(
         tree.get(b"durable-root").unwrap(),
         Some((1, b"chunk-value".to_vec()))
@@ -591,36 +646,6 @@ fn runtime_root_publication_is_visible_and_reusing_a_writer_is_rejected() {
             ..backend.config()
         }),
         Err(CtError::Unavailable)
-    ));
-}
-
-#[test]
-fn legacy_chunk_store_is_explicitly_rejected_by_ordinary_tree_open() {
-    let catalog = Arc::new(ChunkRootCatalog::open_memory(7).unwrap());
-    let store = Arc::new(
-        PageStore::open_chunk(
-            ChunkPageStoreOptions {
-                tree_id: 47,
-                owner_epoch: 7,
-                open_generation: 0,
-                pack_bytes: 4096,
-                iu_size: 1,
-                max_concurrent_packs: 2,
-                materialization_bytes_per_pass: 4096,
-                max_chunk_bytes: 0,
-                mirror_copies: 0,
-            },
-            catalog,
-            None,
-        )
-        .unwrap(),
-    );
-    assert!(matches!(
-        open_tree(&Config {
-            page_store: Some(store),
-            ..Config::default()
-        }),
-        Err(CtError::NotSupported)
     ));
 }
 
@@ -698,23 +723,23 @@ fn mem_gc_watermark_and_snapshot_folding() {
 
     // Below the (default zero) watermark: a snapshot does not fold the
     // tombstone — it is not yet eligible.
-    t.snapshot().unwrap();
+    t.flush_with_persistent().unwrap();
     assert_eq!(t.get(b"a").unwrap(), None);
 
     // gc_slot = min(snapshot_slot, safe_slot): a low snapshot_slot still holds
     // the floor down even though safe_slot alone would allow the drop.
     t.set_gc_watermark(0, 2);
-    t.snapshot().unwrap();
+    t.flush_with_persistent().unwrap();
     assert_eq!(t.get(b"a").unwrap(), None);
 
     // With the watermark past the tombstone's slot, the next snapshot folds
     // it into a fresh clean leaf. The logical read path is unaffected.
     t.set_gc_watermark(2, 2);
-    t.snapshot().unwrap();
+    t.flush_with_persistent().unwrap();
     assert_eq!(t.get(b"a").unwrap(), None);
 
     // A second snapshot has nothing left to fold (idempotent).
-    t.snapshot().unwrap();
+    t.flush_with_persistent().unwrap();
     assert_eq!(t.get(b"a").unwrap(), None);
 }
 
@@ -723,7 +748,7 @@ fn mem_compact_sparse_blocks_noop_on_mem_store() {
     let t = open_tree(&Config::default()).unwrap();
     t.apply_put(1, b"a", b"A").unwrap();
     t.flush().unwrap();
-    t.snapshot().unwrap();
+    t.flush_with_persistent().unwrap();
 
     // A non-block store returns an empty stats result with no snapshot write.
     let stats = t.compact_sparse_blocks().unwrap();
@@ -792,7 +817,7 @@ fn file_snapshot_reopen_smoke() {
             t.apply_put((i + 1) as u64, &key(i), &v).unwrap();
             t.flush().unwrap();
         }
-        let durable = t.snapshot().unwrap();
+        let durable = t.flush_with_persistent().unwrap();
         assert_eq!(durable, 50);
     }
     // Reopen the same file and verify recovery.
@@ -828,7 +853,7 @@ fn block_device_snapshot_reopen_smoke() {
             t.apply_put((i + 1) as u64, &key(i), &v).unwrap();
             t.flush().unwrap();
         }
-        let durable = t.snapshot().unwrap();
+        let durable = t.flush_with_persistent().unwrap();
         assert_eq!(durable, 50);
     }
     // Reopen the same file and verify recovery.
@@ -925,7 +950,7 @@ async fn async_bridge_apply_get_snapshot() {
             .unwrap();
         t.flush().await.unwrap();
     }
-    let durable = t.snapshot().await.unwrap();
+    let durable = t.flush_with_persistent().await.unwrap();
     assert_eq!(durable, 20);
     assert_eq!(t.get(key(3)).await.unwrap(), Some((4u64, b"a3".to_vec())));
     assert_eq!(t.get(key(999)).await.unwrap(), None);
@@ -966,11 +991,9 @@ async fn async_get_slow_path_completes_after_eviction() {
     let t = open_async_tree(&opt).unwrap();
     t.handle().apply_put(1, &key(0), b"v0").unwrap();
     t.flush().await.unwrap();
-    t.snapshot().await.unwrap();
-    // Force the leaf unloaded so the next get takes the demand-load miss
-    // path -- on this (liburing) build, that means a genuine reactor/eventfd
-    // round trip, not spawn_blocking.
-    t.handle().evict_clean_leaves(0);
+    t.flush_with_persistent().await.unwrap();
+    // Wait for any clean leaf references to be evicted before reading back.
+    t.handle().evict_clean_leaves_async(0).await.unwrap();
 
     assert_eq!(t.get(key(0)).await.unwrap(), Some((1u64, b"v0".to_vec())));
 }
@@ -992,7 +1015,7 @@ async fn concurrent_async_gets_all_resolve_correctly() {
             .unwrap();
     }
     t.flush().await.unwrap();
-    t.snapshot().await.unwrap();
+    t.flush_with_persistent().await.unwrap();
     // Force every leaf unloaded so all N concurrent gets below take the
     // reactor round trip -- proves the eventfd wakeup fans out to every
     // pending future, not just one.
@@ -1057,7 +1080,7 @@ async fn async_scan_slow_path_completes_after_eviction() {
             .unwrap();
     }
     t.flush().await.unwrap();
-    t.snapshot().await.unwrap();
+    t.flush_with_persistent().await.unwrap();
     t.handle().evict_clean_leaves(0);
 
     let (entries, truncated) = t
@@ -1092,7 +1115,7 @@ async fn async_reverse_scan_crosses_evicted_leaves_and_respects_cursor() {
             .unwrap();
     }
     t.flush().await.unwrap();
-    t.snapshot().await.unwrap();
+    t.flush_with_persistent().await.unwrap();
     t.handle().evict_clean_leaves(0);
 
     let (entries, truncated) = t
@@ -1229,7 +1252,7 @@ async fn try_get_pinned_slow_path_resolves_after_eviction() {
     let t = open_async_tree(&opt).unwrap();
     t.handle().apply_put(1, &key(0), b"v0").unwrap();
     t.flush().await.unwrap();
-    t.snapshot().await.unwrap();
+    t.flush_with_persistent().await.unwrap();
     t.handle().evict_clean_leaves(0);
 
     // On builds without io_uring (e.g. macOS), ct_get_async completes

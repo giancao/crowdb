@@ -218,7 +218,7 @@ async fn retained_parent_can_complete_a_second_split_on_the_original_worker() {
             .await
             .unwrap();
         // Simulate the catalog publishing an independent child before another split.
-        parent.release_generation_pin(plan.transition_id).unwrap();
+        parent.release_generation_pin(plan.transition_id).await.unwrap();
         parent = parent.split_ingress().unwrap().retained_parent();
         assert_eq!(parent.snapshot().stream_name, original_stream);
         let frontier = parent.capture_journal_frontier(epoch + 1).await.unwrap();

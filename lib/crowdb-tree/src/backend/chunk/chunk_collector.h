@@ -27,8 +27,12 @@ class ChunkCollector
     Status                      step(RootCatalog &catalog, ChunkTransport &transport, uint64_t tree, uint64_t epoch,
                                      const std::shared_ptr<AllocationBudget> &budget, ChunkCollectionProgress *out,
                                      const std::shared_ptr<ChunkPhysicalRegistry> &registry = {});
+    void submit_step(std::shared_ptr<RootCatalog> catalog, std::shared_ptr<ChunkTransport> transport, uint64_t tree,
+                     uint64_t epoch, std::shared_ptr<AllocationBudget> budget, ChunkCollectionProgress *out,
+                     std::shared_ptr<ChunkPhysicalRegistry> registry, AsyncCompletion complete);
 
   private:
+    struct AsyncStep;
     Status candidate_step(ChunkProtectionCatalog &catalog, uint64_t tree, ChunkCollectionProgress &out);
     Status stage_step(RootCatalog &catalog, ChunkTransport &transport, uint64_t tree, uint64_t epoch,
                       const std::shared_ptr<AllocationBudget> &budget, ChunkCollectionProgress &out,

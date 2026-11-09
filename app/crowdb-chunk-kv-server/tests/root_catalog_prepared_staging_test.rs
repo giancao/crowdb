@@ -77,7 +77,7 @@ async fn durable_preparation_stages_without_fencing_source_and_abort_stops_next_
     )
     .await
     .unwrap();
-    source.store().publish(42, 0, 1, 1, b"source-one").unwrap();
+    source.store().publish(42, 0, 1, 1, b"source-one").await.unwrap();
     let (mut transition, entry) = preparation();
     let control = Group0ControlStore::from_client(metadata.client.clone());
     let revision = control.persist_transfer_transition(&transition, 0).await.unwrap();
@@ -88,10 +88,14 @@ async fn durable_preparation_stages_without_fencing_source_and_abort_stops_next_
             .unwrap();
     let mut stage = root_process::stage();
     stage.id.owner_epoch = 2;
-    target.store().compare_stage(42, 2, None, Some(&stage)).unwrap();
-    source.store().publish(42, 1, 1, 2, b"source-two").unwrap();
+    target
+        .store()
+        .compare_stage_async(42, 2, None, Some(&stage))
+        .await
+        .unwrap();
+    source.store().publish(42, 1, 1, 2, b"source-two").await.unwrap();
     assert_eq!(
-        target.store().publish(42, 2, 2, 3, b"premature-target"),
+        target.store().publish(42, 2, 2, 3, b"premature-target").await,
         Err(CtError::Unavailable)
     );
     let mut writing = root_process::next(&stage, StageState::Writing);
@@ -102,7 +106,8 @@ async fn durable_preparation_stages_without_fencing_source_and_abort_stops_next_
     });
     target
         .store()
-        .compare_stage(42, 2, Some(&stage), Some(&writing))
+        .compare_stage_async(42, 2, Some(&stage), Some(&writing))
+        .await
         .unwrap();
     transition.phase = TransferPhase::Aborted;
     transition.failure = Some("preparation cancelled".into());
@@ -114,10 +119,15 @@ async fn durable_preparation_stages_without_fencing_source_and_abort_stops_next_
     assert_eq!(
         target
             .store()
-            .compare_stage(42, 2, Some(&writing), Some(&reloadable)),
+            .compare_stage_async(42, 2, Some(&writing), Some(&reloadable))
+            .await,
         Err(CtError::Unavailable)
     );
-    source.store().publish(42, 2, 1, 3, b"source-three").unwrap();
+    source
+        .store()
+        .publish(42, 2, 1, 3, b"source-three")
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -152,7 +162,11 @@ async fn preparation_requires_exact_recovery_base_and_fixed_target_process() {
             .await
             .is_err()
     );
-    source.store().publish(42, 0, 1, 1, b"still-source").unwrap();
+    source
+        .store()
+        .publish(42, 0, 1, 1, b"still-source")
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -168,7 +182,11 @@ async fn retained_split_tree_can_prepare_transfer_at_a_newer_partition_epoch() {
     )
     .await
     .unwrap();
-    source.store().publish(42, 0, 1, 1, b"retained-source").unwrap();
+    source
+        .store()
+        .publish(42, 0, 1, 1, b"retained-source")
+        .await
+        .unwrap();
     // A retained split changes partition ownership epoch, keeping its Tree writer.
     let (mut transition, mut entry) = preparation();
     transition.source_epoch = 2;
@@ -185,13 +203,18 @@ async fn retained_split_tree_can_prepare_transfer_at_a_newer_partition_epoch() {
             .unwrap();
     let mut stage = root_process::stage();
     stage.id.owner_epoch = 3;
-    target.store().compare_stage(42, 3, None, Some(&stage)).unwrap();
+    target
+        .store()
+        .compare_stage_async(42, 3, None, Some(&stage))
+        .await
+        .unwrap();
     source
         .store()
         .publish(42, 1, 1, 2, b"source-still-writes")
+        .await
         .unwrap();
     assert_eq!(
-        target.store().publish(42, 2, 3, 3, b"premature-target"),
+        target.store().publish(42, 2, 3, 3, b"premature-target").await,
         Err(CtError::Unavailable)
     );
     let successor_process = root_process::process(&metadata.client, 4).await;
@@ -206,7 +229,10 @@ async fn retained_split_tree_can_prepare_transfer_at_a_newer_partition_epoch() {
     .unwrap();
     let writing = root_process::next(&stage, StageState::Writing);
     assert_eq!(
-        target.store().compare_stage(42, 3, Some(&stage), Some(&writing)),
+        target
+            .store()
+            .compare_stage_async(42, 3, Some(&stage), Some(&writing))
+            .await,
         Err(CtError::Unavailable)
     );
 }

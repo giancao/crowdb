@@ -65,13 +65,20 @@ size_t PoolStorage::worker_bytes() noexcept
     return sizeof(Worker);
 }
 
+void PoolStorage::notify_on_exit(AsyncCompletion complete) noexcept
+{
+    on_exit_ = std::move(complete);
+}
+
 void *PoolStorage::start(void *resource, void (*execute)(void *, uint32_t) noexcept, void *context, uint32_t index)
 {
     auto *storage = static_cast<PoolStorage *>(resource);
     auto *worker  = static_cast<Worker *>(storage->allocate(sizeof(Worker), alignof(Worker)));
     std::construct_at(worker, storage, execute, context, index);
+    storage->running_.fetch_add(1, std::memory_order_relaxed);
     const auto error = pthread_create(&worker->thread, nullptr, &run, worker);
     if (error != 0) {
+        storage->running_.fetch_sub(1, std::memory_order_relaxed);
         std::destroy_at(worker);
         storage->deallocate(worker, sizeof(Worker), alignof(Worker));
         throw std::system_error(error, std::generic_category(), "tree worker start");
@@ -89,6 +96,12 @@ void *PoolStorage::run(void *pointer) noexcept
     worker->ready.store(true, std::memory_order_release);
     worker->ready.notify_one();
     worker->execute(worker->context, worker->index);
+    auto *storage = worker->storage;
+    if (storage->running_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        // The pool's stop wake publishes on_exit_ before its worker exits.
+        auto done = std::move(storage->on_exit_);
+        done.complete(Status::Ok());
+    }
     return nullptr;
 }
 

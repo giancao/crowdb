@@ -87,7 +87,9 @@ class RpcChunkFixedIo : public ::testing::Test
         options.rpc_timeout_ms   = 50;
         options.chunkdb_resolver = fixture.resolver();
         transport                = std::make_unique<RpcChunkTransport>(options);
-        ASSERT_TRUE(transport->allocate_fixed_chunk(id, 4096, 17, PagePurpose::kBtreePage).ok());
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(*transport, id, 4096, 17,
+                                                                                     PagePurpose::kBtreePage)
+                        .ok());
     }
 };
 } // namespace
@@ -95,27 +97,34 @@ class RpcChunkFixedIo : public ::testing::Test
 TEST_F(RpcChunkFixedIo, ReadRequiresNewServerReceiptAndKeepsOriginalRequestAge)
 {
     const ChunkIoContext context{.created_ms = 1234};
-    EXPECT_EQ(transport->verify_fixed_read_fence(id, 1, context).code(), Code::kNotSupported);
+    EXPECT_EQ(await_chunk_rpc<&RpcChunkTransport::submit_verify_fixed_read_fence>(*transport, id, 1, context).code(),
+              Code::kNotSupported);
     io.age_receipt.store(true);
-    ASSERT_TRUE(transport->verify_fixed_read_fence(id, 1, context).ok());
+    ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_verify_fixed_read_fence>(*transport, id, 1, context).ok());
     EXPECT_EQ(io.timestamp.load(), context.created_ms);
-    ASSERT_TRUE(transport->advance_write(id, 0, 4).ok());
+    ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_advance_write>(*transport, id, 0, 4).ok());
     std::array<uint8_t, 4> data{};
-    ASSERT_TRUE(transport->read_fixed_mirror(id, 0, 0, data.data(), data.size(), context).ok());
+    ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_read_fixed_mirror>(*transport, id, 0, 0, data.data(),
+                                                                              data.size(), context)
+                    .ok());
+    EXPECT_EQ(data, (std::array<uint8_t, 4>{1, 2, 3, 4}));
     EXPECT_EQ(io.timestamp.load(), context.created_ms);
     io.age_receipt.store(false);
-    EXPECT_EQ(transport->read_fixed_mirror(id, 0, 0, data.data(), data.size(), context).code(), Code::kNotSupported);
-    EXPECT_TRUE(transport->read_mirror(id, 0, 0, data.data(), data.size()).ok());
+    EXPECT_EQ(await_chunk_rpc<&RpcChunkTransport::submit_read_fixed_mirror>(*transport, id, 0, 0, data.data(),
+                                                                            data.size(), context)
+                  .code(),
+              Code::kNotSupported);
 }
 
 TEST_F(RpcChunkFixedIo, DrainRequiresZeroByteSynchronizedBarrier)
 {
-    EXPECT_EQ(transport->drain_fixed_chunk(id).code(), Code::kNotSupported);
+    EXPECT_EQ(await_chunk_rpc<&RpcChunkTransport::submit_drain_fixed_chunk>(*transport, id).code(),
+              Code::kNotSupported);
     EXPECT_TRUE(io.sync_requested.load());
     EXPECT_EQ(io.write_size.load(), 0U);
     EXPECT_NE(io.ordering_offset.load(), UINT64_MAX);
     io.sync_receipt.store(true);
-    EXPECT_TRUE(transport->drain_fixed_chunk(id).ok());
+    EXPECT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_drain_fixed_chunk>(*transport, id).ok());
     EXPECT_EQ(io.write_size.load(), 0U);
 }
 
@@ -123,11 +132,30 @@ TEST_F(RpcChunkFixedIo, WriteRequiresSynchronizedReceiptAndKeepsOriginalRequestA
 {
     const ChunkIoContext         context{.created_ms = 5678};
     const std::array<uint8_t, 4> data{1, 2, 3, 4};
-    EXPECT_EQ(transport->write_fixed_mirror(id, 0, 0, data.data(), data.size(), context).code(), Code::kNotSupported);
+    EXPECT_EQ(await_chunk_rpc<&RpcChunkTransport::submit_write_fixed_mirror>(*transport, id, 0, 0, data.data(),
+                                                                             data.size(), context)
+                  .code(),
+              Code::kNotSupported);
     EXPECT_TRUE(io.sync_requested.load());
     EXPECT_EQ(io.timestamp.load(), context.created_ms);
     io.sync_receipt.store(true);
-    EXPECT_TRUE(transport->write_fixed_mirror(id, 0, 0, data.data(), data.size(), context).ok());
+    EXPECT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_write_fixed_mirror>(*transport, id, 0, 0, data.data(),
+                                                                               data.size(), context)
+                    .ok());
     EXPECT_EQ(io.timestamp.load(), context.created_ms);
+}
+
+TEST_F(RpcChunkFixedIo, AsyncSealValidatesExactBoundaryAndPhysicalOwner)
+{
+    ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_advance_write>(*transport, id, 0, 4).ok());
+    auto seal = [&] { return await_chunk_rpc<&RpcChunkTransport::submit_seal_chunk>(*transport, id, 17, 4); };
+    fixture.services[0].seal_reply = TestSealReply::WrongCursor;
+    EXPECT_EQ(seal().code(), Code::kCorruption);
+    fixture.services[0].seal_reply = TestSealReply::Exact;
+    ASSERT_TRUE(seal().ok());
+    ChunkLayout layout;
+    ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_query_chunk>(*transport, id, &layout).ok());
+    EXPECT_TRUE(layout.sealed);
+    EXPECT_EQ(layout.acknowledged_bytes, 4U);
 }
 } // namespace crowdb::tree::detail

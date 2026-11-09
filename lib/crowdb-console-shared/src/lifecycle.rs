@@ -55,7 +55,7 @@ pub struct DeployRequest {
     /// current executable.
     pub binary: Option<PathBuf>,
     pub election_profile: Option<String>,
-    /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`).
+    /// `--kv-backend` value (`"block"` or `"mem-block"`).
     pub kv_backend: Option<String>,
     /// `--wal-backend` value (e.g. `"file"`, `"mem-block"`, `"block-device"`).
     pub wal_backend: Option<String>,

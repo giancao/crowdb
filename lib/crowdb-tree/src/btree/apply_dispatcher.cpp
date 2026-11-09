@@ -26,8 +26,7 @@ size_t ApplyDispatcher::allocation_bound() noexcept
 
 Status ApplyDispatcher::create(std::shared_ptr<detail::FlushRuntime>       runtime,
                                std::shared_ptr<detail::FlushRuntime::Lane> lane, size_t steps_per_turn,
-                               const std::shared_ptr<detail::AllocationReservation> &metadata,
-                               std::shared_ptr<ApplyDispatcher>                     *out)
+                               const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<ApplyDispatcher> *out)
 try {
     if (!runtime || !lane || !metadata || steps_per_turn == 0 || out == nullptr || *out) {
         return Status::invalid_argument("apply dispatcher requires a bounded runtime and charged storage");
@@ -112,6 +111,11 @@ void ApplyDispatcher::run(void *context) noexcept
         task(argument);
     }
     dispatcher.progress_->request(dispatcher.weak_from_this().lock());
+}
+
+void ApplyDispatcher::close_async(AsyncCompletion complete) noexcept
+{
+    progress_->close_async(std::move(complete));
 }
 
 void ApplyDispatcher::close_and_drain() noexcept

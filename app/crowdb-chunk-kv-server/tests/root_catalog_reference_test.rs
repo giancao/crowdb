@@ -11,7 +11,7 @@ use crowdb_tree_ffi::chunk::protection::{
     reference_checksum, CandidateState, ManifestCandidate, MAX_REFERENCE_WINDOW,
 };
 use crowdb_tree_ffi::chunk::stage::{StageId, StagePack, StageRecord, StageState};
-use crowdb_tree_ffi::{CtError, RootCatalogObject, RootCatalogStore};
+use crowdb_tree_ffi::{ChunkRootCatalog, CtError, RootCatalogObject, RootCatalogStore};
 #[path = "common/metadata.rs"]
 mod metadata;
 
@@ -49,7 +49,7 @@ fn next(old: &StageRecord, state: StageState) -> StageRecord {
     value.revision += 1;
     value
 }
-fn ready(store: &dyn RootCatalogStore, low: u64) -> StageRecord {
+async fn ready(store: &dyn RootCatalogStore, low: u64) -> StageRecord {
     let reserved = StageRecord {
         tree_id: 42,
         id: id(low),
@@ -62,7 +62,10 @@ fn ready(store: &dyn RootCatalogStore, low: u64) -> StageRecord {
         manifest_generation: 0,
         packs: vec![],
     };
-    store.compare_stage(42, 1, None, Some(&reserved)).unwrap();
+    store
+        .compare_stage_async(42, 1, None, Some(&reserved))
+        .await
+        .unwrap();
     let mut writing = next(&reserved, StageState::Writing);
     writing.packs.push(StagePack {
         offset: 0,
@@ -70,10 +73,14 @@ fn ready(store: &dyn RootCatalogStore, low: u64) -> StageRecord {
         checksum: 7,
     });
     store
-        .compare_stage(42, 1, Some(&reserved), Some(&writing))
+        .compare_stage_async(42, 1, Some(&reserved), Some(&writing))
+        .await
         .unwrap();
     let ready = next(&writing, StageState::Reloadable);
-    store.compare_stage(42, 1, Some(&writing), Some(&ready)).unwrap();
+    store
+        .compare_stage_async(42, 1, Some(&writing), Some(&ready))
+        .await
+        .unwrap();
     ready
 }
 fn candidate(low: u64, generation: u64, refs: &[StageId]) -> ManifestCandidate {
@@ -92,9 +99,10 @@ async fn full_reference_windows_prepare_and_release_with_native_metadata_admissi
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    let stages: Vec<_> = (1..=MAX_REFERENCE_WINDOW as u64 + 1)
-        .map(|low| ready(store.as_ref(), low))
-        .collect();
+    let mut stages = Vec::with_capacity(MAX_REFERENCE_WINDOW + 1);
+    for low in 1..=MAX_REFERENCE_WINDOW as u64 + 1 {
+        stages.push(ready(store.as_ref(), low).await);
+    }
     let refs: Vec<_> = stages.iter().map(|stage| stage.id).collect();
     let protection = store.stage_protection().unwrap();
     // Exercise both a full final window and a full non-final window.
@@ -103,22 +111,33 @@ async fn full_reference_windows_prepare_and_release_with_native_metadata_admissi
         .enumerate()
     {
         let plan = candidate(100 + index as u64, 1, refs);
-        protection.begin_manifest_candidate(42, &plan).unwrap();
+        protection
+            .begin_manifest_candidate_async(42, &plan)
+            .await
+            .unwrap();
         for (window, refs) in refs.chunks(MAX_REFERENCE_WINDOW).enumerate() {
             protection
-                .prepare_manifest_references(42, plan.id, window as u64, refs)
+                .prepare_manifest_references_async(42, plan.id, window as u64, refs)
+                .await
                 .unwrap();
         }
-        protection.abort_manifest_candidate(42, plan.id).unwrap();
+        protection
+            .abort_manifest_candidate_async(42, plan.id)
+            .await
+            .unwrap();
         for window in 0..refs.len().div_ceil(MAX_REFERENCE_WINDOW) {
             protection
-                .release_manifest_references(42, plan.id, window as u64)
+                .release_manifest_references_async(42, plan.id, window as u64)
+                .await
                 .unwrap();
         }
     }
     for stage in stages {
         let retired = next(&stage, StageState::Retired);
-        store.compare_stage(42, 1, Some(&stage), Some(&retired)).unwrap();
+        store
+            .compare_stage_async(42, 1, Some(&stage), Some(&retired))
+            .await
+            .unwrap();
     }
 }
 
@@ -131,17 +150,23 @@ async fn generation_reclamation_advances_within_complete_transaction_limit() {
     let protection = store.stage_protection().unwrap();
     for generation in 1..=70 {
         let plan = candidate(100 + generation, generation, &[]);
-        protection.begin_manifest_candidate(42, &plan).unwrap();
-        protection.commit_manifest_candidate(42, plan.id).unwrap();
+        protection
+            .begin_manifest_candidate_async(42, &plan)
+            .await
+            .unwrap();
+        protection
+            .commit_manifest_candidate_async(42, plan.id)
+            .await
+            .unwrap();
     }
     let mut reclaimed = 0;
     while reclaimed < 68 {
-        let count = store.reclaim_before(42, 70);
+        let count = store.reclaim_before_async(42, 70).await.unwrap();
         assert!(count > 0, "reclamation stopped at generation {reclaimed}");
         reclaimed += count;
     }
     assert_eq!(reclaimed, 68);
-    assert_eq!(store.reclaim_before(42, 70), 0);
+    assert_eq!(store.reclaim_before_async(42, 70).await.unwrap(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -150,52 +175,78 @@ async fn prepared_references_protect_before_commit_and_survive_unknown_commit_re
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    let first = ready(store.as_ref(), 1);
-    let second = ready(store.as_ref(), 2);
+    let first = ready(store.as_ref(), 1).await;
+    let second = ready(store.as_ref(), 2).await;
     let refs = [first.id, second.id];
     let plan = candidate(10, 1, &refs);
     let protection = store.stage_protection().unwrap();
-    protection.begin_manifest_candidate(42, &plan).unwrap();
     protection
-        .prepare_manifest_references(42, plan.id, 0, &refs[..1])
+        .begin_manifest_candidate_async(42, &plan)
+        .await
+        .unwrap();
+    protection
+        .prepare_manifest_references_async(42, plan.id, 0, &refs[..1])
+        .await
         .unwrap();
     let retired = next(&first, StageState::Retired);
     assert_eq!(
-        store.compare_stage(42, 1, Some(&first), Some(&retired)),
+        store
+            .compare_stage_async(42, 1, Some(&first), Some(&retired))
+            .await,
         Err(CtError::Unavailable)
     );
     assert_eq!(
-        protection.commit_manifest_candidate(42, plan.id),
+        protection.commit_manifest_candidate_async(42, plan.id).await,
         Err(CtError::Unavailable)
     );
     protection
-        .prepare_manifest_references(42, plan.id, 1, &refs[1..])
+        .prepare_manifest_references_async(42, plan.id, 1, &refs[1..])
+        .await
         .unwrap();
     protection
-        .prepare_manifest_references(42, plan.id, 1, &refs[1..])
+        .prepare_manifest_references_async(42, plan.id, 1, &refs[1..])
+        .await
         .unwrap();
     // Discard the result, query exactly this operation, then repeat it.
-    protection.commit_manifest_candidate(42, plan.id).unwrap();
+    protection
+        .commit_manifest_candidate_async(42, plan.id)
+        .await
+        .unwrap();
     assert_eq!(
         protection
-            .load_manifest_candidate(42, plan.id)
+            .load_manifest_candidate_async(42, plan.id)
+            .await
             .unwrap()
             .unwrap()
             .state,
         CandidateState::Committed
     );
-    protection.commit_manifest_candidate(42, plan.id).unwrap();
+    protection
+        .commit_manifest_candidate_async(42, plan.id)
+        .await
+        .unwrap();
     assert_eq!(
-        protection.abort_manifest_candidate(42, plan.id),
+        protection.abort_manifest_candidate_async(42, plan.id).await,
         Err(CtError::Unavailable)
     );
     assert_eq!(
-        store.load(42, RootCatalogObject::CurrentManifest).unwrap(),
+        store
+            .load_async(42, RootCatalogObject::CurrentManifest)
+            .await
+            .unwrap(),
         Some(plan.manifest)
     );
-    assert_eq!(protection.list_manifest_candidates(42, None, 1).unwrap().len(), 1);
+    assert_eq!(
+        protection
+            .list_manifest_candidates_async(42, None, 1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(protection
-        .list_manifest_candidates(42, Some(plan.id), 1)
+        .list_manifest_candidates_async(42, Some(plan.id), 1)
+        .await
         .unwrap()
         .is_empty());
 }
@@ -206,57 +257,85 @@ async fn generation_pin_and_live_pin_both_prevent_pack_deletion() {
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    let first = ready(store.as_ref(), 1);
+    let first = ready(store.as_ref(), 1).await;
     let protection = store.stage_protection().unwrap();
     let plan = candidate(10, 1, &[first.id]);
-    protection.begin_manifest_candidate(42, &plan).unwrap();
     protection
-        .prepare_manifest_references(42, plan.id, 0, &[first.id])
+        .begin_manifest_candidate_async(42, &plan)
+        .await
         .unwrap();
-    protection.commit_manifest_candidate(42, plan.id).unwrap();
-    store.pin_generation(42, 1, 99, 1).unwrap();
-    protection.pin_stage(42, first.id, id(200)).unwrap();
+    protection
+        .prepare_manifest_references_async(42, plan.id, 0, &[first.id])
+        .await
+        .unwrap();
+    protection
+        .commit_manifest_candidate_async(42, plan.id)
+        .await
+        .unwrap();
+    let catalog = ChunkRootCatalog::open_callback(store.clone()).unwrap();
+    catalog.pin_generation_async(42, 1, 99, 1).await.unwrap();
+    protection.pin_stage_async(42, first.id, id(200)).await.unwrap();
     for generation in 2..=4 {
         store
             .publish(42, generation - 1, 1, generation, b"other root")
+            .await
             .unwrap();
     }
-    assert_eq!(store.reclaim_before(42, 4), 0);
+    assert_eq!(catalog.reclaim_before_async(42, 4).await, Ok(0));
     assert_eq!(
-        protection.release_manifest_references(42, plan.id, 0),
+        protection.release_manifest_references_async(42, plan.id, 0).await,
         Err(CtError::Unavailable)
     );
-    store.unpin_generation(42, 1, 99).unwrap();
-    assert_eq!(store.reclaim_before(42, 4), 2);
+    catalog.unpin_generation_async(42, 1, 99).await.unwrap();
+    catalog.unpin_generation_async(42, 1, 99).await.unwrap();
+    assert_eq!(catalog.reclaim_before_async(42, 4).await, Ok(2));
     assert_eq!(
         protection
-            .load_manifest_candidate(42, plan.id)
+            .load_manifest_candidate_async(42, plan.id)
+            .await
             .unwrap()
             .unwrap()
             .state,
         CandidateState::Reclaimed
     );
-    protection.release_manifest_references(42, plan.id, 0).unwrap();
-    protection.release_manifest_references(42, plan.id, 0).unwrap();
+    protection
+        .release_manifest_references_async(42, plan.id, 0)
+        .await
+        .unwrap();
+    protection
+        .release_manifest_references_async(42, plan.id, 0)
+        .await
+        .unwrap();
     let retired = next(&first, StageState::Retired);
     assert_eq!(
-        store.compare_stage(42, 1, Some(&first), Some(&retired)),
+        store
+            .compare_stage_async(42, 1, Some(&first), Some(&retired))
+            .await,
         Err(CtError::Unavailable)
     );
-    protection.unpin_stage(42, first.id, id(200)).unwrap();
-    store.compare_stage(42, 1, Some(&first), Some(&retired)).unwrap();
+    protection.unpin_stage_async(42, first.id, id(200)).await.unwrap();
+    store
+        .compare_stage_async(42, 1, Some(&first), Some(&retired))
+        .await
+        .unwrap();
     let deleting = next(&retired, StageState::Deleting);
     store
-        .compare_stage(42, 1, Some(&retired), Some(&deleting))
+        .compare_stage_async(42, 1, Some(&retired), Some(&deleting))
+        .await
         .unwrap();
     assert_eq!(
-        protection.pin_stage(42, first.id, id(201)),
+        protection.pin_stage_async(42, first.id, id(201)).await,
         Err(CtError::Unavailable)
     );
     let new_plan = candidate(11, 5, &[first.id]);
-    protection.begin_manifest_candidate(42, &new_plan).unwrap();
+    protection
+        .begin_manifest_candidate_async(42, &new_plan)
+        .await
+        .unwrap();
     assert_eq!(
-        protection.prepare_manifest_references(42, new_plan.id, 0, &[first.id]),
+        protection
+            .prepare_manifest_references_async(42, new_plan.id, 0, &[first.id])
+            .await,
         Err(CtError::Unavailable)
     );
 }
@@ -267,27 +346,42 @@ async fn abort_releases_only_prepared_windows_and_fixed_identity_cannot_be_reall
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    let first = ready(store.as_ref(), 1);
-    let second = ready(store.as_ref(), 2);
+    let first = ready(store.as_ref(), 1).await;
+    let second = ready(store.as_ref(), 2).await;
     let protection = store.stage_protection().unwrap();
     let plan = candidate(10, 1, &[first.id, second.id]);
-    protection.begin_manifest_candidate(42, &plan).unwrap();
     protection
-        .prepare_manifest_references(42, plan.id, 0, &[first.id])
+        .begin_manifest_candidate_async(42, &plan)
+        .await
         .unwrap();
-    protection.abort_manifest_candidate(42, plan.id).unwrap();
+    protection
+        .prepare_manifest_references_async(42, plan.id, 0, &[first.id])
+        .await
+        .unwrap();
+    protection
+        .abort_manifest_candidate_async(42, plan.id)
+        .await
+        .unwrap();
     assert_eq!(
-        protection.prepare_manifest_references(42, plan.id, 1, &[second.id]),
+        protection
+            .prepare_manifest_references_async(42, plan.id, 1, &[second.id])
+            .await,
         Err(CtError::Unavailable)
     );
-    protection.release_manifest_references(42, plan.id, 0).unwrap();
+    protection
+        .release_manifest_references_async(42, plan.id, 0)
+        .await
+        .unwrap();
     let mut last = first;
     for state in [StageState::Retired, StageState::Deleting, StageState::Reclaimed] {
         let value = next(&last, state);
-        store.compare_stage(42, 1, Some(&last), Some(&value)).unwrap();
+        store
+            .compare_stage_async(42, 1, Some(&last), Some(&value))
+            .await
+            .unwrap();
         last = value;
     }
-    store.compare_stage(42, 1, Some(&last), None).unwrap();
+    store.compare_stage_async(42, 1, Some(&last), None).await.unwrap();
     let duplicate = StageRecord {
         id: id(999),
         revision: 1,
@@ -296,7 +390,7 @@ async fn abort_releases_only_prepared_windows_and_fixed_identity_cannot_be_reall
         ..last
     };
     assert_eq!(
-        store.compare_stage(42, 1, None, Some(&duplicate)),
+        store.compare_stage_async(42, 1, None, Some(&duplicate)).await,
         Err(CtError::Unavailable)
     );
 }
@@ -307,22 +401,30 @@ async fn checksum_failure_does_not_publish_protection_and_released_pin_never_res
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    let first = ready(store.as_ref(), 1);
+    let first = ready(store.as_ref(), 1).await;
     let protection = store.stage_protection().unwrap();
     let mut plan = candidate(10, 1, &[first.id]);
     plan.reference_checksum ^= 1;
-    protection.begin_manifest_candidate(42, &plan).unwrap();
+    protection
+        .begin_manifest_candidate_async(42, &plan)
+        .await
+        .unwrap();
     assert_eq!(
-        protection.prepare_manifest_references(42, plan.id, 0, &[first.id]),
+        protection
+            .prepare_manifest_references_async(42, plan.id, 0, &[first.id])
+            .await,
         Err(CtError::Corruption)
     );
-    protection.unpin_stage(42, first.id, id(100)).unwrap();
+    protection.unpin_stage_async(42, first.id, id(100)).await.unwrap();
     assert_eq!(
-        protection.pin_stage(42, first.id, id(100)),
+        protection.pin_stage_async(42, first.id, id(100)).await,
         Err(CtError::Unavailable)
     );
     let retired = next(&first, StageState::Retired);
-    store.compare_stage(42, 1, Some(&first), Some(&retired)).unwrap();
+    store
+        .compare_stage_async(42, 1, Some(&first), Some(&retired))
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -333,7 +435,7 @@ async fn live_pin_invalidates_an_observed_deletion_proof_at_the_authority_revisi
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    let first = ready(store.as_ref(), 1);
+    let first = ready(store.as_ref(), 1).await;
     let mut prefix = b"\0crowdb/chunk-kv/root/v1/".to_vec();
     prefix.extend_from_slice(&42_u64.to_be_bytes());
     let mut authority = prefix.clone();
@@ -350,7 +452,8 @@ async fn live_pin_invalidates_an_observed_deletion_proof_at_the_authority_revisi
     store
         .stage_protection()
         .unwrap()
-        .pin_stage(42, first.id, id(200))
+        .pin_stage_async(42, first.id, id(200))
+        .await
         .unwrap();
     let mut stage_key = prefix;
     stage_key.extend_from_slice(b"/stage/v1/");
@@ -378,7 +481,7 @@ async fn live_pin_invalidates_an_observed_deletion_proof_at_the_authority_revisi
             .await,
         Err(crowdb_paxos_kv_client::Error::CasFailed { .. } | crowdb_paxos_kv_client::Error::CasBusy)
     ));
-    assert_eq!(store.load_stage(42, first.id).unwrap(), Some(first));
+    assert_eq!(store.load_stage_async(42, first.id).await.unwrap(), Some(first));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -409,7 +512,8 @@ async fn candidate_decode_rejects_oversized_checksum_words_even_with_valid_recor
             store
                 .stage_protection()
                 .unwrap()
-                .load_manifest_candidate(42, candidate_id),
+                .load_manifest_candidate_async(42, candidate_id)
+                .await,
             Err(CtError::Corruption),
             "oversized checksum word {checksum_index} must not truncate"
         );
@@ -422,18 +526,22 @@ async fn concurrent_pin_mutations_rebuild_guard_counts_before_gc() {
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    let stage = ready(store.as_ref(), 1);
+    let stage = ready(store.as_ref(), 1).await;
     let retired = next(&stage, StageState::Retired);
     for turn in 0..4 {
         let pins: [_; 32] = std::array::from_fn(|index| id(100 + 32 * turn + u64::try_from(index).unwrap()));
-        let start = std::sync::Arc::new(std::sync::Barrier::new(pins.len()));
+        let start = std::sync::Arc::new(tokio::sync::Barrier::new(pins.len()));
         let jobs = pins.map(|pin| {
             let catalog = store.clone();
             let start = start.clone();
             let stage_id = stage.id;
-            tokio::task::spawn_blocking(move || {
-                start.wait();
-                catalog.stage_protection().unwrap().pin_stage(42, stage_id, pin)
+            tokio::spawn(async move {
+                start.wait().await;
+                catalog
+                    .stage_protection()
+                    .unwrap()
+                    .pin_stage_async(42, stage_id, pin)
+                    .await
             })
         });
         for job in jobs {
@@ -443,20 +551,27 @@ async fn concurrent_pin_mutations_rebuild_guard_counts_before_gc() {
             store
                 .stage_protection()
                 .unwrap()
-                .unpin_stage(42, stage.id, *pin)
+                .unpin_stage_async(42, stage.id, *pin)
+                .await
                 .unwrap();
         }
         assert_eq!(
-            store.compare_stage(42, 1, Some(&stage), Some(&retired)),
+            store
+                .compare_stage_async(42, 1, Some(&stage), Some(&retired))
+                .await,
             Err(CtError::Unavailable),
             "one remaining live pin must retain its exact guard count"
         );
         store
             .stage_protection()
             .unwrap()
-            .unpin_stage(42, stage.id, *pins.last().unwrap())
+            .unpin_stage_async(42, stage.id, *pins.last().unwrap())
+            .await
             .unwrap();
     }
-    store.compare_stage(42, 1, Some(&stage), Some(&retired)).unwrap();
-    assert_eq!(store.load_stage(42, stage.id).unwrap(), Some(retired));
+    store
+        .compare_stage_async(42, 1, Some(&stage), Some(&retired))
+        .await
+        .unwrap();
+    assert_eq!(store.load_stage_async(42, stage.id).await.unwrap(), Some(retired));
 }

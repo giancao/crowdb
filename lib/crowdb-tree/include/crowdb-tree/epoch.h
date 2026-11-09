@@ -11,8 +11,9 @@
 // entry epoch into a per-thread, cache-line-padded participant slot via atomics
 // only — no mutex on get()/scan(). Reclamation is writer-driven: retire() and
 // try_reclaim() scan the participant slots to find the oldest epoch any reader
-// might still see and free everything strictly older. The retired list and the
-// scan are serialized by reclaim_mu_ (writer-side only, off the hot path).
+// might still see and free everything strictly older. Legacy callbacks use
+// reclaim_mu_ on the writer side. Intrusive deferred entries can be collected
+// independently after detaching their batch.
 //
 // Memory ordering (crossbeam/folly-style EBR): enter's global-epoch load and
 // slot publish, plus retire's epoch bump and the reclaim scan, are all seq_cst,
@@ -210,9 +211,9 @@ class EpochManager
     bool         retire_backend_step() noexcept;
     Participant *participant_for_this_thread(const std::shared_ptr<AllocationBudget> &budget);
     static void  destroy_participant(Participant *participant) noexcept;
-    size_t       reclaim_locked();   // caller holds reclaim_mu_
-    uint64_t     min_active_epoch(); // oldest epoch any reader might still see
-    size_t       reclaim_deferred_locked();
+    size_t       reclaim_locked();            // caller holds reclaim_mu_
+    uint64_t     min_active_epoch() noexcept; // oldest epoch any reader might still see
+    size_t       reclaim_deferred() noexcept;
 
     struct Retired
     {
@@ -237,7 +238,6 @@ class EpochManager
     std::recursive_mutex    reclaim_mu_; // guards retired_ (writer side)
     std::vector<Retired>    retired_;
     std::atomic<Deferred *> deferred_{nullptr};
-    Deferred               *collected_ = nullptr;
 };
 
 } // namespace crowdb::tree

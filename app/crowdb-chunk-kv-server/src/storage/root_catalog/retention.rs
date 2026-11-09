@@ -22,7 +22,7 @@ impl KvRootCatalogStore {
         Ok((key, value, revision))
     }
 
-    pub(super) fn retain_generation(
+    pub(super) async fn retain_generation(
         &self,
         tree_id: u64,
         high: u64,
@@ -32,7 +32,7 @@ impl KvRootCatalogStore {
         if tree_id != self.tree_id || (high == 0 && low == 0) || generation == 0 {
             return Err(CtError::InvalidArgument);
         }
-        self.wait(self.authority_mutation(|| async {
+        self.authority_mutation(|| async {
             let (authority_key, authority, revision) = self.retention_authority().await?;
             if self.process.is_some() {
                 self.check_process_owner()?;
@@ -45,7 +45,6 @@ impl KvRootCatalogStore {
             {
                 return Err(CtError::NotFound.into());
             }
-            self.check_legacy_pin_admission(generation).await?;
             let key = catalog_pin_key(tree_id, high, low);
             if let Some((value, _)) = self.get(&key).await.map_err(|_| CtError::Unavailable)? {
                 return if decode_u64(&value) == Some(generation) {
@@ -69,14 +68,15 @@ impl KvRootCatalogStore {
                 .await
                 .map(|_| ())
                 .map_err(|error| super::transaction::MutationError::from_cas(&error))
-        }))
+        })
+        .await
     }
 
-    pub(super) fn release_generation(&self, tree_id: u64, high: u64, low: u64) -> Result<(), CtError> {
+    pub(super) async fn release_generation(&self, tree_id: u64, high: u64, low: u64) -> Result<(), CtError> {
         if tree_id != self.tree_id || (high == 0 && low == 0) {
             return Err(CtError::InvalidArgument);
         }
-        self.wait(self.authority_mutation(|| async {
+        self.authority_mutation(|| async {
             let (authority_key, authority, revision) = self.retention_authority().await?;
             let key = catalog_pin_key(tree_id, high, low);
             if self.get(&key).await.map_err(|_| CtError::Unavailable)?.is_none() {
@@ -96,14 +96,15 @@ impl KvRootCatalogStore {
                 .await
                 .map(|_| ())
                 .map_err(|error| super::transaction::MutationError::from_cas(&error))
-        }))
+        })
+        .await
     }
 
-    pub(super) fn reclaim_generations(&self, tree_id: u64, generation: u64) -> u64 {
+    pub(super) async fn reclaim_generations_async(&self, tree_id: u64, generation: u64) -> u64 {
         if tree_id != self.tree_id || generation <= 2 {
             return 0;
         }
-        self.wait(self.reclaim_generations_inner(generation)).unwrap_or(0)
+        self.reclaim_generations_inner(generation).await.unwrap_or(0)
     }
 
     async fn reclaim_generations_inner(&self, generation: u64) -> Result<u64, CtError> {
@@ -154,26 +155,17 @@ impl KvRootCatalogStore {
             let mut end = floor;
             let mut ops = Vec::with_capacity(super::protection::MAX_METADATA_MUTATIONS);
             for old in floor..limit {
-                let preserved = self.legacy_history_ops(old).await?;
                 let candidate = self.reclaim_candidate_ops(old).await?;
                 // Reserve the floor and authority keys; never split one
-                // generation's manifest, candidate and legacy-history mutation.
-                if ops.len() + 1 + preserved.len() + candidate.len() + 2
-                    > super::protection::MAX_METADATA_MUTATIONS
-                {
+                // generation's manifest and candidate mutation.
+                if ops.len() + 1 + candidate.len() + 2 > super::protection::MAX_METADATA_MUTATIONS {
                     break;
                 }
                 ops.push(BatchOp::Delete {
                     key: Bytes::from(catalog_key(self.tree_id, b"manifest", old)),
                 });
-                let copied_legacy = !preserved.is_empty();
-                ops.extend(preserved);
                 ops.extend(candidate);
                 end = old + 1;
-                // Retain at most one newly copied legacy image in this pass.
-                if copied_legacy {
-                    break;
-                }
             }
             ops.push(BatchOp::Put {
                 key: Bytes::from(floor_key),
@@ -187,13 +179,6 @@ impl KvRootCatalogStore {
                 .batch_write_cas(self.store_id, self.group_id, &ops, &authority_key, revision)
                 .await
                 .map_err(|error| super::transaction::MutationError::from_cas(&error))?;
-            self.published_objects.rcu(|current| {
-                let mut next = (**current).clone();
-                for old in floor..end {
-                    next.remove(&catalog_key(self.tree_id, b"manifest", old));
-                }
-                next
-            });
             Ok(end - floor)
         })
         .await

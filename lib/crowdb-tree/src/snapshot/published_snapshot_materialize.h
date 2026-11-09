@@ -24,6 +24,6 @@ struct SnapshotMaterialized
     std::vector<leaf_entry>                        entries;
 };
 
-Status materialize_snapshot(const std::shared_ptr<PublishedSnapshotContext> &snapshot, size_t max_bytes,
+Status materialize_snapshot(const std::shared_ptr<PublishedReadViewContext> &snapshot, size_t max_bytes,
                             detail::ReservedUnique<SnapshotMaterialized> *out);
 } // namespace crowdb::tree

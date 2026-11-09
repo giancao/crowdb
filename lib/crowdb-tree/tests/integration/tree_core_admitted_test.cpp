@@ -74,14 +74,12 @@ class TreeCoreAdmitted : public testing::Test
             if (!status.ok()) {
                 return Status::internal_error("fill slot " + std::to_string(slot) + ": " + status.to_string());
             }
-            // Preparation targets a full source and retained Handoff credit,
-            // not temporary history candidates awaiting asynchronous disposal.
-            // The final CPU callback below must not join its own retirement work.
+            // Keep history disposal separate from the final CPU callback,
+            // which cannot join its own queued retirement work.
             core->binding()->account()->drain_retirements();
         }
-        // The final batch fills the second source from a CPU callback. Reaching the hard source
-        // cap starts asynchronous soft maintenance, while this callback cannot
-        // wait for the Handoff credit intentionally retained by the test.
+        // The final batch runs from a CPU callback. A source transition must
+        // continue asynchronously rather than waiting for its own executor.
         TestApplyCompletion completion;
         tree->get_async("k64", [&](Status read, GetView) {
             auto status = read.ok() ? tree->apply(128, batch_for(128)) : read;
@@ -110,10 +108,10 @@ TEST_F(TreeCoreAdmitted, PreparationOwnsCallerBytesAndDoesNotBlockReplacementOrC
     EXPECT_EQ(unsubmitted->arm().code(), Code::kUnavailable);
 }
 
-TEST_F(TreeCoreAdmitted, FullBackendWindowReturnsTemporaryPressureAndRollsBackTheApplyTicket)
+TEST_F(TreeCoreAdmitted, SuspendedBackendOwnersDoNotLimitNewAdmittedApply)
 {
-    auto                                                       &lifetime = core->operation_lifetime();
-    const auto                                                  maximum  = lifetime.resource_usage().limit;
+    auto        &lifetime = core->operation_lifetime();
+    const size_t maximum  = 2 * core->binding()->options().cpu_queue_limit;
     std::vector<std::shared_ptr<TreeOperationLifetime::Ticket>> occupied;
     occupied.reserve(maximum);
     for (uint64_t index = 0; index < maximum; ++index) {
@@ -123,15 +121,11 @@ TEST_F(TreeCoreAdmitted, FullBackendWindowReturnsTemporaryPressureAndRollsBackTh
     }
     std::shared_ptr<TreeApplyOperation> operation;
     ASSERT_TRUE(prepare("admitted", "value", &operation).ok());
-    EXPECT_EQ(operation->arm().code(), Code::kUnavailable);
-    auto usage = core->admission_resource_usage();
-    EXPECT_EQ(usage[0].used, maximum);
-    EXPECT_EQ(usage[0].denied_tree, 1U);
-    EXPECT_EQ(usage[1].used, 0U);
-    occupied.pop_back();
     ASSERT_TRUE(operation->arm().ok());
-    usage = core->admission_resource_usage();
-    EXPECT_EQ(usage[0].used, maximum);
+    auto usage = core->admission_resource_usage();
+    EXPECT_EQ(usage[0].limit, 0U);
+    EXPECT_EQ(usage[0].denied_tree, 0U);
+    EXPECT_EQ(usage[0].used, maximum + 1);
     EXPECT_EQ(usage[1].used, 1U);
     TestApplyCompletion completed;
     operation->start(1, &TestApplyCompletion::complete, &completed);
@@ -139,7 +133,7 @@ TEST_F(TreeCoreAdmitted, FullBackendWindowReturnsTemporaryPressureAndRollsBackTh
     core->binding()->lane()->drain();
     ASSERT_TRUE(completed.status.ok()) << completed.status.to_string();
     usage = core->admission_resource_usage();
-    EXPECT_EQ(usage[0].used, maximum - 1);
+    EXPECT_EQ(usage[0].used, maximum);
     EXPECT_EQ(usage[1].used, 0U);
     EXPECT_EQ(usage[3].used, 1U);
     EXPECT_EQ(usage[5].used, 0U);
@@ -190,7 +184,7 @@ TEST_F(TreeCoreAdmitted, DistantNoopAwaitsAnActualFrontierTransitionWithoutSkipp
     EXPECT_EQ(core->max_seen_slot(), ApplyFrontier::kMaxWindow + 1);
 }
 
-TEST_F(TreeCoreAdmitted, FullSourceAwaitsCompleteFlushCreditThenConsumesThePrepaidWrite)
+TEST_F(TreeCoreAdmitted, FullSourceFlushIgnoresUnusedHandoffCreditAndConsumesTheAcceptedWrite)
 {
     tree.reset();
     config.max_memtable_count     = 2;
@@ -198,8 +192,7 @@ TEST_F(TreeCoreAdmitted, FullSourceAwaitsCompleteFlushCreditThenConsumesThePrepa
     config.memtable_flush_bytes   = SIZE_MAX;
     tree                          = std::make_unique<Crowdbtree>(config);
     core                          = TreeCoreAccess::get(*tree);
-    // Fill both configured source windows with Handoff credit held. The
-    // final callback write starts soft backpressure without blocking itself.
+    // An unused reservation cannot block a flush that records actual allocations.
     auto pressure = detail::ResourceBudget::try_reserve(core->binding()->account(), detail::BudgetClass::kHandoff,
                                                         config.runtime_binding.limits.handoff_bytes);
     ASSERT_TRUE(pressure);
@@ -210,26 +203,16 @@ TEST_F(TreeCoreAdmitted, FullSourceAwaitsCompleteFlushCreditThenConsumesThePrepa
     ASSERT_TRUE(operation->arm().ok());
     const auto filled = fill_full_source();
     ASSERT_TRUE(filled.ok()) << filled.to_string();
-    ASSERT_EQ(core->capture()->sources->tables.back()->count(), 4096U);
     TestApplyCompletion completed;
     operation->start(129, &TestApplyCompletion::complete, &completed);
     operation.reset();
-    core->binding()->lane()->drain();
-    EXPECT_FALSE(completed.done.load(std::memory_order_acquire))
-        << completed.status.to_string() << " tables=" << core->capture()->sources->tables.size()
-        << " active=" << core->capture()->sources->tables.back()->count();
-    const auto waiting = core->publisher().work_metrics()->totals();
-    EXPECT_EQ(waiting[static_cast<size_t>(TreeStage::FlushAdmissionWait)].inflight, 1U);
-    EXPECT_EQ(waiting[static_cast<size_t>(TreeStage::BudgetWait)].inflight, 1U);
-    pressure.reset();
     completed.wait();
     ASSERT_TRUE(completed.status.ok()) << completed.status.to_string();
     EXPECT_EQ(tree->get_view("last").value().to_string(), "owned");
     EXPECT_EQ(core->contiguous_slot(), 129U);
     const auto terminal = core->publisher().work_metrics()->totals();
-    EXPECT_EQ(terminal[static_cast<size_t>(TreeStage::FlushAdmissionWait)].count, 1U);
-    EXPECT_EQ(terminal[static_cast<size_t>(TreeStage::BudgetWait)].count,
-              detail::FlushReserveBounds::categories.size());
+    EXPECT_EQ(terminal[static_cast<size_t>(TreeStage::FlushAdmissionWait)].count, 0U);
+    EXPECT_EQ(terminal[static_cast<size_t>(TreeStage::BudgetWait)].count, 0U);
     EXPECT_EQ(terminal[static_cast<size_t>(TreeStage::BudgetWait)].inflight, 0U);
 }
 
@@ -254,7 +237,7 @@ TEST_F(TreeCoreAdmitted, CompleteBatchMustFitTheGapSourceBeforeItCanBeProposed)
     EXPECT_EQ(core->contiguous_slot(), 0U);
 }
 
-TEST_F(TreeCoreAdmitted, FullOrdinaryCpuQueueCannotRejectAcceptedHandoff)
+TEST_F(TreeCoreAdmitted, FullOrdinaryCpuQueueCannotRejectAcceptedApply)
 {
     tree.reset();
     config.max_memtable_count     = 2;
@@ -270,7 +253,6 @@ TEST_F(TreeCoreAdmitted, FullOrdinaryCpuQueueCannotRejectAcceptedHandoff)
     ASSERT_TRUE(operation->arm().ok());
     const auto filled = fill_full_source();
     ASSERT_TRUE(filled.ok()) << filled.to_string();
-    ASSERT_EQ(core->capture()->sources->tables.back()->count(), 4096U);
     auto runtime = core->binding()->cpu();
     auto other   = std::make_shared<detail::FlushRuntime::Lane>(1024);
     std::vector<std::shared_ptr<detail::FlushRuntime::Progress>> occupied;

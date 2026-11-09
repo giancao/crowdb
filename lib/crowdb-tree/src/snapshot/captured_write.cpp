@@ -1,8 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "backend/local/scheduled_page_store.h"
-#include "btree/allocation_bound.h"
-#include "btree/writeback_metrics.h"
 #include "snapshot/captured_write_internal.h"
 
 namespace crowdb::tree
@@ -11,47 +9,15 @@ namespace
 {
 bool valid_write_limits(const CapturedWriteLimits &limits, const PageLoadBudget &budget)
 {
-    return limits.max_frames != 0 && !limits.frames.plan_only && limits.max_dependency_steps != 0 &&
-           limits.frames.encode.frame_bytes <= limits.write.max_frame_bytes &&
+    return !limits.frames.plan_only && limits.frames.encode.frame_bytes <= limits.write.max_frame_bytes &&
            PageWriteOperation::allocation_bound(limits.write).has_value() &&
-           static_cast<bool>(budget.reservation()) == static_cast<bool>(budget.io) &&
-           (!limits.frames.encode.metadata || limits.frames.encode.metadata == budget.reservation()) &&
-           (!budget.reservation() || ((budget.reservation()->category() == detail::BudgetClass::kRouting ||
-                                       budget.reservation()->category() == detail::BudgetClass::kReclaim) &&
-                                      budget.io->category() == detail::BudgetClass::kIo &&
-                                      budget.reservation()->account() == budget.io->account()));
+           (!limits.frames.encode.metadata || limits.frames.encode.metadata == budget.bytes) &&
+           (!budget.reservation() || budget.reservation()->category() == detail::BudgetClass::kRouting ||
+            budget.reservation()->category() == detail::BudgetClass::kReclaim) &&
+           (!budget.io || (budget.reservation() && budget.io->category() == detail::BudgetClass::kIo &&
+                           budget.reservation()->account() == budget.io->account()));
 }
 } // namespace
-
-std::optional<size_t> CapturedWriteOperation::allocation_bound(CapturedWriteLimits limits, size_t frame_count_upper,
-                                                               size_t dependency_entries,
-                                                               size_t reference_heads) noexcept
-{
-    using detail::shared_allocation_bound;
-    if (frame_count_upper > limits.max_frames || dependency_entries > limits.max_dependency_steps) {
-        return {};
-    }
-    // Ordered-map node linkage/alignment is covered independently of payload.
-    // Owner vectors count dependency uses, including shared raw chains. The
-    // three-pointer allowance covers old and new capacity during growth.
-    constexpr size_t node_overhead = 8 * sizeof(void *);
-    return detail::AllocationBound(
-               shared_allocation_bound<State>() + shared_allocation_bound<CapturedWriteOperation>() +
-               shared_allocation_bound<CapturedDurablePages>() + shared_allocation_bound<State::Reservation>())
-        .add_product(frame_count_upper,
-                     sizeof(CapturedDurablePages::Entry) + sizeof(State::ResidentEntry) + (2 * node_overhead) +
-                         shared_allocation_bound<State::Dependencies>() +
-                         shared_allocation_bound<OverflowBackingSet>() + shared_allocation_bound<BackingRef>() +
-                         shared_allocation_bound<StoredOverflowReferences>() +
-                         PageWriteOperation::retained_allocation_bound() + sizeof(OverflowBackingSet::Entry) +
-                         node_overhead + (3 * sizeof(std::shared_ptr<const void>)))
-        .add_product(dependency_entries, sizeof(OverflowBackingSet::Entry) + node_overhead +
-                                             (3 * sizeof(std::shared_ptr<const void>)) +
-                                             shared_allocation_bound<BackingRef>())
-        .add(WritebackMetrics::allocation_bound(frame_count_upper))
-        .add_product(reference_heads, sizeof(StoredOverflowReference))
-        .value();
-}
 
 Status CapturedWriteOperation::create(std::shared_ptr<const PublishedTreeState> captured,
                                       std::shared_ptr<PageLoader> loader, std::shared_ptr<AsyncPageStore> store,
@@ -67,7 +33,7 @@ Status CapturedWriteOperation::create(std::shared_ptr<const PublishedTreeState> 
         return Status::invalid_argument();
     }
     try {
-        limits.frames.encode.metadata = budget.reservation();
+        limits.frames.encode.metadata = budget.bytes;
         limits.frames.cpu_progress    = budget.cpu_progress;
         if (budget.work_metrics) {
             limits.frames.encode.work_metrics = budget.work_metrics;
@@ -79,7 +45,7 @@ Status CapturedWriteOperation::create(std::shared_ptr<const PublishedTreeState> 
         if (!status.ok()) {
             return status;
         }
-        auto pages          = detail::reserved_shared<CapturedDurablePages>(budget.reservation(), budget.reservation());
+        auto pages          = detail::reserved_shared<CapturedDurablePages>(budget.bytes, budget.bytes);
         pages->root_page_id = captured->root_page_id;
         pages->next_page_id = captured->next_page_id;
         pages->coverage     = captured->coverage;
@@ -110,13 +76,13 @@ Status CapturedWriteOperation::create(std::shared_ptr<CapturedFrameStream>      
         return Status::not_supported();
     }
     try {
-        limits.frames.encode.metadata = budget.reservation();
+        limits.frames.encode.metadata = budget.bytes;
         limits.frames.cpu_progress    = budget.cpu_progress;
         if (budget.work_metrics) {
             limits.frames.encode.work_metrics = budget.work_metrics;
             limits.frames.encode.cause        = budget.cause;
         }
-        auto state       = detail::reserved_shared<State>(budget.reservation(), budget.reservation());
+        auto state       = detail::reserved_shared<State>(budget.bytes, budget.bytes);
         state->store     = std::move(store);
         state->runtime   = std::move(runtime);
         state->lane      = std::move(lane);
@@ -126,7 +92,7 @@ Status CapturedWriteOperation::create(std::shared_ptr<CapturedFrameStream>      
         state->inherited = std::move(inherited);
         state->pages     = std::move(pages);
         state->stream    = std::move(stream);
-        *out = detail::reserved_construct<CapturedWriteOperation>(state->budget.reservation(), [&](auto *storage) {
+        *out             = detail::reserved_construct<CapturedWriteOperation>(state->budget.bytes, [&](auto *storage) {
             ::new (static_cast<void *>(storage)) CapturedWriteOperation(std::move(state));
         });
     }

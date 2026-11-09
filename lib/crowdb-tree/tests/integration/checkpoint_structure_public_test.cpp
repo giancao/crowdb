@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "btree/allocation_account.h"
 #include "btree/allocation_bound.h"
 #include "btree/tree_core_checkpoint_internal.h"
 #include "published_read_test_support.h"
@@ -83,7 +84,14 @@ struct TestCheckpointContinuation
         preparation->core    = &core;
         preparation->control = credit;
         preparation->options = checkpoint_detail::defaults(core);
-        auto finish          = credit->take_reserved(CheckpointOperation::finish_allocation_bound() + 512);
+        std::shared_ptr<AllocationAccount> ongoing;
+        auto                               work_status =
+            AllocationAccount::create_ongoing(core.binding()->account(), BudgetClass::kRouting, &ongoing);
+        if (!work_status.ok()) {
+            return work_status;
+        }
+        preparation->work_allocations = std::move(ongoing);
+        auto finish                   = credit->take_reserved(CheckpointOperation::finish_allocation_bound() + 512);
         if (!finish) {
             return Status::resource_exhausted();
         }
@@ -161,7 +169,7 @@ TEST(CheckpointContinuation, ConcurrentNewL0IsOutsideTheSingleCapturedFrontier)
     test.operation.reset();
     ASSERT_TRUE(test.tree.flush().ok());
     EXPECT_EQ(test.core.capture()->coverage, 2U);
-    ASSERT_TRUE(test.tree.snapshot().ok());
+    ASSERT_TRUE(test.tree.flush_with_persistent().ok());
     EXPECT_EQ(test.core.durable_coverage(), 2U);
 }
 
@@ -169,7 +177,7 @@ TEST(CheckpointContinuation, FailedStructureAdmissionPreservesThePreviousDurable
 {
     TestCheckpointContinuation test;
     ASSERT_TRUE(test.tree.apply(1, Batch{{{.key = "seed", .kind = OpKind::kPut, .value = "v"}}}).ok());
-    ASSERT_TRUE(test.tree.snapshot().ok());
+    ASSERT_TRUE(test.tree.flush_with_persistent().ok());
     const auto sequence = test.core.snapshot_sequence();
     ASSERT_TRUE(test.large_leaf().ok());
     size_t handoffs = 0;

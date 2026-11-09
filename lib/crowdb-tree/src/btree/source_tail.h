@@ -5,6 +5,8 @@
 #include "allocation_reservation.h"
 #include "crowdb-tree/memtable/memtable.h"
 
+#include <functional>
+
 namespace crowdb::tree
 {
 // A finite, independent source for a prepared split. Payloads retain their
@@ -88,8 +90,16 @@ class SourceTailDomain : public std::enable_shared_from_this<SourceTailDomain>
     {
         std::shared_ptr<Barrier>      owner;
         std::shared_ptr<Registration> registration;
-        std::atomic<bool>             ready{false};
-        void                          wait() const noexcept;
+        void                          on_ready(std::function<void()> complete) noexcept;
+
+      private:
+        friend class SourceTailDomain;
+        void signal() noexcept;
+
+        static constexpr uint8_t kReady   = 1;
+        static constexpr uint8_t kWaiting = 2;
+        std::atomic<uint8_t>     state_{0};
+        std::function<void()>    complete_;
     };
 
     explicit SourceTailDomain(std::shared_ptr<detail::AllocationReservation> metadata);

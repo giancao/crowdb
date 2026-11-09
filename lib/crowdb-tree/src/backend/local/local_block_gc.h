@@ -7,6 +7,8 @@
 
 namespace crowdb::tree
 {
+class ApplyDispatcher;
+
 struct LocalBlockGcLimits
 {
     size_t   max_blocks        = 64;
@@ -29,10 +31,22 @@ struct LocalBlockGcResult
 // The caller pre-admits metadata for the bounded pass. Partial progress remains
 // valid on failure; resumption starts at next_block without skipping a failure.
 [[nodiscard]] std::optional<size_t> local_block_gc_metadata_bound(LocalBlockGcLimits limits) noexcept;
+[[nodiscard]] size_t                local_block_gc_operation_bound() noexcept;
 // Memory backing pages are reclaimable without enabling legacy block compaction.
 [[nodiscard]] uint64_t local_block_gc_unit(const PageStore &store) noexcept;
 LocalBlockGcResult     collect_free_local_blocks(PageStore &store, ExtentLedger &ledger, uint64_t first_block,
-                                                 LocalBlockGcLimits                                    limits,
-                                                 const std::shared_ptr<detail::AllocationReservation> &metadata,
-                                                 const std::shared_ptr<AllocationBudget>              &backend = {});
+                                                 LocalBlockGcLimits                       limits,
+                                                 const std::shared_ptr<AllocationBudget> &metadata,
+                                                 const std::shared_ptr<AllocationBudget> &backend = {});
+
+// Accepted memory-backend cleanup resumes directly from ledger completion.
+// The completion owner keeps store and ledger alive until terminal delivery.
+void collect_free_memory_blocks(MemPageStore &store, std::shared_ptr<ExtentLedger> ledger, uint64_t first_block,
+                                LocalBlockGcLimits limits, const std::shared_ptr<AllocationBudget> &metadata,
+                                detail::InlineFunction<void(LocalBlockGcResult)> complete);
+void collect_free_file_blocks(BlockPageStore &store, std::shared_ptr<ExtentLedger> ledger, uint64_t first_block,
+                              LocalBlockGcLimits limits, const std::shared_ptr<AllocationBudget> &metadata,
+                              const std::shared_ptr<AllocationBudget> &backend, AsyncPageStore *asynchronous,
+                              const std::shared_ptr<ApplyDispatcher>          &legacy_progress,
+                              detail::InlineFunction<void(LocalBlockGcResult)> complete);
 } // namespace crowdb::tree

@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crowdb_tree_ffi::{Config, Crowdbtree, CtError, PageStore, TreeRuntime, TreeRuntimeOptions};
 
@@ -44,6 +45,42 @@ fn runtime_snapshot_preserves_cumulative_work_after_tree_close() {
     assert_eq!(runtime.snapshot().unwrap(), after);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_wait_can_be_canceled_while_a_tree_keeps_its_binding() {
+    let runtime = Arc::new(
+        TreeRuntime::new(TreeRuntimeOptions {
+            workers: 1,
+            backend_workers: 1,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let config = Config {
+        runtime: Some(runtime.clone()),
+        ..Config::default()
+    };
+    let tree = Crowdbtree::open(&config).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), runtime.shutdown())
+            .await
+            .is_err()
+    );
+    assert!(runtime.snapshot().unwrap().stopped);
+    assert_eq!(runtime.snapshot().unwrap().bindings, 1);
+    assert_eq!(Crowdbtree::open(&config).unwrap_err(), CtError::Unavailable);
+    let close = tree.begin_close().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (tree, first, second) = tokio::join!(close.wait(), runtime.shutdown(), runtime.shutdown());
+        assert_eq!((tree, first, second), (Ok(()), Ok(()), Ok(())));
+    })
+    .await
+    .unwrap();
+    let exited = runtime.snapshot().unwrap();
+    assert_eq!(exited.bindings, 0);
+    assert_eq!((exited.cpu.queued, exited.cpu.inflight), (0, 0));
+    assert_eq!((exited.backend.queued, exited.backend.inflight), (0, 0));
+}
+
 #[test]
 fn shared_runtime_opens_owned_core_and_survives_caller_handle_drop() {
     let runtime = Arc::new(TreeRuntime::new(TreeRuntimeOptions::default()).unwrap());
@@ -82,7 +119,7 @@ fn standalone_source_rebuilds_into_an_explicit_host() {
     assert!(stats.pages_rebuilt > 0);
     drop(source);
     assert_eq!(child.get(b"key").unwrap(), Some((1, b"value".to_vec())));
-    assert_eq!(child.snapshot_state().unwrap().1, 1);
+    assert_eq!(child.durable_state().unwrap().1, 1);
 }
 
 #[test]
@@ -108,8 +145,8 @@ fn standalone_binding_rejects_an_unfunded_open() {
 fn standalone_live_and_snapshot_rebuilds_honor_destination_binding() {
     let source = Crowdbtree::open(&Config::default()).unwrap();
     source.apply_put(1, b"key", b"value").unwrap();
-    let (generation, coverage) = source.snapshot_info().unwrap();
-    let snapshot = source.immutable_snapshot(generation, coverage).unwrap();
+    let (generation, coverage) = source.flush_with_persistent_info().unwrap();
+    let snapshot = source.read_only_view(generation, coverage).unwrap();
     let mut destination = Config {
         page_store: Some(Arc::new(PageStore::open_mem(1).unwrap())),
         ..Default::default()

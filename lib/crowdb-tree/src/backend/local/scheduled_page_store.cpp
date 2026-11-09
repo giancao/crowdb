@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "scheduled_page_store.h"
 
-#include "backend/chunk/chunk_write_queue.h"
+#include "backend/local/block_account.h"
 #include "btree/allocation_account.h"
 #include "btree/allocation_bound.h"
 #include "btree/tree_metrics.h"
@@ -13,40 +13,35 @@ namespace crowdb::tree
 {
 struct ScheduledPageStore::State
 {
-    PageStore                                     *sync  = nullptr;
-    AsyncPageStore                                *async = nullptr;
-    std::shared_ptr<const void>                    backend_owner;
-    std::shared_ptr<TreeRuntimeBinding>            binding;
-    std::shared_ptr<detail::FlushRuntime::Lane>    lane;
-    std::shared_ptr<detail::AllocationReservation> jobs;
-    std::shared_ptr<ChunkWriteQueue>               chunks;
-    std::atomic<size_t>                            active{0};
-
-    ~State()
-    {
-        if (jobs) {
-            jobs->seal();
-        }
-    }
+    PageStore                                  *sync  = nullptr;
+    AsyncPageStore                             *async = nullptr;
+    std::shared_ptr<const void>                 backend_owner;
+    std::shared_ptr<TreeRuntimeBinding>         binding;
+    std::shared_ptr<detail::FlushRuntime::Lane> lane;
+    std::shared_ptr<ApplyDispatcher>            fallback;
+    std::shared_ptr<AllocationBudget>           jobs;
+    std::shared_ptr<AllocationBudget>           backend_allocations;
+    std::shared_ptr<ChunkWriteQueue>            chunks;
 };
 
 struct ScheduledPageStore::Job
 {
-    std::shared_ptr<State>           state;
-    std::shared_ptr<Job>             queued_owner;
-    AsyncCompletion                  consumer;
-    detail::InlineFunction<Status()> step;
-    PageAddr                         address     = 0;
-    void                            *read        = nullptr;
-    const void                      *write       = nullptr;
-    size_t                           length      = 0;
-    PagePurpose                      purpose     = PagePurpose::kBtreePage;
-    size_t                           read_bytes  = 0;
-    size_t                           write_bytes = 0;
-    bool                             io_started  = false;
-    std::atomic<bool>                completed{false};
-    bool                             admitted = false;
-    ApplyDispatcher::Node            node{&Job::execute, this};
+    std::shared_ptr<State>                        state;
+    std::shared_ptr<Job>                          queued_owner;
+    AsyncCompletion                               consumer;
+    detail::InlineFunction<Status()>              step;
+    detail::InlineFunction<void(AsyncCompletion)> async_step;
+    PageAddr                                      address     = 0;
+    void                                         *read        = nullptr;
+    const void                                   *write       = nullptr;
+    size_t                                        length      = 0;
+    PagePurpose                                   purpose     = PagePurpose::kBtreePage;
+    size_t                                        read_bytes  = 0;
+    size_t                                        write_bytes = 0;
+    bool                                          io_started  = false;
+    std::atomic<bool>                             completed{false};
+    bool                                          admitted = false;
+    ApplyDispatcher::Node                         node{&Job::execute, this};
 
     ~Job()
     {
@@ -74,7 +69,6 @@ struct ScheduledPageStore::Job
                             status.ok() ? write_bytes : 1, consumer.cause);
             }
         }
-        state->active.fetch_sub(1, std::memory_order_acq_rel);
         try {
             consumer.complete(std::move(status));
         }
@@ -102,26 +96,33 @@ struct ScheduledPageStore::Job
                 job->finish(job->step());
                 return;
             }
-            if (job->state->async != nullptr) {
+            {
                 AsyncCompletion callback{.context     = job,
                                          .complete_fn = &completed_io,
                                          .owner       = self,
-                                         .allocations = job->consumer.allocations,
+                                         .allocations = job->consumer.allocations ? job->consumer.allocations
+                                                                                  : job->state->backend_allocations,
                                          .cause       = job->consumer.cause};
-                if (job->read != nullptr) {
-                    job->state->async->submit_read(job->address, job->read, job->length, std::move(callback));
+                if (job->async_step) {
+                    job->async_step(std::move(callback));
+                    return;
                 }
-                else if (job->write != nullptr) {
-                    job->state->async->submit_typed_write(job->purpose, job->address, job->write, job->length,
-                                                          std::move(callback));
-                }
-                else {
-                    auto status = job->state->async->submit_fsync(std::move(callback));
-                    if (!status.ok()) {
-                        job->finish(std::move(status));
+                if (job->state->async != nullptr) {
+                    if (job->read != nullptr) {
+                        job->state->async->submit_read(job->address, job->read, job->length, std::move(callback));
                     }
+                    else if (job->write != nullptr) {
+                        job->state->async->submit_typed_write(job->purpose, job->address, job->write, job->length,
+                                                              std::move(callback));
+                    }
+                    else {
+                        auto status = job->state->async->submit_fsync(std::move(callback));
+                        if (!status.ok()) {
+                            job->finish(std::move(status));
+                        }
+                    }
+                    return;
                 }
-                return;
             }
             if (job->state->sync == nullptr) {
                 job->finish(Status::unavailable("backend owner has no synchronous store"));
@@ -130,7 +131,8 @@ struct ScheduledPageStore::Job
             Status status;
             auto  *block = dynamic_cast<BlockPageStore *>(job->state->sync);
             if (block != nullptr) {
-                const auto &budget = job->consumer.allocations;
+                const auto &budget =
+                    job->consumer.allocations ? job->consumer.allocations : job->state->backend_allocations;
                 if (job->read != nullptr) {
                     status = block->read_at(job->address, static_cast<uint8_t *>(job->read), job->length, budget);
                 }
@@ -165,50 +167,44 @@ struct ScheduledPageStore::Job
     }
 };
 
-std::optional<size_t> ScheduledPageStore::allocation_bound(size_t operations) noexcept
+std::optional<size_t> ScheduledPageStore::allocation_bound() noexcept
 {
     using namespace detail;
-    return AllocationBound(shared_allocation_bound<State>() + shared_allocation_bound<ScheduledPageStore>() +
-                           shared_allocation_bound<AllocationReservation>())
-        .add_product(operations, shared_allocation_bound<Job>())
-        .add(2 * shared_allocation_bound<Job>())
-        .value();
+    return AllocationBound(shared_allocation_bound<State>() + shared_allocation_bound<ScheduledPageStore>()).value();
 }
 
 Status ScheduledPageStore::create(PageStore *sync, AsyncPageStore *async, std::shared_ptr<const void> backend_owner,
                                   std::shared_ptr<TreeRuntimeBinding>                   binding,
                                   const std::shared_ptr<detail::AllocationReservation> &metadata,
                                   std::shared_ptr<detail::FlushRuntime::Lane>           lane,
-                                  std::shared_ptr<AsyncPageStore>                      *out)
+                                  std::shared_ptr<AsyncPageStore> *out, std::shared_ptr<ApplyDispatcher> fallback,
+                                  MakeChunkWrites make_chunk_writes)
 try {
     if ((sync == nullptr && async == nullptr) || !binding || !metadata || !lane || out == nullptr || *out) {
         return Status::invalid_argument();
     }
-    const auto bound = detail::AllocationBound(detail::shared_allocation_bound<detail::AllocationReservation>())
-                           .add_product(binding->options().limits.io_operations, detail::shared_allocation_bound<Job>())
-                           .add(2 * detail::shared_allocation_bound<Job>())
-                           .value();
-    if (!bound) {
-        return Status::resource_exhausted();
-    }
-    auto credit = metadata->take_reserved(*bound);
-    if (!credit) {
-        return Status::resource_exhausted();
-    }
     auto state           = detail::reserved_shared<State>(metadata);
-    state->jobs          = detail::AllocationReservation::create(std::move(*credit));
     state->lane          = std::move(lane);
     state->sync          = sync;
     state->async         = async;
     state->backend_owner = std::move(backend_owner);
     state->binding       = std::move(binding);
+    state->fallback      = fallback ? std::move(fallback) : state->binding->backend_progress();
     std::shared_ptr<detail::AllocationAccount> actual;
-    auto status = detail::AllocationAccount::create(state->binding->account(), detail::BudgetClass::kRouting, &actual);
+    auto                                       status =
+        detail::AllocationAccount::create_ongoing(state->binding->account(), detail::BudgetClass::kRouting, &actual);
     if (!status.ok()) {
         return status;
     }
-    state->chunks = std::allocate_shared<ChunkWriteQueue>(MetadataAllocator<ChunkWriteQueue>(actual), actual);
-    *out          = detail::reserved_construct<ScheduledPageStore>(
+    status = detail::ongoing_backend_operation(sync, &state->backend_allocations);
+    if (!status.ok()) {
+        return status;
+    }
+    state->jobs = actual;
+    if (make_chunk_writes != nullptr) {
+        state->chunks = make_chunk_writes(actual);
+    }
+    *out = detail::reserved_construct<ScheduledPageStore>(
         metadata, [&](auto *storage) { ::new (static_cast<void *>(storage)) ScheduledPageStore(std::move(state)); });
     return Status::Ok();
 }
@@ -239,35 +235,29 @@ bool ScheduledPageStore::write_completion_is_reloadable() const noexcept
 
 Status ScheduledPageStore::submit(PageAddr address, void *read, const void *write, size_t length, PagePurpose purpose,
                                   AsyncCompletion complete, detail::InlineFunction<Status()> step, size_t read_bytes,
-                                  size_t write_bytes)
+                                  size_t write_bytes, detail::InlineFunction<void(AsyncCompletion)> async_step)
 try {
     if (!complete || (length != 0 && read == nullptr && write == nullptr) || address > UINT64_MAX - length) {
         return Status::invalid_argument();
     }
     using namespace detail;
-    auto job         = reserved_shared<Job>(state_->jobs);
-    job->state       = state_;
-    job->step        = std::move(step);
-    job->consumer    = std::move(complete);
-    job->address     = address;
-    job->read        = read;
-    job->write       = write;
-    job->length      = length;
-    job->read_bytes  = read != nullptr ? length : read_bytes;
-    job->write_bytes = write != nullptr ? length : write_bytes;
-    job->purpose     = purpose;
-    auto active      = state_->active.load(std::memory_order_relaxed);
-    do {
-        if (active >= state_->binding->options().limits.io_operations) {
-            record_work(state_->binding->work_metrics(), TreeWorkCounter::AdmissionRejected, 1, job->consumer.cause);
-            return Status::resource_exhausted();
-        }
-    } while (!state_->active.compare_exchange_weak(active, active + 1, std::memory_order_acq_rel));
+    auto job          = reserved_shared<Job>(state_->jobs);
+    job->state        = state_;
+    job->step         = std::move(step);
+    job->async_step   = std::move(async_step);
+    job->consumer     = std::move(complete);
+    job->address      = address;
+    job->read         = read;
+    job->write        = write;
+    job->length       = length;
+    job->read_bytes   = read != nullptr ? length : read_bytes;
+    job->write_bytes  = write != nullptr ? length : write_bytes;
+    job->purpose      = purpose;
     job->admitted     = true;
     job->queued_owner = job;
     auto status       = state_->binding->backend_cpu()->try_submit(state_->lane, &Job::execute, job.get());
     if (!status.ok()) {
-        state_->binding->backend_progress()->request(job->node, job);
+        state_->fallback->request(job->node, job);
     }
     return Status::Ok();
 }
@@ -322,15 +312,24 @@ Status ScheduledPageStore::submit_step(detail::InlineFunction<Status()> step, As
                   write_bytes);
 }
 
+Status ScheduledPageStore::submit_async_step(detail::InlineFunction<void(AsyncCompletion)> step,
+                                             AsyncCompletion complete, size_t read_bytes, size_t write_bytes)
+{
+    if (!step || (read_bytes != 0 && write_bytes != 0)) {
+        return Status::invalid_argument();
+    }
+    return submit(0, nullptr, nullptr, 0, PagePurpose::kBtreePage, std::move(complete), {}, read_bytes, write_bytes,
+                  std::move(step));
+}
+
 void ScheduledPageStore::cancel(uint64_t /*operation*/)
 {
     // Accepted operations keep their owners until real terminal or transport
     // disposal. Cancellation of a consumer never releases in-flight I/O early.
 }
 
-void ScheduledPageStore::submit_chunk(std::shared_ptr<ChunkPackBacking> backing, std::span<const uint8_t> input,
-                                      AsyncCompletion complete)
+ChunkWriteQueue *ScheduledPageStore::chunk_writes() const noexcept
 {
-    state_->chunks->submit(shared_from_this(), std::move(backing), input, std::move(complete));
+    return state_->chunks.get();
 }
 } // namespace crowdb::tree

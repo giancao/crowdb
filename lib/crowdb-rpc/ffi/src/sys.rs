@@ -10,6 +10,7 @@ use std::os::raw::{c_char, c_int, c_void};
 pub type crowdb_rpc_pool_t = *mut crowdb_rpc_pool_s;
 pub type crowdb_rpc_buffer_t = *mut crowdb_rpc_buffer_s;
 pub type crowdb_rpc_conn_t = *mut crowdb_rpc_conn_s;
+pub type crowdb_rpc_connect_t = *mut crowdb_rpc_connect_s;
 pub type crowdb_rpc_client_t = *mut crowdb_rpc_client_s;
 pub type crowdb_rpc_server_t = *mut crowdb_rpc_server_s;
 
@@ -23,6 +24,10 @@ pub struct crowdb_rpc_buffer_s {
 }
 #[repr(C)]
 pub struct crowdb_rpc_conn_s {
+    _private: [u8; 0],
+}
+#[repr(C)]
+pub struct crowdb_rpc_connect_s {
     _private: [u8; 0],
 }
 #[repr(C)]
@@ -359,6 +364,28 @@ extern "C" {
         addr: *const c_char,
         port: c_int,
     ) -> crowdb_rpc_conn_t;
+    pub fn crowdb_rpc_connect_begin(
+        server: crowdb_rpc_server_t,
+        addr: *const c_char,
+        port: c_int,
+        out_conn: *mut crowdb_rpc_conn_t,
+    ) -> crowdb_rpc_connect_t;
+    pub fn crowdb_rpc_connect_step(
+        attempt: crowdb_rpc_connect_t,
+        event: c_int,
+        fd: *mut c_int,
+        timeout_ms: *mut u32,
+        out_conn: *mut crowdb_rpc_conn_t,
+    ) -> c_int;
+    pub fn crowdb_rpc_connect_destroy(attempt: crowdb_rpc_connect_t);
+    pub fn crowdb_rpc_connect_requires_retirement(attempt: crowdb_rpc_connect_t) -> bool;
+    pub fn crowdb_rpc_connect_retire_step(attempt: crowdb_rpc_connect_t) -> c_int;
+    pub fn crowdb_rpc_server_schedule(
+        server: crowdb_rpc_server_t,
+        delay_ms: u32,
+        complete: unsafe extern "C" fn(*mut c_void, c_int),
+        context: *mut c_void,
+    ) -> u64;
 
     pub fn crowdb_rpc_conn_destroy(conn: crowdb_rpc_conn_t);
     pub fn crowdb_rpc_conn_is_open(conn: crowdb_rpc_conn_t) -> c_int;

@@ -106,6 +106,47 @@ TEST(FlushRuntime, ReservedProgressRerunsUseSealedStorageAndDrainReleasesLastCon
     EXPECT_EQ(credits.budget.snapshot().allocated[test_read::LoadCredits::kBytes], baseline);
 }
 
+TEST(FlushRuntime, AsyncProgressCloseKeepsRerunsAndFiresAfterLastContextOwner)
+{
+    FlushRuntime     runtime(1, 2);
+    auto             lane = std::make_shared<FlushRuntime::Lane>(2);
+    TestProgressGate gate;
+    ASSERT_TRUE(runtime.try_submit(lane, &TestProgressGate::wait, &gate).ok());
+    gate.entered.wait();
+
+    std::atomic<size_t> calls{0};
+    auto                owner = std::make_shared<TestProgressOwner>(calls);
+    owner->remaining          = 3;
+    const auto registered = runtime.reserve_progress(lane, &TestProgressOwner::run, owner.get(), {}, &owner->progress);
+    if (!registered.ok()) {
+        gate.release.count_down();
+        runtime.drain();
+        FAIL() << registered.to_string();
+    }
+    auto progress = owner->progress;
+
+    struct Close
+    {
+        std::weak_ptr<TestProgressOwner> owner;
+        bool                             completed = false;
+    } close{.owner = owner};
+
+    progress->request(owner);
+    owner.reset();
+    progress->close_async({.context = &close, .complete_fn = [](void *context, Status status) noexcept {
+                               auto &closed = *static_cast<Close *>(context);
+                               EXPECT_TRUE(status.ok());
+                               EXPECT_TRUE(closed.owner.expired());
+                               closed.completed = true;
+                           }});
+    EXPECT_FALSE(close.completed);
+    gate.release.count_down();
+    runtime.drain();
+    EXPECT_TRUE(close.completed);
+    EXPECT_EQ(calls.load(), 3U);
+    EXPECT_EQ(lane->queue_permits(), 0U);
+}
+
 TEST(FlushRuntime, FailedProgressRegistrationReturnsSlotAndQueueCredits)
 {
     test_read::LoadCredits                  credits;

@@ -242,8 +242,8 @@ void FlushOperation::State::begin()
             report.maintenance_status = Status::Ok();
             report.deferred_pages     = tree_view->stats.dirty_pages;
             report.phase              = FlushPhase::kComplete;
-            metadata->seal();
-            release_metadata->seal();
+            detail::seal_reservation(metadata);
+            detail::seal_reservation(release_metadata);
             complete_success.store(true, std::memory_order_release);
             finish();
             return;
@@ -271,7 +271,7 @@ void FlushOperation::State::begin()
         }
         source_pause.reset();
         captured_at_ns = tree_metrics_now_ns();
-        release_metadata->seal();
+        detail::seal_reservation(release_metadata);
         expected_catalog.reset();
         release_metadata.reset();
         release_request.reset();
@@ -340,9 +340,9 @@ void FlushOperation::State::finish() noexcept
         source_pause.reset();
         options.loader.reset();
         options.consolidation_loader.reset();
-        metadata->seal();
+        detail::seal_reservation(metadata);
         if (release_metadata) {
-            release_metadata->seal();
+            detail::seal_reservation(release_metadata);
         }
         reservations.seal();
     }

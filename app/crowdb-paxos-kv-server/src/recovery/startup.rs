@@ -115,7 +115,7 @@ pub fn store_crowdb_tree_path(data_root: &Path, store_id: u64, group_id: u64) ->
 /// # Errors
 ///
 /// Returns an I/O error if the parent directory cannot be created, or if
-/// `CrowdbTreeEngine::open` fails (e.g. a corrupt or unreadable file).
+/// the async Tree open fails.
 async fn open_crowdb_tree_engine(
     data_root: &Path,
     store_id: u64,
@@ -148,10 +148,17 @@ async fn open_crowdb_tree_engine(
         path = %path.display(),
         "opening crowdb-tree engine"
     );
-    // Open waits synchronously for recovery on the shared native runtime.
-    // This boot-time call runs once per group; subsequent reads, apply and
-    // maintenance use native asynchronous operation futures.
-    let engine = CrowdbTreeEngine::open(&opt).map_err(|e| {
+    let opened = if backend == CrowdbTreeBackend::Block {
+        let mut directory = tokio::fs::read_dir(&path).await?;
+        let mut names = Vec::new();
+        while let Some(entry) = directory.next_entry().await? {
+            names.push(entry.file_name());
+        }
+        CrowdbTreeEngine::open_block_from_names(&opt, &names).await
+    } else {
+        CrowdbTreeEngine::open_async(&opt).await
+    };
+    let engine = opened.map_err(|e| {
         io::Error::other(format!(
             "CrowdbTreeEngine::open({}) failed: {e:?}",
             path.display()
@@ -215,10 +222,19 @@ pub async fn create_group_with_wal_on_runtime(
     crowtree_backend: CrowdbTreeBackend,
     runtime: Arc<crowdb_tree_ffi::TreeRuntime>,
 ) -> io::Result<PxGroup> {
+    if !matches!(
+        crowtree_backend,
+        CrowdbTreeBackend::Block | CrowdbTreeBackend::MemBlock
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Paxos-KV Tree backend must be block or mem-block",
+        ));
+    }
     config
         .validate_tree_config()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    crate::mgmt::group_creation::check_restore(&config.config_root, store_id, group_id, replica_id)?;
+    crate::mgmt::group_creation::check_restore(&config.config_root, store_id, group_id, replica_id).await?;
     persist_creation_identity(&config.config_root, store_id, group_id, replica_id).await?;
     // Preserve the typed WAL tunables from the effective server config while
     // deriving the per-store root. Rebuilding a fresh `WalConfig` here would

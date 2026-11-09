@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/memory_budget.h"
 #include "stdexec_adapter.h"
 
@@ -44,6 +45,12 @@ class FlushRuntime
         // Host-thread boundary after producers have joined. Includes the
         // scheduler tail after user completion and context-owner release.
         void drain() noexcept;
+        // Producers are fenced by the caller. Serialize with other drain/close
+        // registrations. Does not close the lane.
+        void drain_async(AsyncCompletion complete) noexcept;
+        // Join registered progress before closing. The lane rejects new
+        // ordinary jobs and completes once its accepted jobs have exited.
+        void close_async(AsyncCompletion complete) noexcept;
 
         [[nodiscard]] size_t queue_permits() const noexcept
         {
@@ -52,9 +59,17 @@ class FlushRuntime
 
       private:
         friend class FlushRuntime;
-        size_t              limit_;
-        std::atomic<size_t> queued_{0};
-        std::atomic<size_t> jobs_{0};
+        static constexpr size_t kClosing = size_t{1} << ((sizeof(size_t) * 8) - 1);
+        static constexpr size_t kNotify  = kClosing >> 1;
+        static constexpr size_t kJobs    = ~(kClosing | kNotify);
+        bool                    try_start_job() noexcept;
+        void                    finish_job() noexcept;
+        void                    arm_drain(size_t flags, AsyncCompletion complete) noexcept;
+        void                    complete_drain() noexcept;
+        size_t                  limit_;
+        std::atomic<size_t>     queued_{0};
+        std::atomic<size_t>     jobs_{0};
+        AsyncCompletion         on_drained_;
     };
 
     using Task = void (*)(void *) noexcept;
@@ -69,6 +84,12 @@ class FlushRuntime
         // Host-thread only. Drain this registration without waiting for other
         // Trees. Producers must stop before drain can be used as a boundary.
         void drain() noexcept;
+        // External producers have joined. Internal requests can finish
+        // before the registration closes and completion is delivered.
+        void close_async(AsyncCompletion complete) noexcept;
+        // Fence racing producer requests and drain accepted jobs. The caller
+        // owns disposal of any work that has yet to enter this registration.
+        void stop_async(AsyncCompletion complete) noexcept;
         // Reject late requests, drain accepted work and return the fixed slot.
         // The closed handle may outlive the runtime. Do not call from its task.
         void close_and_drain() noexcept;
@@ -99,10 +120,15 @@ class FlushRuntime
     [[nodiscard]] static std::optional<size_t> allocation_bound(size_t workers, size_t queue_limit) noexcept;
     void                                       close() noexcept;
     void                                       drain() noexcept;
-    [[nodiscard]] Snapshot                     snapshot() const noexcept;
-    [[nodiscard]] size_t                       worker_count() const noexcept;
-    [[nodiscard]] size_t                       queue_permits() const noexcept;
-    [[nodiscard]] static bool                  on_worker_thread() noexcept;
+    // All progress registrations must already be detached. One host call.
+    void drain_async(AsyncCompletion complete) noexcept;
+    // Only the host calls this after the drain callback. Completion follows
+    // the last worker loop. Reaping remains with the external owner.
+    void                      stop_workers(AsyncCompletion complete) noexcept;
+    [[nodiscard]] Snapshot    snapshot() const noexcept;
+    [[nodiscard]] size_t      worker_count() const noexcept;
+    [[nodiscard]] size_t      queue_permits() const noexcept;
+    [[nodiscard]] static bool on_worker_thread() noexcept;
 
   private:
     struct State;

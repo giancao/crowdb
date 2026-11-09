@@ -272,8 +272,12 @@ async fn single_voter_with_prevote_enabled_becomes_leader() {
     target_os = "macos",
     ignore = "paused Tokio heartbeat scheduling is not reliable on macOS"
 )]
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn leader_heartbeat_tick_renews_lease() {
+    // Lease timestamps are encoded relative to a process-wide real clock.
+    // Initialize it before taking this test's independent paused clock.
+    let _ = crowdb_common::time::process_anchor();
+    tokio::time::pause();
     // Single-voter cluster: become_leader, then the heartbeat ticker
     // bootstraps + extends the lease without sending RPCs.
     let cfg = PxElectionConfig::for_tests();
@@ -415,9 +419,11 @@ fn xorshift_random_between_ms_stays_in_range() {
     }
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "current_thread")]
 async fn stalled_gap_repair_cannot_stop_the_leader_heartbeat_ticker() {
     use crowdb_paxos_kv::paxos::roles::{PxBallot, PxLogEntry};
+    let _ = crowdb_common::time::process_anchor();
+    tokio::time::pause();
     let cfg = PxElectionConfig::for_tests();
     let group = Arc::new(PxGroup::new(
         99,

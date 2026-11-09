@@ -42,7 +42,8 @@ bool FlushController::State::try_enter() noexcept
     if (closed.load(std::memory_order_acquire)) {
         return false;
     }
-    if (!preparing.test_and_set(std::memory_order_acquire)) {
+    uint8_t expected = 0;
+    if (preparing.compare_exchange_strong(expected, kPreparing, std::memory_order_acquire)) {
 #ifdef CROWDB_TREE_TEST_UTIL
         if (prepare_hook_for_tests != nullptr) {
             prepare_hook_for_tests(prepare_context_for_tests, true);
@@ -58,7 +59,7 @@ bool FlushController::State::try_enter() noexcept
 #endif
     // Covers the holder releasing just before this failed entrant registered.
     // Only an observed release is progress; uncontended planning is not.
-    if (!preparing.test(std::memory_order_acquire) && progress) {
+    if (preparing.load(std::memory_order_acquire) == 0 && progress) {
         progress->advance();
     }
     return false;
@@ -66,7 +67,20 @@ bool FlushController::State::try_enter() noexcept
 
 void FlushController::State::leave() noexcept
 {
-    preparing.clear(std::memory_order_release);
+    auto value = preparing.load(std::memory_order_acquire);
+    for (;;) {
+        if ((value & kRelease) != 0) {
+            preparing.fetch_and(kPreparing, std::memory_order_acq_rel);
+            pending.reset();
+            pause.reset();
+            value = preparing.load(std::memory_order_acquire);
+        }
+        // Release requests and the busy bit share one modification order. A
+        // request either wins this CAS or acquires the now-idle owner itself.
+        else if (preparing.compare_exchange_weak(value, 0, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            break;
+        }
+    }
     if (preparing_waiter.exchange(false, std::memory_order_acq_rel) && progress) {
         progress->advance();
     }
@@ -109,8 +123,8 @@ FlushController::~FlushController()
     close();
 }
 
-Status FlushController::prepare(std::shared_ptr<detail::AllocationReservation> metadata,
-                                std::shared_ptr<FlushOperation> *out, std::optional<uint64_t> expected_commit_seq)
+Status FlushController::prepare(std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<FlushOperation> *out,
+                                std::optional<uint64_t> expected_commit_seq)
 {
     return prepare_impl(std::move(metadata), out, expected_commit_seq, nullptr);
 }
@@ -126,8 +140,8 @@ Status FlushController::prepare(const FlushPreparationOptions &preparation, std:
     return prepare_impl({}, out, {}, &preparation, nullptr, nullptr, blocked);
 }
 
-Status FlushController::prepare_impl(std::shared_ptr<detail::AllocationReservation> metadata,
-                                     std::shared_ptr<FlushOperation> *out, std::optional<uint64_t> expected_commit_seq,
+Status FlushController::prepare_impl(std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<FlushOperation> *out,
+                                     std::optional<uint64_t>        expected_commit_seq,
                                      const FlushPreparationOptions *preparation, const FlushReservePlan *plan,
                                      detail::FlushCredits *credits, bool *blocked)
 {
@@ -254,12 +268,17 @@ Status FlushController::prepare_impl(std::shared_ptr<detail::AllocationReservati
                                               .batch      = operation->admission_owner,
                                               .range      = UINT64_MAX - 3,
                                               .sequence   = 0});
-        auto release_credit = operation->metadata->take_reserved(PublicationCoordinator::empty_commit_reserve_bytes());
-        if (!release_credit) {
-            return Status::resource_exhausted("flush needs independent admission release credit");
+        if (const auto prepaid = std::dynamic_pointer_cast<detail::AllocationReservation>(operation->metadata)) {
+            auto release_credit = prepaid->take_reserved(PublicationCoordinator::empty_commit_reserve_bytes());
+            if (!release_credit) {
+                return Status::resource_exhausted("flush needs independent admission release credit");
+            }
+            operation->release_metadata =
+                detail::reserved_shared<detail::AllocationReservation>(operation->metadata, std::move(*release_credit));
         }
-        operation->release_metadata =
-            detail::reserved_shared<detail::AllocationReservation>(operation->metadata, std::move(*release_credit));
+        else {
+            operation->release_metadata = operation->metadata;
+        }
         operation->release_request =
             detail::reserved_shared<PublicationRequest>(operation->metadata, operation->metadata);
         operation->release_request->transaction = {
@@ -295,8 +314,10 @@ void FlushController::close() noexcept
 
 void FlushController::release_pending() noexcept
 {
-    state_->pending.reset();
-    state_->pause.reset();
+    const auto previous = state_->preparing.fetch_or(State::kRelease | State::kPreparing, std::memory_order_acq_rel);
+    if ((previous & State::kPreparing) == 0) {
+        state_->leave();
+    }
 }
 
 } // namespace crowdb::tree

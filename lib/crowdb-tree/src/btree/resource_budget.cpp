@@ -341,9 +341,44 @@ void ResourceBudget::Account::set_work_metrics(const std::shared_ptr<TreeWorkMet
 void ResourceBudget::Account::drain_retirements() const noexcept
 {
     auto pending = retirement_pending_.load(std::memory_order_acquire);
-    while (pending != 0) {
+    while ((pending & ~kRetirementNotify) != 0) {
         retirement_pending_.wait(pending, std::memory_order_acquire);
         pending = retirement_pending_.load(std::memory_order_acquire);
+    }
+}
+
+void ResourceBudget::Account::start_retirement() noexcept
+{
+    retirement_pending_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ResourceBudget::Account::finish_retirement() const noexcept
+{
+    const auto previous = retirement_pending_.fetch_sub(1, std::memory_order_acq_rel);
+    if ((previous & ~kRetirementNotify) == 1) {
+        retirement_pending_.notify_all();
+        if ((previous & kRetirementNotify) != 0) {
+            complete_retirement_drain();
+        }
+    }
+}
+
+void ResourceBudget::Account::when_retirements_drained(AsyncCompletion complete) const noexcept
+{
+    on_retirements_drained_ = std::move(complete);
+    const auto previous     = retirement_pending_.fetch_or(kRetirementNotify, std::memory_order_acq_rel);
+    assert((previous & kRetirementNotify) == 0);
+    if (previous == 0) {
+        complete_retirement_drain();
+    }
+}
+
+void ResourceBudget::Account::complete_retirement_drain() const noexcept
+{
+    auto armed = kRetirementNotify;
+    if (retirement_pending_.compare_exchange_strong(armed, 0, std::memory_order_acq_rel)) {
+        auto done = std::move(on_retirements_drained_);
+        done.complete(Status::Ok());
     }
 }
 
@@ -750,8 +785,8 @@ ResourceBudget::ResourceBudget(Limits limits, size_t max_waiters_per_class,
     state_ = std::allocate_shared<State>(MetadataAllocator<State>(bootstrap), limits, max_waiters_per_class, bootstrap);
 }
 
-bool ResourceBudget::claim_allocation(const std::shared_ptr<Account> &account, BudgetClass category,
-                                      size_t bytes) noexcept
+bool ResourceBudget::claim_allocation(const std::shared_ptr<Account> &account, BudgetClass category, size_t bytes,
+                                      bool ongoing) noexcept
 {
     const auto index = static_cast<size_t>(category);
     if (!account || category == BudgetClass::kIo || index >= kClasses) {
@@ -760,11 +795,13 @@ bool ResourceBudget::claim_allocation(const std::shared_ptr<Account> &account, B
     auto   state = account->state_;
     size_t tree  = 0;
     size_t host  = 0;
-    if (!reserve_amount(account->memory_allocated_, memory_ceiling(account->memory_limit_), bytes, &tree)) {
+    if (!reserve_amount(account->memory_allocated_, ongoing ? SIZE_MAX : memory_ceiling(account->memory_limit_), bytes,
+                        &tree)) {
         state->denied(*account, index, false);
         return false;
     }
-    if (!reserve_amount(state->memory_allocated, memory_ceiling(state->memory_limit_bytes), bytes, &host)) {
+    if (!reserve_amount(state->memory_allocated, ongoing ? SIZE_MAX : memory_ceiling(state->memory_limit_bytes), bytes,
+                        &host)) {
         account->memory_allocated_.fetch_sub(bytes, std::memory_order_relaxed);
         state->denied(*account, index, true);
         return false;

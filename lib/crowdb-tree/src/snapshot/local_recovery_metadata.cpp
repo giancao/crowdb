@@ -13,7 +13,7 @@ void LocalRecoveryOperation::State::next_anchor()
         stage   = Stage::Activated;
         waiting = true;
         event_ready.store(false, std::memory_order_release);
-        auto status = ledger->activate(budget.reservation(), [self = shared_from_this()](ExtentLedgerResult result) {
+        auto status = ledger->activate(budget.bytes, [self = shared_from_this()](ExtentLedgerResult result) {
             self->event(std::move(result.status));
         });
         if (!status.ok()) {
@@ -46,9 +46,9 @@ void LocalRecoveryOperation::State::anchor_read()
         finish(Status::corruption());
         return;
     }
-    image               = detail::reserved_shared<ProtectedCheckpoint>(budget.reservation(), budget.reservation());
+    image               = detail::reserved_shared<ProtectedCheckpoint>(budget.bytes, budget.bytes);
     image->anchor       = anchor;
-    pages               = detail::reserved_shared<CapturedDurablePages>(budget.reservation(), budget.reservation());
+    pages               = detail::reserved_shared<CapturedDurablePages>(budget.bytes, budget.bytes);
     pages->root_page_id = anchor.root_page_id;
     pages->next_page_id = anchor.next_page_id;
     pages->coverage     = anchor.last_applied_slot;
@@ -131,12 +131,6 @@ void LocalRecoveryOperation::State::segment_read()
         finish(Status::corruption());
         return;
     }
-    if (limits.accept_legacy_chunk_refs && std::ranges::any_of(words, slot_word::is_page_ref)) {
-        // Preserve the old anchor's extent, but do not reuse its legacy slot
-        // encoding as an ordinary byte-location segment.
-        image->metadata->extents.push_back(std::move(image->metadata->segments.back().second));
-        image->metadata->segments.pop_back();
-    }
     word_index = 0;
     stage      = Stage::PageExtent;
     wake();
@@ -153,9 +147,8 @@ void LocalRecoveryOperation::State::page_extent()
         wake();
         return;
     }
-    const auto word       = words[word_index];
-    const bool legacy_ref = limits.accept_legacy_chunk_refs && slot_word::is_page_ref(word);
-    if (!slot_word::is_byte_location(word) && !legacy_ref) {
+    const auto word = words[word_index];
+    if (!slot_word::is_unloaded(word)) {
         finish(Status::not_supported());
         return;
     }
@@ -164,8 +157,8 @@ void LocalRecoveryOperation::State::page_extent()
         finish(pid >= pages->next_page_id ? Status::corruption() : Status::resource_exhausted());
         return;
     }
-    const auto iu_index = legacy_ref ? slot_word::page_ref_ordinal(word) : slot_word::unloaded_iu_index(word);
-    const auto iu_count = legacy_ref ? slot_word::page_ref_iu_count(word) : slot_word::unloaded_iu_count(word);
+    const auto iu_index = slot_word::unloaded_iu_index(word);
+    const auto iu_count = slot_word::unloaded_iu_count(word);
     if (iu_index > UINT64_MAX / domain.iu_size) {
         finish(Status::corruption());
         return;
@@ -181,7 +174,7 @@ void LocalRecoveryOperation::State::page_extent()
 
 void LocalRecoveryOperation::State::page_protected()
 {
-    auto backing              = detail::reserved_shared<BackingRef>(budget.reservation());
+    auto backing              = detail::reserved_shared<BackingRef>(budget.bytes);
     backing->backend_id       = recovered.backend_id;
     backing->generation       = recovered.generation;
     backing->content_id       = recovered.identity;

@@ -7,6 +7,6 @@
 namespace crowdb::tree
 {
 Status capture_stored_overflow(const LeafFrameView &leaf, size_t max_references,
-                               const std::shared_ptr<detail::AllocationReservation> &metadata,
-                               std::shared_ptr<const StoredOverflowReferences>      *out);
+                               const std::shared_ptr<AllocationBudget>         &metadata,
+                               std::shared_ptr<const StoredOverflowReferences> *out);
 } // namespace crowdb::tree

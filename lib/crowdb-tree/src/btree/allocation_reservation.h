@@ -59,11 +59,9 @@ class AllocationReservation : public AllocationBudget
 
     [[nodiscard]] RetirementCompletion retirement_started() noexcept override
     {
-        account_->retirement_pending_.fetch_add(1, std::memory_order_acq_rel);
+        account_->start_retirement();
         return {.owner = account_, .finish = [](const void *raw) noexcept {
-                    const auto &account = *static_cast<const ResourceBudget::Account *>(raw);
-                    account.retirement_pending_.fetch_sub(1, std::memory_order_acq_rel);
-                    account.retirement_pending_.notify_all();
+                    static_cast<const ResourceBudget::Account *>(raw)->finish_retirement();
                 }};
     }
 
@@ -85,6 +83,13 @@ class AllocationReservation : public AllocationBudget
     std::atomic<size_t>                      available_;
     std::shared_ptr<AllocationReservation>   parent_;
 };
+
+inline void seal_reservation(const std::shared_ptr<AllocationBudget> &budget) noexcept
+{
+    if (const auto reservation = std::dynamic_pointer_cast<AllocationReservation>(budget)) {
+        reservation->seal();
+    }
+}
 
 template <class T, AllocationKind Kind = AllocationKind::kMetadata>
 using ReservationAllocator = BudgetAllocator<T, AllocationBudget, Kind>;

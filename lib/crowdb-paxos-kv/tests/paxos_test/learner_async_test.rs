@@ -65,8 +65,8 @@ async fn engine_get_resolves_correctly_across_both_ready_and_pending() {
     // guard in `kv/crowdb_tree_engine_test.rs` for the isolated version of
     // this same property).
     handle.flush().expect("flush");
-    handle.snapshot().expect("snapshot");
-    // Checkpoint installs reloadable bases without retaining resident frames.
+    handle.flush_with_persistent().expect("flush with persistent");
+    // Flush with persistent installs reloadable bases without retaining resident frames.
     assert_eq!(learner.engine_get(b"k").await, Some((1, b"v".to_vec())));
     let evicted = handle.evict_clean_leaves(0);
     assert!(

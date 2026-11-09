@@ -4,6 +4,9 @@
 #include "crowdb-common/crc32c.h"
 #include "crowdb-tree/snapshot/snapshot_io.h"
 #include "local_checkpoint_test_support.h"
+#include "snapshot/published_byte_export.h"
+
+#include <future>
 
 namespace crowdb::tree
 {
@@ -125,7 +128,7 @@ TEST(PublishedByteExport, NativeColdOverflowUsesTheSamePidLeaseForBothPasses)
     ASSERT_TRUE(opened.ok()) << opened.to_string();
     const std::string value(14000, 'n');
     ASSERT_TRUE(test.tree->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = value}}}).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     std::unique_ptr<SnapshotExport> exporter;
     auto status = snapshot_export_begin(*test.tree, snapshot_format::kNative, 4093, &exporter);
     ASSERT_TRUE(status.ok()) << status.to_string();
@@ -148,6 +151,118 @@ TEST(PublishedByteExport, NativeColdOverflowUsesTheSamePidLeaseForBothPasses)
     EXPECT_EQ(slot, 1U);
     std::string restored;
     ASSERT_TRUE(copy.get("a", &slot, &restored));
+    EXPECT_EQ(restored, value);
+}
+
+TEST(PublishedByteExport, AsyncPreflightAndOutputReleaseWorkersWhileReadingColdPages)
+{
+    Config config;
+    ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
+    auto store              = std::make_shared<test_write::TestCheckpointStore>();
+    store->device           = std::make_shared<MemPageStore>(4096);
+    config.page_store       = store->device.get();
+    config.backend_owner    = store;
+    config.frame_bytes      = 4096;
+    config.max_inline_value = 64;
+    std::unique_ptr<Crowdbtree> tree;
+    ASSERT_TRUE(Crowdbtree::open(config, &tree).ok());
+    const std::string value(14000, 'v');
+    ASSERT_TRUE(tree->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = value}}}).ok());
+    ASSERT_TRUE(tree->flush_with_persistent().ok());
+    tree.reset();
+    config.async_page_store = store.get();
+    ASSERT_TRUE(Crowdbtree::open(config, &tree).ok());
+    std::shared_ptr<PublishedReadViewContext> view;
+    ASSERT_TRUE(TreeCoreAccess::get(*tree)->capture_read_only_view(&view).ok());
+    auto binding = view->binding();
+
+    using Deferred    = std::promise<std::function<void()>>;
+    auto pauses       = std::make_shared<std::array<Deferred, 2>>();
+    auto preflight_io = (*pauses)[0].get_future();
+    auto output_io    = (*pauses)[1].get_future();
+    auto armed        = std::make_shared<std::atomic<unsigned>>(1);
+    store->defer_read = [pauses, armed, device = store->device](PageAddr at, void *out, size_t len,
+                                                                AsyncCompletion &done) {
+        const auto phase = armed->exchange(0);
+        if (phase == 0) {
+            return false;
+        }
+        (*pauses)[phase - 1].set_value([at, out, len, done = std::move(done), device] {
+            done.complete(device->read_at(at, static_cast<uint8_t *>(out), len));
+        });
+        return true;
+    };
+    auto check_progress = [&](const std::shared_ptr<ApplyDispatcher> &dispatcher) {
+        struct Marker
+        {
+            std::promise<void>    done;
+            ApplyDispatcher::Node node{[](void *context) noexcept { static_cast<Marker *>(context)->done.set_value(); },
+                                       this};
+        };
+        auto marker = std::make_shared<Marker>();
+        auto done   = marker->done.get_future();
+        dispatcher->request(marker->node, marker);
+        EXPECT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    };
+
+    using OpenResult = std::pair<Status, std::shared_ptr<PublishedByteExport>>;
+    auto opened      = std::make_shared<std::promise<OpenResult>>();
+    auto open_result = opened->get_future();
+    ASSERT_TRUE(PublishedByteExport::create_portable_async(
+                    std::move(view), 2049,
+                    [opened](Status status, std::shared_ptr<PublishedByteExport> stream) {
+                        opened->set_value({std::move(status), std::move(stream)});
+                    })
+                    .ok());
+    ASSERT_EQ(preflight_io.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(open_result.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    check_progress(binding->view_cpu_progress());
+    check_progress(binding->view_backend_progress());
+    tree.reset();
+    preflight_io.get()();
+    ASSERT_EQ(open_result.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    auto [status, stream] = open_result.get();
+    ASSERT_TRUE(status.ok()) << status.to_string();
+    ASSERT_TRUE(stream);
+    EXPECT_EQ(stream->info().slot, 1U);
+
+    std::string wire;
+    bool        done = false;
+    armed->store(2);
+    while (!done) {
+        using ReadResult = std::tuple<Status, SnapshotChunk, bool>;
+        auto completed   = std::make_shared<std::promise<ReadResult>>();
+        auto result      = completed->get_future();
+        ASSERT_TRUE(stream
+                        ->next_async([completed](Status read, SnapshotChunk chunk, bool end) {
+                            completed->set_value({std::move(read), std::move(chunk), end});
+                        })
+                        .ok());
+        if (wire.empty()) {
+            ASSERT_EQ(output_io.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+            EXPECT_EQ(result.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+            EXPECT_EQ(stream->next_async([](Status, SnapshotChunk, bool) { ADD_FAILURE(); }).code(),
+                      Code::kUnavailable);
+            check_progress(binding->view_cpu_progress());
+            check_progress(binding->view_backend_progress());
+            output_io.get()();
+        }
+        ASSERT_EQ(result.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+        auto [read, chunk, end] = result.get();
+        ASSERT_TRUE(read.ok()) << read.to_string();
+        wire.append(reinterpret_cast<const char *>(chunk.bytes.data()), chunk.bytes.size());
+        done = end;
+    }
+    EXPECT_EQ(wire.size(), stream->info().total_bytes);
+    EXPECT_EQ(crowdb::common::crc32c(reinterpret_cast<const uint8_t *>(wire.data()), wire.size() - 4),
+              stream->info().final_crc);
+    Crowdbtree     target(Config{});
+    SnapshotImport importer(target);
+    ASSERT_TRUE(importer.feed(wire).ok());
+    ASSERT_TRUE(importer.finish(nullptr).ok());
+    std::string restored;
+    uint64_t    slot = 0;
+    ASSERT_TRUE(target.get("a", &slot, &restored));
     EXPECT_EQ(restored, value);
 }
 

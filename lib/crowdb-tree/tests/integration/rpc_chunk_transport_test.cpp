@@ -14,13 +14,28 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 namespace crowdb::tree::detail
 {
 namespace
 {
+
+bool await_route_counts(const TestChunkRouteFixture &fixture, uint32_t leases, uint32_t releases)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    // The RPC reply is observable while its callback still owns the route.
+    while (fixture.leases.load() != leases || fixture.releases.load() != releases) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
 
 using crowdb::chunkdb::proto::CreateFBAllocateChunkResponse;
 using crowdb::chunkdb::proto::CreateFBChunk;
@@ -77,7 +92,7 @@ extern "C" void handle_allocate(uint64_t request_id, uint64_t /*unused*/, uint16
         return;
     }
     const auto *request = flatbuffers::GetRoot<FBAllocateChunkRequest>(control);
-    state->request_valid.store(request->chunk_id() == nullptr && request->write_granularity() == 1024U &&
+    state->request_valid.store(request->chunk_id() != nullptr && request->write_granularity() == 1024U &&
                                    request->strip_count() == 4 && request->strip_type() == FBStripType_Mirror &&
                                    request->copy_count() == 3 &&
                                    (request->chunk_type() == FBChunkType_BtreePage ||
@@ -122,10 +137,10 @@ extern "C" void handle_disk_read(uint64_t request_id, uint64_t /*unused*/, uint1
     }
     const auto                    *request = flatbuffers::GetRoot<FBDiskReadRequest>(control);
     flatbuffers::FlatBufferBuilder builder;
-    const bool                     error = state->read_error.load(std::memory_order_acquire);
-    const auto response = CreateFBDiskReadResponse(builder, request_id, 0,
-                                                   error ? crowdb::diskio::proto::FBDiskIoRetCode_IoError
-                                                         : crowdb::diskio::proto::FBDiskIoRetCode_Success);
+    const bool                     error    = state->read_error.load(std::memory_order_acquire);
+    const auto                     response = CreateFBDiskReadResponse(
+        builder, request_id, 0,
+        error ? crowdb::diskio::proto::FBDiskIoRetCode_IoError : crowdb::diskio::proto::FBDiskIoRetCode_Success, true);
     builder.Finish(response);
     const std::array<uint8_t, 4> data{1, 2, 3, 4};
     static_cast<void>(crowdb_rpc_server_submit_response(
@@ -153,7 +168,7 @@ extern "C" void handle_disk_write(uint64_t request_id, uint64_t /*unused*/, uint
     state->write_ordering_zone_offset.store(request->ordering_zone_offset(), std::memory_order_release);
     flatbuffers::FlatBufferBuilder builder;
     const auto                     response =
-        CreateFBDiskWriteResponse(builder, request_id, 0, crowdb::diskio::proto::FBDiskIoRetCode_Success);
+        CreateFBDiskWriteResponse(builder, request_id, 0, crowdb::diskio::proto::FBDiskIoRetCode_Success, true);
     builder.Finish(response);
     static_cast<void>(crowdb_rpc_server_submit_response(state->server, connection, builder.GetBufferPointer(),
                                                         builder.GetSize(), nullptr, 0, FBMsgType_EDiskWriteResponse,
@@ -161,30 +176,17 @@ extern "C" void handle_disk_write(uint64_t request_id, uint64_t /*unused*/, uint
     crowdb_rpc_frame_release(frame);
 }
 
-struct AsyncWriteResult
-{
-    std::atomic<bool> done{false};
-    Status            status;
-};
-
-void complete_async_write(void *context, Status status)
-{
-    auto *result   = static_cast<AsyncWriteResult *>(context);
-    result->status = std::move(status);
-    result->done.store(true, std::memory_order_release);
-    result->done.notify_one();
-}
-
 TEST(RpcChunkTransport, RejectsWriteWithoutLocalLivenessAuthority)
 {
     RpcChunkTransport            transport({});
     const std::array<uint8_t, 1> data{0};
-    const Status                 status = transport.write_mirror(ChunkId(1, 2), 0, 0, data.data(), data.size());
+    const Status                 status = await_chunk_rpc<&RpcChunkTransport::submit_write_fixed_mirror>(
+        transport, ChunkId(1, 2), 0, 0, data.data(), data.size(), ChunkIoContext{.created_ms = 1});
     EXPECT_FALSE(status.ok());
     EXPECT_EQ(status.code(), Code::kUnavailable);
 }
 
-TEST(RpcChunkTransport, RequestsSmallMirrorAllocationAndPreserves128BitChunkId)
+TEST(RpcChunkTransport, FixedAllocationPreserves128BitChunkIdAndMirrorOffsets)
 {
     crowdb_rpc_pool_t   pool   = crowdb_rpc_pool_create(128);
     crowdb_rpc_server_t server = crowdb_rpc_server_create(pool);
@@ -220,42 +222,49 @@ TEST(RpcChunkTransport, RequestsSmallMirrorAllocationAndPreserves128BitChunkId)
         .chunkdb_resolver     = {},
         .disk_resolver        = {},
     };
-    RpcChunkTransport transport(options);
-    ChunkId           allocated;
-    ASSERT_TRUE(
-        transport.allocate_mirror_chunk(256U * 1024U * 1024U, 17, &allocated, crowdb::tree::PagePurpose::kBtreePage)
-            .ok());
-    EXPECT_TRUE(handler.request_valid.load(std::memory_order_acquire));
-    EXPECT_EQ(allocated, ChunkId(0x0200'0000'0000'0042ULL, 0x1234));
-    std::array<uint8_t, 4> read{};
-    ASSERT_TRUE(transport.read_mirror(allocated, 0, 0, read.data(), read.size()).ok());
-    EXPECT_EQ(read, (std::array<uint8_t, 4>{1, 2, 3, 4}));
-    handler.read_error.store(true, std::memory_order_release);
-    EXPECT_EQ(transport.read_mirror(allocated, 0, 0, read.data(), read.size()).code(), Code::kInternal);
-    AsyncWriteResult             write_result;
-    const std::array<uint8_t, 4> write{5, 6, 7, 8};
-    constexpr uint64_t           kSegmentBase = 4096ULL * 256U * 1024U * 1024U;
-    ASSERT_TRUE(transport.write_mirror(allocated, 1, 65531, write.data(), write.size()).ok());
-    EXPECT_EQ(handler.write_zone_offset.load(std::memory_order_acquire), kSegmentBase + 65531);
-    EXPECT_EQ(handler.write_ordering_zone_offset.load(std::memory_order_acquire), kSegmentBase);
-    transport.submit_write_mirror(allocated, 1, 65535, write.data(), write.size(),
-                                  {.complete_fn = &complete_async_write, .context = &write_result});
-    write_result.done.wait(false, std::memory_order_acquire);
-    EXPECT_TRUE(write_result.status.ok()) << write_result.status.to_string();
-    EXPECT_EQ(handler.write_zone_offset.load(std::memory_order_acquire), kSegmentBase + 65535);
-    EXPECT_EQ(handler.write_ordering_zone_offset.load(std::memory_order_acquire), kSegmentBase);
+    {
+        RpcChunkTransport    transport(options);
+        const ChunkId        allocated(0x0200'0000'0000'0042ULL, 0x1234);
+        const ChunkIoContext context{.created_ms = 1};
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(
+                        transport, allocated, 4U * 1024U * 1024U, 17, PagePurpose::kBtreePage)
+                        .ok());
+        EXPECT_TRUE(handler.request_valid.load(std::memory_order_acquire));
+        std::array<uint8_t, 4> read{};
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_read_fixed_mirror>(transport, allocated, 0, 0,
+                                                                                  read.data(), read.size(), context)
+                        .ok());
+        EXPECT_EQ(read, (std::array<uint8_t, 4>{1, 2, 3, 4}));
+        handler.read_error.store(true, std::memory_order_release);
+        EXPECT_EQ(await_chunk_rpc<&RpcChunkTransport::submit_read_fixed_mirror>(transport, allocated, 0, 0, read.data(),
+                                                                                read.size(), context)
+                      .code(),
+                  Code::kInternal);
+        const std::array<uint8_t, 4> write{5, 6, 7, 8};
+        constexpr uint64_t           kSegmentBase = 4096ULL * 256U * 1024U * 1024U;
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_write_fixed_mirror>(transport, allocated, 1, 65531,
+                                                                                   write.data(), write.size(), context)
+                        .ok());
+        EXPECT_EQ(handler.write_zone_offset.load(std::memory_order_acquire), kSegmentBase + 65531);
+        EXPECT_EQ(handler.write_ordering_zone_offset.load(std::memory_order_acquire), kSegmentBase);
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_write_fixed_mirror>(transport, allocated, 1, 65535,
+                                                                                   write.data(), write.size(), context)
+                        .ok());
+        EXPECT_EQ(handler.write_zone_offset.load(std::memory_order_acquire), kSegmentBase + 65535);
+        EXPECT_EQ(handler.write_ordering_zone_offset.load(std::memory_order_acquire), kSegmentBase);
 
-    ChunkId mapping;
-    ASSERT_TRUE(
-        transport.allocate_mirror_chunk(256U * 1024U * 1024U, 17, &mapping, crowdb::tree::PagePurpose::kPageIndex)
-            .ok());
-    EXPECT_TRUE(handler.request_valid.load(std::memory_order_acquire));
-    EXPECT_EQ(mapping.high >> 56U, 3U);
-    EXPECT_NE(mapping, allocated);
+        const ChunkId mapping(0x0300'0000'0000'0042ULL, 0x1234);
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(
+                        transport, mapping, 4U * 1024U * 1024U, 17, PagePurpose::kPageIndex)
+                        .ok());
+        EXPECT_TRUE(handler.request_valid.load(std::memory_order_acquire));
+        EXPECT_EQ(mapping.high >> 56U, 3U);
+        EXPECT_NE(mapping, allocated);
+    }
 
+    crowdb_rpc_server_stop(server);
     crowdb_rpc_conn_destroy(connection);
     crowdb_rpc_client_destroy(client);
-    crowdb_rpc_server_stop(server);
     crowdb_rpc_server_destroy(server);
     crowdb_rpc_pool_destroy(pool);
 }
@@ -270,15 +279,16 @@ TEST(RpcChunkTransport, ResolvesEachChunkOwnerAndReleasesRouteLeases)
         options.disk_route_count = 1;
         options.chunkdb_resolver = fixture.resolver();
         RpcChunkTransport transport(options);
-        ChunkId           allocated;
-        ASSERT_TRUE(
-            transport.allocate_mirror_chunk(256U * 1024U * 1024U, 17, &allocated, crowdb::tree::PagePurpose::kBtreePage)
-                .ok());
-        EXPECT_EQ(allocated.low, 100);
-        EXPECT_TRUE(transport.advance_write(allocated, 0, 4).ok());
-        EXPECT_TRUE(transport.seal_chunk(allocated, 17, 4).ok());
+        const ChunkId     allocated(0x0200'0000'0000'0042ULL, 100);
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(
+                        transport, allocated, 4U * 1024U * 1024U, 17, PagePurpose::kBtreePage)
+                        .ok());
+        EXPECT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_advance_write>(transport, allocated, 0, 4).ok());
+        EXPECT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_seal_chunk>(transport, allocated, 17, 4).ok());
         ChunkLayout other;
-        EXPECT_TRUE(transport.query_chunk(ChunkId(allocated.high, 101), &other).ok());
+        EXPECT_TRUE(
+            await_chunk_rpc<&RpcChunkTransport::submit_query_chunk>(transport, ChunkId(allocated.high, 101), &other)
+                .ok());
         EXPECT_EQ(other.chunk_id.low, 101);
         EXPECT_EQ(fixture.services[0].allocations.load(), 1U);
         EXPECT_EQ(fixture.services[0].advances.load(), 1U);
@@ -286,9 +296,9 @@ TEST(RpcChunkTransport, ResolvesEachChunkOwnerAndReleasesRouteLeases)
         EXPECT_EQ(fixture.services[0].sealed_bytes.load(), 4U);
         EXPECT_EQ(fixture.services[1].queries.load(), 1U);
         EXPECT_EQ(fixture.retains.load(), 1U);
-        EXPECT_EQ(fixture.leases.load(), 0U);
+        EXPECT_TRUE(await_route_counts(fixture, 1, 0));
     }
-    EXPECT_EQ(fixture.releases.load(), 1U);
+    EXPECT_TRUE(await_route_counts(fixture, 0, 1));
 }
 
 TEST(RpcChunkTransport, RefreshesOnOwnershipRejectionWithoutWrongOwnerFallback)
@@ -302,12 +312,14 @@ TEST(RpcChunkTransport, RefreshesOnOwnershipRejectionWithoutWrongOwnerFallback)
     options.chunkdb_resolver = fixture.resolver();
     RpcChunkTransport transport(options);
     ChunkLayout       layout;
-    EXPECT_TRUE(transport.query_chunk(ChunkId(0x0200'0000'0000'0042ULL, 101), &layout).ok());
+    EXPECT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_query_chunk>(transport,
+                                                                        ChunkId(0x0200'0000'0000'0042ULL, 101), &layout)
+                    .ok());
     EXPECT_EQ(layout.chunk_id.low, 101);
     EXPECT_EQ(fixture.services[0].queries.load(), 1U);
     EXPECT_EQ(fixture.services[1].queries.load(), 1U);
     EXPECT_EQ(fixture.refreshes.load(), 1U);
-    EXPECT_EQ(fixture.leases.load(), 0U);
+    EXPECT_TRUE(await_route_counts(fixture, 1, 0));
 }
 
 TEST(RpcChunkTransport, DoesNotResubmitAllocationAfterAnUnknownOutcome)
@@ -321,15 +333,15 @@ TEST(RpcChunkTransport, DoesNotResubmitAllocationAfterAnUnknownOutcome)
     options.rpc_timeout_ms   = 100;
     options.chunkdb_resolver = fixture.resolver();
     RpcChunkTransport transport(options);
-    ChunkId           allocated;
-    EXPECT_EQ(
-        transport.allocate_mirror_chunk(256U * 1024U * 1024U, 17, &allocated, crowdb::tree::PagePurpose::kBtreePage)
-            .code(),
-        Code::kUnavailable);
+    const ChunkId     allocated(0x0200'0000'0000'0042ULL, 100);
+    EXPECT_EQ(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(transport, allocated, 4U * 1024U * 1024U,
+                                                                               17, PagePurpose::kBtreePage)
+                  .code(),
+              Code::kUnavailable);
     EXPECT_EQ(fixture.services[0].allocations.load(), 1U);
     EXPECT_EQ(fixture.services[1].allocations.load(), 0U);
     EXPECT_EQ(fixture.refreshes.load(), 1U);
-    EXPECT_EQ(fixture.leases.load(), 0U);
+    EXPECT_TRUE(await_route_counts(fixture, 1, 0));
 }
 
 } // namespace

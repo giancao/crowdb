@@ -60,8 +60,8 @@ TEST(BorrowedReadBudget, InlineOverlayValuesDoNotReserveAnOverflowAssemblyWindow
     ASSERT_TRUE(status.ok()) << status.to_string();
     auto &core = *TreeCoreAccess::get(tree);
     core.binding()->drain();
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
-    status = core.capture_snapshot(&snapshot);
+    std::shared_ptr<PublishedReadViewContext> snapshot;
+    status = core.capture_read_only_view(&snapshot);
     ASSERT_TRUE(status.ok()) << status.to_string();
     std::shared_ptr<PublishedSnapshotEntries> cursor;
     status = PublishedSnapshotEntries::create(snapshot, &cursor);

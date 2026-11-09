@@ -77,7 +77,7 @@ impl CrowdbTreeEngine {
         let attempt = begin(&pending);
         KVFuture::Pending(Box::pin(async move {
             let report = if durable {
-                tree.checkpoint_report().await
+                tree.flush_with_persistent_report().await
             } else {
                 tree.writeback_report().await
             }

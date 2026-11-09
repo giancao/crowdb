@@ -70,6 +70,7 @@ impl TestChunkBackend {
         check(unsafe { ct_test_chunk_runtime_create(runtime.as_ptr(), &mut catalog, &mut transport) })?;
         let catalog = Arc::new(ChunkRootCatalog {
             ptr: NonNull::new(catalog).ok_or(CtError::Internal)?,
+            callback: None,
         });
         Ok(Self {
             runtime,
@@ -123,6 +124,7 @@ impl TestChunkBackend {
         check(unsafe { ct_test_chunk_runtime_next(self.catalog.ptr.as_ptr(), &mut out) })?;
         self.catalog = Arc::new(ChunkRootCatalog {
             ptr: NonNull::new(out).ok_or(CtError::Internal)?,
+            callback: None,
         });
         Ok(())
     }

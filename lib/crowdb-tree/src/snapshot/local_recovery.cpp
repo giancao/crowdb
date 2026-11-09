@@ -1,6 +1,5 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/allocation_bound.h"
 #include "snapshot/local_recovery_internal.h"
 
 #include <algorithm>
@@ -10,7 +9,7 @@
 namespace crowdb::tree
 {
 LocalRecoveryOperation::State::Window::Window(size_t blob_bytes, size_t frame_bytes, size_t alignment,
-                                              const std::shared_ptr<detail::AllocationReservation> &metadata)
+                                              const std::shared_ptr<AllocationBudget> &metadata)
     : storage(blob_bytes + alignment - 1, detail::ReservationAllocator<uint8_t, AllocationKind::kIo>(metadata)),
       frame(frame_bytes, detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(metadata))
 {
@@ -23,29 +22,10 @@ LocalRecoveryOperation::State::Window::Window(size_t blob_bytes, size_t frame_by
 
 LocalRecoveryOperation::State::State(PageLoadBudget credits)
     : budget(std::move(credits)),
-      directory(detail::ReservationAllocator<DirEntry>(budget.reservation())),
-      references(detail::ReservationAllocator<LeafReference>(budget.reservation())),
-      report(detail::reserved_shared<LocalRecoveryResult>(budget.reservation()))
+      directory(detail::ReservationAllocator<DirEntry>(budget.bytes)),
+      references(detail::ReservationAllocator<LeafReference>(budget.bytes)),
+      report(detail::reserved_shared<LocalRecoveryResult>(budget.bytes))
 {
-}
-
-std::optional<size_t> LocalRecoveryOperation::empty_allocation_bound(LocalRecoveryLimits limits, uint32_t iu) noexcept
-{
-    if (iu == 0) {
-        return {};
-    }
-    const auto metadata_window = round_up_to_iu(segment_image_encoded_size(kMappingSegmentSize), iu);
-    using detail::shared_allocation_bound;
-    return detail::AllocationBound(
-               shared_allocation_bound<State>() + shared_allocation_bound<LocalRecoveryOperation>() +
-               shared_allocation_bound<State::Window>() + shared_allocation_bound<State::ReadStep>() +
-               shared_allocation_bound<LocalCheckpointRegistry>() + shared_allocation_bound<LocalRecoveryResult>())
-        .add(ExtentLedger::creation_metadata_bound())
-        .add(ExtentLedger::reservation_metadata_bound())
-        .add(std::max(limits.max_blob_bytes, metadata_window))
-        .add(std::bit_ceil(std::max<size_t>(4096, iu)) - 1)
-        .add(limits.max_frame_bytes)
-        .value();
 }
 
 Status LocalRecoveryOperation::create(std::shared_ptr<AsyncPageStore>             store,
@@ -54,21 +34,21 @@ Status LocalRecoveryOperation::create(std::shared_ptr<AsyncPageStore>           
                                       LocalRecoveryLimits limits, PageLoadBudget budget,
                                       std::shared_ptr<LocalRecoveryOperation> *out)
 {
+    const auto prepaid = budget.reservation();
     if (!store || !runtime || !lane || out == nullptr || domain.iu_size == 0 ||
         domain.region_begin < snapshot::region_base_for(domain.iu_size) || limits.max_segments == 0 ||
         limits.max_segments > kMaxMappingSegments || limits.max_frames == 0 ||
         limits.max_blob_bytes < kDurableBlobHeader || limits.max_blob_bytes > UINT32_MAX ||
         limits.max_frame_bytes < kFrameHeaderSize + kFrameTrailerSize || limits.max_frame_bytes > UINT32_MAX ||
         limits.max_overflow_references == 0 || limits.max_dependency_steps == 0 ||
-        static_cast<bool>(budget.reservation()) != static_cast<bool>(budget.io) ||
-        (budget.reservation() && ((budget.reservation()->category() != detail::BudgetClass::kRouting &&
-                                   budget.reservation()->category() != detail::BudgetClass::kReclaim) ||
-                                  budget.io->category() != detail::BudgetClass::kIo ||
-                                  budget.reservation()->account() != budget.io->account()))) {
+        (prepaid && (prepaid->category() != detail::BudgetClass::kRouting &&
+                     prepaid->category() != detail::BudgetClass::kReclaim)) ||
+        (budget.io && (!budget.bytes || budget.io->category() != detail::BudgetClass::kIo ||
+                       budget.bytes->domain() != budget.io->domain()))) {
         return Status::invalid_argument();
     }
     try {
-        auto state            = detail::reserved_shared<State>(budget.reservation(), budget);
+        auto state            = detail::reserved_shared<State>(budget.bytes, budget);
         state->readable_bytes = domain.file_size;
         domain.file_size      = std::max(domain.file_size, domain.region_begin);
         state->domain         = domain;
@@ -76,15 +56,15 @@ Status LocalRecoveryOperation::create(std::shared_ptr<AsyncPageStore>           
         state->store          = std::move(store);
         state->runtime        = std::move(runtime);
         state->lane           = std::move(lane);
-        auto status           = ExtentLedger::create(domain, budget.reservation(), &state->ledger);
+        auto status           = ExtentLedger::create(domain, budget.bytes, &state->ledger);
         if (!status.ok()) {
             return status;
         }
         state->metadata_window = round_up_to_iu(segment_image_encoded_size(kMappingSegmentSize), domain.iu_size);
         state->window          = detail::reserved_shared<State::Window>(
-            budget.reservation(), std::max(limits.max_blob_bytes, state->metadata_window), limits.max_frame_bytes,
-            std::bit_ceil(std::max<size_t>(4096, domain.iu_size)), budget.reservation());
-        *out = detail::reserved_construct<LocalRecoveryOperation>(budget.reservation(), [&](auto *storage) {
+            budget.bytes, std::max(limits.max_blob_bytes, state->metadata_window), limits.max_frame_bytes,
+            std::bit_ceil(std::max<size_t>(4096, domain.iu_size)), budget.bytes);
+        *out = detail::reserved_construct<LocalRecoveryOperation>(budget.bytes, [&](auto *storage) {
             ::new (static_cast<void *>(storage)) LocalRecoveryOperation(std::move(state));
         });
     }

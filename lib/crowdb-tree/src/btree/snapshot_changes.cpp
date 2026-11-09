@@ -46,7 +46,7 @@ struct SnapshotChanges::Branch : Node
 };
 
 SnapshotChanges::Owner SnapshotChanges::insert(const Owner &node, const std::shared_ptr<const Leaf> &leaf,
-                                               const std::shared_ptr<detail::AllocationReservation> &metadata)
+                                               const std::shared_ptr<AllocationBudget> &metadata)
 {
     if (!node) {
         return leaf;
@@ -66,8 +66,8 @@ SnapshotChanges::Owner SnapshotChanges::insert(const Owner &node, const std::sha
                                            right ? insert(branch.children[1], leaf, metadata) : branch.children[1]);
 }
 
-SnapshotChanges SnapshotChanges::replace(SnapshotPageChange                                    change,
-                                         const std::shared_ptr<detail::AllocationReservation> &metadata) const
+SnapshotChanges SnapshotChanges::replace(SnapshotPageChange                       change,
+                                         const std::shared_ptr<AllocationBudget> &metadata) const
 {
     if (change.page_id >= kPageLimit) {
         throw std::invalid_argument("snapshot change exceeds the PID namespace");
@@ -148,8 +148,8 @@ std::optional<size_t> SnapshotChanges::initial_allocation_bound(size_t pages) no
         .value();
 }
 
-SnapshotChanges::Owner SnapshotChanges::build(std::span<const SnapshotPageChange>                   changes,
-                                              const std::shared_ptr<detail::AllocationReservation> &metadata)
+SnapshotChanges::Owner SnapshotChanges::build(std::span<const SnapshotPageChange>      changes,
+                                              const std::shared_ptr<AllocationBudget> &metadata)
 {
     if (changes.size() == 1) {
         return detail::reserved_shared<Leaf>(metadata, changes.front());
@@ -162,8 +162,8 @@ SnapshotChanges::Owner SnapshotChanges::build(std::span<const SnapshotPageChange
                                            build(changes.subspan(count), metadata));
 }
 
-SnapshotChanges SnapshotChanges::from_sorted(std::span<const SnapshotPageChange>                   changes,
-                                             const std::shared_ptr<detail::AllocationReservation> &metadata)
+SnapshotChanges SnapshotChanges::from_sorted(std::span<const SnapshotPageChange>      changes,
+                                             const std::shared_ptr<AllocationBudget> &metadata)
 {
     uint64_t next_pid = 0;
     for (const auto &change : changes) {

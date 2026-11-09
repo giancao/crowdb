@@ -20,7 +20,6 @@ pub struct TestPublishTree {
     fail_publish: AtomicBool,
     fail_release: AtomicBool,
     generation: AtomicU64,
-    begins: AtomicU64,
     publications: AtomicU64,
     releases: AtomicU64,
     stage: Arc<AtomicU8>,
@@ -29,6 +28,8 @@ pub struct TestPublishTree {
     cancel_on_install: Arc<OnceLock<tokio::task::AbortHandle>>,
     pause_prepare: AtomicBool,
     cleanup: Arc<OnceLock<Arc<TestCleanupGate>>>,
+    pin_gate: OnceLock<Arc<TestCleanupGate>>,
+    unpin_gate: OnceLock<Arc<TestCleanupGate>>,
     pub prepare_entered: tokio::sync::Notify,
     pub prepare_release: tokio::sync::Notify,
 }
@@ -43,7 +44,6 @@ impl TestPublishTree {
             fail_publish: AtomicBool::new(fail_publish),
             fail_release: AtomicBool::new(fail_release),
             generation: AtomicU64::new(0),
-            begins: AtomicU64::new(0),
             publications: AtomicU64::new(0),
             releases: AtomicU64::new(0),
             stage: Arc::new(AtomicU8::new(0)),
@@ -52,6 +52,8 @@ impl TestPublishTree {
             cancel_on_install: Arc::new(OnceLock::new()),
             pause_prepare: AtomicBool::new(false),
             cleanup: Arc::new(OnceLock::new()),
+            pin_gate: OnceLock::new(),
+            unpin_gate: OnceLock::new(),
             prepare_entered: tokio::sync::Notify::new(),
             prepare_release: tokio::sync::Notify::new(),
         }
@@ -61,9 +63,7 @@ impl TestPublishTree {
         match self.stage.load(Ordering::Acquire) {
             0 => "before parent snapshot",
             1 => "parent snapshot",
-            2 => "after parent snapshot, before native capture",
-            3 => "native capture",
-            4 => "native capture complete",
+            2 => "after parent snapshot",
             5 => "publication gate",
             6 => "native publication",
             7 => "native publication complete",
@@ -91,6 +91,16 @@ impl TestPublishTree {
         TestCleanupPause { gate }
     }
 
+    pub fn pause_generation_mutation(&self, pin: bool) -> TestCleanupPause {
+        let gate = Arc::new(TestCleanupGate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let slot = if pin { &self.pin_gate } else { &self.unpin_gate };
+        assert!(slot.set(gate.clone()).is_ok());
+        TestCleanupPause { gate }
+    }
+
     pub fn pause_preparation(&self) {
         self.pause_prepare.store(true, Ordering::Release);
     }
@@ -102,9 +112,8 @@ impl TestPublishTree {
         )
     }
 
-    pub fn calls(&self) -> (u64, u64, u64) {
+    pub fn calls(&self) -> (u64, u64) {
         (
-            self.begins.load(Ordering::Acquire),
             self.publications.load(Ordering::Acquire),
             self.releases.load(Ordering::Acquire),
         )
@@ -170,9 +179,9 @@ impl PartitionTree for TestPublishTree {
     async fn checkpoint(&self, offset: u64) -> Result<(u64, u64)> {
         self.inner.checkpoint(offset).await
     }
-    async fn checkpoint_snapshot(&self, offset: u64) -> Result<(u64, u64, Arc<dyn PartitionTree>)> {
+    async fn flush_with_persistent_view(&self, offset: u64) -> Result<(u64, u64, Arc<dyn PartitionTree>)> {
         self.stage.store(1, Ordering::Release);
-        let snapshot = self.inner.checkpoint_snapshot(offset).await?;
+        let snapshot = self.inner.flush_with_persistent_view(offset).await?;
         self.stage.store(2, Ordering::Release);
         Ok(snapshot)
     }
@@ -186,13 +195,6 @@ impl PartitionTree for TestPublishTree {
     }
     async fn force_advance_split_frontier(&self, frontier: u64) -> Result<()> {
         self.inner.force_advance_split_frontier(frontier).await
-    }
-    async fn begin_split_memtable_view(&self) -> Result<(u64, u64)> {
-        self.begins.fetch_add(1, Ordering::AcqRel);
-        self.stage.store(3, Ordering::Release);
-        let captured = self.inner.begin_split_memtable_view().await?;
-        self.stage.store(4, Ordering::Release);
-        Ok(captured)
     }
     async fn arm_split_overlay(
         &self,
@@ -220,9 +222,6 @@ impl PartitionTree for TestPublishTree {
         ))
     }
 
-    async fn install_split_memtable_overlay(&self, source: &dyn PartitionTree, frontier: u64) -> Result<()> {
-        self.inner.install_split_memtable_overlay(source, frontier).await
-    }
     async fn clear_split_memtable_overlay(&self, source: &dyn PartitionTree) -> Result<()> {
         self.inner.clear_split_memtable_overlay(source).await
     }
@@ -277,11 +276,19 @@ impl PartitionTree for TestPublishTree {
     fn last_applied_seq(&self) -> u64 {
         self.inner.last_applied_seq()
     }
-    fn pin_generation(&self, transition: TransitionId, generation: u64) -> Result<()> {
-        self.inner.pin_generation(transition, generation)
+    async fn pin_generation(&self, transition: TransitionId, generation: u64) -> Result<()> {
+        if let Some(gate) = self.pin_gate.get() {
+            gate.entered.notify_one();
+            gate.release.acquire().await.unwrap().forget();
+        }
+        self.inner.pin_generation(transition, generation).await
     }
-    fn unpin_generation(&self, transition: TransitionId) -> Result<()> {
-        self.inner.unpin_generation(transition)
+    async fn unpin_generation(&self, transition: TransitionId) -> Result<()> {
+        if let Some(gate) = self.unpin_gate.get() {
+            gate.entered.notify_one();
+            gate.release.acquire().await.unwrap().forget();
+        }
+        self.inner.unpin_generation(transition).await
     }
 }
 
@@ -315,17 +322,6 @@ struct TestPreparedOverlay {
     cleanup: Option<Arc<TestCleanupGate>>,
 }
 
-impl Drop for TestPreparedOverlay {
-    fn drop(&mut self) {
-        if let Some(gate) = &self.cleanup {
-            gate.entered.notify_one();
-            futures::executor::block_on(gate.release.acquire())
-                .unwrap()
-                .forget();
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl crowdb_chunk_kv::PreparedSplitOverlay for TestPreparedOverlay {
     async fn prepare(&self, replayed_prefix: u64) -> Result<()> {
@@ -345,5 +341,14 @@ impl crowdb_chunk_kv::PreparedSplitOverlay for TestPreparedOverlay {
 
     fn committed_frontier(&self) -> Option<u64> {
         self.inner.committed_frontier()
+    }
+
+    async fn release(self: Arc<Self>) -> Result<()> {
+        let owner = Arc::into_inner(self).expect("cutover worker released its capability");
+        if let Some(gate) = owner.cleanup {
+            gate.entered.notify_one();
+            gate.release.acquire().await.unwrap().forget();
+        }
+        owner.inner.release().await
     }
 }

@@ -21,7 +21,7 @@ int32_t ct_writeback_async(ct_tree *tree, ct_future **out)
                                              });
 }
 
-int32_t ct_checkpoint_report_async(ct_tree *tree, ct_future **out)
+int32_t ct_flush_with_persistent_report_async(ct_tree *tree, ct_future **out)
 {
     return begin_report<CheckpointOperation>(tree, out, ct_future_impl::Kind::kCheckpointReport,
                                              [](TreeCore &core, std::shared_ptr<CheckpointOperation> *operation) {

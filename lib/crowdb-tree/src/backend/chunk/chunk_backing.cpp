@@ -2,18 +2,102 @@
 // Licensed under the Apache License, Version 2.0.
 #include "chunk_backing.h"
 
+#include "backend/local/scheduled_page_store.h"
 #include "btree/allocation_bound.h"
 #include "chunk_frame.h"
 #include "chunk_physical_registry.h"
+#include "chunk_write_queue.h"
 
 #include <algorithm>
 
 namespace crowdb::tree
 {
-static Status read_chunk_pack(const ChunkPackBacking &backing, std::span<uint8_t> output,
-                              const std::shared_ptr<AllocationBudget> &budget);
-static Status write_chunk_pack(ChunkPackBacking &backing, std::span<const uint8_t> input,
-                               const std::shared_ptr<AllocationBudget> &budget);
+namespace
+{
+struct ChunkRead : std::enable_shared_from_this<ChunkRead>
+{
+    std::shared_ptr<const ChunkPackBacking> pack;
+    std::shared_ptr<ScheduledPageStore>     store;
+    std::shared_ptr<AllocationBudget>       metadata;
+    std::span<uint8_t>                      output;
+    AsyncCompletion                         complete;
+
+    static void finished(void *raw, Status status)
+    {
+        auto &self = *static_cast<ChunkRead *>(raw);
+        if (status.ok()) {
+            status = self.pack->domain->catalog->protection()->check_read_owner();
+        }
+        auto done = std::exchange(self.complete, {});
+        done.complete(std::move(status));
+    }
+
+    void start(AsyncCompletion callback) noexcept
+    {
+        complete = std::move(callback);
+        try {
+            auto status = pack->domain->catalog->protection()->check_read_owner();
+            if (!status.ok()) {
+                finished(this, std::move(status));
+                return;
+            }
+            const auto                 &domain = *pack->domain;
+            detail::ChunkFixedPackStore reader(domain.tree, domain.epoch, domain.mirrors, domain.catalog,
+                                               domain.transport);
+            reader.submit_read_into(pack->pack, metadata, output,
+                                    {.context     = this,
+                                     .complete_fn = &ChunkRead::finished,
+                                     .owner       = shared_from_this(),
+                                     .allocations = metadata},
+                                    store);
+        }
+        catch (const std::bad_alloc &) {
+            finished(this, Status::resource_exhausted());
+        }
+        catch (...) {
+            finished(this, Status::internal_error());
+        }
+    }
+};
+} // namespace
+
+static void submit_chunk_pack_read(ScheduledPageStore &scheduled, std::shared_ptr<const ChunkPackBacking> backing,
+                                   std::span<uint8_t> output, std::shared_ptr<AllocationBudget> metadata,
+                                   AsyncCompletion complete)
+{
+    try {
+        auto read      = detail::reserved_shared<ChunkRead>(metadata);
+        read->pack     = std::move(backing);
+        read->store    = scheduled.shared_from_this();
+        read->metadata = std::move(metadata);
+        read->output   = output;
+        auto status    = scheduled.submit_async_step(
+            [read](AsyncCompletion callback) { read->start(std::move(callback)); }, complete, output.size(), 0);
+        if (!status.ok()) {
+            complete.complete(std::move(status));
+        }
+    }
+    catch (const std::bad_alloc &) {
+        complete.complete(Status::resource_exhausted());
+    }
+}
+
+static void submit_chunk_pack_write(ScheduledPageStore &scheduled, std::shared_ptr<ChunkPackBacking> backing,
+                                    std::span<const uint8_t> input, AsyncCompletion complete)
+{
+    auto *queue = scheduled.chunk_writes();
+    if (queue == nullptr) {
+        complete.complete(Status::not_supported("Chunk writes require a Chunk backend lane"));
+        return;
+    }
+    queue->submit(scheduled.shared_from_this(), std::move(backing), input, std::move(complete));
+}
+
+void initialize_chunk_backing_io(ChunkPackBacking &backing) noexcept
+{
+    backing.read  = &submit_chunk_pack_read;
+    backing.write = &submit_chunk_pack_write;
+}
 
 namespace
 {
@@ -35,6 +119,13 @@ Status validate_pin_pack(const ChunkBackingDomain &domain, const detail::ChunkFi
     if (!status.ok()) {
         return status;
     }
+    return validate_chunk_pin_stage(domain, pack, record);
+}
+} // namespace
+
+Status validate_chunk_pin_stage(const ChunkBackingDomain &domain, const detail::ChunkFixedPackRef &pack,
+                                const std::optional<detail::ChunkStageRecord> &record)
+{
     if (!record || record->tree_id != domain.tree || record->id != pack.stage ||
         record->chunk_high != pack.chunk.high || record->chunk_low != pack.chunk.low ||
         record->purpose != static_cast<uint32_t>(pack.purpose) || pack.offset > record->capacity ||
@@ -48,7 +139,6 @@ Status validate_pin_pack(const ChunkBackingDomain &domain, const detail::ChunkFi
              ? Status::Ok()
              : Status::unavailable("Chunk stage no longer admits readers");
 }
-} // namespace
 
 size_t chunk_pin_validation_bound() noexcept
 {
@@ -64,11 +154,10 @@ try {
         !detail::ChunkFixedPackStore::write_allocation_bound(length)) {
         return Status::invalid_argument();
     }
-    auto result   = std::allocate_shared<ChunkPackBacking>(MetadataAllocator<ChunkPackBacking>(metadata));
-    result->read  = &read_chunk_pack;
-    result->write = &write_chunk_pack;
-    auto status   = domain->catalog->pin_release_queue()->prepare(metadata, domain->catalog, domain->tree, stage, stage,
-                                                                  &result->pin);
+    auto result = std::allocate_shared<ChunkPackBacking>(MetadataAllocator<ChunkPackBacking>(metadata));
+    initialize_chunk_backing_io(*result);
+    auto status = domain->catalog->pin_release_queue()->prepare(metadata, domain->catalog, domain->tree, stage, stage,
+                                                                &result->pin);
     if (!status.ok()) {
         return status;
     }
@@ -89,9 +178,8 @@ try {
     if (!domain || !domain->supported() || !metadata || out == nullptr || *out || pin.owner_epoch != domain->epoch) {
         return Status::invalid_argument();
     }
-    auto result    = std::allocate_shared<ChunkPackBacking>(MetadataAllocator<ChunkPackBacking>(metadata));
-    result->read   = &read_chunk_pack;
-    result->write  = &write_chunk_pack;
+    auto result = std::allocate_shared<ChunkPackBacking>(MetadataAllocator<ChunkPackBacking>(metadata));
+    initialize_chunk_backing_io(*result);
     result->domain = domain;
     result->pack   = pack;
     auto status    = domain->catalog->pin_release_queue()->prepare(metadata, domain->catalog, domain->tree, pack.stage,
@@ -139,8 +227,8 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted();
 }
 
-static Status read_chunk_pack(const ChunkPackBacking &backing, std::span<uint8_t> output,
-                              const std::shared_ptr<AllocationBudget> &budget)
+Status read_chunk_backing(const ChunkPackBacking &backing, std::span<uint8_t> output,
+                          const std::shared_ptr<AllocationBudget> &budget)
 {
     if (!backing.domain || !chunk_backing_matches(backing, backing.domain->backend_id, output.size())) {
         return Status::corruption("read does not name one owned Chunk pack");
@@ -159,8 +247,8 @@ static Status read_chunk_pack(const ChunkPackBacking &backing, std::span<uint8_t
     return status;
 }
 
-static Status write_chunk_pack(ChunkPackBacking &backing, std::span<const uint8_t> input,
-                               const std::shared_ptr<AllocationBudget> &budget)
+Status write_chunk_backing(ChunkPackBacking &backing, std::span<const uint8_t> input,
+                           const std::shared_ptr<AllocationBudget> &budget)
 {
     if (!backing.domain || !chunk_backing_matches(backing, backing.domain->backend_id, input.size()) ||
         backing.pack.stage.owner_epoch != backing.domain->epoch) {

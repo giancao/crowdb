@@ -127,8 +127,8 @@ void CapturedWriteOperation::State::received_frame()
         .page_id = frame->info.page_id, .type = frame->info.type, .frame_bytes = frame->info.bytes, .backing = {}};
     descriptor.summary = frame->summary;
     if (!dependencies) {
-        dependencies     = detail::reserved_shared<Dependencies>(budget.reservation(), budget.reservation());
-        overflow_backing = detail::reserved_shared<OverflowBackingSet>(budget.reservation(), budget.reservation());
+        dependencies     = detail::reserved_shared<Dependencies>(budget.bytes, budget.bytes);
+        overflow_backing = detail::reserved_shared<OverflowBackingSet>(budget.bytes, budget.bytes);
     }
     if (frame->reuse) {
         descriptor = frame->reuse->primary->frame;
@@ -140,9 +140,9 @@ void CapturedWriteOperation::State::received_frame()
         dependencies->ids         = frame->info.dependencies;
     }
     else if (descriptor.type == page_type::kLeafBase) {
-        const auto status = capture_stored_overflow(LeafFrameView(frame->buffer->bytes.data(), descriptor.frame_bytes),
-                                                    limits.frames.encode.max_entries, budget.reservation(),
-                                                    &descriptor.stored_overflow);
+        const auto status =
+            capture_stored_overflow(LeafFrameView(frame->buffer->bytes.data(), descriptor.frame_bytes),
+                                    limits.frames.encode.max_entries, budget.bytes, &descriptor.stored_overflow);
         if (!status.ok()) {
             finish(status);
             return;
@@ -166,9 +166,6 @@ Status CapturedWriteOperation::State::insert(DurableCapturedFrame value, bool re
                  ? Status::Ok()
                  : Status::corruption("duplicate captured PID");
     }
-    if (pages->frames.size() == limits.max_frames) {
-        return Status::resource_exhausted();
-    }
     pages->backend_id         = value.backing->backend_id;
     pages->next_page_id       = std::max(pages->next_page_id, value.page_id + 1);
     const auto reused_bytes   = reused ? value.backing->length : 0;
@@ -191,18 +188,19 @@ void CapturedWriteOperation::State::reuse_step()
         begin_write();
         return;
     }
-    if (dependency_steps++ == limits.max_dependency_steps) {
-        finish(Status::resource_exhausted());
-        return;
-    }
     if (dependency_pid == kInvalidPageId) {
         const auto &ref  = frame->reused_overflow[dependency_index];
         dependency_pid   = ref.head;
         dependency_bytes = ref.bytes;
+        dependency_steps = 0;
     }
     DurableCapturedFrame old;
     const auto          &captured = frame->reused_overflow[dependency_index].backing;
     if (captured) {
+        if (++dependency_steps > captured->pages.size()) {
+            finish(Status::corruption("captured overflow dependency cycle"));
+            return;
+        }
         const auto found = captured->pages.find(dependency_pid);
         if (found == captured->pages.end()) {
             finish(Status::corruption("captured primary has no referenced overflow PID"));
@@ -220,6 +218,10 @@ void CapturedWriteOperation::State::reuse_step()
     else {
         if (!inherited) {
             finish(Status::unavailable("captured overflow requires its protected durable mapping"));
+            return;
+        }
+        if (++dependency_steps > inherited->frames.size()) {
+            finish(Status::corruption("captured overflow dependency cycle"));
             return;
         }
         const auto found = inherited->frames.find(dependency_pid);

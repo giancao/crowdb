@@ -26,7 +26,6 @@ struct EpochManager::Lifetime : std::enable_shared_from_this<Lifetime>
     // Legacy detached guards use the same bounded final destruction path.
     Participant         *participants = nullptr;
     Deferred            *pending      = nullptr;
-    Deferred            *collected    = nullptr;
     std::vector<Retired> retired;
 
   private:

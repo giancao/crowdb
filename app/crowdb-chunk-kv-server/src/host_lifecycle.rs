@@ -10,6 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{error, warn};
@@ -37,7 +38,7 @@ impl HostLifecycle {
         }
     }
 
-    pub async fn close(&mut self) {
+    pub async fn close(&mut self, drain_timeout: Duration) {
         if let Some(service) = &self.service {
             service.begin_drain();
         }
@@ -58,8 +59,23 @@ impl HostLifecycle {
         if let Some(rpc) = &self.rpc {
             rpc.close_and_drain().await;
         }
+        let mut trees_closed = true;
         if let Some(service) = &self.service {
-            if let Err(error) = service.release_hosted_trees().await {
+            let closing = service.release_hosted_trees();
+            tokio::pin!(closing);
+            let result = if let Ok(result) = tokio::time::timeout(drain_timeout, closing.as_mut()).await {
+                result
+            } else {
+                let progress = self.storage.tree_runtime().snapshot().ok();
+                warn!(
+                    timeout_ms = drain_timeout.as_millis(),
+                    ?progress,
+                    "waiting for hosted Tree close"
+                );
+                closing.await
+            };
+            if let Err(error) = result {
+                trees_closed = false;
                 error!(%error, "native Tree close failed during host shutdown");
             }
         }
@@ -67,6 +83,23 @@ impl HostLifecycle {
         if let Some(process) = &self.process {
             if let Err(error) = process.withdraw_observation().await {
                 warn!(%error, "failed to unregister chunk KV instance");
+            }
+        }
+        if trees_closed {
+            let runtime = self.storage.tree_runtime();
+            let result = if let Ok(result) = tokio::time::timeout(drain_timeout, runtime.shutdown()).await {
+                result
+            } else {
+                let progress = runtime.snapshot().ok();
+                warn!(
+                    timeout_ms = drain_timeout.as_millis(),
+                    ?progress,
+                    "waiting for Tree runtime exit"
+                );
+                runtime.shutdown().await
+            };
+            if let Err(error) = result {
+                error!(%error, "Tree runtime shutdown failed");
             }
         }
     }

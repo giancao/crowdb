@@ -7,6 +7,8 @@
 #include "runtime/tree_operation_lifetime.h"
 #include "runtime/tree_runtime_binding.h"
 
+#include <functional>
+
 namespace crowdb::tree
 {
 class TreeCore;
@@ -15,7 +17,8 @@ class ScanPackedBuf;
 
 // One accepted window. Idle cursor handles keep no I/O reserve or Tree
 // ticket. Lower-level callback owners independently retain accepted I/O.
-// Construct and destroy this host scope off runtime workers.
+// Windows that borrow a Core must release the host guard off runtime workers.
+// Detached windows can complete and release their resources on a worker.
 struct SnapshotReadWindow
 {
     // Host-only guard; released after the loader and ticket, so a last Core
@@ -37,12 +40,12 @@ struct SnapshotReadWindow
 
 // A captured L1 header/mapping with no live L0 catalog. Shared backends can
 // detach from the Core; raw backends admit each window through a weak Core.
-class PublishedSnapshotContext
+class PublishedReadViewContext
 {
     struct State;
 
   public:
-    static Status capture(const std::shared_ptr<TreeCore> &core, std::shared_ptr<PublishedSnapshotContext> *out);
+    static Status capture(const std::shared_ptr<TreeCore> &core, std::shared_ptr<PublishedReadViewContext> *out);
     [[nodiscard]] static size_t allocation_bound() noexcept;
     [[nodiscard]] static size_t window_control_bound() noexcept;
     // bytes covers the caller's operation, loader and output capacities.
@@ -50,7 +53,14 @@ class PublishedSnapshotContext
     Status prepare_window(size_t bytes, SnapshotReadWindow *out) const;
     Status prepare_window(SnapshotReadWindow *out) const;
     Status get(Slice key, GetView *out) const;
+    // For detached views. Once accepted, complete can run inline or after I/O.
+    Status get_async(Slice key, std::function<void(Status, GetView)> complete) const;
     Status scan(CoreScanOptions options, ScanPackedBuf *out, size_t *count, bool *truncated) const;
+    Status scan_async(CoreScanOptions options, std::function<void(Status, ScanPackedBuf, size_t, bool)> complete) const;
+    // Starts one close on an independently owned view. The callback can run
+    // inline. An accepted close retains its state after the view is released.
+    Status             close_async(void (*complete)(void *), void *context) const noexcept;
+    [[nodiscard]] bool closed() const noexcept;
 
     [[nodiscard]] const std::shared_ptr<const PublishedTreeState>   &view() const noexcept;
     [[nodiscard]] const std::shared_ptr<TreeRuntimeBinding>         &binding() const noexcept;
@@ -63,10 +73,10 @@ class PublishedSnapshotContext
   private:
     friend class TreeCore;
     static Status capture_admitted(const std::shared_ptr<TreeCore>           &core,
-                                   std::shared_ptr<PublishedSnapshotContext> *out,
+                                   std::shared_ptr<PublishedReadViewContext> *out,
                                    std::shared_ptr<const PublishedTreeState>  captured = {});
 
-    explicit PublishedSnapshotContext(std::shared_ptr<State> state) : state_(std::move(state))
+    explicit PublishedReadViewContext(std::shared_ptr<State> state) : state_(std::move(state))
     {
     }
 

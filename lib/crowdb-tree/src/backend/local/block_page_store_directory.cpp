@@ -4,7 +4,12 @@
 #include "block_account.h"
 #include "block_directory.h"
 #include "btree/allocation_account.h"
+#include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/backend/backend_release_service.h"
+#ifdef CROWDB_HAVE_LIBURING
+#    include "crowdb-common/diskio_uring.h"
+#    include "host_completion.h"
+#endif
 
 #include <dirent.h>
 
@@ -37,15 +42,48 @@ bool parse_block_filename(const std::string &name, uint32_t &out_store, uint32_t
         out_part  = static_cast<uint32_t>(std::stoul(name.substr(dash + 1, dot - dash - 1)));
         out_idx   = static_cast<uint32_t>(std::stoul(name.substr(dot + 5)));
     }
-    catch (...) {
+    catch (const std::invalid_argument &) {
+        return false;
+    }
+    catch (const std::out_of_range &) {
         return false;
     }
     return true;
 }
+
+template <class Visit> Status visit_files(const std::string &dir, Visit visit)
+{
+    auto *directory = ::opendir(dir.c_str());
+    if (directory == nullptr) {
+        return Status::io_error(std::string("opendir: ") + std::strerror(errno));
+    }
+
+    struct CloseDirectory
+    {
+        DIR *value;
+
+        ~CloseDirectory()
+        {
+            ::closedir(value);
+        }
+    } close{directory};
+
+    for (;;) {
+        errno       = 0;
+        auto *entry = ::readdir(directory);
+        if (entry == nullptr) {
+            return errno == 0 ? Status::Ok() : Status::io_error(std::string("readdir: ") + std::strerror(errno));
+        }
+        auto status = visit(entry->d_name);
+        if (!status.ok()) {
+            return status;
+        }
+    }
+}
 } // namespace
 
-Status BlockPageStore::open_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
-                                   uint32_t iu_size, std::unique_ptr<BlockPageStore> *out)
+Status BlockPageStore::prepare_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
+                                      uint32_t iu_size, std::unique_ptr<BlockPageStore> *out)
 try {
     const auto unit = iu_size == 0 ? 4096 : iu_size;
     if (out == nullptr || block_size == 0 || block_size % unit != 0) {
@@ -65,39 +103,41 @@ try {
     auto                        *value = ::new (storage.get())
         BlockPageStore(allocations, dir, store_id, group_id, block_size, unit, std::move(release));
     (void)storage.release();
-    auto store     = std::unique_ptr<BlockPageStore>(value);
-    DIR *directory = ::opendir(dir.c_str());
-    if (directory == nullptr) {
-        return Status::io_error(std::string("opendir: ") + std::strerror(errno));
+    out->reset(value);
+    return Status::Ok();
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted();
+}
+
+Status BlockPageStore::open_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
+                                   uint32_t iu_size, std::unique_ptr<BlockPageStore> *out)
+try {
+    if (out == nullptr) {
+        return Status::invalid_argument();
     }
-
-    struct CloseDirectory
-    {
-        DIR *value;
-
-        ~CloseDirectory()
-        {
-            ::closedir(value);
-        }
-    } close{directory};
-
-    while (auto *entry = ::readdir(directory)) {
+    std::unique_ptr<BlockPageStore> store;
+    auto                            status = prepare_blocks(dir, store_id, group_id, block_size, iu_size, &store);
+    if (!status.ok()) {
+        return status;
+    }
+    status = visit_files(dir, [&](const char *name) {
         uint32_t found_store = 0;
         uint32_t found_group = 0;
         uint32_t index       = 0;
-        if (!parse_block_filename(entry->d_name, found_store, found_group, index) || found_store != store_id ||
+        if (!parse_block_filename(name, found_store, found_group, index) || found_store != store_id ||
             found_group != group_id) {
-            continue;
+            return Status::Ok();
         }
         std::shared_ptr<FileMedium> file;
-        auto                        status = store->blocks_->ensure(index, dir + "/" + entry->d_name, unit > 1, &file);
-        if (!status.ok()) {
-            return status;
-        }
+        return store->blocks_->ensure(index, dir + "/" + name, store->iu_size_ > 1, &file);
+    });
+    if (!status.ok()) {
+        return status;
     }
     if (store->num_extents() == 0) {
         std::shared_ptr<FileMedium> file;
-        auto                        status = store->blocks_->ensure(0, store->block_path(0).c_str(), unit > 1, &file);
+        status = store->blocks_->ensure(0, store->block_path(0).c_str(), store->iu_size_ > 1, &file);
         if (!status.ok()) {
             return status;
         }
@@ -108,6 +148,139 @@ try {
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted();
 }
+
+#ifdef CROWDB_HAVE_LIBURING
+Status BlockPageStore::submit_open_blocks(std::span<const std::string> names, common::DiskIOUring &uring,
+                                          AsyncCompletion done)
+try {
+    if (!blocks_ || !done) {
+        return Status::invalid_argument();
+    }
+    if (!uring.valid()) {
+        return Status::not_supported();
+    }
+    auto budget = detail::block_allocation_budget(*this, done.allocations);
+    if (!budget) {
+        return Status::invalid_argument("backend allocation budget belongs to another store");
+    }
+
+    struct OpenFiles
+    {
+        explicit OpenFiles(AsyncCompletion done) : done(std::move(done))
+        {
+        }
+
+        void finish(Status status) noexcept
+        {
+            auto expected = Code::kOk;
+            if (!status.ok() && failure.compare_exchange_strong(expected, status.code(), std::memory_order_relaxed)) {
+                result = std::move(status);
+            }
+            if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                auto completion = std::move(done);
+                completion.complete(std::move(result));
+            }
+        }
+
+        AsyncCompletion     done;
+        std::atomic<size_t> remaining{1}; // join also covers enumeration of the supplied names
+        std::atomic<Code>   failure{Code::kOk};
+        Status              result;
+    };
+
+    auto open   = std::allocate_shared<OpenFiles>(MetadataAllocator<OpenFiles>(budget), std::move(done));
+    auto submit = [&](uint32_t index, std::string_view name) {
+        open->remaining.fetch_add(1, std::memory_order_relaxed);
+        blocks_->submit_ensure(index, *this, uring,
+                               {.context = open.get(),
+                                .complete_fn =
+                                    [](void *context, Status status) noexcept {
+                                        static_cast<OpenFiles *>(context)->finish(std::move(status));
+                                    },
+                                .owner       = open,
+                                .allocations = budget},
+                               name);
+    };
+    try {
+        bool found = false;
+        for (const auto &name : names) {
+            uint32_t found_store = 0;
+            uint32_t found_group = 0;
+            uint32_t index       = 0;
+            if (!parse_block_filename(name, found_store, found_group, index) || found_store != store_id_ ||
+                found_group != group_id_) {
+                continue;
+            }
+            if (name.find('/') != std::string::npos || name.find('\0') != std::string::npos) {
+                open->finish(Status::invalid_argument());
+                return Status::Ok();
+            }
+            found = true;
+            submit(index, name);
+        }
+        if (!found) {
+            submit(0, {});
+        }
+    }
+    catch (const std::bad_alloc &) {
+        open->finish(Status::resource_exhausted());
+        return Status::Ok();
+    }
+    open->finish(Status::Ok());
+    return Status::Ok();
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted();
+}
+
+Status BlockPageStore::open_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
+                                   uint32_t iu_size, common::DiskIOUring &uring, std::unique_ptr<BlockPageStore> *out)
+try {
+    if (out == nullptr) {
+        return Status::invalid_argument();
+    }
+    if (!uring.valid()) {
+        return Status::not_supported();
+    }
+    std::unique_ptr<BlockPageStore> store;
+    auto                            status = prepare_blocks(dir, store_id, group_id, block_size, iu_size, &store);
+    if (!status.ok()) {
+        return status;
+    }
+    std::vector<std::string> names;
+    status = visit_files(dir, [&](const char *name) {
+        names.emplace_back(name);
+        return Status::Ok();
+    });
+    if (!status.ok()) {
+        return status;
+    }
+
+    struct Result
+    {
+        detail::HostCompletion ready;
+        Status                 status;
+    } result;
+
+    status = store->submit_open_blocks(names, uring,
+                                       {.context = &result, .complete_fn = [](void *context, Status status) noexcept {
+                                            auto &result  = *static_cast<Result *>(context);
+                                            result.status = std::move(status);
+                                            result.ready.signal();
+                                        }});
+    if (!status.ok()) {
+        return status;
+    }
+    result.ready.wait();
+    if (result.status.ok()) {
+        *out = std::move(store);
+    }
+    return std::move(result.status);
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted();
+}
+#endif
 
 BlockPageStore::BlockPath BlockPageStore::block_path(uint32_t                                 index,
                                                      const std::shared_ptr<AllocationBudget> &budget) const
@@ -139,6 +312,28 @@ try {
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted("backend metadata allocation unavailable");
 }
+
+#ifdef CROWDB_HAVE_LIBURING
+void BlockPageStore::submit_ensure_block(uint32_t block_idx, common::DiskIOUring &uring, AsyncCompletion done)
+{
+    done.allocations = detail::block_allocation_budget(*this, done.allocations);
+    if (!done.allocations || !blocks_) {
+        done.complete(Status::invalid_argument());
+        return;
+    }
+    blocks_->submit_ensure(block_idx, *this, uring, std::move(done));
+}
+
+void BlockPageStore::submit_delete_block(uint32_t block_idx, common::DiskIOUring &uring, AsyncCompletion done)
+{
+    done.allocations = detail::block_allocation_budget(*this, done.allocations);
+    if (!done.allocations || !blocks_) {
+        done.complete(Status::invalid_argument());
+        return;
+    }
+    blocks_->submit_erase(block_idx, *this, uring, std::move(done));
+}
+#endif
 
 size_t BlockPageStore::num_extents() const
 {

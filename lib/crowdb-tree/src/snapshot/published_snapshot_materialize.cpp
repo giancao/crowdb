@@ -41,7 +41,7 @@ size_t key_heap_bytes(const std::string &key)
     return data >= object && data < object_end ? 0 : key.capacity() + 1;
 }
 
-Status plan_materialization(const std::shared_ptr<PublishedSnapshotContext> &snapshot, size_t max_bytes,
+Status plan_materialization(const std::shared_ptr<PublishedReadViewContext> &snapshot, size_t max_bytes,
                             MaterializePlan *plan)
 {
     if (plan->bytes > max_bytes) {
@@ -69,7 +69,7 @@ Status plan_materialization(const std::shared_ptr<PublishedSnapshotContext> &sna
     return Status::Ok();
 }
 
-Status copy_materialization(const std::shared_ptr<PublishedSnapshotContext> &snapshot, size_t count,
+Status copy_materialization(const std::shared_ptr<PublishedReadViewContext> &snapshot, size_t count,
                             SnapshotMaterialized *result)
 {
     result->entries.reserve(count);
@@ -129,7 +129,7 @@ void SnapshotMaterialized::charge(size_t bytes, AllocationKind kind)
     }
 }
 
-Status materialize_snapshot(const std::shared_ptr<PublishedSnapshotContext> &snapshot, size_t max_bytes,
+Status materialize_snapshot(const std::shared_ptr<PublishedReadViewContext> &snapshot, size_t max_bytes,
                             detail::ReservedUnique<SnapshotMaterialized> *out)
 try {
     if (!snapshot || out == nullptr || *out) {

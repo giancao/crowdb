@@ -92,7 +92,6 @@ pub struct CheckpointReclaim {
     pub journal_bytes: u64,
     pub metadata_records: u64,
     pub tree_bytes: u64,
-    pub orphan_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -273,6 +272,33 @@ impl Partition {
         range.validate()?;
         config.validate()?;
         let (tree, journal) = native_storage_parts(tree_id, &range, tree_config, page_store, stream)?;
+        Self::open(partition_id, range, ownership_epoch, config, tree, journal)
+    }
+
+    /// Opens a serving partition through the native runtime completion path.
+    ///
+    /// # Errors
+    /// Returns an invalid partition or native Tree open error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_native_async(
+        partition_id: PartitionId,
+        range: PartitionRange,
+        ownership_epoch: u64,
+        config: PartitionConfig,
+        tree_id: u64,
+        tree_config: crowdb_tree_ffi::Config,
+        page_store: Arc<crowdb_tree_ffi::PageStore>,
+        stream: ChunkStream,
+    ) -> Result<Self> {
+        range.validate()?;
+        config.validate()?;
+        if ownership_epoch == 0 || tree_id == 0 {
+            return Err(ChunkKvError::InvalidRequest(
+                "ownership epoch and tree identity must be nonzero".into(),
+            ));
+        }
+        let (tree, journal) =
+            native::open_storage(tree_id, range.clone(), tree_config, page_store, stream).await?;
         Self::open(partition_id, range, ownership_epoch, config, tree, journal)
     }
 
@@ -1520,7 +1546,7 @@ impl Partition {
         if proof.catalog_revision == 0 {
             return Err(ChunkKvError::SplitRetry("split abort proof is absent".into()));
         }
-        let mut transition = self.split_transition.lock().await;
+        let mut transition = self.split_transition.clone().lock_owned().await;
         let active = transition
             .as_ref()
             .ok_or_else(|| ChunkKvError::SplitRetry("no split transition is active".into()))?;
@@ -1536,23 +1562,19 @@ impl Partition {
             PartitionLifecycle::SplitPreparing | PartitionLifecycle::SplitFinalizing => {}
             state => return Err(write_state_error(state)),
         }
-        self.discard_pending_child_preparation()?;
-        *transition = None;
-        self.split_ingress.store(None);
-        self.lifecycle
-            .store(lifecycle_code(PartitionLifecycle::Serving), Ordering::Release);
-        self.metrics.split_abort();
-        Ok(())
-    }
-
-    /// Returns legacy mutable page-store counters. Runtime-backed Chunk trees
-    /// reject this schema; use `backing_storage_stats` for physical storage.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed storage error if the native counters are unavailable.
-    pub fn chunk_storage_stats(&self) -> Result<Option<crowdb_tree_ffi::ChunkPageStoreStats>> {
-        self.tree.chunk_stats()
+        let partition = self.clone();
+        tokio::spawn(async move {
+            partition.discard_pending_child_preparation().await?;
+            *transition = None;
+            partition.split_ingress.store(None);
+            partition
+                .lifecycle
+                .store(lifecycle_code(PartitionLifecycle::Serving), Ordering::Release);
+            partition.metrics.split_abort();
+            Ok(())
+        })
+        .await
+        .map_err(|error| ChunkKvError::Internal(format!("split abort task failed: {error}")))?
     }
 
     /// Samples the actual physical backing ledger. Equal scope IDs identify the

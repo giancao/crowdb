@@ -186,7 +186,7 @@ TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
         ASSERT_EQ(put_flush(t, i + 1, make_key(i), "val" + std::to_string(i)), 0);
     }
     uint64_t durable = 0;
-    ASSERT_EQ(ct_snapshot(t, &durable), 0);
+    ASSERT_EQ(ct_flush_with_persistent(t, &durable), 0);
     EXPECT_EQ(durable, 40U);
 
     ct_buf   warm_entries{};
@@ -233,7 +233,7 @@ TEST(AsyncScan, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
     for (int i = 0; i < 40; ++i) {
         ASSERT_EQ(put_flush(t, i + 1, make_key(i), "val" + std::to_string(i)), 0);
     }
-    ASSERT_EQ(ct_snapshot(t, nullptr), 0);
+    ASSERT_EQ(ct_flush_with_persistent(t, nullptr), 0);
     ct_evict_clean_leaves(t, 0);
 
     ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, 0);

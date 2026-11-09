@@ -156,7 +156,7 @@ struct EngineStats
     uint64_t mt_get_hit_total       = 0; // L0 lookups that found a cell
     uint64_t flush_drain_total      = 0; // drain_all_frozen_locked calls
     uint64_t flush_entries_total    = 0; // entries drained from L0 to L1
-    uint64_t snapshot_total         = 0; // snapshot() calls (durable checkpoints)
+    uint64_t snapshot_total         = 0; // flush_with_persistent() calls
     uint64_t l1_get_total           = 0; // get() lookups that descended to L1
     uint64_t l1_get_hit_total       = 0; // L1 lookups that found a cell
     uint64_t map_lookup_total       = 0; // mapping table lookups

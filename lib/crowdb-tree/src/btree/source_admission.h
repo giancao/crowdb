@@ -36,8 +36,7 @@ struct SourceCatalog
         return detail::shared_allocation_bound<SourceCatalog>();
     }
 
-    explicit SourceCatalog(std::shared_ptr<detail::AllocationReservation> credit = {})
-        : tables(TableAllocator(std::move(credit)))
+    explicit SourceCatalog(std::shared_ptr<AllocationBudget> credit = {}) : tables(TableAllocator(std::move(credit)))
     {
     }
 
@@ -61,16 +60,16 @@ class SourceCapture
     SourceCapture(const SourceCapture &)            = delete;
     SourceCapture &operator=(const SourceCapture &) = delete;
 
-    [[nodiscard]] uint64_t                                              batch_id() const noexcept;
-    [[nodiscard]] uint64_t                                              floor() const noexcept;
-    [[nodiscard]] uint64_t                                              frontier() const noexcept;
-    [[nodiscard]] SourceCapturePhase                                    phase() const noexcept;
-    [[nodiscard]] bool                                                  drained() const noexcept;
-    [[nodiscard]] bool                                                  successor_active() const noexcept;
-    [[nodiscard]] const std::shared_ptr<const SourceCatalog>           &expected_catalog() const noexcept;
-    [[nodiscard]] const std::shared_ptr<const SourceCatalog>           &next_catalog() const noexcept;
-    [[nodiscard]] const std::shared_ptr<MemTable>                      &successor() const noexcept;
-    [[nodiscard]] const std::shared_ptr<detail::AllocationReservation> &admission_owner() const noexcept;
+    [[nodiscard]] uint64_t                                    batch_id() const noexcept;
+    [[nodiscard]] uint64_t                                    floor() const noexcept;
+    [[nodiscard]] uint64_t                                    frontier() const noexcept;
+    [[nodiscard]] SourceCapturePhase                          phase() const noexcept;
+    [[nodiscard]] bool                                        drained() const noexcept;
+    [[nodiscard]] bool                                        successor_active() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const SourceCatalog> &expected_catalog() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const SourceCatalog> &next_catalog() const noexcept;
+    [[nodiscard]] const std::shared_ptr<MemTable>            &successor() const noexcept;
+    [[nodiscard]] const std::shared_ptr<AllocationBudget>    &admission_owner() const noexcept;
 
     // A stopped attempt still drains every admitted writer before terminal.
     // Reconnecting after terminal retries against the same fixed P/F/sources.
@@ -238,10 +237,10 @@ class SourceAdmission
     // Requires the already-authorized whole-batch metadata credit owner.
     // All allocations precede closure. Existing repair captures are returned
     // unchanged, rather than closing another active table or widening F.
-    [[nodiscard]] Status try_capture(const std::atomic<uint64_t>                   &contiguous,
-                                     std::shared_ptr<detail::AllocationReservation> admission_owner,
-                                     std::shared_ptr<SourceCapture>                *out,
-                                     std::shared_ptr<const SourceCatalog>           expected_catalog = {});
+    [[nodiscard]] Status try_capture(const std::atomic<uint64_t>         &contiguous,
+                                     std::shared_ptr<AllocationBudget>    admission_owner,
+                                     std::shared_ptr<SourceCapture>      *out,
+                                     std::shared_ptr<const SourceCatalog> expected_catalog = {});
     // Call only after the Tree publication makes next_catalog's complete
     // source membership visible to readers. Before this acknowledgement,
     // successor writes are rejected, so no read can miss a new source.
@@ -258,7 +257,7 @@ class SourceAdmission
     // table keeps later slots. Allocate its new catalog before publication;
     // installation only acknowledges the matching immutable covered state.
     [[nodiscard]] static std::optional<size_t> coverage_allocation_bound(size_t sources) noexcept;
-    Status prepare_coverage(uint64_t frontier, const std::shared_ptr<detail::AllocationReservation> &metadata,
+    Status prepare_coverage(uint64_t frontier, const std::shared_ptr<AllocationBudget> &metadata,
                             std::shared_ptr<Coverage> *out);
     Status install_coverage(const std::shared_ptr<Coverage> &prepared, const PublishedTreeState &published);
     [[nodiscard]] static std::optional<size_t> rotation_allocation_bound(size_t sources) noexcept;

@@ -86,10 +86,6 @@ void SharedPageCache::State::drain() noexcept
         if (evict_requested.exchange(false, std::memory_order_acq_rel)) {
             evict_ready();
         }
-        if (resume_requested) {
-            resume_requested = false;
-            resume_pending();
-        }
         // A producer that observed running publishes its command before its
         // exchange. Acquire that handoff before rechecking the incoming lists.
         running.exchange(false, std::memory_order_acq_rel);

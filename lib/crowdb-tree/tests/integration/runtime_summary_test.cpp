@@ -38,7 +38,7 @@ TEST(RuntimeSummary, CheckpointAndRecoveryExposeCompleteCountsWithoutLoadingPage
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.tree->apply(1, summary_data()).ok());
     EXPECT_FALSE(test.tree->tree_summary().exact);
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     check_summary(*test.tree, 80, 320, 20000 + (79 * 60));
     const auto saved = test.tree->tree_summary();
     test.tree.reset();
@@ -57,7 +57,7 @@ TEST(RuntimeSummary, UnflushedAndPublishedWritesInvalidateOnlyTheCurrentSummary)
     test_chunk::TestCoreChunk test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.tree->apply(1, summary_data()).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     auto old = TreeCoreAccess::get(*test.tree)->capture();
     if (!old->summary) {
         FAIL() << "fixed summary missing after checkpoint";
@@ -66,7 +66,7 @@ TEST(RuntimeSummary, UnflushedAndPublishedWritesInvalidateOnlyTheCurrentSummary)
     EXPECT_FALSE(test.tree->tree_summary().exact);
     ASSERT_TRUE(test.tree->flush().ok());
     EXPECT_FALSE(test.tree->tree_summary().exact);
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     check_summary(*test.tree, 79, 316, 20000 + (78 * 60));
     EXPECT_EQ(old->summary->live_kv, 80U);
     EXPECT_EQ(old->summary->live_value_bytes, 20000 + (79 * 60));

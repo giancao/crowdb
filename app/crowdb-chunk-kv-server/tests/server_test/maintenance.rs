@@ -78,6 +78,7 @@ async fn metadata_maintenance_requires_a_live_independent_assignment() {
     head.seal().unwrap();
     service
         .install_catalog_and_reconcile(&head, &[page], &[])
+        .await
         .unwrap();
     install_grant(&service, 2);
     write(&partition, 3).await;
@@ -97,6 +98,7 @@ async fn metadata_maintenance_requires_a_live_independent_assignment() {
     );
     service
         .install_catalog_and_reconcile(&head, &[page], &[])
+        .await
         .unwrap();
     assert_eq!(store.record_load_count(), reads);
     install_grant(&service, 3);

@@ -12,6 +12,7 @@ std::optional<size_t> LocalCompactionOperation::allocation_bound() noexcept
 {
     using namespace detail;
     return AllocationBound(local_block_gc_metadata_bound({}).value_or(SIZE_MAX))
+        .add(local_block_gc_operation_bound())
         .add(shared_allocation_bound<State>())
         .add(shared_allocation_bound<LocalCompactionOperation>())
         .add(shared_allocation_bound<AllocationReservation>())
@@ -42,9 +43,7 @@ try {
             options.free_threshold <= 0.0 || options.free_threshold >= 1.0) {
             return Status::invalid_argument();
         }
-        status = detail::reserve_backend_operation(state->store, core.binding()->account(),
-                                                   {.workers = core.binding()->backend_cpu()->worker_count()},
-                                                   &state->backend);
+        status = detail::ongoing_backend_operation(state->store, &state->backend);
         if (!status.ok()) {
             return status;
         }
@@ -141,13 +140,11 @@ void LocalCompactionOperation::State::backend_run(void *context) noexcept
         state.backend_step();
     }
     catch (const std::bad_alloc &) {
-        state.child_status = Status::resource_exhausted();
+        state.child_done(Status::resource_exhausted());
     }
     catch (...) {
-        state.child_status = Status::io_error();
+        state.child_done(Status::io_error());
     }
-    state.child_ready.store(true, std::memory_order_release);
-    state.wake();
 }
 
 void LocalCompactionOperation::State::finish(Status status) noexcept

@@ -21,7 +21,7 @@ pub struct TestRuntimeShutdown {
     _root: crowdb_test_harness::test_dirs::TestDir,
     pub registry: Arc<PaxosKvStoreRegistry>,
     pub store: Arc<PxKvStore>,
-    pub group: Arc<PxGroup>,
+    pub group: Option<Arc<PxGroup>>,
     pub engine_marker: PathBuf,
     pub wal_marker: PathBuf,
     origin: String,
@@ -29,10 +29,14 @@ pub struct TestRuntimeShutdown {
 }
 impl TestRuntimeShutdown {
     pub async fn start() -> Self {
+        Self::start_with_backend("mem-block").await
+    }
+
+    pub async fn start_with_backend(backend: &str) -> Self {
         let root = crowdb_test_harness::test_dirs::tempdir_in_test_data("runtime-host-shutdown");
         let mut config = PaxosKvConfig {
             wal_backend: "file".into(),
-            crowtree_backend: "mem-block".into(),
+            crowtree_backend: backend.into(),
             wal_root: root.path().join("wal"),
             data_root: root.path().join("data"),
             config_root: root.path().join("config"),
@@ -95,7 +99,7 @@ impl TestRuntimeShutdown {
             _root: root,
             registry,
             store,
-            group,
+            group: Some(group),
             engine_marker,
             wal_marker,
             origin,
@@ -120,14 +124,21 @@ impl TestRuntimeShutdown {
         assert!(self.store.get_group(1).is_some());
         assert!(self.engine_marker.exists());
         assert!(self.wal_marker.exists());
-        assert_eq!(self.group.local_replica().contiguous_applied(), 0);
-        assert_eq!(self.group.local_replica().learner.engine().resume_from_slot(), 0);
+        assert_eq!(self.group().local_replica().contiguous_applied(), 0);
+        assert_eq!(
+            self.group().local_replica().learner.engine().resume_from_slot(),
+            0
+        );
     }
     pub async fn repair(&self) {
-        accept(&self.group, 1).await;
-        tokio::time::timeout(DEADLINE, self.group.local_replica().await_apply_fence(2))
+        accept(self.group(), 1).await;
+        tokio::time::timeout(DEADLINE, self.group().local_replica().await_apply_fence(2))
             .await
             .unwrap();
+    }
+
+    pub fn group(&self) -> &PxGroup {
+        self.group.as_deref().unwrap()
     }
 }
 impl Drop for TestRuntimeShutdown {

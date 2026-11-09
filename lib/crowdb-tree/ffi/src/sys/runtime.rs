@@ -78,12 +78,29 @@ extern "C" {
     pub fn ct_runtime_create(options: *const ct_runtime_options, out: *mut *mut ct_runtime) -> i32;
     pub fn ct_runtime_stop_admission(runtime: *mut ct_runtime);
     pub fn ct_runtime_drain_cpu(runtime: *mut ct_runtime);
+    pub fn ct_runtime_drain_async(
+        runtime: *mut ct_runtime,
+        complete: unsafe extern "C" fn(*mut std::ffi::c_void, i32),
+        context: *mut std::ffi::c_void,
+    ) -> i32;
+    pub fn ct_runtime_stop_workers_async(
+        runtime: *mut ct_runtime,
+        complete: unsafe extern "C" fn(*mut std::ffi::c_void, i32),
+        context: *mut std::ffi::c_void,
+    ) -> i32;
     pub fn ct_runtime_free(runtime: *mut ct_runtime);
     pub fn ct_open_with_runtime(
         options: *const ct_options,
         runtime: *mut ct_runtime,
         binding: *const ct_tree_runtime_options,
         out: *mut *mut ct_tree,
+    ) -> i32;
+    pub fn ct_open_with_runtime_async(
+        options: *const ct_options,
+        runtime: *mut ct_runtime,
+        binding: *const ct_tree_runtime_options,
+        complete: unsafe extern "C" fn(*mut std::ffi::c_void, i32, *mut ct_tree),
+        context: *mut std::ffi::c_void,
     ) -> i32;
     pub fn ct_rebuild_range_with_runtime(
         source: *mut ct_tree,

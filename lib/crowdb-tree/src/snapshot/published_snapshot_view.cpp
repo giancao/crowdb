@@ -9,7 +9,7 @@
 
 namespace crowdb::tree
 {
-PublishedSnapshotView::PublishedSnapshotView(std::shared_ptr<PublishedSnapshotContext> context, size_t max_bytes)
+PublishedSnapshotView::PublishedSnapshotView(std::shared_ptr<PublishedReadViewContext> context, size_t max_bytes)
     : Snapshot(context->view()->coverage, {}),
       context_(std::move(context)),
       max_bytes_(max_bytes)
@@ -23,7 +23,7 @@ PublishedSnapshotView::~PublishedSnapshotView()
     }
 }
 
-Status PublishedSnapshotView::create(std::shared_ptr<PublishedSnapshotContext> context, size_t max_bytes,
+Status PublishedSnapshotView::create(std::shared_ptr<PublishedReadViewContext> context, size_t max_bytes,
                                      std::shared_ptr<Snapshot> *out)
 try {
     if (!context || max_bytes == 0 || out == nullptr || *out) {
@@ -101,8 +101,8 @@ Status create_published_snapshot(const std::shared_ptr<TreeCore> &core, std::sha
     if (!core || out == nullptr || *out) {
         return Status::invalid_argument("snapshot compatibility view requires a Core and empty output");
     }
-    std::shared_ptr<PublishedSnapshotContext> context;
-    auto                                      status = core->capture_snapshot(&context);
+    std::shared_ptr<PublishedReadViewContext> context;
+    auto                                      status = core->capture_read_only_view(&context);
     if (!status.ok()) {
         return status;
     }

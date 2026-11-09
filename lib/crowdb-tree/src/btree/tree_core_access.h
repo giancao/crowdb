@@ -13,6 +13,14 @@ struct TreeCoreAccess
         return tree.core_.get();
     }
 
+    [[nodiscard]] static bool close_async(Crowdbtree &tree, AsyncCompletion complete) noexcept
+    {
+        auto core = tree.core_;
+        return core->close_async(std::move(complete));
+    }
+
+    static void finish_open(const std::shared_ptr<TreeCore> &core, std::unique_ptr<Crowdbtree> *out);
+
     static void record_compaction(Crowdbtree &tree, const MergeGcStats &stats, uint64_t elapsed_ns)
     {
         tree.record_compaction_metrics(stats, elapsed_ns);

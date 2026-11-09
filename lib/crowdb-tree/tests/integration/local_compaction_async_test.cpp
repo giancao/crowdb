@@ -148,5 +148,49 @@ TEST(LocalCompactionAsync, StopBeforeStartCompletesOnceAndReleasesTheSelectionGa
     EXPECT_TRUE(detail::wait_snapshot_operation(operation).ok());
     operation.reset();
 }
+
+TEST(LocalCompactionAsync, PendingRetirementLeavesBackendWorkerFree)
+{
+    tree_test::TempDir              directory("async_compact_retirement_");
+    std::unique_ptr<BlockPageStore> store;
+    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
+    Config config;
+    ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
+    config.page_store = store.get();
+    std::shared_ptr<TreeCore> core;
+    ASSERT_TRUE(TreeCore::open(config, &core).ok());
+    auto binding = core->binding();
+    binding->drain();
+    std::shared_ptr<LocalCompactionOperation> operation;
+    ASSERT_TRUE(core->prepare_compaction({}, &operation).ok());
+
+    struct Probe
+    {
+        std::promise<void>    done;
+        ApplyDispatcher::Node node{[](void *context) noexcept { static_cast<Probe *>(context)->done.set_value(); },
+                                   this};
+    };
+
+    auto                 probe         = std::make_shared<Probe>();
+    auto                 backend_ready = probe->done.get_future();
+    std::promise<Status> terminal;
+    auto                 completed  = terminal.get_future();
+    auto                 connection = stdexec::connect(operation->sender(), TestCompletion{.result = &terminal});
+    auto                 retirement = core->accepted_allocations()->retirement_started();
+    ASSERT_NE(retirement.finish, nullptr);
+    stdexec::start(connection);
+    // Make sure the compaction's first backend step is queued before the probe.
+    binding->lane()->drain();
+    binding->backend_progress()->request(probe->node, probe);
+    const auto ready   = backend_ready.wait_for(std::chrono::seconds(2));
+    const auto pending = completed.wait_for(std::chrono::milliseconds(0));
+    retirement.finish(retirement.owner.get());
+    EXPECT_EQ(ready, std::future_status::ready);
+    EXPECT_EQ(pending, std::future_status::timeout);
+    ASSERT_EQ(completed.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(completed.get().ok());
+    EXPECT_FALSE(core->local_backend()->gc_active.load(std::memory_order_acquire));
+    operation.reset();
+}
 } // namespace
 } // namespace crowdb::tree

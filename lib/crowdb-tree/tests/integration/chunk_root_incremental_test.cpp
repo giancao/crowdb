@@ -33,7 +33,7 @@ std::shared_ptr<ChunkRootCommit> next(test_chunk::TestRootBackend               
     std::shared_ptr<ChunkRootCommit> operation;
     const auto                       status =
         ChunkRootCommit::create(pages, test.domain, test.ids, identity, test.credits.credits.reservation(),
-                                test.credits.credits.reservation(), &operation, 1024 * 1024, previous, baseline);
+                                test.credits.credits.reservation(), &operation, previous, baseline);
     EXPECT_TRUE(status.ok()) << status.to_string();
     return status.ok() ? finish(std::move(operation)) : nullptr;
 }

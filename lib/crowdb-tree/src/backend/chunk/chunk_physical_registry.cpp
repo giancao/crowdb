@@ -69,13 +69,18 @@ bool ChunkPhysicalRegistry::State::retire_step() noexcept
     return packs.empty();
 }
 
-Status ChunkPhysicalRegistry::State::execute(const std::shared_ptr<Request> &request)
+void ChunkPhysicalRegistry::State::submit(const std::shared_ptr<Request> &request)
 {
     request->state             = shared_from_this();
     request->queued_owner      = request;
     request->dispose           = &State::dispatch;
     request->retirement_budget = request->metadata;
     queue->retire(request.get());
+}
+
+Status ChunkPhysicalRegistry::State::execute(const std::shared_ptr<Request> &request)
+{
+    submit(request);
     while (!request->done.load(std::memory_order_acquire)) {
         request->done.wait(false, std::memory_order_acquire);
     }
@@ -102,6 +107,20 @@ bool ChunkPhysicalRegistry::State::dispatch(detail::RetirementNode *node) noexce
     }
     catch (...) {
         request->status = Status::internal_error("physical registry operation failed");
+    }
+    if (request->status.ok() && request->output != nullptr) {
+        if (request->admission != nullptr) {
+            auto &rollback                = request->rollback;
+            rollback->pack                = request->pack;
+            request->admission->rollback_ = std::move(rollback);
+            request->admission->abort_    = &State::abort;
+        }
+        *request->output = request->pack;
+    }
+    if (request->completion.complete_fn != nullptr) {
+        auto complete = std::move(request->completion);
+        complete.complete(std::move(request->status));
+        return true;
     }
     // Keep the paid command alive across both notification and the callback tail.
     // RetirementQueue copied accounting before dispatch and does not read it again.

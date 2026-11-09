@@ -47,7 +47,7 @@ TEST(R6, GetAsyncSlowPathReturnsBorrowedSlice)
         ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "val" + std::to_string(i))).ok());
     }
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot(nullptr).ok()); // clean + evictable
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // clean + evictable
 
     GetView warm;
     ASSERT_TRUE(RuntimeTreeAccess_for_tests::core(t).get(Slice(make_key(0)), &warm).ok());
@@ -96,7 +96,7 @@ TEST(R6, PublishedSnapshotStaysConsistentAcrossInstallSnapshot)
         ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "val" + std::to_string(i))).ok());
     }
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     std::weak_ptr<const PublishedPage> old_root = RuntimeTreeAccess_for_tests::root(t);
     auto                               snap     = t.snapshot_view();
@@ -146,7 +146,7 @@ TEST(R6, ConcurrentReadersAndInstallSnapshotNoUAF)
         ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "val" + std::to_string(i))).ok());
     }
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     std::atomic<bool>   stop{false};
     std::atomic<bool>   bad{false};

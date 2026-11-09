@@ -35,11 +35,16 @@ Status ChunkRootRecovery::index()
     if (!status.ok()) {
         return status;
     }
-    status = decode_chunk_index_header(index_bytes_, root_.identity, index_, &left_, &offset_);
+    return index_loaded();
+}
+
+Status ChunkRootRecovery::index_loaded()
+{
+    auto status = decode_chunk_index_header(index_bytes_, root_.identity, index_, &left_, &offset_);
     if (!status.ok()) {
         return status;
     }
-    if (left_ != expected.frame_count) {
+    if (left_ != root_.indexes[index_].frame_count) {
         return Status::corruption();
     }
     return Status::Ok();
@@ -48,18 +53,9 @@ Status ChunkRootRecovery::index()
 Status ChunkRootRecovery::frame()
 {
     ChunkIndexFrame record;
-    auto            status = decode_chunk_index_frame(index_bytes_, &offset_, &record);
+    auto            status = prepare_frame(&record);
     if (!status.ok()) {
         return status;
-    }
-    const auto &expected = root_.indexes[index_];
-    if ((have_pid_ && record.page_id <= last_pid_) || record.page_id >= root_.identity.next_page_id ||
-        (left_ == expected.frame_count && record.page_id != expected.first_page) ||
-        (left_ == 1 && (record.page_id != expected.last_page || offset_ != index_bytes_.size() - 4))) {
-        return Status::corruption();
-    }
-    if (record.pack.length > limits_.max_blob_bytes || record.frame_bytes > limits_.max_frame_bytes) {
-        return Status::resource_exhausted();
     }
     detail::ChunkStageId pin;
     status = next_pin(&pin);
@@ -71,6 +67,32 @@ Status ChunkRootRecovery::frame()
     if (!status.ok()) {
         return status;
     }
+    blob_.resize(record.pack.length);
+    status = read_chunk_backing(*pack, blob_, window_);
+    return status.ok() ? frame_loaded(record, std::move(pack)) : status;
+}
+
+Status ChunkRootRecovery::prepare_frame(ChunkIndexFrame *out)
+{
+    auto status = decode_chunk_index_frame(index_bytes_, &offset_, out);
+    if (!status.ok()) {
+        return status;
+    }
+    const auto &record   = *out;
+    const auto &expected = root_.indexes[index_];
+    if ((have_pid_ && record.page_id <= last_pid_) || record.page_id >= root_.identity.next_page_id ||
+        (left_ == expected.frame_count && record.page_id != expected.first_page) ||
+        (left_ == 1 && (record.page_id != expected.last_page || offset_ != index_bytes_.size() - 4))) {
+        return Status::corruption();
+    }
+    if (record.pack.length > limits_.max_blob_bytes || record.frame_bytes > limits_.max_frame_bytes) {
+        return Status::resource_exhausted();
+    }
+    return Status::Ok();
+}
+
+Status ChunkRootRecovery::frame_loaded(const ChunkIndexFrame &record, std::shared_ptr<const ChunkPackBacking> pack)
+{
     auto backing              = detail::reserved_shared<BackingRef>(metadata_);
     backing->backend_id       = domain_->backend_id;
     backing->length           = record.pack.length;
@@ -91,12 +113,7 @@ Status ChunkRootRecovery::frame()
                                     .backing         = std::move(backing),
                                     .stored_overflow = {},
                                     .summary         = {}};
-    blob_.resize(record.pack.length);
-    status = read_chunk_backing(*descriptor.backing->chunk, blob_, window_);
-    if (!status.ok()) {
-        return status;
-    }
-    status = validate_frame(descriptor, record.stored_reference_words);
+    auto                 status = validate_frame(descriptor, record.stored_reference_words);
     if (!status.ok()) {
         return status;
     }

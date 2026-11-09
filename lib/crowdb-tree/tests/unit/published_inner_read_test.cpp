@@ -66,7 +66,7 @@ TEST(PublishedInnerRead, ScanCrossesColdIndexesInBothDirectionsWithSingleWorker)
     TestColdTree tree;
     auto         runtime = std::make_shared<detail::FlushRuntime>(1, 1);
     auto         lane    = std::make_shared<detail::FlushRuntime::Lane>(1);
-    auto loader = std::make_shared<AsyncStorePageLoader>(tree.store, runtime, lane, PageLoadLimits{.max_inflight = 1});
+    auto         loader  = std::make_shared<AsyncStorePageLoader>(tree.store, runtime, lane, PageLoadLimits{});
     for (bool reverse : {false, true}) {
         std::shared_ptr<PublishedScan> scan;
         ASSERT_TRUE(PublishedScan::create(tree.view, loader, {.lower = "g", .upper = "t"}, reverse,

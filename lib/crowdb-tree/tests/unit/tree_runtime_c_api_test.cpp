@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <future>
 #include <vector>
 
 namespace crowdb::tree
@@ -71,10 +73,47 @@ TEST(TreeRuntimeCAbi, NullRuntimeKeepsTheDefaultReloadableMemoryBackend)
     ASSERT_EQ(ct_apply_put(tree, 1, &key, 1, &value, 1), 0);
     uint64_t generation = 0;
     uint64_t coverage   = 0;
-    EXPECT_EQ(ct_snapshot_info(tree, &generation, &coverage), 0);
+    EXPECT_EQ(ct_flush_with_persistent_info(tree, &generation, &coverage), 0);
     EXPECT_GT(generation, 0U);
     EXPECT_EQ(coverage, 1U);
     ct_close(tree);
+}
+
+TEST(TreeRuntimeCAbi, AsyncMemBlockOpenDoesNotNeedAPath)
+{
+    using namespace std::chrono_literals;
+    ct_runtime *handle = nullptr;
+    ASSERT_EQ(ct_runtime_create(nullptr, &handle), 0);
+    std::unique_ptr<ct_runtime, decltype(&ct_runtime_free)> runtime(handle, &ct_runtime_free);
+
+    ct_options options{};
+    options.backend     = CT_BACKEND_MEM_BLOCK;
+    using Reply         = std::promise<std::pair<ct_status, ct_tree *>>;
+    auto      *reply    = new Reply;
+    auto       opened   = reply->get_future();
+    const auto accepted = ct_open_with_runtime_async(
+        &options, handle, nullptr,
+        [](void *context, ct_status status, ct_tree *tree) {
+            std::unique_ptr<Reply> owner(static_cast<Reply *>(context));
+            owner->set_value({status, tree});
+        },
+        reply);
+    if (accepted != 0) {
+        delete reply;
+    }
+    ASSERT_EQ(accepted, 0);
+    ASSERT_EQ(opened.wait_for(3s), std::future_status::ready);
+    const auto [status, tree] = opened.get();
+    std::unique_ptr<ct_tree, decltype(&ct_close)> owned_tree(tree, &ct_close);
+    ASSERT_EQ(status, 0);
+    ASSERT_NE(tree, nullptr);
+    const uint8_t key   = 'k';
+    const uint8_t value = 'v';
+    EXPECT_EQ(ct_apply_put(tree, 1, &key, 1, &value, 1), 0);
+    uint64_t generation = 0;
+    uint64_t coverage   = 0;
+    EXPECT_EQ(ct_flush_with_persistent_info(tree, &generation, &coverage), 0);
+    EXPECT_EQ(coverage, 1U);
 }
 
 TEST(TreeRuntimeCAbi, VersionedOptionsRejectWrongSizeAndUnfundedStorage)
@@ -121,7 +160,7 @@ TEST(TreeRuntimeCAbi, OpenRuntimeUsesOwnedCoreAndRejectsInvalidBinding)
     ASSERT_EQ(ct_open_with_runtime(&options, runtime, nullptr, &tree), 0);
     ASSERT_NE(tree, nullptr);
     uint64_t checkpoint = 0;
-    EXPECT_EQ(ct_snapshot(tree, &checkpoint), static_cast<int32_t>(Code::kUnavailable));
+    EXPECT_EQ(ct_flush_with_persistent(tree, &checkpoint), static_cast<int32_t>(Code::kUnavailable));
     ct_close(tree);
     tree = nullptr;
     ct_tree_runtime_options binding{};
@@ -134,6 +173,68 @@ TEST(TreeRuntimeCAbi, OpenRuntimeUsesOwnedCoreAndRejectsInvalidBinding)
     EXPECT_EQ(configure_tree_runtime(runtime, nullptr, &config).code(), Code::kUnavailable);
     ct_runtime_drain_cpu(runtime);
     ct_runtime_free(runtime);
+}
+
+TEST(TreeRuntimeCAbi, ConsumingCloseLetsTheOnlyWorkerRunBeforeRetirementCompletes)
+{
+    using namespace std::chrono_literals;
+    ct_runtime_options runtime_options{};
+    ct_runtime_options_default(&runtime_options);
+    runtime_options.workers = 1;
+    ct_runtime *handle      = nullptr;
+    ASSERT_EQ(ct_runtime_create(&runtime_options, &handle), 0);
+    std::unique_ptr<ct_runtime, decltype(&ct_runtime_free)> runtime(handle, &ct_runtime_free);
+    ct_page_store                                          *store = nullptr;
+    ASSERT_EQ(ct_page_store_open_mem(1, &store), 0);
+    std::unique_ptr<ct_page_store, decltype(&ct_page_store_free)> owned_store(store, &ct_page_store_free);
+    ct_options                                                    options{};
+    options.page_store = store;
+    ct_tree *tree      = nullptr;
+    ASSERT_EQ(ct_open_with_runtime(&options, handle, nullptr, &tree), 0);
+    EXPECT_EQ(ct_close_async(tree, nullptr, nullptr), static_cast<ct_status>(Code::kInvalidArgument));
+    auto *core       = TreeCoreAccess::get(*c_api_tree(tree));
+    auto  cpu        = core->binding()->cpu();
+    auto  retirement = core->accepted_allocations()->retirement_started();
+    ASSERT_NE(retirement.finish, nullptr);
+
+    struct Probe
+    {
+        ct_tree                *tree;
+        std::promise<ct_status> submitted;
+        std::promise<ct_status> completed;
+
+        static void close(void *argument) noexcept
+        {
+            auto &probe = *static_cast<Probe *>(argument);
+            probe.submitted.set_value(ct_close_async(probe.tree, &Probe::complete, &probe));
+        }
+
+        static void complete(void *argument, ct_status status) noexcept
+        {
+            static_cast<Probe *>(argument)->completed.set_value(status);
+        }
+    } probe{.tree = tree, .submitted = {}, .completed = {}};
+
+    auto       submitted = probe.submitted.get_future();
+    auto       completed = probe.completed.get_future();
+    auto       lane      = std::make_shared<detail::FlushRuntime::Lane>(1);
+    const auto queued    = cpu->try_submit(lane, &Probe::close, &probe);
+    const auto returned  = queued.ok() ? submitted.wait_for(3s) : std::future_status::deferred;
+    EXPECT_TRUE(queued.ok());
+    EXPECT_EQ(returned, std::future_status::ready);
+    EXPECT_EQ(completed.wait_for(0ms), std::future_status::timeout);
+    retirement.finish(retirement.owner.get());
+    lane->drain();
+    if (!queued.ok() || submitted.get() != 0) {
+        ct_close(tree);
+        FAIL() << "close was not accepted";
+    }
+    ASSERT_EQ(completed.wait_for(3s), std::future_status::ready);
+    EXPECT_EQ(completed.get(), 0);
+    // Closing releases the allocation authority before notifying the caller.
+    tree = nullptr;
+    ASSERT_EQ(ct_open_with_runtime(&options, handle, nullptr, &tree), 0);
+    ct_close(tree);
 }
 } // namespace
 } // namespace crowdb::tree

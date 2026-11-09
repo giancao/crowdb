@@ -119,7 +119,6 @@ EpochManager::~EpochManager()
     if (active_guards() != 0) {
         lifetime_->participants = participants_.exchange(nullptr);
         lifetime_->pending      = deferred_.exchange(nullptr);
-        lifetime_->collected    = std::exchange(collected_, nullptr);
         lifetime_->retired      = std::move(retired_);
         return;
     }
@@ -132,8 +131,8 @@ EpochManager::~EpochManager()
     // being silently dropped.
     {
         std::scoped_lock lk(reclaim_mu_);
-        while (!retired_.empty() || deferred_.load() != nullptr || collected_ != nullptr) {
-            reclaim_deferred_locked();
+        while (!retired_.empty() || deferred_.load() != nullptr) {
+            reclaim_deferred();
             std::vector<Retired> pending;
             pending.swap(retired_);
             for (auto &r : pending) {
@@ -154,7 +153,7 @@ EpochManager::~EpochManager()
     }
 }
 
-uint64_t EpochManager::min_active_epoch()
+uint64_t EpochManager::min_active_epoch() noexcept
 {
     // Oldest epoch any active reader might still be inside. seq_cst loads pair
     // with enter()'s publish for the total-order argument above.
@@ -238,7 +237,7 @@ size_t EpochManager::try_reclaim()
         return lifetime_->freed_count.load(std::memory_order_relaxed) - before;
     }
     std::scoped_lock lk(reclaim_mu_);
-    return reclaim_deferred_locked() + reclaim_locked();
+    return reclaim_deferred() + reclaim_locked();
 }
 
 size_t EpochManager::pending_retired()
@@ -247,15 +246,7 @@ size_t EpochManager::pending_retired()
         return lifetime_->pending_count.load(std::memory_order_relaxed);
     }
     std::scoped_lock lk(reclaim_mu_);
-    size_t           count = retired_.size();
-    // Diagnostic snapshot; tickets can only be reclaimed while this lock is held.
-    for (auto *p = deferred_.load(std::memory_order_acquire); p != nullptr; p = p->next) {
-        ++count;
-    }
-    for (auto *p = collected_; p != nullptr; p = p->next) {
-        ++count;
-    }
-    return count;
+    return retired_.size() + (lifetime_ ? lifetime_->pending_count.load(std::memory_order_relaxed) : 0);
 }
 
 void EpochManager::defer(Deferred *entry) noexcept
@@ -264,28 +255,26 @@ void EpochManager::defer(Deferred *entry) noexcept
         lifetime_->defer(entry);
         return;
     }
+    entry->epoch = global_epoch_.fetch_add(1, std::memory_order_seq_cst);
+    if (lifetime_) {
+        lifetime_->pending_count.fetch_add(1, std::memory_order_relaxed);
+    }
     auto *head = deferred_.load(std::memory_order_relaxed);
     do {
         entry->next = head;
     } while (!deferred_.compare_exchange_weak(head, entry, std::memory_order_release, std::memory_order_relaxed));
 }
 
-size_t EpochManager::reclaim_deferred_locked()
+size_t EpochManager::reclaim_deferred() noexcept
 {
     auto *pending = deferred_.exchange(nullptr, std::memory_order_acquire);
-    if (pending != nullptr) {
-        const auto epoch = global_epoch_.fetch_add(1, std::memory_order_seq_cst);
-        while (pending != nullptr) {
-            auto *next     = pending->next;
-            pending->epoch = epoch;
-            pending->next  = collected_;
-            collected_     = pending;
-            pending        = next;
-        }
+    if (pending == nullptr) {
+        return 0;
     }
-    const auto oldest = min_active_epoch();
-    pending           = std::exchange(collected_, nullptr);
-    size_t freed      = 0;
+    const auto oldest  = min_active_epoch();
+    Deferred  *blocked = nullptr;
+    Deferred  *tail    = nullptr;
+    size_t     freed   = 0;
     while (pending != nullptr) {
         auto *next = pending->next;
         if (pending->epoch < oldest) {
@@ -293,10 +282,22 @@ size_t EpochManager::reclaim_deferred_locked()
             ++freed;
         }
         else {
-            pending->next = collected_;
-            collected_    = pending;
+            if (tail == nullptr) {
+                tail = pending;
+            }
+            pending->next = blocked;
+            blocked       = pending;
         }
         pending = next;
+    }
+    if (tail != nullptr) {
+        auto *head = deferred_.load(std::memory_order_relaxed);
+        do {
+            tail->next = head;
+        } while (!deferred_.compare_exchange_weak(head, blocked, std::memory_order_release, std::memory_order_relaxed));
+    }
+    if (lifetime_ && freed != 0) {
+        lifetime_->pending_count.fetch_sub(freed, std::memory_order_relaxed);
     }
     return freed;
 }

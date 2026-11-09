@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+use super::{ct_catalog_blob_complete, ct_catalog_status_complete};
 use super::{
     ct_chunk_stage_id, ct_root_catalog, ct_root_catalog_callbacks, ct_root_catalog_staging_callbacks,
 };
@@ -71,7 +72,111 @@ pub struct ct_root_catalog_protection_callbacks {
         ) -> i32,
     >,
 }
+#[repr(C)]
+pub struct ct_root_catalog_protection_async_callbacks {
+    pub version: u32,
+    pub struct_bytes: u32,
+    pub writer_quiesced:
+        Option<unsafe extern "C" fn(*mut c_void, u64, u64, ct_catalog_status_complete, *mut c_void) -> i32>,
+    pub begin: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u64,
+            ct_chunk_stage_id,
+            u64,
+            u64,
+            u32,
+            *const u8,
+            usize,
+            ct_catalog_status_complete,
+            *mut c_void,
+        ) -> i32,
+    >,
+    pub load: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u64,
+            ct_chunk_stage_id,
+            *mut ct_chunk_candidate_status,
+            ct_catalog_status_complete,
+            *mut c_void,
+        ) -> i32,
+    >,
+    pub list: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u64,
+            *const ct_chunk_stage_id,
+            u32,
+            *mut ct_chunk_candidate_status,
+            *mut usize,
+            ct_catalog_status_complete,
+            *mut c_void,
+        ) -> i32,
+    >,
+    pub prepare: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u64,
+            ct_chunk_stage_id,
+            u64,
+            *const ct_chunk_stage_id,
+            usize,
+            ct_catalog_status_complete,
+            *mut c_void,
+        ) -> i32,
+    >,
+    pub finish: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u64,
+            ct_chunk_stage_id,
+            u32,
+            ct_catalog_status_complete,
+            *mut c_void,
+        ) -> i32,
+    >,
+    pub release: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u64,
+            ct_chunk_stage_id,
+            u64,
+            ct_catalog_status_complete,
+            *mut c_void,
+        ) -> i32,
+    >,
+    pub pin: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u64,
+            ct_chunk_stage_id,
+            ct_chunk_stage_id,
+            u8,
+            ct_catalog_status_complete,
+            *mut c_void,
+        ) -> i32,
+    >,
+    pub prune: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u64,
+            ct_chunk_stage_id,
+            *const ct_chunk_stage_id,
+            u32,
+            *mut ct_chunk_pin_progress,
+            ct_catalog_status_complete,
+            *mut c_void,
+        ) -> i32,
+    >,
+    pub root:
+        Option<unsafe extern "C" fn(*mut c_void, u64, u64, ct_catalog_blob_complete, *mut c_void) -> i32>,
+}
 unsafe extern "C" {
+    pub fn ct_callback_root_catalog_set_protection_async_v1(
+        catalog: *mut ct_root_catalog,
+        callbacks: *const ct_root_catalog_protection_async_callbacks,
+    ) -> i32;
     pub fn ct_callback_root_catalog_open_v3(
         callbacks: *const ct_root_catalog_callbacks,
         staging: *const ct_root_catalog_staging_callbacks,

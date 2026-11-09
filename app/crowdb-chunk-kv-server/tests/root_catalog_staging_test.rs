@@ -60,7 +60,7 @@ fn next(old: &StageRecord, state: StageState) -> StageRecord {
     out.state = state;
     out
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn callback_stage_roundtrip_survives_reopen_and_retries_the_same_operation() {
     let metadata = metadata::TestMetadata::start().await;
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
@@ -69,10 +69,20 @@ async fn callback_stage_roundtrip_survives_reopen_and_retries_the_same_operation
     let catalog = ChunkRootCatalog::open_callback(Arc::clone(&store)).unwrap();
     assert!(catalog.supports_staging());
     let first = record(1);
-    catalog.compare_stage(42, 1, None, Some(&first)).unwrap();
+    assert_eq!(catalog.load_stage(42, first.id), Err(CtError::NotSupported));
+    catalog
+        .compare_stage_async(42, 1, None, Some(&first))
+        .await
+        .unwrap();
     // Discarding the first result models a successful commit whose reply was lost.
-    catalog.compare_stage(42, 1, None, Some(&first)).unwrap();
-    assert_eq!(catalog.load_stage(42, first.id).unwrap(), Some(first.clone()));
+    catalog
+        .compare_stage_async(42, 1, None, Some(&first))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.load_stage_async(42, first.id).await.unwrap(),
+        Some(first.clone())
+    );
     let mut writing = next(&first, StageState::Writing);
     writing.packs.push(StagePack {
         offset: 0,
@@ -80,21 +90,35 @@ async fn callback_stage_roundtrip_survives_reopen_and_retries_the_same_operation
         checksum: 7,
     });
     catalog
-        .compare_stage(42, 1, Some(&first), Some(&writing))
+        .compare_stage_async(42, 1, Some(&first), Some(&writing))
+        .await
         .unwrap();
     catalog
-        .compare_stage(42, 1, Some(&first), Some(&writing))
+        .compare_stage_async(42, 1, Some(&first), Some(&writing))
+        .await
         .unwrap();
     let second = record(2);
-    catalog.compare_stage(42, 1, None, Some(&second)).unwrap();
-    assert_eq!(catalog.list_stages(42, None, 1).unwrap(), vec![writing.clone()]);
-    assert_eq!(catalog.list_stages(42, Some(first.id), 1).unwrap(), vec![second]);
+    catalog
+        .compare_stage_async(42, 1, None, Some(&second))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.list_stages_async(42, None, 1).await.unwrap(),
+        vec![writing.clone()]
+    );
+    assert_eq!(
+        store.list_stages_async(42, Some(first.id), 1).await.unwrap(),
+        vec![second]
+    );
     drop(catalog);
     drop(store);
     let reopened = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    assert_eq!(reopened.load_stage(42, first.id).unwrap(), Some(writing));
+    assert_eq!(
+        reopened.load_stage_async(42, first.id).await.unwrap(),
+        Some(writing)
+    );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn epoch_fencing_rejects_stale_transitions_and_keeps_unresolved_allocations() {
@@ -103,21 +127,23 @@ async fn epoch_fencing_rejects_stale_transitions_and_keeps_unresolved_allocation
         .await
         .unwrap();
     let first = record(1);
-    old.compare_stage(42, 1, None, Some(&first)).unwrap();
+    old.compare_stage_async(42, 1, None, Some(&first)).await.unwrap();
     let writing = next(&first, StageState::Writing);
     let current = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(2))
         .await
         .unwrap();
     assert_eq!(
-        old.compare_stage(42, 1, Some(&first), Some(&writing)),
+        old.compare_stage_async(42, 1, Some(&first), Some(&writing)).await,
         Err(CtError::Unavailable)
     );
     assert_eq!(
-        current.compare_stage(42, 2, Some(&first), Some(&writing)),
+        current
+            .compare_stage_async(42, 2, Some(&first), Some(&writing))
+            .await,
         Err(CtError::Unavailable)
     );
-    assert_eq!(current.load_stage(42, first.id).unwrap(), Some(first));
-    assert_eq!(current.list_stages(42, None, 64).unwrap().len(), 1);
+    assert_eq!(current.load_stage_async(42, first.id).await.unwrap(), Some(first));
+    assert_eq!(current.list_stages_async(42, None, 64).await.unwrap().len(), 1);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_cas_and_cleanup_cannot_skip_reclamation_completion() {
@@ -125,32 +151,47 @@ async fn stale_cas_and_cleanup_cannot_skip_reclamation_completion() {
     let store = open_root_catalog_for_tests(metadata.client.clone(), 0, 1, &entry(1))
         .await
         .unwrap();
-    let catalog = ChunkRootCatalog::open_callback(store).unwrap();
+    let catalog = ChunkRootCatalog::open_callback(Arc::clone(&store)).unwrap();
     let first = record(1);
-    catalog.compare_stage(42, 1, None, Some(&first)).unwrap();
+    catalog
+        .compare_stage_async(42, 1, None, Some(&first))
+        .await
+        .unwrap();
     let writing = next(&first, StageState::Writing);
     catalog
-        .compare_stage(42, 1, Some(&first), Some(&writing))
+        .compare_stage_async(42, 1, Some(&first), Some(&writing))
+        .await
         .unwrap();
     let stale_retired = next(&first, StageState::Retired);
     assert_eq!(
-        catalog.compare_stage(42, 1, Some(&first), Some(&stale_retired)),
+        catalog
+            .compare_stage_async(42, 1, Some(&first), Some(&stale_retired))
+            .await,
         Err(CtError::Unavailable)
     );
     assert_eq!(
-        catalog.compare_stage(42, 1, Some(&writing), None),
+        catalog.compare_stage_async(42, 1, Some(&writing), None).await,
         Err(CtError::InvalidArgument)
     );
     let mut last = writing;
     for state in [StageState::Retired, StageState::Deleting, StageState::Reclaimed] {
         let value = next(&last, state);
-        catalog.compare_stage(42, 1, Some(&last), Some(&value)).unwrap();
+        catalog
+            .compare_stage_async(42, 1, Some(&last), Some(&value))
+            .await
+            .unwrap();
         last = value;
     }
-    catalog.compare_stage(42, 1, Some(&last), None).unwrap();
-    catalog.compare_stage(42, 1, Some(&last), None).unwrap();
-    assert_eq!(catalog.load_stage(42, last.id).unwrap(), None);
-    assert!(catalog.list_stages(42, None, 1).unwrap().is_empty());
+    catalog
+        .compare_stage_async(42, 1, Some(&last), None)
+        .await
+        .unwrap();
+    catalog
+        .compare_stage_async(42, 1, Some(&last), None)
+        .await
+        .unwrap();
+    assert_eq!(store.load_stage_async(42, last.id).await.unwrap(), None);
+    assert!(store.list_stages_async(42, None, 1).await.unwrap().is_empty());
 }
 fn key(kind: &[u8], id: u64) -> Vec<u8> {
     let mut key = b"\0crowdb/chunk-kv/root/v1/".to_vec();
@@ -170,6 +211,7 @@ async fn pin_invalidates_a_reclamation_proof_at_the_shared_authority_key() {
     for generation in 1..=4 {
         store
             .publish(42, generation - 1, 1, generation, b"manifest")
+            .await
             .unwrap();
     }
     let authority = key(b"authority", 0);
@@ -181,7 +223,7 @@ async fn pin_invalidates_a_reclamation_proof_at_the_shared_authority_key() {
     else {
         panic!("authority must exist");
     };
-    store.pin_generation(42, 1, 1, 1).unwrap();
+    store.pin_generation_async(42, 1, 1, 1).await.unwrap();
     let ops = [
         BatchOp::Put {
             key: Bytes::from(authority.clone()),
@@ -198,10 +240,23 @@ async fn pin_invalidates_a_reclamation_proof_at_the_shared_authority_key() {
             .await,
         Err(crowdb_paxos_kv_client::Error::CasFailed { .. } | crowdb_paxos_kv_client::Error::CasBusy)
     ));
-    assert_eq!(store.reclaim_before(42, 4), 0);
-    store.unpin_generation(42, 1, 1).unwrap();
-    assert_eq!(store.reclaim_before(42, u64::MAX), 2);
-    assert_eq!(store.load(42, RootCatalogObject::Manifest(1)).unwrap(), None);
-    assert_eq!(store.pin_generation(42, 2, 2, 1), Err(CtError::NotFound));
-    assert!(store.load(42, RootCatalogObject::Manifest(3)).unwrap().is_some());
+    assert_eq!(store.reclaim_before_async(42, 4).await.unwrap(), 0);
+    store.unpin_generation_async(42, 1, 1).await.unwrap();
+    assert_eq!(store.reclaim_before_async(42, u64::MAX).await.unwrap(), 2);
+    assert_eq!(
+        store
+            .load_async(42, RootCatalogObject::Manifest(1))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store.pin_generation_async(42, 2, 2, 1).await,
+        Err(CtError::NotFound)
+    );
+    assert!(store
+        .load_async(42, RootCatalogObject::Manifest(3))
+        .await
+        .unwrap()
+        .is_some());
 }

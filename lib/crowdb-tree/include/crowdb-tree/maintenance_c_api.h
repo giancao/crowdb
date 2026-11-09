@@ -75,7 +75,7 @@ uint64_t ct_durable_coverage(ct_tree *tree);
 // immediate operation failures. Admission failures return no future.
 int32_t ct_flush_report_async(ct_tree *tree, ct_future **out);
 int32_t ct_writeback_async(ct_tree *tree, ct_future **out);
-int32_t ct_checkpoint_report_async(ct_tree *tree, ct_future **out);
+int32_t ct_flush_with_persistent_report_async(ct_tree *tree, ct_future **out);
 
 // Initialize struct_size=sizeof(*out), version=1. A poll error leaves the
 // future and output unchanged. done=0 retains the future. done=1 copies the

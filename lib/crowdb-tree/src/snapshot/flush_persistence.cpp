@@ -30,21 +30,7 @@ void FlushPersistence::configure(FlushBatchOptions &options)
 void FlushPersistence::select_inputs()
 {
     pending_leaves_.reset();
-    if (selection_metadata_) {
-        selection_metadata_->seal();
-    }
-    const auto bytes = detail::AllocationBound(detail::shared_allocation_bound<detail::AllocationReservation>())
-                           .add_product(initial_->snapshot_changes.size(), sizeof(const SnapshotPageChange *))
-                           .value();
-    if (!bytes) {
-        throw std::bad_alloc();
-    }
-    auto credit = detail::ResourceBudget::try_reserve(preparation_->core->binding()->account(),
-                                                      detail::BudgetClass::kRouting, *bytes);
-    if (!credit) {
-        throw std::bad_alloc();
-    }
-    selection_metadata_ = detail::AllocationReservation::create(std::move(*credit));
+    selection_metadata_ = preparation_->work_allocations;
     pending_leaves_.emplace(detail::ReservationAllocator<const SnapshotPageChange *>(selection_metadata_));
     pending_leaves_->reserve(initial_->snapshot_changes.size());
     uint64_t next = 0;
@@ -57,7 +43,6 @@ void FlushPersistence::select_inputs()
     }
     std::sort(pending_leaves_->begin(), pending_leaves_->end(),
               [](const auto *a, const auto *b) { return a->after.range.lower < b->after.range.lower; });
-    selection_metadata_->seal();
 }
 
 bool FlushPersistence::selected(uint64_t pid, const PageKeyRange &range) const

@@ -67,7 +67,7 @@ TEST(CrashRecovery, FaultInjectedWriteFailureLeavesPreviousGenerationIntact)
         ASSERT_TRUE(t->apply(i + 1, put_one(make_key(i), "gen1-" + std::to_string(i))).ok());
     }
     ASSERT_TRUE(t->flush().ok());
-    ASSERT_TRUE(t->snapshot(nullptr).ok()); // gen1 commits
+    ASSERT_TRUE(t->flush_with_persistent(nullptr).ok()); // gen1 commits
 
     int gen1_writes = store.write_count();
 
@@ -78,7 +78,7 @@ TEST(CrashRecovery, FaultInjectedWriteFailureLeavesPreviousGenerationIntact)
     ASSERT_TRUE(t->flush().ok());
     // Fail the very first byte this snapshot generation tries to write.
     store.arm_write_fault(gen1_writes, FaultyPageStore::Fault::kFail);
-    EXPECT_FALSE(t->snapshot(nullptr).ok()); // gen2 must fail, not silently succeed
+    EXPECT_FALSE(t->flush_with_persistent(nullptr).ok()); // gen2 must fail, not silently succeed
 
     // gen2's anchor was never written -- gen1 is still the last committed
     // generation. Reopen (fault already disarmed -- one-shot) and confirm.
@@ -105,9 +105,9 @@ TEST(CrashRecovery, CorruptSegmentImageFailsReopenEvenThoughAnchorCommitted)
     for (int index = 0; index < 5; ++index) {
         ASSERT_TRUE(tree->apply(index + 1, put_one(make_key(index), "first")).ok());
     }
-    ASSERT_TRUE(tree->snapshot().ok());
+    ASSERT_TRUE(tree->flush_with_persistent().ok());
     ASSERT_TRUE(tree->put(make_key(0), "second").ok());
-    ASSERT_TRUE(tree->snapshot().ok());
+    ASSERT_TRUE(tree->flush_with_persistent().ok());
     std::vector<snapshot::CommitAnchor> anchors;
     ASSERT_TRUE(snapshot::read_valid_anchors(store, store.iu_size(), &anchors).ok());
     ASSERT_EQ(anchors.size(), 2U);
@@ -152,7 +152,7 @@ TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression)
             ASSERT_TRUE(t.flush().ok());
             gen1[make_key(i)] = v;
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok()); // seq 1 -> slot 0
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // seq 1 -> slot 0
 
         // Second generation: overwrite a few keys, then snapshot (seq 2 -> slot B).
         for (int i = 0; i < 20; i += 5) {
@@ -160,7 +160,7 @@ TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression)
             ASSERT_TRUE(t.apply(slot, put_one(make_key(i), big_val(7000, 'Z'))).ok());
             ASSERT_TRUE(t.flush().ok());
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok()); // seq 2 -> slot kSbBytes
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // seq 2 -> slot kSbBytes
     }
 
     // Simulate a crash that left the newest superblock unreadable.
@@ -200,13 +200,13 @@ TEST(CrashRecovery, AlignedTwoGenerationFallback)
             ASSERT_TRUE(t.flush().ok());
             gen1[make_key(i)] = v;
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         for (int i = 0; i < 60; i += 7) {
             ++slot;
             ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "new")).ok());
             ASSERT_TRUE(t.flush().ok());
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     }
     std::vector<uint8_t> garbage(kSbBytes, 0xcd);
     ASSERT_TRUE(store.write_at(kSbBytes, garbage.data(), garbage.size()).ok());
@@ -238,7 +238,7 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched)
             ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "v" + std::to_string(i))).ok());
             ASSERT_TRUE(t.flush().ok());
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         RuntimeTreeAccess_for_tests::capture(t)->mapping.visit(
             &off, [](void *raw, uint64_t, const std::shared_ptr<const PublishedPage> &page) {
                 auto &offset = *static_cast<uint64_t *>(raw);
@@ -303,13 +303,13 @@ TEST(CrashRecovery, FileTornSuperblockFallsBack)
             ASSERT_TRUE(t.flush().ok());
             gen1[make_key(i)] = "v" + std::to_string(i);
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok()); // gen1: seq 1 -> superblock slot 0
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // gen1: seq 1 -> superblock slot 0
 
         for (int i = 0; i < 80; i += 4) {
             ASSERT_TRUE(t.apply(1000 + i, put_one(make_key(i), "GEN2")).ok());
             ASSERT_TRUE(t.flush().ok());
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok()); // gen2: seq 2 -> superblock slot 4096
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // gen2: seq 2 -> superblock slot 4096
     }
 
     // Tear the gen2 superblock (slot B at offset 4096) as a crash would.

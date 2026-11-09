@@ -3,6 +3,8 @@
 #include "load_budget_test_support.h"
 #include "page_cache_residency_test_support.h"
 
+#include <latch>
+
 namespace crowdb::tree
 {
 namespace
@@ -29,7 +31,34 @@ TEST(PageCacheResidency, CloseDetachesRuntimeWhileOldPinsAndPreparedUpdatesRemai
     const std::array<PageReplacement, 1> edits{{{.page_id = 0, .expected = page, .replacement = {}}}};
     auto                                 late_update = residency->prepare(edits, {});
     auto late_ready = residency->prepare_ready(page_cache_key(PageCacheKind::Leaf, input), {});
-    fixture->cache->close_and_drain();
+
+    struct Gate
+    {
+        std::latch entered{1};
+        std::latch release{1};
+    } gate;
+
+    ASSERT_TRUE(fixture->runtime
+                    .try_submit(
+                        fixture->lane,
+                        [](void *context) noexcept {
+                            auto &state = *static_cast<Gate *>(context);
+                            state.entered.count_down();
+                            state.release.wait();
+                        },
+                        &gate)
+                    .ok());
+    gate.entered.wait();
+    std::atomic<bool> closed{false};
+    fixture->cache->close_async({.context = &closed, .complete_fn = [](void *context, Status status) noexcept {
+                                     EXPECT_TRUE(status.ok());
+                                     static_cast<std::atomic<bool> *>(context)->store(true, std::memory_order_release);
+                                 }});
+    EXPECT_FALSE(closed.load(std::memory_order_acquire));
+    gate.release.count_down();
+    fixture->runtime.drain();
+    EXPECT_TRUE(closed.load(std::memory_order_acquire));
+    EXPECT_EQ(fixture->lane->queue_permits(), 0U);
     EXPECT_EQ(resources->snapshot().proxy_pages, 0U);
     fixture.reset();
     PageCacheResidency::publish(std::move(late_update));

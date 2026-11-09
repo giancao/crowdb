@@ -21,15 +21,11 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
     };
 
     struct Subtree;
-    void                                      start_subtree();
-    Status                                    collect_subtree(PublicationTransaction &transaction);
-    void                                      start_leaves() noexcept;
-    std::atomic<Subtree *>                    leaf_waiters{nullptr};
-    std::atomic<size_t>                       active_leaves{0};
-    std::shared_ptr<Subtree>                  subtree;
+    void                     start_subtree();
+    Status                   collect_subtree(PublicationTransaction &transaction, uint64_t &handoff_bytes);
+    std::shared_ptr<Subtree> subtree;
     std::shared_ptr<const PublishedTreeState> checkpoint_view;
     std::atomic<uint64_t>                     next_pid{0};
-    std::atomic<size_t>                       next_range{0};
 
     struct Range
     {
@@ -38,7 +34,7 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
         uint64_t                                               page_id;
         PageKeyRange                                           bounds;
         std::shared_ptr<const PublishedPage>                   expected;
-        std::shared_ptr<InstallRecord>                         record;
+        std::shared_ptr<InstallRecord>                         record = nullptr;
         OverlayStorage                                         runs;
         detail::ReservedVector<std::shared_ptr<InstallRecord>> installs;
         std::optional<OwnedKey>                                next_key;
@@ -124,8 +120,7 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
         static void                           execute(void *context) noexcept;
     };
 
-    State(PublicationCoordinator &publish, detail::FlushRuntime &cpu,
-          std::shared_ptr<detail::AllocationReservation> credit)
+    State(PublicationCoordinator &publish, detail::FlushRuntime &cpu, std::shared_ptr<AllocationBudget> credit)
         : publisher(publish),
           runtime(cpu),
           metadata(std::move(credit)),
@@ -174,7 +169,7 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
     std::shared_ptr<detail::FlushRuntime::Lane>             lane;
     std::shared_ptr<const PublishedTreeState>               captured;
     std::shared_ptr<const PublishedSources>                 inputs;
-    std::shared_ptr<detail::AllocationReservation>          metadata;
+    std::shared_ptr<AllocationBudget>                       metadata;
     uint64_t                                                admission_owner = 0;
     std::vector<Range, detail::ReservationAllocator<Range>> ranges;
     detail::ReservedUnique<PublishedRouteCursor>            route;

@@ -116,7 +116,7 @@ source_max_key_bytes = 1_048_576
 # Only the next contiguous slot may use gap source capacity; higher holes use ordinary capacity or wait.
 source_max_gap_entries = 1_024
 source_max_gap_key_bytes = 1_048_576
-# 0 = min(host workers, Tree io_operations). Explicit values must fit both limits.
+# Legacy range-handoff setting; fork/join page tasks have no in-flight quota.
 flush_parallelism = 0
 # Per-handoff-run entry/key/work-byte limits. Value owners are retained independently.
 run_max_entries = 128

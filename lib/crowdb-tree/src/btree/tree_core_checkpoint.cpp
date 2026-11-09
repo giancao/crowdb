@@ -86,28 +86,11 @@ Status TreeCore::prepare_checkpoint_state(const CheckpointOptions               
                                           std::shared_ptr<checkpoint_detail::Preparation> *out)
 {
     using namespace detail;
-    const auto bound = AllocationBound(CheckpointOperation::control_allocation_bound())
-                           .add(shared_allocation_bound<checkpoint_detail::Preparation>())
-                           .add_product(2, shared_allocation_bound<checkpoint_detail::Credits>())
-                           .add(shared_allocation_bound<AllocationReservation>())
-                           .add(FlushPersistence::control_allocation_bound())
-                           .add(TreeOperationLifetime::ticket_allocation_bound())
-                           .value();
-    if (!bound) {
-        return Status::resource_exhausted();
-    }
-    auto control = ResourceBudget::try_reserve(binding()->account(), BudgetClass::kReclaim, *bound);
-    auto finish  = ResourceBudget::try_reserve(
-        binding()->account(), BudgetClass::kReclaim,
-        CheckpointOperation::finish_allocation_bound() + CheckpointOperation::finish_allocation_bound() +
-            shared_allocation_bound<SnapshotBaseline>() + shared_allocation_bound<AllocationReservation>());
-    if (!control || !finish) {
-        return Status::resource_exhausted("checkpoint finish credit unavailable");
-    }
-    auto credit                           = AllocationReservation::create(std::move(*control));
-    auto preparation                      = reserved_shared<checkpoint_detail::Preparation>(credit);
+    const auto &credit                    = state_->work_allocations;
+    auto        preparation               = reserved_shared<checkpoint_detail::Preparation>(credit);
     preparation->control                  = credit;
-    preparation->finish                   = AllocationReservation::create(std::move(*finish));
+    preparation->finish                   = credit;
+    preparation->work_allocations         = state_->work_allocations;
     preparation->core                     = this;
     preparation->options                  = options;
     preparation->structure_options        = state_->preparation.maintenance;

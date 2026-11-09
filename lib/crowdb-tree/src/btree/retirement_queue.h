@@ -31,13 +31,18 @@ class RetirementQueue : public std::enable_shared_from_this<RetirementQueue>
     // registration. Late owners keep only this closed queue and allocation
     // accounts, and free iteratively without touching an executor.
     void                   close_and_drain() noexcept;
+    void                   close_async(AsyncCompletion complete) noexcept;
     [[nodiscard]] Snapshot snapshot() const noexcept;
 
   private:
     static void run(void *context) noexcept;
+    static void stopped(void *context, Status status) noexcept;
+
+    enum State : uint8_t { kOpen, kClosing, kClosed, kDraining };
     enum class Step : uint8_t { kBusy, kEmpty, kWork };
     Step               step(size_t limit) noexcept;
     void               drain_host() noexcept;
+    void               publish_closed() noexcept;
     [[nodiscard]] bool pending() const noexcept;
 
     std::shared_ptr<FlushRuntime::Progress> progress_;
@@ -46,9 +51,8 @@ class RetirementQueue : public std::enable_shared_from_this<RetirementQueue>
     std::atomic<bool>                       fallback_queued_{false};
     RetirementQueue                        *fallback_next_ = nullptr;
     std::shared_ptr<RetirementQueue>        fallback_owner_;
-    // 0 accepts CPU requests; 1 routes arrivals to the closing host; 2 uses
-    // the caller's iterative fallback after the executor is detached.
-    std::atomic<unsigned> state_{0};
-    std::atomic<size_t>   enqueued_{0}, freed_{0}, cpu_steps_{0}, max_step_nodes_{0};
+    std::atomic<State>                      state_{kOpen};
+    AsyncCompletion                         on_drained_;
+    std::atomic<size_t>                     enqueued_{0}, freed_{0}, cpu_steps_{0}, max_step_nodes_{0};
 };
 } // namespace crowdb::tree::detail

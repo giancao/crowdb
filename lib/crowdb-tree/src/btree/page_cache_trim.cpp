@@ -37,7 +37,6 @@ size_t SharedPageCache::State::trim_ready(PageCacheKind kind, size_t max_pages) 
         --retained;
         ++evicted;
     }
-    resume_requested = evicted != 0 || resume_requested;
     return evicted;
 }
 

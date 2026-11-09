@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
+#include "btree/tree_generation_lease.h"
 #include "crowdb-tree/btree/tree.h"
 
 #include <gtest/gtest.h>
@@ -100,6 +101,19 @@ TEST_F(TreeCoreGeneration, RejectedPreparationPreservesOriginalGenerationAndFutu
     EXPECT_EQ(tree->get_view("next").slot(), 2U);
     ASSERT_TRUE(tree->clear().ok());
     EXPECT_EQ(core->capture()->generation, original->generation + 1);
+}
+
+TEST_F(TreeCoreGeneration, CloseRevokesPreparedReplacementWithoutWaitingForItsHandle)
+{
+    ASSERT_TRUE(tree->put("old", "value").ok());
+    const auto                           original = core->capture();
+    std::shared_ptr<TreeGenerationLease> prepared;
+    ASSERT_TRUE(TreeGenerationLease::prepare(*core, {}, nullptr, &prepared).ok());
+    ASSERT_TRUE(prepared->acquire().ok());
+    core->close_and_drain();
+    EXPECT_EQ(prepared->commit().code(), Code::kUnavailable);
+    EXPECT_EQ(core->capture(), original);
+    EXPECT_EQ(tree->put("rejected", "value").code(), Code::kUnavailable);
 }
 
 #ifdef CROWDB_TREE_TEST_UTIL

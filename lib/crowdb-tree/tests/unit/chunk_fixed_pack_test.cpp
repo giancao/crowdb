@@ -108,7 +108,6 @@ TEST(ChunkFixedPack, ReloadsFixedPackWithoutAManifestAndFallsBackFromCorruptMirr
     std::shared_ptr<const ChunkPackWindow> loaded;
     ASSERT_TRUE(store.read(output, credit, &loaded).ok());
     EXPECT_EQ(std::vector<uint8_t>(loaded->bytes.begin(), loaded->bytes.end()), input);
-    EXPECT_EQ(catalog->manifest_loads, 0U);
     loaded.reset();
     ++output.checksum;
     EXPECT_FALSE(store.read(output, credit, &loaded).ok());

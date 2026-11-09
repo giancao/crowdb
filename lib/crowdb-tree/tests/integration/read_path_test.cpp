@@ -81,7 +81,7 @@ TEST(ReadPath, GetViewL1HitBorrowsFrameSurvivingConcurrentEviction)
         ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "val" + std::to_string(i))).ok());
     }
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot(nullptr).ok()); // clean + evictable
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // clean + evictable
 
     // Hold a GetView (and thus its epoch guard) open across an eviction pass
     // that would otherwise unload and retire the very frame this view

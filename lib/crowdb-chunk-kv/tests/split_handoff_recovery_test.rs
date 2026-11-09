@@ -41,7 +41,7 @@ async fn recover_after_handoff(child_has_write: bool, checkpoint_after_dispatch:
         .await
         .unwrap();
     let base_offset = parent_journal.tail();
-    let (_, _, mut cold_parent_tree) = parent_tree.checkpoint_snapshot(base_offset).await.unwrap();
+    let (_, _, mut cold_parent_tree) = parent_tree.flush_with_persistent_view(base_offset).await.unwrap();
     let mut source_checkpoint = source_checkpoint_at_base(&parent_journal, base_offset);
     let child_range = PartitionRange {
         start: Some(b"m".to_vec()),
@@ -256,7 +256,7 @@ async fn checkpoint_source_after_dispatch(
     mut checkpoint: crowdb_chunk_kv::Checkpoint,
 ) -> (crowdb_chunk_kv::Checkpoint, Arc<dyn PartitionTree>) {
     let offset = journal.tail();
-    let (manifest, generation, snapshot) = tree.checkpoint_snapshot(offset).await.unwrap();
+    let (manifest, generation, snapshot) = tree.flush_with_persistent_view(offset).await.unwrap();
     checkpoint.tree_manifest = manifest;
     checkpoint.root_manifest_generation = generation;
     checkpoint.applied_seq = parent.snapshot().applied_seq;

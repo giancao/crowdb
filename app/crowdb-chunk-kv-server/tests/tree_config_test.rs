@@ -122,11 +122,6 @@ fn chunk_backend_alignment_is_validated_before_open() {
 #[test]
 fn invalid_runtime_engine_and_partition_bounds_fail_on_load() {
     for (from, to, field) in [
-        (
-            "flush_parallelism = 0",
-            "flush_parallelism = 5",
-            "flush_parallelism",
-        ),
         ("cache_max_pages = 256", "cache_max_pages = 0", "cache_max_pages"),
         ("queue_requests = 1_024", "queue_requests = 0", "partition bounds"),
         ("batch_bytes = 4_194_304", "batch_bytes = 0", "partition bounds"),
@@ -143,6 +138,12 @@ fn invalid_runtime_engine_and_partition_bounds_fail_on_load() {
             "{field}"
         );
     }
+}
+
+#[test]
+fn flush_page_tasks_do_not_require_worker_or_io_count_capacity() {
+    let config = load(&CANONICAL.replace("flush_parallelism = 0", "flush_parallelism = 1024")).unwrap();
+    assert_eq!(config.tree.tuning.flush_parallelism, 1024);
 }
 
 #[test]

@@ -191,7 +191,7 @@ TEST(SplitMerge, SnapshotSucceedsAfterHeavyMergeAndRootCollapse)
     }
     EXPECT_GT(t.leaf_count(), 0U); // sanity: still a valid tree after the merge storm
 
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
 
     tree.reset(); // The writer domain must close before reopening the same store.
     std::unique_ptr<Crowdbtree> t2;

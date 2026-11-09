@@ -47,42 +47,47 @@ Status bind_flush_reservations(PublicationCoordinator &publisher, const FlushPre
                                FlushReservations *out)
 {
     if (!preparation.runtime || !preparation.store || !lane || out == nullptr || !account || batch == nullptr ||
-        batch->loader || maintenance == nullptr || *maintenance || bounds.snapshot_bytes == 0 ||
-        bounds.maintenance_output_pages < 2 ||
+        batch->loader || maintenance == nullptr || *maintenance ||
+        (!preparation.allocations && bounds.snapshot_bytes == 0) || bounds.maintenance_output_pages < 2 ||
         bounds.maintenance_output_pages > preparation.maintenance.publication.pages.max_output_pages) {
         return Status::invalid_argument("flush binding requires fresh consumers and owned progress grants");
     }
-    if (preparation.publication && preparation.publication->capacity() <= batch->parallelism) {
-        return Status::invalid_argument("flush publication window is smaller than the parallel handoff");
-    }
-    for (size_t index = 0; index < credits.size(); ++index) {
-        if (!credits[index].belongs_to(account, FlushReserveBounds::categories[index]) || credits[index].allocated() ||
-            credits[index].amount() < bounds.amounts[index]) {
-            return Status::invalid_argument("flush binding requires each complete unused partition grant");
-        }
-    }
-    auto backend_credit = credits[1].split(bounds.backend_bytes);
-    if (!backend_credit) {
-        return Status::invalid_argument("flush routing grant lacks backend capacity");
-    }
-    auto snapshot_credit = credits[1].split(bounds.snapshot_bytes);
-    if (!snapshot_credit) {
-        return Status::invalid_argument("flush routing grant lacks snapshot selection capacity");
-    }
     FlushReservations reserved;
-    reserved.cache      = preparation.cache;
-    reserved.handoff    = AllocationReservation::create(std::move(credits[0]));
-    reserved.routing    = reserved_shared<AllocationReservation>(reserved.handoff, std::move(credits[1]));
-    reserved.reclaim    = reserved_shared<AllocationReservation>(reserved.handoff, std::move(credits[2]));
-    reserved.snapshot   = AllocationReservation::create(std::move(*snapshot_credit));
-    auto backend_status = bind_backend_operation(preparation.store.get(),
-                                                 {.max_io_bytes = preparation.loads.max_blob_bytes,
-                                                  .write_calls  = 0,
-                                                  .workers      = preparation.runtime->worker_count(),
-                                                  .barriers     = false},
-                                                 std::move(*backend_credit), &reserved.backend);
-    if (!backend_status.ok()) {
-        return backend_status;
+    reserved.cache = preparation.cache;
+    if (preparation.allocations) {
+        reserved.handoff  = preparation.allocations;
+        reserved.routing  = preparation.allocations;
+        reserved.reclaim  = preparation.allocations;
+        reserved.snapshot = preparation.allocations;
+    }
+    else {
+        for (size_t index = 0; index < credits.size(); ++index) {
+            if (!credits[index].belongs_to(account, FlushReserveBounds::categories[index]) ||
+                credits[index].allocated() || credits[index].amount() < bounds.amounts[index]) {
+                return Status::invalid_argument("flush binding requires each complete unused partition grant");
+            }
+        }
+        auto backend_credit = credits[1].split(bounds.backend_bytes);
+        if (!backend_credit) {
+            return Status::invalid_argument("flush routing grant lacks backend capacity");
+        }
+        auto snapshot_credit = credits[1].split(bounds.snapshot_bytes);
+        if (!snapshot_credit) {
+            return Status::invalid_argument("flush routing grant lacks snapshot selection capacity");
+        }
+        reserved.handoff    = AllocationReservation::create(std::move(credits[0]));
+        reserved.routing    = reserved_shared<AllocationReservation>(reserved.handoff, std::move(credits[1]));
+        reserved.reclaim    = reserved_shared<AllocationReservation>(reserved.handoff, std::move(credits[2]));
+        reserved.snapshot   = AllocationReservation::create(std::move(*snapshot_credit));
+        auto backend_status = bind_backend_operation(preparation.store.get(),
+                                                     {.max_io_bytes = preparation.loads.max_blob_bytes,
+                                                      .write_calls  = 0,
+                                                      .workers      = preparation.runtime->worker_count(),
+                                                      .barriers     = false},
+                                                     std::move(*backend_credit), &reserved.backend);
+        if (!backend_status.ok()) {
+            return backend_status;
+        }
     }
     batch->cpu_progress = preparation.cpu_progress;
     batch->publication  = preparation.publication;
@@ -99,15 +104,15 @@ Status bind_flush_reservations(PublicationCoordinator &publisher, const FlushPre
         persistence->configure(*batch);
         *maintenance = [persistence](auto view, auto done) { persistence->commit(std::move(view), std::move(done)); };
     }
-    auto loads         = preparation.loads;
-    loads.max_inflight = SIZE_MAX;
-    batch->loader      = reserved_shared<AsyncStorePageLoader>(reserved.routing, preparation.store, preparation.runtime,
-                                                               lane, loads, OverflowBackingResolver{},
-                                                               PageLoadBudget{.bytes        = reserved.routing,
-                                                                              .work_metrics = publisher.work_metrics(),
-                                                                              .backend      = reserved.backend,
-                                                                              .cpu_progress = preparation.cpu_progress,
-                                                                              .cause        = TreeWorkCause::Flush});
+    auto loads = preparation.loads;
+
+    batch->loader = reserved_shared<AsyncStorePageLoader>(reserved.routing, preparation.store, preparation.runtime,
+                                                          lane, loads, OverflowBackingResolver{},
+                                                          PageLoadBudget{.bytes        = reserved.routing,
+                                                                         .work_metrics = publisher.work_metrics(),
+                                                                         .backend      = reserved.backend,
+                                                                         .cpu_progress = preparation.cpu_progress,
+                                                                         .cause        = TreeWorkCause::Flush});
     batch->consolidation_loader = batch->loader;
     if (preparation.cache) {
         batch->loader = preparation.cache->bind(batch->loader, reserved.handoff, PageLoadPriority::Maintenance);
@@ -135,7 +140,11 @@ Status prepare_flush_reservations(PublicationCoordinator &publisher, const Publi
     if (!status.ok()) {
         return status;
     }
-    FlushCredits         credits;
+    FlushCredits credits;
+    if (preparation.allocations) {
+        return bind_flush_reservations(publisher, preparation, sources.active_budget->options().account,
+                                       std::move(lane), bounds, std::move(credits), batch, maintenance, out);
+    }
     constexpr std::array names{"handoff", "routing", "reclaim"};
     for (size_t index = 0; index < credits.size(); ++index) {
         const auto capacity =

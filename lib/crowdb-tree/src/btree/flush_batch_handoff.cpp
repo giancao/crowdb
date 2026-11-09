@@ -11,7 +11,7 @@ namespace
 std::shared_ptr<const PublishedPage> append_runs(const PublishedPage                                 &old,
                                                  std::span<const std::shared_ptr<const OverlayBatch>> runs,
                                                  size_t installed, uint64_t entries, uint64_t bytes,
-                                                 const std::shared_ptr<detail::AllocationReservation> &metadata)
+                                                 const std::shared_ptr<AllocationBudget> &metadata)
 {
     auto logical = detail::reserved_shared<PageState>(metadata, *old.leaf, metadata);
     logical->overlays.insert(logical->overlays.begin() + static_cast<std::ptrdiff_t>(installed), runs.begin(),
@@ -53,7 +53,7 @@ void FlushBatch::State::start_range(size_t index, detail::BoundedRangeJoin::Comp
 
 void FlushBatch::State::start_range(Range &range, RangeComplete done)
 {
-    if (range.record->committed.load(std::memory_order_acquire)) {
+    if (range.record && range.record->committed.load(std::memory_order_acquire)) {
         finish_range(range, done);
         return;
     }
@@ -117,7 +117,7 @@ void FlushBatch::State::install(Range &range, RangeComplete done, bool inline_pr
         finish_range(range, done, Status::unavailable("flush stopped before range execution"));
         return;
     }
-    if (!range.ready && range.runs.size() < range.next_install_at) {
+    if (!range.ready && (!range.record || range.runs.size() < range.next_install_at)) {
         auto status = prepare_run(range, inline_probe);
         if (!status.ok()) {
             finish_range(range, done, std::move(status));
@@ -131,13 +131,23 @@ void FlushBatch::State::install(Range &range, RangeComplete done, bool inline_pr
         if (inline_probe && range.ready) {
             publisher.work_metrics()->dispatch.inline_range();
         }
-        if (!range.ready && range.runs.size() < range.next_install_at) {
+        if (!range.ready && (!range.record || range.runs.size() < range.next_install_at)) {
             start_range(range, done);
             return;
         }
     }
     if ((lifecycle.load(std::memory_order_acquire) & kStopped) != 0) {
-        finish_range(range, done, Status::unavailable("flush stopped before range publication"));
+        finish_range(range, done, Status::unavailable("flush stopped before range completion"));
+        return;
+    }
+    // Fork/join leaves keep their input local until the root publishes the
+    // completed replacements. The standalone handoff still installs ranges.
+    if (!range.record) {
+        if (!range.runs.empty()) {
+            range.prepared_page = append_runs(*range.expected, range.runs, 0, range.entries, range.bytes, metadata);
+            range.runs.clear();
+        }
+        finish_range(range, done);
         return;
     }
     if (!range.window_prepared) {
@@ -261,17 +271,19 @@ void FlushBatch::State::cover()
     for (const auto &range : ranges) {
         transaction.required_installs.push_back(range.record);
     }
+    uint64_t handoff_bytes = 0;
     if (subtree) {
-        auto status = collect_subtree(transaction);
+        auto status = collect_subtree(transaction, handoff_bytes);
         if (!status.ok()) {
             joined(std::move(status));
             return;
         }
     }
     auto self        = shared_from_this();
-    request->on_done = [self, detached, snapshot_metadata = transaction.snapshot_metadata](PublicationResult result) {
-        if (snapshot_metadata) {
-            snapshot_metadata->seal();
+    request->on_done = [self, detached, handoff_bytes,
+                        snapshot_metadata = transaction.snapshot_metadata](PublicationResult result) {
+        if (const auto credit = std::dynamic_pointer_cast<detail::AllocationReservation>(snapshot_metadata)) {
+            credit->seal();
         }
         self->report.handoff_status = std::move(result.status);
         if (!self->report.handoff_status.ok()) {
@@ -280,6 +292,11 @@ void FlushBatch::State::cover()
             return;
         }
         record_work(self->publisher.work_metrics(), TreeWorkCounter::SourceDetached, detached, TreeWorkCause::Flush);
+        if (self->subtree) {
+            self->publisher.work_metrics()->dispatch.installed(result.copied.bytes);
+            record_work(self->publisher.work_metrics(), TreeWorkCounter::FlushHandoffBytes, handoff_bytes,
+                        TreeWorkCause::Flush);
+        }
         self->report.published_coverage = self->report.frontier;
         self->report.phase              = FlushPhase::kCovered;
         self->checkpoint_view           = std::move(result.checkpoint_view);

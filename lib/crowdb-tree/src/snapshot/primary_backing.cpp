@@ -4,9 +4,10 @@
 
 namespace crowdb::tree
 {
-std::shared_ptr<const PrimaryBackingMetadata>
-make_primary_backing(const DurableCapturedFrame &frame, const PageState &page, uint64_t coverage, uint64_t gc_floor,
-                     const std::shared_ptr<detail::AllocationReservation> &metadata)
+std::shared_ptr<const PrimaryBackingMetadata> make_primary_backing(const DurableCapturedFrame &frame,
+                                                                   const PageState &page, uint64_t coverage,
+                                                                   uint64_t                                 gc_floor,
+                                                                   const std::shared_ptr<AllocationBudget> &metadata)
 {
     if (frame.type != page_type::kLeafBase || !frame.backing || !frame.backing->reloadable() || !frame.summary ||
         !frame.stored_overflow || frame.frame_bytes == 0 || frame.logical_bytes == 0) {
@@ -27,7 +28,7 @@ make_primary_backing(const DurableCapturedFrame &frame, const PageState &page, u
 
 std::shared_ptr<const PrimaryBackingMetadata>
 make_inner_primary_backing(const DurableCapturedFrame &frame, const PublishedPage &page, uint64_t coverage,
-                           uint64_t gc_floor, const std::shared_ptr<detail::AllocationReservation> &metadata)
+                           uint64_t gc_floor, const std::shared_ptr<AllocationBudget> &metadata)
 {
     if (frame.type != page_type::kInnerBase || page.level == 0 || !frame.backing || !frame.backing->reloadable() ||
         !frame.summary || !frame.summary->inner_fences || frame.frame_bytes == 0 || frame.logical_bytes == 0) {

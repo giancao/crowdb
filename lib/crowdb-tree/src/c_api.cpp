@@ -11,14 +11,17 @@
 #include "crowdb-tree/c_api.h"
 
 #include "btree/tree_core_access.h"
+#include "btree/tree_options.h"
 #include "c_api_future_internal.h"
 #include "c_api_internal.h"
 #include "c_api_owned_budget.h"
 #include "crowdb-common/log.h"
 #include "crowdb-tree/backend/async_page_store.h"
+#include "crowdb-tree/backend/backend_release_service.h"
 #include "crowdb-tree/backend/block_page_store.h"
 #include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/backend/text_page_store.h"
+#include "crowdb-tree/backend_release_c_api.h"
 #include "crowdb-tree/btree/cell.h"
 #include "crowdb-tree/btree/range_rebuild.h"
 #include "crowdb-tree/crowdb-tree.h"
@@ -162,12 +165,124 @@ struct CompletionSignal
 
 struct ct_tree
 {
-    // The bundle owns async_store, then uring, then store through reverse
-    // member destruction, and captured snapshot windows share its lifetime.
+    // Read-only views can share the backend bundle independently of Tree.
     std::shared_ptr<PageStoreBundle>  backend;
     std::shared_ptr<CompletionSignal> completion = std::make_shared<CompletionSignal>();
     std::unique_ptr<Crowdbtree>       tree;
+    void (*close_complete)(void *, ct_status) = nullptr;
+    void *close_context                       = nullptr;
 };
+
+namespace
+{
+using OpenCallback = void (*)(void *, ct_status, ct_tree *);
+
+struct AsyncOpen : std::enable_shared_from_this<AsyncOpen>
+{
+    Status start(Config &options)
+    {
+        auto status = configure_tree_options(&options);
+        if (!status.ok()) {
+            return status;
+        }
+        auto factory = options.page_store->runtime_async_factory();
+        if (factory == nullptr) {
+            factory = &TreeCore::open_local_async;
+        }
+        return factory(options, [open = shared_from_this()](Status terminal, std::shared_ptr<TreeCore> core) noexcept {
+            open->opened(std::move(terminal), core);
+        });
+    }
+
+    void opened(Status status, const std::shared_ptr<TreeCore> &core) noexcept
+    {
+        try {
+            if (status.ok()) {
+                TreeCoreAccess::finish_open(core, &handle->tree);
+            }
+        }
+        catch (const std::bad_alloc &) {
+            status = Status::resource_exhausted();
+        }
+        catch (...) {
+            status = Status::internal_error();
+        }
+        if (status.ok()) {
+            complete(context, 0, handle.release());
+            return;
+        }
+        failure = to_status(status);
+        if (!core) {
+            handle.reset();
+            complete(context, failure, nullptr);
+            return;
+        }
+        // Facade/metrics allocation failed after the core was constructed.
+        // The core has no other closer until a successful delivery.
+        closing = core;
+        const auto accepted =
+            core->close_async({.context = this, .complete_fn = &AsyncOpen::closed, .owner = weak_from_this().lock()});
+        if (!accepted) {
+            std::terminate();
+        }
+    }
+
+    static void closed(void *argument, Status /*closed*/) noexcept
+    {
+        auto &open = *static_cast<AsyncOpen *>(argument);
+        open.handle.reset();
+        open.closing.reset();
+        open.complete(open.context, open.failure, nullptr);
+    }
+
+    std::unique_ptr<ct_tree>  handle;
+    std::shared_ptr<TreeCore> closing;
+    OpenCallback              complete = nullptr;
+    void                     *context  = nullptr;
+    ct_status                 failure  = 0;
+};
+
+struct BlockOpenInput
+{
+    const char *const *names;
+    size_t             count;
+    void (*wake)(void *);
+    void (*drop)(void *);
+    void                        *context;
+    ct_backend_release_service **release;
+};
+
+#ifdef CROWDB_HAVE_LIBURING
+struct AsyncBlockOpen : AsyncOpen
+{
+    static void files_opened(void *context, Status status) noexcept
+    {
+        auto &open = *static_cast<AsyncBlockOpen *>(context);
+        if (status.ok()) {
+            try {
+                auto &backend = *open.handle->backend;
+                auto *store   = static_cast<BlockPageStore *>(backend.store.get());
+                for (int fd : store->all_extent_fds()) {
+                    backend.uring->register_fd(fd);
+                }
+                status = open.start(open.options);
+            }
+            catch (const std::bad_alloc &) {
+                status = Status::resource_exhausted();
+            }
+            catch (...) {
+                status = Status::internal_error();
+            }
+        }
+        if (!status.ok()) {
+            open.opened(std::move(status), nullptr);
+        }
+    }
+
+    Config options;
+};
+#endif
+} // namespace
 
 static std::shared_ptr<ct_future_impl> make_tree_future(ct_tree *tree)
 {
@@ -254,21 +369,104 @@ void ct_page_store_free(ct_page_store *store)
     delete store;
 }
 
+static ct_status submit_open(Config &options, std::unique_ptr<ct_tree> handle, OpenCallback complete, void *context)
+{
+    auto open      = std::make_shared<AsyncOpen>();
+    open->handle   = std::move(handle);
+    open->complete = complete;
+    open->context  = context;
+    return to_status(open->start(options));
+}
+
+#ifdef CROWDB_HAVE_LIBURING
+std::shared_ptr<crowdb::common::DiskIOUring> c_api_create_block_reactor()
+{
+    crowdb::common::Topology       topology;
+    crowdb::common::PipelineConfig pipeline;
+    pipeline.entries = 256;
+    pipeline.mode    = crowdb::common::PollingMode::Hybrid;
+    topology.pipelines.push_back(pipeline);
+    auto reactor = std::make_shared<crowdb::common::DiskIOUring>(std::move(topology));
+    if (!reactor->valid()) {
+        CRB_LOG_ERROR("Linux block backend requires a usable io_uring reactor");
+        return nullptr;
+    }
+    return reactor;
+}
+
+static ct_status submit_block_open(Config options, const ct_options &opt, SyncMode sync,
+                                   std::unique_ptr<ct_tree> handle, const BlockOpenInput &input, OpenCallback complete,
+                                   void *context)
+{
+    std::vector<std::string> names;
+    names.reserve(input.count);
+    for (size_t i = 0; i < input.count; ++i) {
+        if (input.names[i] == nullptr) {
+            return to_status(Status::invalid_argument());
+        }
+        names.emplace_back(input.names[i]);
+    }
+    const auto                      block_size = opt.block_size == 0 ? (uint64_t{64} * 1024 * 1024) : opt.block_size;
+    const auto                      iu         = opt.iu_size == 0 ? 4096 : opt.iu_size;
+    std::unique_ptr<BlockPageStore> store;
+    auto status = BlockPageStore::prepare_blocks(opt.path, opt.store_id, opt.group_id, block_size, iu, &store);
+    if (!status.ok()) {
+        return to_status(status);
+    }
+    auto open      = std::make_shared<AsyncBlockOpen>();
+    open->handle   = std::move(handle);
+    open->options  = std::move(options);
+    open->complete = complete;
+    open->context  = context;
+    auto &backend  = *open->handle->backend;
+    auto *block    = store.get();
+    block->set_sync_mode(sync);
+    backend.store    = std::move(store);
+    const auto bound = c_api_bind_backend_release(&backend, true, input.wake, input.drop, input.context, input.release);
+    if (bound != 0) {
+        return bound;
+    }
+
+    // From here the host owns the release driver. Report even immediate
+    // failures by completion so the driver can drain the reactor and files.
+    try {
+        backend.async_store            = std::make_unique<BlockAsyncPageStore>(block, backend.uring.get());
+        open->options.page_store       = block;
+        open->options.async_page_store = backend.async_store.get();
+        open->options.async_uring      = backend.uring.get();
+        status                         = block->submit_open_blocks(
+            names, *backend.uring,
+            {.context = open.get(), .complete_fn = &AsyncBlockOpen::files_opened, .owner = open});
+    }
+    catch (const std::bad_alloc &) {
+        status = Status::resource_exhausted();
+    }
+    catch (...) {
+        status = Status::internal_error();
+    }
+    if (!status.ok()) {
+        open->opened(std::move(status), nullptr);
+    }
+    return 0;
+}
+#endif
+
 static ct_status open_configured(const ct_options *opt, ct_runtime *runtime, const ct_tree_runtime_options *binding,
-                                 ct_tree **out, uint64_t migration_generation, CApiMigration migrate)
+                                 ct_tree **out, OpenCallback complete = nullptr, void *context = nullptr,
+                                 [[maybe_unused]] const BlockOpenInput *block_open   = nullptr,
+                                 bool                                  *initializing = nullptr)
 try {
-    if (opt == nullptr || out == nullptr) {
+    if (opt == nullptr || (out == nullptr && complete == nullptr)) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    auto h = std::make_unique<ct_tree>();
-
     Config o;
-    if (runtime != nullptr || binding != nullptr) {
-        auto status = configure_tree_runtime(runtime, binding, &o);
+    if (runtime != nullptr || binding != nullptr || initializing != nullptr) {
+        auto status = configure_tree_runtime(runtime, binding, &o, initializing);
         if (!status.ok()) {
             return to_status(status);
         }
     }
+    auto h             = std::make_unique<ct_tree>();
     auto tuning_status = configure_tree_tuning(opt->tuning, &o);
     if (!tuning_status.ok()) {
         return to_status(tuning_status);
@@ -327,7 +525,7 @@ try {
     }
 
     const bool durable = opt->path != nullptr && opt->path[0] != '\0';
-    if (opt->page_store == nullptr && (durable || runtime == nullptr)) {
+    if (opt->page_store == nullptr && (durable || runtime == nullptr || complete != nullptr)) {
         h->backend                = std::make_shared<PageStoreBundle>();
         h->backend->backend_label = o.backend_label;
         o.backend_owner           = h->backend;
@@ -345,14 +543,17 @@ try {
 #ifdef CROWDB_HAVE_LIBURING
         o.async_uring = h->backend->uring.get();
 #endif
+        if (complete != nullptr) {
+            return submit_open(o, std::move(h), complete, context);
+        }
         std::unique_ptr<Crowdbtree> t;
-        Status os = migrate != nullptr ? migrate(o, migration_generation, &t) : Crowdbtree::open(o, &t);
+        Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
             return to_status(os);
         }
         h->tree = std::move(t);
     }
-    else if (!durable && runtime != nullptr) {
+    else if (!durable && runtime != nullptr && complete == nullptr) {
         // A volatile runtime Tree has no reloadable backend or checkpoint.
         // Keep it on the same immutable core as direct C++ construction.
         auto status = TreeCoreAccess::create_volatile(o, &h->tree);
@@ -360,7 +561,7 @@ try {
             return to_status(status);
         }
     }
-    else if (!durable) {
+    else if (!durable && complete == nullptr) {
         // In-memory: BlockPageStore::open_mem with IU=1
         std::unique_ptr<BlockPageStore> bs;
         Status                          s = BlockPageStore::open_mem(opt->iu_size == 0 ? 1 : opt->iu_size, &bs);
@@ -403,6 +604,9 @@ try {
         ms->set_sync_mode(sm);
         h->backend->store = std::move(ms);
         o.page_store      = h->backend->store.get();
+        if (complete != nullptr) {
+            return submit_open(o, std::move(h), complete, context);
+        }
         std::unique_ptr<Crowdbtree> t;
         Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
@@ -412,46 +616,42 @@ try {
     }
     else {
         // CT_BACKEND_BLOCK: block device, 4K aligned, O_DIRECT
+#if defined(__linux__) && !defined(CROWDB_HAVE_LIBURING)
+        CRB_LOG_ERROR("Linux block backend requires liburing");
+        return static_cast<ct_status>(Code::kNotSupported);
+#endif
+#ifdef CROWDB_HAVE_LIBURING
+        if (block_open != nullptr) {
+            return submit_block_open(std::move(o), *opt, sm, std::move(h), *block_open, complete, context);
+        }
+        h->backend->uring = c_api_create_block_reactor();
+        if (!h->backend->uring) {
+            return static_cast<ct_status>(Code::kNotSupported);
+        }
+#endif
         uint64_t block_size = opt->block_size == 0 ? (uint64_t{64} * 1024 * 1024) : opt->block_size;
         uint32_t iu         = opt->iu_size == 0 ? 4096 : opt->iu_size;
         std::unique_ptr<BlockPageStore> bs;
+#ifdef CROWDB_HAVE_LIBURING
+        Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->group_id, block_size, iu,
+                                               *h->backend->uring, &bs);
+#else
         Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->group_id, block_size, iu, &bs);
+#endif
         if (!s.ok()) {
             return to_status(s);
         }
         bs->set_sync_mode(sm);
+#ifdef CROWDB_HAVE_LIBURING
+        for (int fd : bs->all_extent_fds()) {
+            h->backend->uring->register_fd(fd);
+        }
+        h->backend->async_store = std::make_unique<BlockAsyncPageStore>(bs.get(), h->backend->uring.get());
+        o.async_uring           = h->backend->uring.get();
+        o.async_page_store      = h->backend->async_store.get();
+#endif
         h->backend->store = std::move(bs);
         o.page_store      = h->backend->store.get();
-#ifdef CROWDB_HAVE_LIBURING
-        // Wire a DiskIOUring + BlockAsyncPageStore so get_async's demand-load
-        // miss path completes off the poll thread instead of blocking
-        // the caller. The async_store borrows both the store (h->backend->store)
-        // and the uring (h->backend->uring), both owned by h and outliving tree.
-        crowdb::common::Topology       uring_topo;
-        crowdb::common::PipelineConfig uring_cfg;
-        uring_cfg.entries = 256;
-        uring_cfg.mode    = crowdb::common::PollingMode::Hybrid;
-        uring_topo.pipelines.push_back(uring_cfg);
-        auto candidate = std::make_unique<crowdb::common::DiskIOUring>(std::move(uring_topo));
-        if (candidate->valid()) {
-            h->backend->uring = std::move(candidate);
-            // Register all extent fds with the uring so submit_* can route.
-            for (int fd : static_cast<BlockPageStore *>(h->backend->store.get())->all_extent_fds()) {
-                h->backend->uring->register_fd(fd);
-            }
-            h->backend->async_store = std::make_unique<BlockAsyncPageStore>(
-                static_cast<BlockPageStore *>(h->backend->store.get()), h->backend->uring.get());
-            o.async_uring      = h->backend->uring.get();
-            o.async_page_store = h->backend->async_store.get();
-        }
-        else {
-            // Containers may run without CAP_SYS_ADMIN, which makes the
-            // io_uring setup fail with EPERM. Keep the durable block backend
-            // usable by leaving the optional async twin disabled; the tree
-            // will complete page I/O through its synchronous block store.
-            CRB_LOG_WARN("io_uring unavailable; using synchronous block page I/O");
-        }
-#endif
         std::unique_ptr<Crowdbtree> t;
         Status                      os = Crowdbtree::open(o, &t);
         if (!os.ok()) {
@@ -473,20 +673,45 @@ catch (...) {
 ct_status ct_open_configured(const ct_options *opt, ct_runtime *runtime, const ct_tree_runtime_options *binding,
                              ct_tree **out)
 {
-    return open_configured(opt, runtime, binding, out, 0, nullptr);
+    return open_configured(opt, runtime, binding, out);
 }
 
-ct_status ct_migrate_configured(const ct_options *opt, ct_runtime *runtime, const ct_tree_runtime_options *binding,
-                                uint64_t generation, CApiMigration migrate, ct_tree **out)
+ct_status ct_open_with_runtime_async(const ct_options *opt, ct_runtime *runtime, const ct_tree_runtime_options *binding,
+                                     OpenCallback complete, void *context)
 {
-    if (out != nullptr) {
-        *out = nullptr;
-    }
-    if (opt == nullptr || out == nullptr || runtime == nullptr || opt->page_store == nullptr || generation == 0 ||
-        generation == UINT64_MAX || migrate == nullptr) {
+    if (opt == nullptr || complete == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    return open_configured(opt, runtime, binding, out, generation, migrate);
+    if (opt->page_store == nullptr && opt->backend != CT_BACKEND_MEM_BLOCK) {
+        return static_cast<ct_status>(Code::kNotSupported);
+    }
+    bool       initializing = false;
+    const auto status       = open_configured(opt, runtime, binding, nullptr, complete, context, nullptr,
+                                              runtime == nullptr ? &initializing : nullptr);
+    return initializing ? CT_OPEN_RETRY : status;
+}
+
+ct_status ct_open_block_with_runtime_async(const ct_options *opt, ct_runtime *runtime,
+                                           const ct_tree_runtime_options *binding, const char *const *names,
+                                           size_t count, OpenCallback complete, void        *open_context,
+                                           void (*wake)(void *), void (*drop)(void *), void *release_context,
+                                           ct_backend_release_service **release)
+{
+    if (opt == nullptr || opt->page_store != nullptr || opt->backend != CT_BACKEND_BLOCK || opt->path == nullptr ||
+        opt->path[0] == '\0' || runtime == nullptr || complete == nullptr || (count != 0 && names == nullptr) ||
+        wake == nullptr || drop == nullptr || release == nullptr || *release != nullptr) {
+        return to_status(Status::invalid_argument());
+    }
+#ifdef CROWDB_HAVE_LIBURING
+    const BlockOpenInput input{
+        .names = names, .count = count, .wake = wake, .drop = drop, .context = release_context, .release = release};
+    return open_configured(opt, runtime, binding, nullptr, complete, open_context, &input);
+#else
+    (void)binding;
+    (void)open_context;
+    (void)release_context;
+    return to_status(Status::not_supported());
+#endif
 }
 
 ct_status ct_open(const ct_options *opt, ct_tree **out)
@@ -501,7 +726,13 @@ crowdb::tree::Crowdbtree *c_api_tree(ct_tree *tree) noexcept
 
 crowdb::tree::PageStore *c_api_page_store(ct_tree *tree) noexcept
 {
-    return tree != nullptr && tree->backend ? tree->backend->store.get() : nullptr;
+    auto *backend = c_api_backend_bundle(tree);
+    return backend != nullptr ? backend->store.get() : nullptr;
+}
+
+PageStoreBundle *c_api_backend_bundle(ct_tree *tree) noexcept
+{
+    return tree != nullptr ? tree->backend.get() : nullptr;
 }
 
 std::shared_ptr<CompletionSignal> c_api_completion_signal(ct_tree *tree) noexcept
@@ -517,6 +748,30 @@ void c_api_notify_completion(const std::shared_ptr<CompletionSignal> &signal) no
 void ct_close(ct_tree *t)
 {
     delete t;
+}
+
+ct_status ct_close_async(ct_tree *tree, void (*complete)(void *, ct_status), void *context)
+{
+    if (tree == nullptr || complete == nullptr) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    auto *store = c_api_page_store(tree);
+    auto *block = dynamic_cast<BlockPageStore *>(store);
+    if (dynamic_cast<TextPageStore *>(store) != nullptr ||
+        (block != nullptr && block->release_service() && !block->release_service()->externally_driven())) {
+        return static_cast<ct_status>(Code::kNotSupported);
+    }
+    tree->close_complete = complete;
+    tree->close_context  = context;
+    const bool started   = TreeCoreAccess::close_async(
+        *tree->tree, {.context = tree, .complete_fn = [](void *argument, Status status) noexcept {
+                          auto *owner        = static_cast<ct_tree *>(argument);
+                          auto *notify       = owner->close_complete;
+                          auto *user_context = owner->close_context;
+                          delete owner;
+                          notify(user_context, to_status(status));
+                      }});
+    return started ? 0 : static_cast<ct_status>(Code::kUnavailable);
 }
 
 ct_status ct_rebuild_range(ct_tree *source, const ct_options *destination_options, ct_tree **out,
@@ -624,29 +879,29 @@ void ct_shutdown_logging()
     crowdb::common::shutdown_logging();
 }
 
-ct_status ct_snapshot(ct_tree *t, uint64_t *out_last_applied)
+ct_status ct_flush_with_persistent(ct_tree *t, uint64_t *out_last_applied)
 {
     if (t == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    return to_status(t->tree->snapshot(out_last_applied));
+    return to_status(t->tree->flush_with_persistent(out_last_applied));
 }
 
-ct_status ct_snapshot_info(ct_tree *t, uint64_t *out_snapshot_seq, uint64_t *out_last_applied)
+ct_status ct_flush_with_persistent_info(ct_tree *t, uint64_t *out_persistent_sequence, uint64_t *out_last_applied)
 {
-    if (t == nullptr || out_snapshot_seq == nullptr || out_last_applied == nullptr) {
+    if (t == nullptr || out_persistent_sequence == nullptr || out_last_applied == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    return to_status(t->tree->snapshot(out_last_applied, out_snapshot_seq));
+    return to_status(t->tree->flush_with_persistent(out_last_applied, out_persistent_sequence));
 }
 
-ct_status ct_snapshot_state(const ct_tree *t, uint64_t *out_snapshot_seq, uint64_t *out_last_applied)
+ct_status ct_durable_state(const ct_tree *t, uint64_t *out_persistent_sequence, uint64_t *out_last_applied)
 {
-    if (t == nullptr || out_snapshot_seq == nullptr || out_last_applied == nullptr) {
+    if (t == nullptr || out_persistent_sequence == nullptr || out_last_applied == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    *out_snapshot_seq = t->tree->durable_snapshot_seq();
-    *out_last_applied = t->tree->durable_snapshot_last_applied_slot();
+    *out_persistent_sequence = t->tree->durable_sequence();
+    *out_last_applied        = t->tree->durable_coverage();
     return static_cast<ct_status>(Code::kOk);
 }
 
@@ -746,6 +1001,32 @@ ct_status ct_inspect_page(const ct_tree *t, const uint32_t *path, size_t depth, 
     *page  = value.page_id;
     *frame = make_buf(value.frame.data(), value.frame.size());
     return static_cast<ct_status>(frame->data == nullptr ? Code::kResourceExhausted : Code::kOk);
+}
+
+ct_status ct_inspect_page_async(const ct_tree *t, const uint32_t *path, size_t depth, uint64_t expected_version,
+                                void (*complete)(void *, ct_status, uint64_t, uint64_t, uint64_t, uint32_t, ct_buf),
+                                void *context)
+try {
+    if (t == nullptr || complete == nullptr || depth > 32 || (depth != 0 && path == nullptr)) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    auto status = TreeCoreAccess::get(*t->tree)->inspect_page_async(
+        {path, depth}, expected_version,
+        [complete, context](Status result, crowdb::tree::NativeFrame value, uint64_t revision, uint64_t root,
+                            uint32_t deltas) noexcept {
+            ct_buf frame{};
+            if (result.ok()) {
+                frame = make_buf(value.frame.data(), value.frame.size());
+                if (frame.data == nullptr) {
+                    result = Status::resource_exhausted();
+                }
+            }
+            complete(context, to_status(result), revision, root, value.page_id, deltas, frame);
+        });
+    return to_status(status);
+}
+catch (const std::bad_alloc &) {
+    return static_cast<ct_status>(Code::kResourceExhausted);
 }
 
 void ct_get_stats(const ct_tree *t, ct_stats *out)
@@ -873,6 +1154,20 @@ uint64_t ct_evict_clean_inner(ct_tree *t, uint64_t max_resident_inner)
         return 0;
     }
     return t->tree->evict_clean_inner(max_resident_inner);
+}
+
+ct_status ct_evict_clean_pages_async(ct_tree *t, uint8_t inner, uint64_t max_resident,
+                                     void (*complete)(void *, uint64_t), void *context)
+try {
+    if (t == nullptr || inner > 1 || complete == nullptr) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    const auto kind = inner == 0 ? PageCacheKind::Leaf : PageCacheKind::Inner;
+    return to_status(TreeCoreAccess::get(*t->tree)->evict_clean_pages_async(
+        kind, max_resident, [complete, context](size_t count) noexcept { complete(context, count); }));
+}
+catch (const std::bad_alloc &) {
+    return static_cast<ct_status>(Code::kResourceExhausted);
 }
 
 // ── Data path ─────────────────────────────────────────────────────
@@ -1194,6 +1489,40 @@ ct_status ct_release_split_memtable_view(ct_tree *t, uint64_t generation)
     return to_status(t->tree->release_split_memtable_view(generation));
 }
 
+ct_status ct_publish_installed_split_view_async(ct_tree *source, uint64_t generation, uint64_t journal_frontier,
+                                                ct_tree *destination, const uint8_t *range_start,
+                                                size_t range_start_len, int has_range_start, const uint8_t *range_end,
+                                                size_t range_end_len, int                  has_range_end,
+                                                void (*complete)(void *, ct_status), void *context)
+try {
+    if (source == nullptr || destination == nullptr || complete == nullptr ||
+        (has_range_start != 0 && range_start == nullptr) || (has_range_end != 0 && range_end == nullptr)) {
+        return to_status(Status::invalid_argument());
+    }
+    auto *parent = TreeCoreAccess::get(*source->tree);
+    auto *child  = TreeCoreAccess::get(*destination->tree);
+    if (parent == nullptr || child == nullptr) {
+        return to_status(Status::not_supported());
+    }
+    std::optional<std::string> start;
+    std::optional<std::string> end;
+    if (has_range_start != 0) {
+        start.emplace(reinterpret_cast<const char *>(range_start), range_start_len);
+    }
+    if (has_range_end != 0) {
+        end.emplace(reinterpret_cast<const char *>(range_end), range_end_len);
+    }
+    return to_status(parent->publish_installed_split_view_async(
+        generation, journal_frontier, *child, KeyRange::bounded(std::move(start), std::move(end)),
+        [complete, context](Status status) { complete(context, to_status(status)); }));
+}
+catch (const std::bad_alloc &) {
+    return to_status(Status::resource_exhausted());
+}
+catch (...) {
+    return to_status(Status::internal_error());
+}
+
 // ── Async data path ───────────────────────────────────────────────
 
 ct_future *ct_get_async(ct_tree *t, const uint8_t *key, size_t klen)
@@ -1250,7 +1579,7 @@ catch (...) {
     return nullptr;
 }
 
-ct_future *ct_snapshot_async(ct_tree *t)
+ct_future *ct_flush_with_persistent_async(ct_tree *t)
 try {
     if (t == nullptr) {
         return nullptr;
@@ -1258,7 +1587,7 @@ try {
     auto impl   = make_tree_future(t);
     impl->kind  = ct_future_impl::Kind::kSnapshot;
     auto signal = t->completion;
-    t->tree->snapshot_async([impl, signal](const Status &st, uint64_t last_applied) {
+    t->tree->flush_with_persistent_async([impl, signal](const Status &st, uint64_t last_applied) {
         impl->status = to_status(st);
         impl->slot   = last_applied;
         impl->done.store(true, std::memory_order_release);
@@ -1782,6 +2111,22 @@ ct_status ct_snapshot_import_finish(ct_import *im, uint64_t *out_at_slot)
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
     return to_status(im->imp->finish(out_at_slot));
+}
+
+ct_status ct_snapshot_import_finish_async(ct_import *im, ct_snapshot_import_complete complete, void *context)
+try {
+    if (im == nullptr || complete == nullptr) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    return to_status(im->imp->finish_async([complete, context](Status result, uint64_t coverage) noexcept {
+        complete(context, to_status(result), result.ok() ? coverage : 0);
+    }));
+}
+catch (const std::bad_alloc &) {
+    return static_cast<ct_status>(Code::kResourceExhausted);
+}
+catch (...) {
+    return static_cast<ct_status>(Code::kInternal);
 }
 
 void ct_snapshot_import_end(ct_import *im)

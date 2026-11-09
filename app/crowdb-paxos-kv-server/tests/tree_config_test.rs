@@ -71,10 +71,6 @@ fn enlarged_source_capacity_is_included_in_scan_admission() {
 fn incompatible_or_unknown_work_windows_are_rejected_on_load() {
     for (input, field) in [
         (
-            CANONICAL.replace("flush_parallelism = 0", "flush_parallelism = 5"),
-            "flush_parallelism",
-        ),
-        (
             CANONICAL.replace("cache_max_pages = 256", "cache_max_pages = 0"),
             "cache_max_pages",
         ),
@@ -89,6 +85,12 @@ fn incompatible_or_unknown_work_windows_are_rejected_on_load() {
     ] {
         assert!(load(&input).unwrap_err().contains(field), "{field}");
     }
+}
+
+#[test]
+fn flush_page_tasks_do_not_require_worker_or_io_count_capacity() {
+    let config = load(&CANONICAL.replace("flush_parallelism = 0", "flush_parallelism = 1024")).unwrap();
+    assert_eq!(config.tree.tuning.flush_parallelism, 1024);
 }
 
 #[test]

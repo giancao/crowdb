@@ -31,9 +31,9 @@ fn maintenance_futures_can_move_to_the_host_executor() {
     let tree = tree();
     require_send(tree.flush_report());
     require_send(tree.writeback_report());
-    require_send(tree.checkpoint_report());
+    require_send(tree.flush_with_persistent_report());
     require_send(tree.flush());
-    require_send(tree.snapshot());
+    require_send(tree.flush_with_persistent());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -69,10 +69,10 @@ async fn writeback_does_not_advance_the_durable_checkpoint() {
     assert_eq!(written.durable_coverage, 0);
     assert!(written.written_frames > written.primary_frames);
     assert!(written.rebased_pages > 0);
-    let durable = tree.checkpoint_report().await.unwrap();
+    let durable = tree.flush_with_persistent_report().await.unwrap();
     assert_eq!(durable.status, Ok(()));
     assert!(durable.durable_committed);
     assert_eq!(durable.durable_coverage, 1);
     assert!(durable.snapshot_sequence > 0);
-    assert_eq!(tree.snapshot().await.unwrap(), 1);
+    assert_eq!(tree.flush_with_persistent().await.unwrap(), 1);
 }

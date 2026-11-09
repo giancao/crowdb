@@ -77,6 +77,7 @@ pub(super) async fn create(endpoint: &str) -> Arc<ChunkKvService> {
     let (head, page) = catalog(endpoint, stream_name);
     service
         .install_catalog_and_reconcile(&head, &[page], &[partition])
+        .await
         .unwrap();
     renew(&service, 1);
     service

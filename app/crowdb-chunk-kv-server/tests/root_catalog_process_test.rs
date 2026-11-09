@@ -2,13 +2,37 @@
 // Licensed under the Apache License, Version 2.0.
 use crowdb_chunk_kv_server::storage::open_root_catalog_with_process_for_tests as open;
 use crowdb_tree_ffi::chunk::protection::{reference_checksum, CandidateState, ManifestCandidate};
-use crowdb_tree_ffi::chunk::stage::{StageId, StagePack, StageState};
-use crowdb_tree_ffi::{CtError, RootCatalogObject};
+use crowdb_tree_ffi::chunk::stage::{StageId, StagePack, StageRecord, StageState};
+use crowdb_tree_ffi::{CtError, RootCatalogObject, RootCatalogStore};
 #[path = "common/root_process.rs"]
 mod fixture;
 #[path = "common/metadata.rs"]
 mod metadata;
 use fixture::{entry, expire, next, process, recovered, stage};
+
+async fn reloadable_stage(store: &dyn RootCatalogStore) -> StageRecord {
+    let reserved = stage();
+    store
+        .compare_stage_async(42, 1, None, Some(&reserved))
+        .await
+        .unwrap();
+    let mut writing = next(&reserved, StageState::Writing);
+    writing.packs.push(StagePack {
+        offset: 0,
+        length: 100,
+        checksum: 7,
+    });
+    store
+        .compare_stage_async(42, 1, Some(&reserved), Some(&writing))
+        .await
+        .unwrap();
+    let ready = next(&writing, StageState::Reloadable);
+    store
+        .compare_stage_async(42, 1, Some(&writing), Some(&ready))
+        .await
+        .unwrap();
+    ready
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn saturated_pin_pruning_commits_bounded_progress() {
@@ -17,25 +41,11 @@ async fn saturated_pin_pruning_commits_bounded_progress() {
     let old = open(metadata.client.clone(), 0, 1, &entry(1), old_process.clone())
         .await
         .unwrap();
-    let reserved = stage();
-    old.store().compare_stage(42, 1, None, Some(&reserved)).unwrap();
-    let mut writing = next(&reserved, StageState::Writing);
-    writing.packs.push(StagePack {
-        offset: 0,
-        length: 100,
-        checksum: 7,
-    });
-    old.store()
-        .compare_stage(42, 1, Some(&reserved), Some(&writing))
-        .unwrap();
-    let ready = next(&writing, StageState::Reloadable);
-    old.store()
-        .compare_stage(42, 1, Some(&writing), Some(&ready))
-        .unwrap();
+    let ready = reloadable_stage(old.store()).await;
     let protection = old.store().stage_protection().unwrap();
     for low in 100..164 {
         protection
-            .pin_stage(
+            .pin_stage_async(
                 42,
                 ready.id,
                 StageId {
@@ -43,6 +53,7 @@ async fn saturated_pin_pruning_commits_bounded_progress() {
                     ..ready.id
                 },
             )
+            .await
             .unwrap();
     }
     let replacement = open(
@@ -60,17 +71,22 @@ async fn saturated_pin_pruning_commits_bounded_progress() {
         .unwrap();
     expire(&metadata.client, &old_process).await;
     let protection = replacement.store().stage_protection().unwrap();
-    let first = protection.prune_stage_pins(42, ready.id, None, 64).unwrap();
+    let first = protection
+        .prune_stage_pins_async(42, ready.id, None, 64)
+        .await
+        .unwrap();
     assert_eq!(first.released, 62);
     assert!(first.more);
     let second = protection
-        .prune_stage_pins(42, ready.id, first.after, 64)
+        .prune_stage_pins_async(42, ready.id, first.after, 64)
+        .await
         .unwrap();
     assert_eq!(second.released, 3);
     assert!(!second.more);
     replacement
         .store()
-        .compare_stage(42, 2, Some(&ready), Some(&next(&ready, StageState::Retired)))
+        .compare_stage_async(42, 2, Some(&ready), Some(&next(&ready, StageState::Retired)))
+        .await
         .unwrap();
 }
 
@@ -82,7 +98,10 @@ async fn new_epoch_and_completed_recovery_do_not_erase_a_live_old_reader() {
         .await
         .unwrap();
     let reserved = stage();
-    old.store().compare_stage(42, 1, None, Some(&reserved)).unwrap();
+    old.store()
+        .compare_stage_async(42, 1, None, Some(&reserved))
+        .await
+        .unwrap();
     let mut writing = next(&reserved, StageState::Writing);
     writing.packs.push(StagePack {
         offset: 0,
@@ -90,20 +109,25 @@ async fn new_epoch_and_completed_recovery_do_not_erase_a_live_old_reader() {
         checksum: 7,
     });
     old.store()
-        .compare_stage(42, 1, Some(&reserved), Some(&writing))
+        .compare_stage_async(42, 1, Some(&reserved), Some(&writing))
+        .await
         .unwrap();
     let ready = next(&writing, StageState::Reloadable);
     old.store()
-        .compare_stage(42, 1, Some(&writing), Some(&ready))
+        .compare_stage_async(42, 1, Some(&writing), Some(&ready))
+        .await
         .unwrap();
     let pin = StageId {
         operation_low: 99,
         ..ready.id
     };
     let protection = old.store().stage_protection().unwrap();
-    protection.pin_stage(42, ready.id, pin).unwrap();
-    protection.unpin_stage(42, ready.id, ready.id).unwrap();
-    protection.writer_quiesced(42, 1).unwrap();
+    protection.pin_stage_async(42, ready.id, pin).await.unwrap();
+    protection
+        .unpin_stage_async(42, ready.id, ready.id)
+        .await
+        .unwrap();
+    protection.writer_quiesced_async(42, 1).await.unwrap();
     assert_eq!(protection.check_read_owner(), Ok(()));
     let replacement = open(
         metadata.client.clone(),
@@ -119,29 +143,36 @@ async fn new_epoch_and_completed_recovery_do_not_erase_a_live_old_reader() {
         .await
         .unwrap();
     let reader = replacement.store().stage_protection().unwrap();
-    let progress = reader.prune_stage_pins(42, ready.id, None, 64).unwrap();
+    let progress = reader
+        .prune_stage_pins_async(42, ready.id, None, 64)
+        .await
+        .unwrap();
     assert_eq!(progress.released, 0);
     let retired = next(&ready, StageState::Retired);
     assert_eq!(
         replacement
             .store()
-            .compare_stage(42, 2, Some(&ready), Some(&retired)),
+            .compare_stage_async(42, 2, Some(&ready), Some(&retired))
+            .await,
         Err(CtError::Unavailable)
     );
-    protection.unpin_stage(42, ready.id, pin).unwrap();
+    protection.unpin_stage_async(42, ready.id, pin).await.unwrap();
     replacement
         .store()
-        .compare_stage(42, 2, Some(&ready), Some(&retired))
+        .compare_stage_async(42, 2, Some(&ready), Some(&retired))
+        .await
         .unwrap();
     assert_eq!(
-        protection.pin_stage(
-            42,
-            ready.id,
-            StageId {
-                operation_low: 100,
-                ..pin
-            }
-        ),
+        protection
+            .pin_stage_async(
+                42,
+                ready.id,
+                StageId {
+                    operation_low: 100,
+                    ..pin
+                }
+            )
+            .await,
         Err(CtError::Unavailable)
     );
 }
@@ -154,7 +185,10 @@ async fn actual_recovery_and_authoritative_process_exclusion_release_crash_pins(
         .await
         .unwrap();
     let reserved = stage();
-    old.store().compare_stage(42, 1, None, Some(&reserved)).unwrap();
+    old.store()
+        .compare_stage_async(42, 1, None, Some(&reserved))
+        .await
+        .unwrap();
     let replacement = open(
         metadata.client.clone(),
         0,
@@ -166,7 +200,7 @@ async fn actual_recovery_and_authoritative_process_exclusion_release_crash_pins(
     .unwrap();
     let protection = replacement.store().stage_protection().unwrap();
     assert_eq!(
-        protection.prune_stage_pins(42, reserved.id, None, 64),
+        protection.prune_stage_pins_async(42, reserved.id, None, 64).await,
         Err(CtError::Unavailable)
     );
     replacement
@@ -175,7 +209,8 @@ async fn actual_recovery_and_authoritative_process_exclusion_release_crash_pins(
         .unwrap();
     assert_eq!(
         protection
-            .prune_stage_pins(42, reserved.id, None, 64)
+            .prune_stage_pins_async(42, reserved.id, None, 64)
+            .await
             .unwrap()
             .released,
         0
@@ -185,24 +220,29 @@ async fn actual_recovery_and_authoritative_process_exclusion_release_crash_pins(
         old.store().stage_protection().unwrap().check_read_owner(),
         Err(CtError::Unavailable)
     );
-    let progress = protection.prune_stage_pins(42, reserved.id, None, 64).unwrap();
+    let progress = protection
+        .prune_stage_pins_async(42, reserved.id, None, 64)
+        .await
+        .unwrap();
     assert_eq!(progress.examined, 1);
     assert_eq!(progress.released, 1);
     assert_eq!(
         protection
-            .prune_stage_pins(42, reserved.id, None, 64)
+            .prune_stage_pins_async(42, reserved.id, None, 64)
+            .await
             .unwrap()
             .released,
         0
     );
     replacement
         .store()
-        .compare_stage(
+        .compare_stage_async(
             42,
             2,
             Some(&reserved),
             Some(&next(&reserved, StageState::Retired)),
         )
+        .await
         .unwrap();
 }
 
@@ -217,6 +257,7 @@ async fn same_epoch_reopen_cannot_steal_a_live_writer_or_reuse_its_recovery_rece
     for generation in 1..=3 {
         old.store()
             .publish(42, generation - 1, 1, generation, b"root")
+            .await
             .unwrap();
     }
     assert!(
@@ -225,7 +266,10 @@ async fn same_epoch_reopen_cannot_steal_a_live_writer_or_reuse_its_recovery_rece
             .is_err()
     );
     let reserved = stage();
-    old.store().compare_stage(42, 1, None, Some(&reserved)).unwrap();
+    old.store()
+        .compare_stage_async(42, 1, None, Some(&reserved))
+        .await
+        .unwrap();
     expire(&metadata.client, &old_process).await;
     let replacement = open(
         metadata.client.clone(),
@@ -241,15 +285,20 @@ async fn same_epoch_reopen_cannot_steal_a_live_writer_or_reuse_its_recovery_rece
             .store()
             .stage_protection()
             .unwrap()
-            .prune_stage_pins(42, reserved.id, None, 64),
+            .prune_stage_pins_async(42, reserved.id, None, 64)
+            .await,
         Err(CtError::Unavailable)
     );
-    assert_eq!(old.store().reclaim_before(42, 3), 0);
-    assert_eq!(old.store().pin_generation(42, 9, 9, 1), Err(CtError::Unavailable));
+    assert_eq!(old.store().reclaim_before_async(42, 3).await.unwrap(), 0);
+    assert_eq!(
+        old.store().pin_generation_async(42, 9, 9, 1).await,
+        Err(CtError::Unavailable)
+    );
     assert_eq!(
         replacement
             .store()
-            .load(42, RootCatalogObject::Manifest(1))
+            .load_async(42, RootCatalogObject::Manifest(1))
+            .await
             .unwrap(),
         Some(b"root".to_vec())
     );
@@ -257,13 +306,14 @@ async fn same_epoch_reopen_cannot_steal_a_live_writer_or_reuse_its_recovery_rece
         .complete_recovery(&recovered(1).await, 3)
         .await
         .unwrap();
-    assert_eq!(replacement.store().reclaim_before(42, 3), 1);
+    assert_eq!(replacement.store().reclaim_before_async(42, 3).await.unwrap(), 1);
     assert_eq!(
         replacement
             .store()
             .stage_protection()
             .unwrap()
-            .prune_stage_pins(42, reserved.id, None, 64)
+            .prune_stage_pins_async(42, reserved.id, None, 64)
+            .await
             .unwrap()
             .released,
         1
@@ -277,21 +327,7 @@ async fn recovered_new_owner_aborts_old_candidate_before_releasing_its_reference
     let old = open(metadata.client.clone(), 0, 1, &entry(1), old_process.clone())
         .await
         .unwrap();
-    let reserved = stage();
-    old.store().compare_stage(42, 1, None, Some(&reserved)).unwrap();
-    let mut writing = next(&reserved, StageState::Writing);
-    writing.packs.push(StagePack {
-        offset: 0,
-        length: 100,
-        checksum: 7,
-    });
-    old.store()
-        .compare_stage(42, 1, Some(&reserved), Some(&writing))
-        .unwrap();
-    let ready = next(&writing, StageState::Reloadable);
-    old.store()
-        .compare_stage(42, 1, Some(&writing), Some(&ready))
-        .unwrap();
+    let ready = reloadable_stage(old.store()).await;
     let id = StageId {
         operation_low: 66,
         ..ready.id
@@ -304,9 +340,13 @@ async fn recovered_new_owner_aborts_old_candidate_before_releasing_its_reference
         manifest: b"pending-root".to_vec(),
     };
     let protection = old.store().stage_protection().unwrap();
-    protection.begin_manifest_candidate(42, &candidate).unwrap();
     protection
-        .prepare_manifest_references(42, id, 0, &[ready.id])
+        .begin_manifest_candidate_async(42, &candidate)
+        .await
+        .unwrap();
+    protection
+        .prepare_manifest_references_async(42, id, 0, &[ready.id])
+        .await
         .unwrap();
     let replacement = open(
         metadata.client.clone(),
@@ -319,46 +359,59 @@ async fn recovered_new_owner_aborts_old_candidate_before_releasing_its_reference
     .unwrap();
     let next_protection = replacement.store().stage_protection().unwrap();
     assert_eq!(
-        next_protection.recover_manifest_candidate(42, id),
+        next_protection.recover_manifest_candidate_async(42, id).await,
         Err(CtError::Unavailable)
     );
     replacement
         .complete_recovery(&recovered(2).await, 0)
         .await
         .unwrap();
-    next_protection.recover_manifest_candidate(42, id).unwrap();
+    next_protection
+        .recover_manifest_candidate_async(42, id)
+        .await
+        .unwrap();
     assert_eq!(
         next_protection
-            .load_manifest_candidate(42, id)
+            .load_manifest_candidate_async(42, id)
+            .await
             .unwrap()
             .unwrap()
             .state,
         CandidateState::Aborted
     );
     assert_eq!(
-        protection.commit_manifest_candidate(42, id),
+        protection.commit_manifest_candidate_async(42, id).await,
         Err(CtError::Unavailable)
     );
-    next_protection.release_manifest_references(42, id, 0).unwrap();
-    next_protection.release_manifest_references(42, id, 0).unwrap();
+    next_protection
+        .release_manifest_references_async(42, id, 0)
+        .await
+        .unwrap();
+    next_protection
+        .release_manifest_references_async(42, id, 0)
+        .await
+        .unwrap();
     let retired = next(&ready, StageState::Retired);
     assert_eq!(
         replacement
             .store()
-            .compare_stage(42, 2, Some(&ready), Some(&retired)),
+            .compare_stage_async(42, 2, Some(&ready), Some(&retired))
+            .await,
         Err(CtError::Unavailable)
     );
     expire(&metadata.client, &old_process).await;
     assert_eq!(
         next_protection
-            .prune_stage_pins(42, ready.id, None, 64)
+            .prune_stage_pins_async(42, ready.id, None, 64)
+            .await
             .unwrap()
             .released,
         1
     );
     replacement
         .store()
-        .compare_stage(42, 2, Some(&ready), Some(&retired))
+        .compare_stage_async(42, 2, Some(&ready), Some(&retired))
+        .await
         .unwrap();
 }
 
@@ -371,15 +424,21 @@ async fn unsealed_stage_requires_creator_exclusion_even_after_the_last_pin() {
         .unwrap();
     old.complete_recovery(&recovered(1).await, 0).await.unwrap();
     let reserved = stage();
-    old.store().compare_stage(42, 1, None, Some(&reserved)).unwrap();
+    old.store()
+        .compare_stage_async(42, 1, None, Some(&reserved))
+        .await
+        .unwrap();
     old.store()
         .stage_protection()
         .unwrap()
-        .unpin_stage(42, reserved.id, reserved.id)
+        .unpin_stage_async(42, reserved.id, reserved.id)
+        .await
         .unwrap();
     let retired = next(&reserved, StageState::Retired);
     assert_eq!(
-        old.store().compare_stage(42, 1, Some(&reserved), Some(&retired)),
+        old.store()
+            .compare_stage_async(42, 1, Some(&reserved), Some(&retired))
+            .await,
         Err(CtError::Unavailable)
     );
     let replacement = open(
@@ -398,13 +457,15 @@ async fn unsealed_stage_requires_creator_exclusion_even_after_the_last_pin() {
     assert_eq!(
         replacement
             .store()
-            .compare_stage(42, 2, Some(&reserved), Some(&retired)),
+            .compare_stage_async(42, 2, Some(&reserved), Some(&retired))
+            .await,
         Err(CtError::Unavailable)
     );
     expire(&metadata.client, &old_process).await;
     replacement
         .store()
-        .compare_stage(42, 2, Some(&reserved), Some(&retired))
+        .compare_stage_async(42, 2, Some(&reserved), Some(&retired))
+        .await
         .unwrap();
 }
 
@@ -422,28 +483,45 @@ async fn release_before_unknown_stage_creation_fences_its_late_retry() {
     .unwrap();
     let reserved = stage();
     let protection = owner.store().stage_protection().unwrap();
-    protection.unpin_stage(42, reserved.id, reserved.id).unwrap();
-    protection.unpin_stage(42, reserved.id, reserved.id).unwrap();
+    protection
+        .unpin_stage_async(42, reserved.id, reserved.id)
+        .await
+        .unwrap();
+    protection
+        .unpin_stage_async(42, reserved.id, reserved.id)
+        .await
+        .unwrap();
     assert_eq!(
-        owner.store().compare_stage(42, 1, None, Some(&reserved)),
+        owner
+            .store()
+            .compare_stage_async(42, 1, None, Some(&reserved))
+            .await,
         Err(CtError::Unavailable)
     );
-    assert_eq!(owner.store().load_stage(42, reserved.id).unwrap(), None);
+    assert_eq!(
+        owner.store().load_stage_async(42, reserved.id).await.unwrap(),
+        None
+    );
     let mut created_first = reserved.clone();
     created_first.id.operation_low += 1;
     created_first.chunk_low += 1;
     owner
         .store()
-        .compare_stage(42, 1, None, Some(&created_first))
+        .compare_stage_async(42, 1, None, Some(&created_first))
+        .await
         .unwrap();
     protection
-        .unpin_stage(42, created_first.id, created_first.id)
+        .unpin_stage_async(42, created_first.id, created_first.id)
+        .await
         .unwrap();
     protection
-        .unpin_stage(42, created_first.id, created_first.id)
+        .unpin_stage_async(42, created_first.id, created_first.id)
+        .await
         .unwrap();
     assert_eq!(
-        protection.prune_stage_pins(42, created_first.id, None, 64),
+        protection
+            .prune_stage_pins_async(42, created_first.id, None, 64)
+            .await,
         Err(CtError::Unavailable)
     );
 }
@@ -457,27 +535,43 @@ async fn terminal_unknown_operation_can_retire_while_its_process_and_tree_keep_s
         .unwrap();
     owner.complete_recovery(&recovered(1).await, 0).await.unwrap();
     let reserved = stage();
-    owner.store().compare_stage(42, 1, None, Some(&reserved)).unwrap();
+    owner
+        .store()
+        .compare_stage_async(42, 1, None, Some(&reserved))
+        .await
+        .unwrap();
     let protection = owner.store().stage_protection().unwrap();
-    protection.unpin_stage(42, reserved.id, reserved.id).unwrap();
+    protection
+        .unpin_stage_async(42, reserved.id, reserved.id)
+        .await
+        .unwrap();
     let retired = next(&reserved, StageState::Retired);
     assert_eq!(
         owner
             .store()
-            .compare_stage(42, 1, Some(&reserved), Some(&retired)),
+            .compare_stage_async(42, 1, Some(&reserved), Some(&retired))
+            .await,
         Err(CtError::Unavailable)
     );
     fixture::age_operation_release(&metadata.client, reserved.id).await;
-    protection.unpin_stage(42, reserved.id, reserved.id).unwrap();
+    protection
+        .unpin_stage_async(42, reserved.id, reserved.id)
+        .await
+        .unwrap();
     assert_eq!(protection.check_read_owner(), Ok(()));
     owner
         .store()
-        .compare_stage(42, 1, Some(&reserved), Some(&retired))
+        .compare_stage_async(42, 1, Some(&reserved), Some(&retired))
+        .await
         .unwrap();
     let mut ongoing = reserved;
     ongoing.id.operation_low += 1;
     ongoing.chunk_low += 1;
-    owner.store().compare_stage(42, 1, None, Some(&ongoing)).unwrap();
+    owner
+        .store()
+        .compare_stage_async(42, 1, None, Some(&ongoing))
+        .await
+        .unwrap();
     assert_eq!(protection.check_read_owner(), Ok(()));
 }
 
@@ -489,27 +583,29 @@ async fn drained_writer_reopens_immediately_without_expiring_its_old_readers() {
         .await
         .unwrap();
     let old_reader = old.store().stage_protection().unwrap();
-    old_reader.writer_quiesced(42, 1).unwrap();
+    old_reader.writer_quiesced_async(42, 1).await.unwrap();
     let replacement = open(metadata.client.clone(), 0, 1, &entry(1), process)
         .await
         .unwrap();
     assert_eq!(old_reader.check_read_owner(), Ok(()));
     assert_eq!(
-        old.store().compare_stage(42, 1, None, Some(&stage())),
+        old.store().compare_stage_async(42, 1, None, Some(&stage())).await,
         Err(CtError::Unavailable)
     );
     replacement
         .store()
-        .compare_stage(42, 1, None, Some(&stage()))
+        .compare_stage_async(42, 1, None, Some(&stage()))
+        .await
         .unwrap();
     // An idempotent late release still refers only to the old incarnation.
-    old_reader.writer_quiesced(42, 1).unwrap();
+    old_reader.writer_quiesced_async(42, 1).await.unwrap();
     let mut another = stage();
     another.id.operation_low += 1;
     another.chunk_low += 1;
     replacement
         .store()
-        .compare_stage(42, 1, None, Some(&another))
+        .compare_stage_async(42, 1, None, Some(&another))
+        .await
         .unwrap();
 }
 
@@ -525,16 +621,22 @@ async fn sealed_legacy_stage_can_retire_after_recovery_without_an_invented_proce
     .await
     .unwrap();
     let reserved = stage();
-    old.compare_stage(42, 1, None, Some(&reserved)).unwrap();
+    old.compare_stage_async(42, 1, None, Some(&reserved))
+        .await
+        .unwrap();
     let mut writing = next(&reserved, StageState::Writing);
     writing.packs.push(StagePack {
         offset: 0,
         length: 100,
         checksum: 7,
     });
-    old.compare_stage(42, 1, Some(&reserved), Some(&writing)).unwrap();
+    old.compare_stage_async(42, 1, Some(&reserved), Some(&writing))
+        .await
+        .unwrap();
     let ready = next(&writing, StageState::Reloadable);
-    old.compare_stage(42, 1, Some(&writing), Some(&ready)).unwrap();
+    old.compare_stage_async(42, 1, Some(&writing), Some(&ready))
+        .await
+        .unwrap();
     let replacement = open(
         metadata.client.clone(),
         0,
@@ -550,6 +652,7 @@ async fn sealed_legacy_stage_can_retire_after_recovery_without_an_invented_proce
         .unwrap();
     replacement
         .store()
-        .compare_stage(42, 2, Some(&ready), Some(&next(&ready, StageState::Retired)))
+        .compare_stage_async(42, 2, Some(&ready), Some(&next(&ready, StageState::Retired)))
+        .await
         .unwrap();
 }

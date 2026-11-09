@@ -13,6 +13,7 @@ use crowdb_chunk_kv::{
 };
 use split_storage::TestSplitStorage;
 use std::sync::Arc;
+use std::time::Duration;
 
 struct TestNativeHandoffGate {
     entered: tokio::sync::Notify,
@@ -26,6 +27,65 @@ impl SplitHandoffStore for TestNativeHandoffGate {
         self.release.notified().await;
         Ok(())
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_pin_and_unpin_keep_the_partition_maintenance_turn_until_completion() {
+    let storage = TestSplitStorage::new();
+    let tree = Arc::new(split_publish_tree::TestPublishTree::new(
+        Arc::new(crowdb_chunk_kv::memory::MemoryPartitionTree::with_tree_id(42)),
+        false,
+        false,
+    ));
+    let (partition, _) = storage
+        .partition(
+            PartitionId { high: 42, low: 1 },
+            PartitionRange {
+                start: None,
+                end: None,
+            },
+            1,
+            tree.clone(),
+        )
+        .await;
+    let transition = TransitionId { high: 42, low: 2 };
+    let (request, operation) = put(1, b"key", b"before pin");
+    partition.mutate(1, request, operation).await.unwrap();
+
+    let pin = tree.pause_generation_mutation(true);
+    let owner = partition.clone();
+    let waiting = tokio::spawn(async move { owner.checkpoint_with_pin(1, transition).await });
+    tokio::time::timeout(Duration::from_secs(3), pin.entered())
+        .await
+        .unwrap();
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    let next = partition.checkpoint(1);
+    tokio::pin!(next);
+    assert!(futures::poll!(&mut next).is_pending());
+    assert!(partition.get(1, b"key", None).await.unwrap().is_some());
+    drop(pin);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), next).await.unwrap(),
+        Err(crowdb_chunk_kv::ChunkKvError::SplitRetry(_))
+    ));
+
+    let unpin = tree.pause_generation_mutation(false);
+    let owner = partition.clone();
+    let waiting = tokio::spawn(async move { owner.release_generation_pin(transition).await });
+    tokio::time::timeout(Duration::from_secs(3), unpin.entered())
+        .await
+        .unwrap();
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    let next = partition.checkpoint(1);
+    tokio::pin!(next);
+    assert!(futures::poll!(&mut next).is_pending());
+    drop(unpin);
+    tokio::time::timeout(Duration::from_secs(3), next)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 fn put(sequence: u64, key: &[u8], value: &[u8]) -> (RequestId, MutationOperation) {
@@ -120,8 +180,8 @@ async fn consecutive_native_splits_preserve_every_original_record() {
             .complete_local_split_handoff(&prepared.artifact)
             .await
             .unwrap();
-        source.release_generation_pin(plan.transition_id).unwrap();
-        child.release_generation_pin(plan.transition_id).unwrap();
+        source.release_generation_pin(plan.transition_id).await.unwrap();
+        child.release_generation_pin(plan.transition_id).await.unwrap();
         partitions[index] = source.split_ingress().unwrap().retained_parent();
         partitions.push(child);
         verify_native_records(&partitions).await;
@@ -373,11 +433,7 @@ async fn verify_native_publication(
     );
     assert_eq!(
         publication.calls(),
-        (
-            0,
-            if fail_publish { 2 } else { 1 },
-            if fail_release { 2 } else { 1 }
-        )
+        (if fail_publish { 2 } else { 1 }, if fail_release { 2 } else { 1 })
     );
     assert_eq!(publication.prepared_calls(), (1, 1));
     let repeated = parent
@@ -387,11 +443,7 @@ async fn verify_native_publication(
     assert_eq!(repeated.artifact, prepared.artifact);
     assert_eq!(
         publication.calls(),
-        (
-            0,
-            if fail_publish { 2 } else { 1 },
-            if fail_release { 2 } else { 1 }
-        )
+        (if fail_publish { 2 } else { 1 }, if fail_release { 2 } else { 1 })
     );
 }
 
@@ -447,7 +499,7 @@ async fn native_overlay_preparation_keeps_parent_mutation_worker_serving() {
     assert_eq!(prepared.artifact.cutover_seq, 3);
     assert_eq!(prepared.artifact.child.base_applied_seq, 1);
     assert_eq!(publication.prepared_calls(), (1, 1));
-    assert_eq!(publication.calls(), (0, 1, 1));
+    assert_eq!(publication.calls(), (1, 1));
     let child = prepared
         .child
         .open_warmed(crowdb_chunk_kv::PartitionConfig::default())
@@ -496,7 +548,7 @@ async fn native_route_and_child_wal_do_not_wait_for_parent_journal_publication()
         result = &mut preparing => panic!("failed before parent WAL proof: {}; stage={}", preparation_failure(result), publication.stage()),
     }
     assert!(!preparing.is_finished());
-    assert_eq!(publication.calls(), (0, 0, 0));
+    assert_eq!(publication.calls(), (0, 0));
     assert_eq!(publication.prepared_calls(), (1, 1));
     let ingress = parent
         .split_ingress()
@@ -560,7 +612,7 @@ async fn cancelled_cutover_receiver_finalizes_installed_route_without_reinstalli
     }
     assert!(parent.split_ingress().is_some());
     assert!(parent.pending_split_child_target(&plan).unwrap().is_none());
-    assert_eq!(publication.calls(), (0, 0, 0));
+    assert_eq!(publication.calls(), (0, 0));
     let (request, operation) = put(2, b"n", b"after-cancel");
     let response = parent.mutate(1, request, operation).await.unwrap();
     assert_eq!(response.mutation_seq, 2);
@@ -579,7 +631,7 @@ async fn cancelled_cutover_receiver_finalizes_installed_route_without_reinstalli
     let prepared = retry.await.unwrap().unwrap();
     assert_eq!(prepared.artifact.cutover_seq, 1);
     assert_eq!(publication.prepared_calls(), (1, 1));
-    assert_eq!(publication.calls(), (0, 1, 1));
+    assert_eq!(publication.calls(), (1, 1));
     assert_eq!(
         parent.get(1, b"n", None).await.unwrap().unwrap().value,
         b"after-cancel"
@@ -607,7 +659,7 @@ async fn native_token_cleanup_never_blocks_parent_or_child_mutation_workers() {
     }
     assert!(parent.split_ingress().is_some());
     assert!(!preparing.is_finished());
-    assert_eq!(publication.calls(), (0, 0, 0));
+    assert_eq!(publication.calls(), (0, 0));
     let parent_stream = parent.snapshot().stream_name;
     let child_stream = parent.split_ingress().unwrap().child().snapshot().stream_name;
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -632,7 +684,7 @@ async fn native_token_cleanup_never_blocks_parent_or_child_mutation_workers() {
     let prepared = preparing.await.unwrap().unwrap();
     assert_eq!(prepared.artifact.cutover_seq, 1);
     assert_eq!(publication.prepared_calls(), (1, 1));
-    assert_eq!(publication.calls(), (0, 1, 1));
+    assert_eq!(publication.calls(), (1, 1));
     assert_eq!(
         parent.get(1, b"b", None).await.unwrap().unwrap().value,
         b"during-host-cleanup"

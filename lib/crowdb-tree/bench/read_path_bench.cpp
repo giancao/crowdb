@@ -52,17 +52,18 @@ void build_tree(benchmark::State &state, std::unique_ptr<Crowdbtree> *t, std::ve
         keys_out->push_back(std::move(k));
     }
     (*t)->flush();
-    (*t)->snapshot(nullptr);
+    (*t)->flush_with_persistent(nullptr);
 }
 } // namespace
 
 // Sync point get on a resident L1 hit — the hot path R6 must not regress.
-static void BM_ReadPath_GetHit(benchmark::State &state)
+static void bm_read_path_get_hit(benchmark::State &state)
 {
     std::unique_ptr<Crowdbtree> t;
     std::vector<std::string>    keys;
     build_tree(state, &t, &keys);
-    for (auto _ : state) {
+    for (auto iteration : state) {
+        (void)iteration;
         uint64_t    s;
         std::string v;
         for (const auto &k : keys) {
@@ -72,15 +73,16 @@ static void BM_ReadPath_GetHit(benchmark::State &state)
     state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(keys.size()));
 }
 
-BENCHMARK(BM_ReadPath_GetHit)->Arg(1000)->Arg(10000);
+BENCHMARK(bm_read_path_get_hit)->Name("BM_ReadPath_GetHit")->Arg(1000)->Arg(10000);
 
 // Sync scan over the whole keyspace — the other hot path R6 must not regress.
-static void BM_ReadPath_Scan(benchmark::State &state)
+static void bm_read_path_scan(benchmark::State &state)
 {
     std::unique_ptr<Crowdbtree> t;
     std::vector<std::string>    keys;
     build_tree(state, &t, &keys);
-    for (auto _ : state) {
+    for (auto iteration : state) {
+        (void)iteration;
         std::vector<scan_entry> out;
         bool                    truncated = false;
         t->scan(Slice(), Slice(), Slice(), 1000000, 0, false, 0, &out, &truncated);
@@ -89,4 +91,4 @@ static void BM_ReadPath_Scan(benchmark::State &state)
     state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(keys.size()));
 }
 
-BENCHMARK(BM_ReadPath_Scan)->Arg(1000)->Arg(10000);
+BENCHMARK(bm_read_path_scan)->Name("BM_ReadPath_Scan")->Arg(1000)->Arg(10000);

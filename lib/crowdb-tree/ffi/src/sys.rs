@@ -3,7 +3,10 @@
 
 #![allow(non_camel_case_types)]
 
+use std::ffi::c_void;
 use std::os::raw::{c_char, c_int};
+
+pub(crate) const CT_OPEN_RETRY: c_int = 1;
 
 mod owned_allocation;
 mod owned_budget;
@@ -47,13 +50,6 @@ pub type ct_root_catalog_load_fn = unsafe extern "C" fn(
 pub struct ct_root_catalog_callbacks {
     pub load: Option<ct_root_catalog_load_fn>,
     pub free_blob: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize)>,
-    pub store: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, u64, u64, *const u8, usize) -> c_int>,
-    pub publish:
-        Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, u64, u64, u64, *const u8, usize) -> c_int>,
-    pub allocate_reference_segment_id:
-        Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, *mut u64) -> c_int>,
-    pub discard_reference_segments:
-        Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, *const u64, usize) -> u64>,
     pub reclaim_before: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, u64) -> u64>,
     pub pin_generation: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, u64, u64, u64) -> c_int>,
     pub unpin_generation: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, u64, u64) -> c_int>,
@@ -81,19 +77,6 @@ pub struct ct_root_catalog {
 #[repr(C)]
 pub struct ct_chunk_transport {
     _private: [u8; 0],
-}
-
-#[repr(C)]
-pub struct ct_chunk_page_store_options {
-    pub tree_id: u64,
-    pub owner_epoch: u64,
-    pub open_generation: u64,
-    pub pack_bytes: usize,
-    pub iu_size: u32,
-    pub max_concurrent_packs: usize,
-    pub materialization_bytes_per_pass: u64,
-    pub max_chunk_bytes: u64,
-    pub mirror_copies: u32,
 }
 
 #[repr(C)]
@@ -143,41 +126,6 @@ pub struct ct_chunk_rpc_transport_options {
     pub disk_resolver: ct_chunk_rpc_resolver,
 }
 
-#[repr(C)]
-#[derive(Default)]
-pub struct ct_chunk_page_store_stats {
-    pub generations_published: u64,
-    pub packs_written: u64,
-    pub pack_bytes_written: u64,
-    pub packs_reused: u64,
-    pub pack_bytes_reused: u64,
-    pub pack_reads: u64,
-    pub cache_hits: u64,
-    pub layout_queries: u64,
-    pub mirror_write_attempts: u64,
-    pub mirror_write_failures: u64,
-    pub retained_manifests: u64,
-    pub pinned_bytes: u64,
-    pub oldest_pin_age_ms: u64,
-    pub orphan_bytes: u64,
-    pub materialization_passes: u64,
-    pub materialization_failures: u64,
-    pub materialization_packs_written: u64,
-    pub materialization_bytes_written: u64,
-    pub shared_packs: u64,
-    pub rpc_operations: u64,
-    pub rpc_latency_ns: u64,
-    pub diskio_operations: u64,
-    pub diskio_latency_ns: u64,
-    pub coalesced_reads: u64,
-    pub coalesced_read_bytes: u64,
-    pub completion_wakeups: u64,
-    pub materialization_scan_bytes: u64,
-    pub shared_metadata_segments: u64,
-    pub materialized_metadata_segments: u64,
-    pub manifest_publication_latency_ns: u64,
-    pub recovery_latency_ns: u64,
-}
 #[repr(C)]
 pub struct ct_view {
     _private: [u8; 0],
@@ -358,41 +306,23 @@ extern "C" {
     pub fn ct_free_buf(buf: *mut ct_buf);
     pub fn ct_page_store_open_mem(iu_size: u32, out: *mut *mut ct_page_store) -> c_int;
     pub fn ct_page_store_free(store: *mut ct_page_store);
-    pub fn ct_memory_root_catalog_open(owner_epoch: u64, out: *mut *mut ct_root_catalog) -> c_int;
     pub fn ct_callback_root_catalog_open(
         callbacks: *const ct_root_catalog_callbacks,
         context: *mut std::ffi::c_void,
         out: *mut *mut ct_root_catalog,
     ) -> c_int;
     pub fn ct_root_catalog_free(catalog: *mut ct_root_catalog);
-    pub fn ct_chunk_page_store_open(
-        options: *const ct_chunk_page_store_options,
-        catalog: *mut ct_root_catalog,
-        out: *mut *mut ct_page_store,
-    ) -> c_int;
-    pub fn ct_chunk_page_store_open_with_transport(
-        options: *const ct_chunk_page_store_options,
-        catalog: *mut ct_root_catalog,
-        transport: *mut ct_chunk_transport,
-        out: *mut *mut ct_page_store,
-    ) -> c_int;
     pub fn ct_rpc_chunk_transport_open(
         options: *const ct_chunk_rpc_transport_options,
         out: *mut *mut ct_chunk_transport,
     ) -> c_int;
     pub fn ct_chunk_transport_free(transport: *mut ct_chunk_transport);
-    pub fn ct_chunk_page_store_get_stats(
-        store: *const ct_page_store,
-        out: *mut ct_chunk_page_store_stats,
-    ) -> c_int;
-    pub fn ct_chunk_page_store_estimated_bytes(store: *const ct_page_store, out: *mut u64) -> c_int;
     pub fn ct_chunk_page_store_set_wal_replay_offset(store: *mut ct_page_store, offset: u64) -> c_int;
     pub fn ct_chunk_page_store_get_wal_replay_offset(store: *const ct_page_store, offset: *mut u64) -> c_int;
     pub fn ct_chunk_page_store_get_manifest_generation(
         store: *const ct_page_store,
         generation: *mut u64,
     ) -> c_int;
-    pub fn ct_chunk_page_store_reclaim_orphans(store: *mut ct_page_store) -> u64;
     pub fn ct_materialize_ownership(tree: *mut ct_tree, bytes_written: *mut u64, complete: *mut i32)
         -> c_int;
     pub fn ct_root_catalog_reclaim_before(
@@ -414,6 +344,11 @@ extern "C" {
         transition_low: u64,
     ) -> c_int;
     pub fn ct_close(t: *mut ct_tree);
+    pub fn ct_close_async(
+        tree: *mut ct_tree,
+        complete: unsafe extern "C" fn(*mut std::ffi::c_void, c_int),
+        context: *mut std::ffi::c_void,
+    ) -> c_int;
     pub fn ct_init_logging(
         log_dir: *const c_char,
         level: *const c_char,
@@ -424,12 +359,15 @@ extern "C" {
     pub fn ct_flush_logging();
     pub fn ct_add_log_stderr(level: *const c_char);
     pub fn ct_shutdown_logging();
-    pub fn ct_snapshot(t: *mut ct_tree, out_last_applied: *mut u64) -> c_int;
-    pub fn ct_snapshot_info(t: *mut ct_tree, out_snapshot_seq: *mut u64, out_last_applied: *mut u64)
-        -> c_int;
-    pub fn ct_snapshot_state(
+    pub fn ct_flush_with_persistent(t: *mut ct_tree, out_last_applied: *mut u64) -> c_int;
+    pub fn ct_flush_with_persistent_info(
+        t: *mut ct_tree,
+        out_persistent_sequence: *mut u64,
+        out_last_applied: *mut u64,
+    ) -> c_int;
+    pub fn ct_durable_state(
         t: *const ct_tree,
-        out_snapshot_seq: *mut u64,
+        out_persistent_sequence: *mut u64,
         out_last_applied: *mut u64,
     ) -> c_int;
     pub fn ct_last_applied_slot(t: *const ct_tree) -> u64;
@@ -452,6 +390,14 @@ extern "C" {
         page: *mut u64,
         deltas: *mut u32,
         frame: *mut ct_buf,
+    ) -> c_int;
+    pub fn ct_inspect_page_async(
+        t: *const ct_tree,
+        path: *const u32,
+        depth: usize,
+        expected_version: u64,
+        complete: unsafe extern "C" fn(*mut c_void, c_int, u64, u64, u64, u32, ct_buf),
+        context: *mut c_void,
     ) -> c_int;
     pub fn ct_apply_put(
         t: *mut ct_tree,
@@ -500,6 +446,20 @@ extern "C" {
         has_range_end: c_int,
     ) -> c_int;
     pub fn ct_release_split_memtable_view(t: *mut ct_tree, generation: u64) -> c_int;
+    pub fn ct_publish_installed_split_view_async(
+        source: *mut ct_tree,
+        generation: u64,
+        journal_frontier: u64,
+        destination: *mut ct_tree,
+        range_start: *const u8,
+        range_start_len: usize,
+        has_range_start: c_int,
+        range_end: *const u8,
+        range_end_len: usize,
+        has_range_end: c_int,
+        complete: unsafe extern "C" fn(*mut c_void, c_int),
+        context: *mut c_void,
+    ) -> c_int;
     pub fn ct_get(
         t: *mut ct_tree,
         key: *const u8,
@@ -522,6 +482,12 @@ extern "C" {
     pub fn ct_iter_release(it: *mut ct_iter);
     pub fn ct_view_release(v: *mut ct_view);
     pub fn ct_snapshot_export_begin(t: *mut ct_tree, chunk_bytes: usize, out: *mut *mut ct_export) -> c_int;
+    pub fn ct_snapshot_export_begin_published_async(
+        t: *mut ct_tree,
+        chunk_bytes: usize,
+        complete: unsafe extern "C" fn(*mut c_void, c_int, *mut ct_export),
+        context: *mut c_void,
+    ) -> c_int;
     pub fn ct_snapshot_export_at_slot(e: *const ct_export) -> u64;
     pub fn ct_snapshot_export_total_bytes(e: *const ct_export) -> u64;
     pub fn ct_snapshot_export_final_crc32c(e: *const ct_export) -> u32;
@@ -537,11 +503,23 @@ extern "C" {
     pub fn ct_snapshot_import_begin(t: *mut ct_tree, out: *mut *mut ct_import) -> c_int;
     pub fn ct_snapshot_import_feed(im: *mut ct_import, chunk: *const u8, len: usize) -> c_int;
     pub fn ct_snapshot_import_finish(im: *mut ct_import, out_at_slot: *mut u64) -> c_int;
+    pub fn ct_snapshot_import_finish_async(
+        im: *mut ct_import,
+        complete: unsafe extern "C" fn(*mut c_void, c_int, u64),
+        context: *mut c_void,
+    ) -> c_int;
     pub fn ct_snapshot_import_end(im: *mut ct_import);
 
     // Async data path
     pub fn ct_evict_clean_leaves(t: *mut ct_tree, max_resident_leaves: u64) -> u64;
     pub fn ct_evict_clean_inner(t: *mut ct_tree, max_resident_inner: u64) -> u64;
+    pub fn ct_evict_clean_pages_async(
+        t: *mut ct_tree,
+        inner: u8,
+        max_resident: u64,
+        complete: unsafe extern "C" fn(*mut c_void, u64),
+        context: *mut c_void,
+    ) -> c_int;
     pub fn ct_get_async(t: *mut ct_tree, key: *const u8, klen: usize) -> *mut ct_future;
     pub fn ct_future_poll(
         f: *mut ct_future,
@@ -626,11 +604,8 @@ pub use snapshot_owner::*;
 mod chunk_pin_service;
 pub(crate) use chunk_pin_service::*;
 
-mod immutable_snapshot;
-pub use immutable_snapshot::*;
+mod read_only_view;
+pub use read_only_view::*;
 
 mod compaction;
 pub use compaction::*;
-
-mod chunk_migration;
-pub use chunk_migration::*;

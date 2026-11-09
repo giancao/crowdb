@@ -6,6 +6,9 @@
 #include "crowdb-tree/chunk_runtime_c_api.h"
 #include "runtime/tree_runtime_c_api.h"
 
+#include <chrono>
+#include <future>
+
 namespace crowdb::tree
 {
 namespace
@@ -82,7 +85,7 @@ TEST(ChunkRuntimeCAbi, PublicTreeUsesSameHostAndCommitsWalWithTheRoot)
     ASSERT_EQ(ct_apply_put(tree.get(), 1, &key, 1, reinterpret_cast<const uint8_t *>(value.data()), value.size()), 0);
     ASSERT_EQ(ct_chunk_page_store_set_wal_replay_offset(store.get(), 4096), 0);
     uint64_t coverage = 0;
-    ASSERT_EQ(ct_snapshot(tree.get(), &coverage), 0);
+    ASSERT_EQ(ct_flush_with_persistent(tree.get(), &coverage), 0);
     EXPECT_EQ(coverage, 1U);
     uint64_t wal  = 0;
     uint64_t root = 0;
@@ -93,13 +96,30 @@ TEST(ChunkRuntimeCAbi, PublicTreeUsesSameHostAndCommitsWalWithTheRoot)
     const auto writes   = backend.transport->writes;
     const auto begins   = backend.catalog->begin_calls;
     const auto prepares = backend.catalog->prepare_calls;
-    ASSERT_EQ(ct_snapshot(tree.get(), &coverage), 0);
+    ASSERT_EQ(ct_flush_with_persistent(tree.get(), &coverage), 0);
     ASSERT_EQ(ct_chunk_page_store_get_manifest_generation(store.get(), &root), 0);
     EXPECT_EQ(root, 1U);
     EXPECT_EQ(backend.transport->writes, writes);
     EXPECT_EQ(backend.catalog->begin_calls, begins);
     EXPECT_EQ(backend.catalog->prepare_calls, prepares);
-    tree.reset();
+    auto       completion = std::make_unique<std::promise<ct_status>>();
+    auto       closed     = completion->get_future();
+    auto      *context    = completion.release();
+    auto      *source     = tree.release();
+    const auto accepted   = ct_close_async(
+        source,
+        [](void *argument, ct_status status) {
+            std::unique_ptr<std::promise<ct_status>> ready(static_cast<std::promise<ct_status> *>(argument));
+            ready->set_value(status);
+        },
+        context);
+    if (accepted != 0) {
+        tree.reset(source);
+        completion.reset(context);
+    }
+    ASSERT_EQ(accepted, 0);
+    ASSERT_EQ(closed.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(closed.get(), 0);
     raw_tree = nullptr;
     EXPECT_EQ(ct_open_with_runtime(&options, runtime.get(), nullptr, &raw_tree),
               static_cast<ct_status>(Code::kUnavailable));

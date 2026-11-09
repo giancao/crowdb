@@ -39,8 +39,8 @@ class ChunkPhysicalAdmission
 
 // The stable host transport owns a canonical ledger per logical Tree across
 // PageStore facades and writer reopen.
-// Commands use the host retirement lane; only blocking backend/host callers may
-// wait for them. No command performs I/O or walks the full allocation catalog.
+// Commands use the host retirement lane and acknowledge through completion.
+// No command performs I/O or walks the full allocation catalog.
 class ChunkPhysicalRegistry
 {
     struct State;
@@ -63,6 +63,14 @@ class ChunkPhysicalRegistry
     Status deleted(detail::ChunkStageId stage, detail::ChunkId chunk,
                    const std::optional<detail::ChunkAllocationIdentity> &receipt,
                    const std::shared_ptr<AllocationBudget>              &metadata);
+    void   submit_prepare(detail::ChunkStageId stage, detail::ChunkId chunk,
+                          const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<ChunkPhysicalPack> *out,
+                          ChunkPhysicalAdmission *admission, detail::ChunkTransportCompletion completion);
+    void submit_observe(const std::shared_ptr<ChunkPhysicalPack> &pack, detail::ChunkAllocationIdentity receipt,
+                        const std::shared_ptr<AllocationBudget> &metadata, detail::ChunkTransportCompletion completion);
+    void submit_deleted(detail::ChunkStageId stage, detail::ChunkId chunk,
+                        const std::optional<detail::ChunkAllocationIdentity> &receipt,
+                        const std::shared_ptr<AllocationBudget> &metadata, detail::ChunkTransportCompletion completion);
     [[nodiscard]] static std::shared_ptr<BackingMetricExtent>
     extent(const std::shared_ptr<ChunkPhysicalPack> &pack) noexcept;
 

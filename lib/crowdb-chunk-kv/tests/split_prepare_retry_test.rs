@@ -105,7 +105,7 @@ async fn authoritative_abort_discards_the_pending_base_before_another_split() {
         .await
         .is_err());
     assert!(parent.pending_split_child_target(&plan).unwrap().is_some());
-    parent.release_generation_pin(plan.transition_id).unwrap();
+    parent.release_generation_pin(plan.transition_id).await.unwrap();
     parent
         .abort_split(&crowdb_chunk_kv::SplitAbortProof {
             transition_id: plan.transition_id,

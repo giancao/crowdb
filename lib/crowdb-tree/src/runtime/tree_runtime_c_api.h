@@ -13,6 +13,6 @@ class AllocationBudget;
 
 // Copies host ownership (the process host when null) and validates options;
 // the core creates one binding.
-[[nodiscard]] Status configure_tree_runtime(ct_runtime *runtime, const ct_tree_runtime_options *options,
-                                            Config *out) noexcept;
+[[nodiscard]] Status configure_tree_runtime(ct_runtime *runtime, const ct_tree_runtime_options *options, Config *out,
+                                            bool *initializing = nullptr) noexcept;
 } // namespace crowdb::tree

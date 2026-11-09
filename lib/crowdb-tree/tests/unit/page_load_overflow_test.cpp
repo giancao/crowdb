@@ -231,7 +231,7 @@ TEST(OverflowLoad, InlineChainUsesBoundedCpuContinuations)
     EXPECT_EQ(runtime->snapshot().completed, pages + 1);
 }
 
-TEST(OverflowLoad, LateReadErrorReleasesSharedInflightPermit)
+TEST(OverflowLoad, IndependentOverflowReadsStartBeforeLateReadErrors)
 {
     auto runtime    = std::make_shared<detail::FlushRuntime>(1, 8);
     auto lane       = std::make_shared<detail::FlushRuntime::Lane>(8);
@@ -239,17 +239,21 @@ TEST(OverflowLoad, LateReadErrorReleasesSharedInflightPermit)
     store->deferred = true;
     auto captured   = std::make_shared<TestBackingMap>();
     add_overflow(store, captured.get(), 1, kInvalidPageId, "hello");
-    AsyncStorePageLoader loader(store, runtime, lane, {.max_inflight = 1}, resolver(captured));
+    AsyncStorePageLoader loader(store, runtime, lane, {}, resolver(captured));
     std::vector<Code>    outcomes;
     auto complete = [&](Status status, std::shared_ptr<const buffer>) { outcomes.push_back(status.code()); };
     loader.load_overflow(1, 5, complete);
     runtime->drain();
     loader.load_overflow(1, 5, complete);
+    runtime->drain();
+    EXPECT_TRUE(outcomes.empty());
+    EXPECT_EQ(store->reads.load(), 2U);
     store->finish(Status::io_error("deferred failure"));
     loader.load_overflow(1, 5, complete);
     runtime->drain();
     store->finish(Status::io_error("second failure"));
-    EXPECT_EQ(outcomes, (std::vector<Code>{Code::kResourceExhausted, Code::kIoError, Code::kIoError}));
-    EXPECT_EQ(store->reads.load(), 2U);
+    store->finish(Status::io_error("third failure"));
+    EXPECT_EQ(outcomes, (std::vector<Code>{Code::kIoError, Code::kIoError, Code::kIoError}));
+    EXPECT_EQ(store->reads.load(), 3U);
 }
 } // namespace crowdb::tree

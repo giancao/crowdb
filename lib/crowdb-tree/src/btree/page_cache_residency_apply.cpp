@@ -151,8 +151,9 @@ bool PageCacheResidency::State::enter() noexcept
 
 void PageCacheResidency::State::leave() noexcept
 {
-    producers.fetch_sub(1, std::memory_order_acq_rel);
-    producers.notify_all();
+    if (producers.fetch_sub(1, std::memory_order_acq_rel) == (kClosed | 1U)) {
+        close_progress();
+    }
 }
 
 void PageCacheResidency::State::discard(Command *command) noexcept
@@ -235,9 +236,22 @@ void PageCacheResidency::State::drain() noexcept
             pages.erase(page);
         }
     }
-    if (reversing != nullptr || ordered != nullptr || incoming.load(std::memory_order_acquire) != nullptr ||
-        (clear_requested.load(std::memory_order_acquire) && !pages.empty())) {
+    const bool final_clear = producers.load(std::memory_order_acquire) == kClosed;
+    const bool more_commands =
+        reversing != nullptr || ordered != nullptr || incoming.load(std::memory_order_acquire) != nullptr;
+    const bool more_pages = clear_requested.load(std::memory_order_acquire) && !pages.empty();
+    if (more_commands || more_pages) {
         wake();
+    }
+    else if (final_clear && pages.empty()) {
+        // Rejected eviction commands can leave ready counts in the old base
+        // records. Drop them only after every accepted command has run.
+        for (size_t i = 0; i < kStepCommands && !bases.empty(); ++i) {
+            bases.erase(bases.begin());
+        }
+        if (!bases.empty()) {
+            wake();
+        }
     }
 }
 } // namespace crowdb::tree

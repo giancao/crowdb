@@ -22,16 +22,17 @@ TEST(RpcChunkTransport, SealsEmptyAndPartialKibBoundariesWithExactBytes)
         options.disk_route_count = 1;
         options.chunkdb_resolver = fixture.resolver();
         RpcChunkTransport transport(options);
-        ChunkId           allocated;
-        ASSERT_TRUE(
-            transport.allocate_mirror_chunk(256U * 1024U * 1024U, 17, &allocated, PagePurpose::kBtreePage).ok());
+        const ChunkId     allocated(0x0200'0000'0000'0042ULL, 100);
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(
+                        transport, allocated, 4U * 1024U * 1024U, 17, PagePurpose::kBtreePage)
+                        .ok());
         if (bytes != 0) {
-            ASSERT_TRUE(transport.advance_write(allocated, 0, bytes).ok());
+            ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_advance_write>(transport, allocated, 0, bytes).ok());
         }
-        ASSERT_TRUE(transport.seal_chunk(allocated, 17, bytes).ok());
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_seal_chunk>(transport, allocated, 17, bytes).ok());
         EXPECT_EQ(fixture.services[0].sealed_bytes.load(), bytes);
         ChunkLayout sealed;
-        ASSERT_TRUE(transport.query_chunk(allocated, &sealed).ok());
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_query_chunk>(transport, allocated, &sealed).ok());
         EXPECT_TRUE(sealed.sealed);
         EXPECT_EQ(sealed.acknowledged_bytes, bytes);
         if (bytes == 0) {
@@ -51,11 +52,12 @@ TEST(RpcChunkTransport, RejectsASealReplyWithoutTheExactSealedBoundary)
         options.disk_route_count = 1;
         options.chunkdb_resolver = fixture.resolver();
         RpcChunkTransport transport(options);
-        ChunkId           allocated;
-        ASSERT_TRUE(
-            transport.allocate_mirror_chunk(256U * 1024U * 1024U, 17, &allocated, PagePurpose::kBtreePage).ok());
-        ASSERT_TRUE(transport.advance_write(allocated, 0, 4).ok());
-        EXPECT_FALSE(transport.seal_chunk(allocated, 17, 4).ok());
+        const ChunkId     allocated(0x0200'0000'0000'0042ULL, 100);
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(
+                        transport, allocated, 4U * 1024U * 1024U, 17, PagePurpose::kBtreePage)
+                        .ok());
+        ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_advance_write>(transport, allocated, 0, 4).ok());
+        EXPECT_FALSE(await_chunk_rpc<&RpcChunkTransport::submit_seal_chunk>(transport, allocated, 17, 4).ok());
     }
 }
 } // namespace

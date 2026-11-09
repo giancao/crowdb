@@ -8,12 +8,14 @@
 
 namespace crowdb::tree::detail
 {
-AllocationAccount::AllocationAccount(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category)
+AllocationAccount::AllocationAccount(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category,
+                                     bool ongoing)
     : retirement_(account ? account->retirement_.lock() : nullptr),
       work_(account ? account->work_metrics() : nullptr),
       resources_(account ? account->resource_metrics() : nullptr),
       account_(std::move(account)),
       category_(category),
+      ongoing_(ongoing),
       domain_(ResourceBudget::allocation_domain(account_))
 {
 }
@@ -26,7 +28,39 @@ void AllocationAccount::leave() noexcept
     }
 }
 
+RetirementCompletion AllocationAccount::retirement_started() noexcept
+{
+    const auto entered = ingress_.fetch_add(1, std::memory_order_acq_rel);
+    auto       account = (entered & kClosed) == 0 ? account_ : nullptr;
+    leave();
+    if (!account) {
+        return {};
+    }
+    account->start_retirement();
+    return {.owner = account, .finish = [](const void *raw) noexcept {
+                static_cast<const ResourceBudget::Account *>(raw)->finish_retirement();
+            }};
+}
+
 bool AllocationAccount::claim(size_t bytes) noexcept
+{
+    return claim(bytes, ongoing_);
+}
+
+bool AllocationAccount::belongs_to(const std::shared_ptr<ResourceBudget::Account> &account) noexcept
+{
+    const auto entered = ingress_.fetch_add(1, std::memory_order_acq_rel);
+    const bool matches = (entered & kClosed) == 0 && account_ == account;
+    leave();
+    return matches;
+}
+
+bool AllocationAccount::claim_ongoing(size_t bytes) noexcept
+{
+    return claim(bytes, true);
+}
+
+bool AllocationAccount::claim(size_t bytes, bool ongoing) noexcept
 {
     const auto entered = ingress_.fetch_add(1, std::memory_order_acq_rel);
     if ((entered & kClosed) != 0) {
@@ -38,7 +72,7 @@ bool AllocationAccount::claim(size_t bytes) noexcept
         if (!allocated_.compare_exchange_weak(current, current + bytes, std::memory_order_acq_rel)) {
             continue;
         }
-        const bool accepted = !account_ || ResourceBudget::claim_allocation(account_, category_, bytes);
+        const bool accepted = !account_ || ResourceBudget::claim_allocation(account_, category_, bytes, ongoing);
         if (!accepted) {
             allocated_.fetch_sub(bytes, std::memory_order_relaxed);
         }

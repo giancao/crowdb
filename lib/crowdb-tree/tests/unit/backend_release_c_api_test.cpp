@@ -9,6 +9,8 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <future>
 #include <thread>
 
 namespace crowdb::tree
@@ -43,25 +45,45 @@ TEST(BackendReleaseCAbi, HostHandleOutlivesTreeAndDropsContextOnlyAfterDisposal)
     options.buffer_pool_bytes = 1 << 20;
     ct_tree *tree             = nullptr;
     ASSERT_EQ(ct_open(&options, &tree), 0);
+    const auto close = [](void *context, ct_status status) {
+        std::unique_ptr<std::promise<ct_status>> completed(static_cast<std::promise<ct_status> *>(context));
+        completed->set_value(status);
+    };
+    ASSERT_EQ(ct_close_async(tree, [](void *, ct_status) {}, nullptr), static_cast<ct_status>(Code::kNotSupported));
     TestWake                    wake;
     ct_backend_release_service *service = nullptr;
     ASSERT_EQ(ct_tree_backend_release_service(tree, TestWake::wake, TestWake::drop, &wake, &service), 0);
+#ifdef CROWDB_HAVE_LIBURING
+    EXPECT_NE(ct_backend_release_service_is_async(service), 0);
+#endif
     TestWake                    refused;
     ct_backend_release_service *duplicate = nullptr;
     EXPECT_NE(ct_tree_backend_release_service(tree, TestWake::wake, TestWake::drop, &refused, &duplicate), 0);
     EXPECT_EQ(refused.drops.load(), 0U);
     EXPECT_EQ(duplicate, nullptr);
-    std::thread callback([tree] { ct_close(tree); });
-    callback.join();
+    auto       completion = std::make_unique<std::promise<ct_status>>();
+    auto       result     = completion->get_future();
+    auto      *context    = completion.release();
+    const auto accepted   = ct_close_async(tree, close, context);
+    if (accepted != 0) {
+        completion.reset(context);
+        ct_close(tree);
+    }
+    ASSERT_EQ(accepted, 0);
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(result.get(), 0);
     EXPECT_EQ(wake.drops.load(), 0U);
-    size_t work    = 0;
-    bool   drained = false;
-    while (work++ < 1024) {
+    bool       drained  = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
         const auto step = ct_backend_release_service_pump(service, 1);
         EXPECT_LE(step.visited, 1U);
         if (step.drained != 0) {
             drained = true;
             break;
+        }
+        if (step.more == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
     EXPECT_TRUE(drained);

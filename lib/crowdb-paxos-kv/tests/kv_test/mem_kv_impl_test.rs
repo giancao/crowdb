@@ -184,9 +184,12 @@ impl KVEngine for InMemKV {
         Ok(())
     }
 
-    fn snapshot_export_begin(&self, chunk_bytes: usize) -> Result<Box<dyn SnapshotExporter>, String> {
+    fn snapshot_export_begin(
+        &self,
+        chunk_bytes: usize,
+    ) -> KVFuture<Result<Box<dyn SnapshotExporter>, String>> {
         if chunk_bytes == 0 {
-            return Err("snapshot chunk size must be nonzero".to_string());
+            return KVFuture::ready(Err("snapshot chunk size must be nonzero".to_string()));
         }
         let (at_slot, bytes) = export_snapshot(&self.map);
         let metadata = SnapshotMetadata {
@@ -196,11 +199,11 @@ impl KVEngine for InMemKV {
             final_crc32c: crowdb_tree_ffi::crc32c(&bytes),
             chunk_bytes,
         };
-        Ok(Box::new(InMemSnapshotExporter {
+        KVFuture::ready(Ok(Box::new(InMemSnapshotExporter {
             bytes,
             metadata,
             offset: 0,
-        }))
+        })))
     }
 
     fn snapshot_import_begin(&self) -> Result<Box<dyn SnapshotImporter>, String> {
@@ -260,21 +263,23 @@ impl SnapshotExporter for InMemSnapshotExporter {
         self.offset as u64
     }
 
-    fn read(&mut self, offset: u64) -> Result<SnapshotChunk, String> {
-        if offset != self.offset as u64 {
-            return Err(format!(
-                "invalid snapshot offset {offset}, expected {}",
-                self.offset
-            ));
-        }
-        let end = self.bytes.len().min(self.offset + self.metadata.chunk_bytes);
-        let chunk = SnapshotChunk {
-            offset,
-            bytes: self.bytes[self.offset..end].to_vec().into(),
-            done: end == self.bytes.len(),
-        };
-        self.offset = end;
-        Ok(chunk)
+    fn read(&mut self, offset: u64) -> futures::future::BoxFuture<'_, Result<SnapshotChunk, String>> {
+        Box::pin(async move {
+            if offset != self.offset as u64 {
+                return Err(format!(
+                    "invalid snapshot offset {offset}, expected {}",
+                    self.offset
+                ));
+            }
+            let end = self.bytes.len().min(self.offset + self.metadata.chunk_bytes);
+            let chunk = SnapshotChunk {
+                offset,
+                bytes: self.bytes[self.offset..end].to_vec().into(),
+                done: end == self.bytes.len(),
+            };
+            self.offset = end;
+            Ok(chunk)
+        })
     }
 }
 
@@ -289,8 +294,8 @@ impl SnapshotImporter for InMemSnapshotImporter {
         Ok(())
     }
 
-    fn finish(self: Box<Self>) -> Result<u64, String> {
-        import_snapshot(&self.map, &self.bytes)
+    fn finish(self: Box<Self>) -> KVFuture<Result<u64, String>> {
+        KVFuture::ready(import_snapshot(&self.map, &self.bytes))
     }
 
     fn abort(self: Box<Self>) {}

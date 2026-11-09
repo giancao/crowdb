@@ -111,38 +111,73 @@ void LocalCompactionOperation::State::pump()
     backend_progress->request(backend_node, weak_from_this().lock());
 }
 
+void LocalCompactionOperation::State::await_retirements() noexcept
+{
+    core->binding()->account()->when_retirements_drained({
+        .context = this,
+        .complete_fn =
+            [](void *context, Status) noexcept {
+                auto &self = *static_cast<State *>(context);
+                self.backend_progress->request(self.backend_node, self.weak_from_this().lock());
+            },
+        .owner = weak_from_this().lock(),
+    });
+}
+
 void LocalCompactionOperation::State::backend_step()
 {
-    // Retirement drains are host/backend waits. The CPU lane remains free to
-    // execute the paid destructor continuations they depend on.
-    core->publisher().reclaim();
-    core->binding()->account()->drain_retirements();
+    if (reclaim_step == ReclaimStep::kBegin) {
+        core->publisher().reclaim();
+        reclaim_step = ReclaimStep::kPublication;
+        await_retirements();
+        return;
+    }
     if (phase == Phase::kSelected) {
-        const LocalBlockGcLimits limits;
-        auto                     freed =
-            collect_free_local_blocks(*store, *local->ledger, local->gc_cursor.load(), limits, credit, backend);
-        report.blocks_deleted += freed.deleted_blocks;
-        child_status = freed.status;
-        if (!child_status.ok()) {
+        if (reclaim_step == ReclaimStep::kPublication) {
+            collect_free_file_blocks(*store, local->ledger, local->gc_cursor.load(), {}, credit, backend,
+                                     core->config().async_page_store, backend_progress,
+                                     [owner = shared_from_this()](LocalBlockGcResult result) {
+                                         owner->report.blocks_deleted += result.deleted_blocks;
+                                         if (!result.status.ok()) {
+                                             owner->local->gc_cursor.store(result.next_block);
+                                             owner->child_done(std::move(result.status));
+                                             return;
+                                         }
+                                         owner->reclaim_step = ReclaimStep::kCollected;
+                                         owner->backend_progress->request(owner->backend_node, owner);
+                                     });
             return;
         }
-        candidate = select_sparse_local_block(*store, *local->ledger, local->gc_cursor.load(), credit,
-                                              options.free_threshold, backend);
-        local->gc_cursor.store(candidate.next_block);
-        child_status = candidate.status.code() == Code::kNotFound ? Status::Ok() : candidate.status.without_message();
-        if (candidate.exclusion.owner) {
-            report.blocks_selected = 1;
-        }
+        reclaim_step = ReclaimStep::kBegin;
+        select_sparse_local_block_async(
+            *store, local->ledger, local->gc_cursor.load(), credit, options.free_threshold, backend,
+            [owner = shared_from_this()](LocalSparseBlock selected) {
+                owner->candidate = std::move(selected);
+                owner->local->gc_cursor.store(owner->candidate.next_block);
+                if (owner->candidate.exclusion.owner) {
+                    owner->report.blocks_selected = 1;
+                }
+                const auto &status = owner->candidate.status;
+                owner->child_done(status.code() == Code::kNotFound ? Status::Ok() : status.without_message());
+            });
     }
-    else {
+    else if (reclaim_step == ReclaimStep::kPublication) {
         core->cache()->evict();
         core->publisher().reclaim();
-        core->binding()->account()->drain_retirements();
+        reclaim_step = ReclaimStep::kCache;
+        await_retirements();
+    }
+    else {
         const LocalBlockGcLimits limits{.max_blocks = 1, .max_deleted_bytes = store->block_size()};
-        auto                     freed = collect_free_local_blocks(
-            *store, *local->ledger, candidate.exclusion.address / store->block_size(), limits, credit, backend);
-        report.blocks_deleted += freed.deleted_blocks;
-        child_status = freed.status;
+        collect_free_file_blocks(*store, local->ledger, candidate.exclusion.address / store->block_size(), limits,
+                                 credit, backend, core->config().async_page_store, backend_progress,
+                                 [owner = shared_from_this()](LocalBlockGcResult result) {
+                                     owner->report.blocks_deleted += result.deleted_blocks;
+                                     if (!result.status.ok()) {
+                                         owner->local->gc_cursor.store(result.next_block);
+                                     }
+                                     owner->child_done(std::move(result.status));
+                                 });
     }
 }
 } // namespace crowdb::tree

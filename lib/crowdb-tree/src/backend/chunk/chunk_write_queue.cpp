@@ -25,16 +25,14 @@ struct ChunkWriteQueue::Batch
     Request                         *head = nullptr;
     size_t                           pipe = 0;
 
-    Status write()
+    void write(AsyncCompletion complete)
     {
-        auto &first = *head->backing;
-        if (head->next == nullptr) {
-            return write_chunk_backing(first, head->input, queue->metadata_);
-        }
+        auto       &first  = *head->backing;
         const auto &domain = *first.domain;
         auto        status = domain.catalog->protection()->check_read_owner();
         if (!status.ok()) {
-            return status;
+            complete.complete(std::move(status));
+            return;
         }
         std::vector<detail::ChunkFixedPackStore::Write, MetadataAllocator<detail::ChunkFixedPackStore::Write>> inputs{
             MetadataAllocator<detail::ChunkFixedPackStore::Write>(queue->metadata_)};
@@ -50,17 +48,20 @@ struct ChunkWriteQueue::Batch
         first.pin->arm();
         detail::ChunkFixedPackStore store(domain.tree, domain.epoch, domain.mirrors, domain.catalog, domain.transport,
                                           domain.physical_registry);
-        status = store.write_many(first.pack.stage, first.pack.chunk, first.pack.purpose, inputs, queue->metadata_,
-                                  &first.physical, first.physical_budget);
-        for (auto *item = head; item != nullptr; item = item->next) {
-            item->backing->physical         = first.physical;
-            item->backing->physical_metrics = ChunkPhysicalRegistry::extent(first.physical);
-        }
-        return status.ok() ? domain.catalog->protection()->check_read_owner() : status;
+        store.submit_write_many(first.pack.stage, first.pack.chunk, first.pack.purpose, inputs, queue->metadata_,
+                                std::move(complete), &first.physical, first.physical_budget);
     }
 
     void finish(Status status) noexcept
     {
+        const auto physical = head->backing->physical;
+        for (auto *item = head; item != nullptr; item = item->next) {
+            item->backing->physical         = physical;
+            item->backing->physical_metrics = ChunkPhysicalRegistry::extent(physical);
+        }
+        if (status.ok()) {
+            status = head->backing->domain->catalog->protection()->check_read_owner();
+        }
         queue->active_[pipe].store(false, std::memory_order_release);
         while (head != nullptr) {
             auto *item = head;
@@ -179,13 +180,14 @@ void ChunkWriteQueue::start(size_t pipe) noexcept
             push(item);
         }
     }
-    auto status = batch->head->store->submit_step([batch] { return batch->write(); },
-                                                  {.context     = batch.get(),
-                                                   .complete_fn = &Batch::completed,
-                                                   .owner       = batch,
-                                                   .allocations = metadata_,
-                                                   .cause       = batch->head->complete.cause},
-                                                  0, bytes);
+    auto status =
+        batch->head->store->submit_async_step([batch](AsyncCompletion complete) { batch->write(std::move(complete)); },
+                                              {.context     = batch.get(),
+                                               .complete_fn = &Batch::completed,
+                                               .owner       = batch,
+                                               .allocations = metadata_,
+                                               .cause       = batch->head->complete.cause},
+                                              0, bytes);
     if (!status.ok()) {
         batch->finish(std::move(status));
     }

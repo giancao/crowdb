@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::ct_tree;
+use std::ffi::c_void;
 use std::os::raw::c_int;
 
 #[repr(C)]
@@ -34,9 +35,22 @@ unsafe extern "C" {
         out: *mut *mut ct_prepared_split_overlay,
         start_frontier: *mut u64,
     ) -> c_int;
+    pub fn ct_arm_split_overlay_async(
+        source: *mut ct_tree,
+        destination: *mut ct_tree,
+        limits: *const ct_split_overlay_limits_v1,
+        complete: unsafe extern "C" fn(*mut c_void, c_int, *mut ct_prepared_split_overlay, u64),
+        context: *mut c_void,
+    ) -> c_int;
     pub fn ct_prepared_split_overlay_prepare(
         prepared: *mut ct_prepared_split_overlay,
         replayed_prefix: u64,
+    ) -> c_int;
+    pub fn ct_prepared_split_overlay_prepare_async(
+        prepared: *mut ct_prepared_split_overlay,
+        replayed_prefix: u64,
+        complete: unsafe extern "C" fn(*mut c_void, c_int),
+        context: *mut c_void,
     ) -> c_int;
     pub fn ct_prepared_split_overlay_try_install(
         prepared: *mut ct_prepared_split_overlay,
@@ -48,4 +62,9 @@ unsafe extern "C" {
         out: *mut u64,
     ) -> i32;
     pub fn ct_prepared_split_overlay_destroy(prepared: *mut ct_prepared_split_overlay);
+    pub fn ct_prepared_split_overlay_release_async(
+        prepared: *mut ct_prepared_split_overlay,
+        complete: Option<unsafe extern "C" fn(*mut c_void)>,
+        context: *mut c_void,
+    ) -> c_int;
 }

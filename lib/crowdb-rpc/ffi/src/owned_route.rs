@@ -11,6 +11,7 @@ use crate::{Connection, RpcClient, RpcServer};
 mod retirement;
 
 pub(crate) use retirement::shutdown as drain_before_native_shutdown;
+pub(crate) use retirement::{begin_transport_retirement, finish_transport_retirement};
 
 /// Supplies the raw crowdb-rpc client handle while an owner keeps it alive.
 pub trait RpcClientHandle: Send + Sync {
@@ -92,6 +93,12 @@ impl OwnedClientRoute {
             owners.server.handle().cast(),
             owners.connection.handle().cast(),
         )
+    }
+
+    /// Releases a dedicated native resolver's transport on the same lifecycle
+    /// worker, including when discovery exits before it can publish a route.
+    pub fn retire_transport(transport: impl Send + 'static) {
+        retirement::retire_transport(transport);
     }
 
     /// Wait for queued and recursively queued owner teardown after route

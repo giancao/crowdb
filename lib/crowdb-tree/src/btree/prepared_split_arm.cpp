@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "allocation_bound.h"
+#include "host_completion.h"
 #include "prepared_split_internal.h"
 
 namespace crowdb::tree
@@ -28,14 +29,47 @@ PreparedSplitOverlay::~PreparedSplitOverlay()
     if (self.source_gate) {
         self.source->state_->split_busy.clear(std::memory_order_release);
     }
+    if (on_released_ != nullptr) {
+        state_.reset();
+        on_released_(release_context_);
+    }
+}
+
+void PreparedSplitOverlay::notify_released(void (*complete)(void *), void *context) noexcept
+{
+    on_released_     = complete;
+    release_context_ = context;
 }
 
 Status PreparedSplitOverlay::arm(TreeCore &source, TreeCore &destination, SplitOverlayLimits limits,
                                  std::shared_ptr<PreparedSplitOverlay> *out, uint64_t *start_frontier)
+{
+    if (out == nullptr || *out || start_frontier == nullptr || detail::FlushRuntime::on_worker_thread()) {
+        return Status::invalid_argument();
+    }
+    detail::HostCompletion done;
+    Status                 result;
+    auto status = arm_async(source, destination, limits,
+                            [&](Status reply, std::shared_ptr<PreparedSplitOverlay> token, uint64_t start) {
+                                if (reply.ok()) {
+                                    *out            = std::move(token);
+                                    *start_frontier = start;
+                                }
+                                result = std::move(reply);
+                                done.signal();
+                            });
+    if (!status.ok()) {
+        return status;
+    }
+    done.wait();
+    return result;
+}
+
+Status PreparedSplitOverlay::arm_async(TreeCore &source, TreeCore &destination, SplitOverlayLimits limits,
+                                       Armed complete)
 try {
     if (&source == &destination || source.config().runtime != destination.config().runtime || limits.max_records == 0 ||
-        limits.max_bytes == 0 || out == nullptr || *out || start_frontier == nullptr ||
-        detail::FlushRuntime::on_worker_thread()) {
+        limits.max_bytes == 0 || !complete) {
         return Status::invalid_argument("split arm requires distinct same-host trees and a finite tail");
     }
     const auto bound = detail::AllocationBound()
@@ -65,6 +99,16 @@ try {
     state->tail        = detail::reserved_shared<SourceTail>(metadata, metadata, limits.max_records, limits.max_bytes);
     auto token         = detail::reserved_construct<PreparedSplitOverlay>(
         metadata, [&](auto *storage) { ::new (static_cast<void *>(storage)) PreparedSplitOverlay(state); });
+    std::function<void()> armed = [token, complete = std::move(complete)]() mutable {
+        auto status = token->check_armed();
+        if (!status.ok()) {
+            token.reset();
+            complete(std::move(status), {}, 0);
+            return;
+        }
+        const auto start = token->state_->start;
+        complete(Status::Ok(), std::move(token), start);
+    };
     {
         TreeCore::State::Ingress parent(*source.state_);
         TreeCore::State::Ingress child(*destination.state_);
@@ -100,19 +144,27 @@ try {
     }
     // No admission pause: only pre-registration writers belong to this epoch
     // barrier. They release their observation guard after frontier.complete.
-    state->subscription->wait();
-    TreeCore::State::Ingress parent(*source.state_);
-    if (parent.owner == nullptr || source.state_->sources->tail_domain() != state->domain || state->tail->expired()) {
-        return Status::unavailable("split tail expired before its starting frontier");
-    }
-    // Pre-registration out-of-order writes may lie above the contiguous
-    // frontier. The private child must replay this complete high-watermark.
-    state->start    = source.max_seen_slot();
-    *start_frontier = state->start;
-    *out            = std::move(token);
+    state->subscription->on_ready(std::move(armed));
     return Status::Ok();
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted("split arm allocation exhausted its reservation");
+}
+
+Status PreparedSplitOverlay::check_armed()
+try {
+    auto                    &state  = *state_;
+    auto                    &source = *state.source;
+    TreeCore::State::Ingress parent(*source.state_);
+    if (parent.owner == nullptr || source.state_->sources->tail_domain() != state.domain || state.tail->expired()) {
+        return Status::unavailable("split tail expired before its starting frontier");
+    }
+    // Pre-registration out-of-order writes may lie above the contiguous
+    // frontier. The private child must replay this complete high-watermark.
+    state.start = source.max_seen_slot();
+    return Status::Ok();
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted();
 }
 } // namespace crowdb::tree

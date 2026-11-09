@@ -21,15 +21,14 @@ std::shared_ptr<const CapturedDurablePages> CheckpointOperation::State::inherite
 
 void CheckpointOperation::State::begin_chunk_checkpoint()
 {
-    auto status = chunk->prepare_checkpoint({.pages                = written_pages,
-                                             .view                 = *view,
-                                             .wal_offset           = chunk_wal_offset,
-                                             .max_dependency_steps = options.write.max_dependency_steps,
-                                             .store                = store,
-                                             .runtime              = runtime,
-                                             .lane                 = lane,
-                                             .budget               = budget,
-                                             .owner                = owner},
+    auto status = chunk->prepare_checkpoint({.pages      = written_pages,
+                                             .view       = *view,
+                                             .wal_offset = chunk_wal_offset,
+                                             .store      = store,
+                                             .runtime    = runtime,
+                                             .lane       = lane,
+                                             .budget     = budget,
+                                             .owner      = owner},
                                             &chunk_checkpoint);
     if (!status.ok()) {
         reconcile(std::move(status));

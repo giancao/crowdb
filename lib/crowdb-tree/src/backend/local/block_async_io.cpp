@@ -142,6 +142,7 @@ Status submit_part(::crowdb::common::DiskIOUring &uring, const std::shared_ptr<I
                                 static_cast<off_t>(offset), std::move(callback));
     }
     else {
+        part->medium->mark_dirty();
         uring.submit_write_owned(part->medium->fd(), part->aligned != nullptr ? part->aligned : write_buffer, length,
                                  static_cast<off_t>(offset), std::move(callback));
     }
@@ -179,11 +180,100 @@ Status submit_parts(BlockPageStore &store, ::crowdb::common::DiskIOUring &uring,
     }
     return Status::Ok();
 }
+
+void submit_data(BlockPageStore &store, common::DiskIOUring &uring, PageAddr address, void *read_buffer,
+                 const void *write_buffer, size_t length, const std::shared_ptr<IoJoin> &join) noexcept
+{
+    Status status;
+    try {
+        status = submit_parts(store, uring, address, read_buffer, write_buffer, length, join);
+    }
+    catch (const std::bad_alloc &) {
+        status = Status::resource_exhausted();
+    }
+    join->done(std::move(status));
+}
+
+struct WriteOpen : std::enable_shared_from_this<WriteOpen>
+{
+    WriteOpen(BlockPageStore &store, common::DiskIOUring &uring, PageAddr address, const void *buffer, size_t length,
+              std::shared_ptr<IoJoin> join)
+        : store(store),
+          uring(uring),
+          address(address),
+          buffer(buffer),
+          length(length),
+          join(std::move(join))
+    {
+    }
+
+    void start(uint64_t first, uint64_t last) noexcept
+    {
+        const auto keep = weak_from_this().lock();
+        for (auto index = first; index <= last; ++index) {
+            pending.fetch_add(1, std::memory_order_relaxed);
+            store.submit_ensure_block(
+                static_cast<uint32_t>(index), uring,
+                {.context = this, .complete_fn = &prepared, .owner = keep, .allocations = join->complete.allocations});
+        }
+        prepared(this, Status::Ok());
+    }
+
+    static void prepared(void *context, Status status) noexcept
+    {
+        auto &self = *static_cast<WriteOpen *>(context);
+        if (!status.ok() && !self.failed.test_and_set(std::memory_order_relaxed)) {
+            self.first_error = std::move(status);
+        }
+        if (self.pending.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+            return;
+        }
+        if (!self.first_error.ok()) {
+            self.join->done(std::move(self.first_error));
+            return;
+        }
+        submit_data(self.store, self.uring, self.address, nullptr, self.buffer, self.length, self.join);
+    }
+
+    BlockPageStore         &store;
+    common::DiskIOUring    &uring;
+    PageAddr                address;
+    const void             *buffer;
+    size_t                  length;
+    std::shared_ptr<IoJoin> join;
+    std::atomic<size_t>     pending{1};
+    std::atomic_flag        failed = ATOMIC_FLAG_INIT;
+    Status                  first_error;
+};
+
+void submit_write(BlockPageStore &store, common::DiskIOUring &uring, PageAddr address, const void *buffer,
+                  size_t length, const std::shared_ptr<IoJoin> &join)
+{
+    const auto block_size = store.block_size();
+    if (block_size != 0) {
+        const auto last = (address + length - 1) / block_size;
+        if (last > UINT32_MAX) {
+            join->done(Status::invalid_argument("BlockPageStore: byte range overflow"));
+            return;
+        }
+        for (auto index = address / block_size; index <= last; ++index) {
+            uint64_t local = 0;
+            if (!store.file_for_offset(index * block_size, &local, join->complete.allocations)) {
+                auto prepare = std::allocate_shared<WriteOpen>(MetadataAllocator<WriteOpen>(join->complete.allocations),
+                                                               store, uring, address, buffer, length, join);
+                prepare->start(index, last);
+                return;
+            }
+        }
+    }
+    submit_data(store, uring, address, nullptr, buffer, length, join);
+}
 } // namespace
 
-std::optional<size_t> block_io_allocation_bound(size_t bytes, size_t parts) noexcept
+std::optional<size_t> block_io_allocation_bound(size_t bytes, size_t parts, bool opens_extents) noexcept
 {
     return AllocationBound(shared_allocation_bound<IoJoin>())
+        .add(opens_extents ? shared_allocation_bound<WriteOpen>() : 0)
         .add(bytes)
         .add_product(parts, shared_allocation_bound<IoPart>() +
                                 ::crowdb::common::DiskIOUring::owned_submission_allocation_bytes())
@@ -204,7 +294,6 @@ void submit_block_io(BlockPageStore &store, ::crowdb::common::DiskIOUring &uring
         return;
     }
     std::shared_ptr<IoJoin> join;
-    Status                  status;
     try {
         complete.allocations = block_allocation_budget(store, complete.allocations);
         if (!complete.allocations) {
@@ -213,20 +302,14 @@ void submit_block_io(BlockPageStore &store, ::crowdb::common::DiskIOUring &uring
         }
         join = std::allocate_shared<IoJoin>(MetadataAllocator<IoJoin>(complete.allocations), complete);
         if (write_buffer != nullptr) {
-            status = store.ensure_extents(address, length, complete.allocations);
+            submit_write(store, uring, address, write_buffer, length, join);
         }
-        if (status.ok()) {
-            status = submit_parts(store, uring, address, read_buffer, write_buffer, length, join);
+        else {
+            submit_data(store, uring, address, read_buffer, nullptr, length, join);
         }
     }
     catch (const std::bad_alloc &) {
-        status = Status::resource_exhausted();
-    }
-    if (join) {
-        join->done(std::move(status));
-    }
-    else {
-        complete.complete(std::move(status));
+        complete.complete(Status::resource_exhausted());
     }
 }
 } // namespace crowdb::tree::detail

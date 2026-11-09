@@ -43,12 +43,10 @@ struct FlushBatch::State::Subtree
     void                                               complete(Status result) noexcept;
     void                                               prepare_builder();
     static size_t                                      fork_bytes() noexcept;
-    Subtree                                           *leaf_next   = nullptr;
-    bool                                               leaf_permit = false;
     void                                               reset_work();
     void                                               request_load();
     void                                               load() noexcept;
-    Status                                             collect(PublicationTransaction &transaction);
+    Status collect(PublicationTransaction &transaction, uint64_t &handoff_bytes);
     [[nodiscard]] std::shared_ptr<const PublishedPage> lookup(uint64_t page_id) const;
 
     State       &owner;

@@ -24,15 +24,18 @@ try {
     }
     // This load fixes an already covered prefix. Writers completing after it
     // remain in the current source and belong to a subsequent flush.
-    constexpr auto bytes = detail::shared_allocation_bound<FlushOperation::State>() +
-                           detail::shared_allocation_bound<FlushOperation>() +
-                           detail::shared_allocation_bound<detail::AllocationReservation>();
-    auto           paid  = detail::ResourceBudget::try_reserve(catalog->active_budget->options().account,
-                                                               detail::BudgetClass::kHandoff, bytes);
-    if (!paid) {
-        return Status::unavailable("covered flush control reserve unavailable");
+    auto metadata = preparation.allocations;
+    if (!metadata) {
+        constexpr auto bytes = detail::shared_allocation_bound<FlushOperation::State>() +
+                               detail::shared_allocation_bound<FlushOperation>() +
+                               detail::shared_allocation_bound<detail::AllocationReservation>();
+        auto           paid  = detail::ResourceBudget::try_reserve(catalog->active_budget->options().account,
+                                                                   detail::BudgetClass::kHandoff, bytes);
+        if (!paid) {
+            return Status::unavailable("covered flush control reserve unavailable");
+        }
+        metadata = detail::AllocationReservation::create(std::move(*paid));
     }
-    auto metadata       = detail::AllocationReservation::create(std::move(*paid));
     auto bounds         = options;
     bounds.cpu_progress = preparation.cpu_progress;
     bounds.publication  = preparation.publication;
@@ -52,7 +55,7 @@ try {
     operation->complete_success.store(true, std::memory_order_release);
     auto result = detail::reserved_construct<FlushOperation>(
         metadata, [&](auto *storage) { ::new (static_cast<void *>(storage)) FlushOperation(std::move(operation)); });
-    metadata->seal();
+    detail::seal_reservation(metadata);
     pending = std::move(result);
     *out    = pending;
     return Status::Ok();

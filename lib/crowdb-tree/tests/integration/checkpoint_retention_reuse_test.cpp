@@ -25,10 +25,10 @@ void check_live_only_reuse(size_t value_bytes)
                     .ok());
         }
         uint64_t durable = 0;
-        ASSERT_TRUE(tree.snapshot(&durable).ok());
+        ASSERT_TRUE(tree.flush_with_persistent(&durable).ok());
         ASSERT_EQ(durable, 3U);
         tree.set_gc_watermark(3, 3);
-        ASSERT_TRUE(tree.snapshot(&durable).ok());
+        ASSERT_TRUE(tree.flush_with_persistent(&durable).ok());
         EXPECT_EQ(durable, 3U);
         EXPECT_EQ(tree.last_snapshot_pages_written(), 0U);
     }
@@ -61,10 +61,10 @@ TEST(CheckpointRetentionReuse, AdvancingFloorStillRewritesAStoredTombstoneBefore
         ASSERT_TRUE(tree.apply(2, Batch{.ops = {{.key = "b", .kind = OpKind::kPut, .value = "live"}}}).ok());
         ASSERT_TRUE(tree.apply(3, Batch{.ops = {{.key = "a", .kind = OpKind::kDelete, .value = ""}}}).ok());
         uint64_t durable = 0;
-        ASSERT_TRUE(tree.snapshot(&durable).ok());
+        ASSERT_TRUE(tree.flush_with_persistent(&durable).ok());
         ASSERT_EQ(durable, 3U);
         tree.set_gc_watermark(3, 3);
-        ASSERT_TRUE(tree.snapshot(&durable).ok());
+        ASSERT_TRUE(tree.flush_with_persistent(&durable).ok());
         EXPECT_GT(tree.last_snapshot_pages_written(), 0U);
         EXPECT_EQ(durable, 3U);
     }

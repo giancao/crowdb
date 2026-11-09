@@ -3,6 +3,8 @@
 #include "common/test_chunk_physical.h"
 #include "common/test_chunk_root.h"
 
+#include <chrono>
+#include <future>
 #include <thread>
 
 namespace crowdb::tree
@@ -45,6 +47,53 @@ TEST(ChunkRegistryScope, ConcurrentFacadesShareOneCanonicalLedger)
     ASSERT_TRUE(one.ok());
     ASSERT_TRUE(two.ok());
     EXPECT_EQ(first, second);
+}
+
+TEST(ChunkRegistryScope, SubmissionReturnsOnTheOnlyWorkerBeforeRegistryCompletion)
+{
+    using namespace std::chrono_literals;
+
+    test_chunk::TestPhysicalHost host;
+    test_chunk::TestRootBackend  backend;
+
+    struct Open : std::enable_shared_from_this<Open>
+    {
+        std::shared_ptr<detail::ChunkTransport> transport;
+        std::shared_ptr<AllocationBudget>       budget;
+        std::shared_ptr<ChunkPhysicalRegistry>  registry;
+        std::promise<Code>                      result;
+        bool                                    returned = false;
+
+        static void submit(void *context) noexcept
+        {
+            auto &request = *static_cast<Open *>(context);
+            auto  status  = request.transport->submit_physical_registry(
+                19, request.budget, &request.registry,
+                {.complete_fn = &Open::complete, .context = &request, .owner = request.weak_from_this().lock()});
+            request.returned = true;
+            if (!status.ok()) {
+                request.result.set_value(status.code());
+            }
+        }
+
+        static void complete(void *context, Status status) noexcept
+        {
+            auto &request = *static_cast<Open *>(context);
+            EXPECT_TRUE(request.returned);
+            request.result.set_value(status.code());
+        }
+    };
+
+    auto request       = std::make_shared<Open>();
+    request->transport = backend.transport;
+    request->budget    = host.budget;
+    auto ready         = request->result.get_future();
+    ASSERT_TRUE(host.cpu.try_submit(host.lane, &Open::submit, request.get()).ok());
+    ASSERT_EQ(ready.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(ready.get(), Code::kOk);
+    std::shared_ptr<ChunkPhysicalRegistry> reopened;
+    ASSERT_TRUE(backend.transport->physical_registry(19, host.budget, &reopened).ok());
+    EXPECT_EQ(request->registry, reopened);
 }
 
 TEST(ChunkRegistryScope, EveryStartupAllocationFailureReturnsItsPaidMetadataWithoutExternalAllocation)

@@ -10,33 +10,30 @@ namespace crowdb::tree
 {
 struct ChunkRecoveryLimits
 {
-    size_t max_pages            = 1024 * 1024;
-    size_t max_frame_bytes      = 1024 * 1024;
-    size_t max_blob_bytes       = 2 * 1024 * 1024;
-    size_t max_references       = 1024 * 1024;
-    size_t max_dependency_steps = 1024 * 1024;
+    size_t max_frame_bytes = 1024 * 1024;
+    size_t max_blob_bytes  = 2 * 1024 * 1024;
 };
 
 // One exact index, frame, or bounded dependency slice per backend step. The
 // root is loaded first; its validated counts determine the admission bound.
 // A successful result still requires RecoveredStateOperation graph validation.
-class ChunkRootRecovery
+class ChunkRootRecovery : public std::enable_shared_from_this<ChunkRootRecovery>
 {
     struct ConstructionKey
     {
     };
 
   public:
-    ChunkRootRecovery(ConstructionKey, std::shared_ptr<detail::AllocationReservation> metadata,
-                      std::shared_ptr<detail::AllocationReservation> window);
+    ChunkRootRecovery(ConstructionKey, std::shared_ptr<AllocationBudget> metadata,
+                      std::shared_ptr<AllocationBudget> window);
     static Status create(ChunkRootManifest root, std::shared_ptr<const ChunkBackingDomain> domain,
                          std::shared_ptr<detail::ChunkRuntimeIds> ids, ChunkRecoveryLimits limits,
-                         std::shared_ptr<detail::AllocationReservation> metadata,
-                         std::shared_ptr<detail::AllocationReservation> window,
-                         std::shared_ptr<ChunkRootRecovery>            *out);
+                         std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<AllocationBudget> window,
+                         std::shared_ptr<ChunkRootRecovery> *out);
     [[nodiscard]] static std::optional<size_t> allocation_bound(const ChunkRootManifest &root) noexcept;
     [[nodiscard]] static std::optional<size_t> window_allocation_bound(ChunkRecoveryLimits limits) noexcept;
     Status                                     step(bool stopped = false) noexcept;
+    void submit_step(bool stopped, std::shared_ptr<ScheduledPageStore> cpu, AsyncCompletion complete) noexcept;
 
     [[nodiscard]] bool done() const noexcept
     {
@@ -73,17 +70,29 @@ class ChunkRootRecovery
         std::shared_ptr<const OverflowBackingSet> overflow;
     };
 
-    Status index();
-    Status frame();
-    Status validate_frame(DurableCapturedFrame &descriptor, std::span<const uint8_t> words);
-    Status dependencies();
-    Status next_pin(detail::ChunkStageId *out);
-    Status finish(Status status);
-    std::shared_ptr<detail::AllocationReservation> metadata_;
-    std::shared_ptr<detail::AllocationReservation> window_;
-    std::shared_ptr<const ChunkBackingDomain>      domain_;
-    std::shared_ptr<detail::ChunkRuntimeIds>       ids_;
-    ChunkRecoveryLimits                            limits_;
+    Status          index();
+    Status          index_loaded();
+    Status          frame();
+    Status          prepare_frame(ChunkIndexFrame *out);
+    Status          frame_loaded(const ChunkIndexFrame &record, std::shared_ptr<const ChunkPackBacking> pack);
+    Status          validate_frame(DurableCapturedFrame &descriptor, std::span<const uint8_t> words);
+    Status          dependencies();
+    Status          next_pin(detail::ChunkStageId *out);
+    Status          finish(Status status);
+    void            complete_step(Status status);
+    void            read_pinned(Status status);
+    void            read_completed(Status status);
+    AsyncCompletion async_reply(AsyncCompleteFn callback);
+    std::shared_ptr<ScheduledPageStore>       cpu_;
+    AsyncCompletion                           completion_;
+    ChunkIndexFrame                           async_record_;
+    std::shared_ptr<const ChunkPackBacking>   async_pack_;
+    bool                                      reading_index_ = false;
+    std::shared_ptr<AllocationBudget>         metadata_;
+    std::shared_ptr<AllocationBudget>         window_;
+    std::shared_ptr<const ChunkBackingDomain> domain_;
+    std::shared_ptr<detail::ChunkRuntimeIds>  ids_;
+    ChunkRecoveryLimits                       limits_;
 
     ChunkRootManifest                                         root_;
     std::shared_ptr<CapturedDurablePages>                     pages_;
@@ -103,9 +112,10 @@ class ChunkRootRecovery
     bool                                                      done_             = false;
     Status                                                    status_;
     CapturedDurablePages::Frames::iterator                    leaf_;
-    size_t                                                    reference_ = 0;
-    uint64_t                                                  pid_       = kInvalidPageId;
-    uint64_t                                                  remaining_ = 0;
+    size_t                                                    reference_   = 0;
+    uint64_t                                                  pid_         = kInvalidPageId;
+    uint64_t                                                  remaining_   = 0;
+    uint64_t                                                  chain_steps_ = 0;
     std::shared_ptr<OverflowBackingSet>                       overflow_;
 };
 } // namespace crowdb::tree

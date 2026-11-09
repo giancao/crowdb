@@ -88,6 +88,7 @@ struct TreeRuntimeSnapshot
 
 class TreeRuntimeBinding;
 struct TreeRuntimeAccess;
+struct AsyncCompletion;
 
 // A host shares CPU and blocking-backend pools and a resource ledger across its
 // Trees. Tree operations retain a binding until their CPU work and backend
@@ -110,6 +111,11 @@ class TreeRuntime
     // tickets have drained. This closes CPU submission and waits for CPU jobs;
     // it does not wait for or cancel external I/O on the caller's behalf.
     void drain_cpu() noexcept;
+    // One final host drain. Rejected submissions do not call completion.
+    [[nodiscard]] Status drain_async(AsyncCompletion complete) noexcept;
+    // Host-only, after drain completion. Keep this runtime until both worker
+    // loops have exited and the external host can reap them.
+    [[nodiscard]] Status stop_workers_async(AsyncCompletion complete) noexcept;
 
     [[nodiscard]] bool                      stopped() const noexcept;
     [[nodiscard]] TreeRuntimeSnapshot       snapshot() const noexcept;

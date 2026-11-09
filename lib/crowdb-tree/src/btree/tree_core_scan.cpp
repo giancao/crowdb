@@ -29,7 +29,7 @@ void CoreScan::finish(Status status, bool truncated) noexcept
         CRB_LOG_WARN("scan failed after {} entries: {}", count, status.to_string());
     }
     try {
-        complete(std::move(status), std::move(packed), truncated);
+        complete(std::move(status), std::move(packed), count, truncated);
     }
     catch (...) {
         // Completion is terminal; a throwing consumer cannot be retried.
@@ -37,9 +37,28 @@ void CoreScan::finish(Status status, bool truncated) noexcept
     }
 }
 
+void CoreScan::schedule() noexcept
+{
+    auto   keep = owner;
+    Status status;
+    try {
+        status = prepared.binding->cpu()->try_submit(lane, &CoreScan::step, this);
+    }
+    catch (const std::bad_alloc &) {
+        status = Status::resource_exhausted();
+    }
+    if (status.code() == Code::kResourceExhausted) {
+        progress->request(cpu_node, std::move(keep));
+    }
+    else if (!status.ok()) {
+        finish(std::move(status), false);
+    }
+}
+
 void CoreScan::step(void *context) noexcept
 {
     auto *self = static_cast<CoreScan *>(context);
+    auto  keep = self->owner;
     try {
         if (self->expired()) {
             self->finish(Status::Ok(), true);
@@ -83,7 +102,7 @@ try {
             finish(Status::Ok(), true);
             return;
         }
-        detail::reserve_scan_output(packed, size, normal_capacity);
+        detail::reserve_scan_output(packed, size, 0);
         packed.pack_u32(static_cast<uint32_t>(key.size()));
         packed.append(key);
         packed.pack_u64(entry.cell.slot);
@@ -101,7 +120,7 @@ try {
         finish(Status::Ok(), true);
     }
     else {
-        progress->request(owner);
+        schedule();
     }
 }
 catch (const std::bad_alloc &) {
@@ -114,13 +133,12 @@ catch (...) {
 
 namespace crowdb::tree
 {
-void TreeCore::scan_async(CoreScanOptions options, std::function<void(Status, ScanPackedBuf, bool)> complete)
+void TreeCore::scan_async(CoreScanOptions options, ScanComplete complete)
 {
     scan_impl(options, std::move(complete), true);
 }
 
-void TreeCore::scan_impl(CoreScanOptions options, std::function<void(Status, ScanPackedBuf, bool)> complete,
-                         bool dispatch)
+void TreeCore::scan_impl(CoreScanOptions options, ScanComplete complete, bool dispatch)
 {
     if (!complete) {
         return;
@@ -139,13 +157,13 @@ void TreeCore::scan_impl(CoreScanOptions options, std::function<void(Status, Sca
         if (status.code() == Code::kResourceExhausted) {
             CRB_LOG_WARN("scan admission failed: {}", status.to_string());
         }
-        complete(std::move(status), {}, false);
+        complete(std::move(status), {}, 0, false);
         return;
     }
     operation->complete = std::move(complete);
     operation->owner    = operation;
     if (dispatch) {
-        operation->progress->request(operation);
+        operation->schedule();
     }
     else {
         core_read_detail::CoreScan::step(operation.get());

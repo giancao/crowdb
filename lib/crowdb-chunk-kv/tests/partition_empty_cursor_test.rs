@@ -68,7 +68,7 @@ async fn live_default_tree_resumes_exclusively_after_an_empty_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn captured_default_tree_preserves_the_empty_key_cursor_after_writer_close() {
     let tree = tree().await;
-    let (_, coverage, snapshot) = tree.checkpoint_snapshot(0).await.unwrap();
+    let (_, coverage, snapshot) = tree.flush_with_persistent_view(0).await.unwrap();
     assert_eq!(coverage, 2);
     drop(tree);
     check_empty_key_continuation(snapshot.as_ref()).await;

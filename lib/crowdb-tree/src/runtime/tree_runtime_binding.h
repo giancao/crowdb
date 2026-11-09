@@ -30,6 +30,9 @@ class TreeRuntimeBinding
         return lane_;
     }
 
+    [[nodiscard]] const std::shared_ptr<ApplyDispatcher> &view_cpu_progress() const noexcept;
+    [[nodiscard]] const std::shared_ptr<ApplyDispatcher> &view_backend_progress() const noexcept;
+
     [[nodiscard]] const std::shared_ptr<detail::FlushRuntime> &backend_cpu() const noexcept
     {
         return backend_cpu_;

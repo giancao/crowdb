@@ -15,8 +15,11 @@ class BackendAllocationGrant final : public AllocationBudget
 {
   public:
     BackendAllocationGrant(std::shared_ptr<AllocationAccount> owner, ResourceBudget::Credit credit);
+    explicit BackendAllocationGrant(std::shared_ptr<AllocationAccount> owner);
     static Status create(std::shared_ptr<AllocationAccount> owner, ResourceBudget::Credit credit,
                          std::shared_ptr<BackendAllocationGrant> *out);
+    static Status create_ongoing(std::shared_ptr<AllocationAccount>       owner,
+                                 std::shared_ptr<BackendAllocationGrant> *out);
 
     [[nodiscard]] static constexpr size_t allocation_bound() noexcept
     {
@@ -31,7 +34,7 @@ class BackendAllocationGrant final : public AllocationBudget
 
     [[nodiscard]] std::shared_ptr<TreeWorkMetrics> retirement_metrics() const noexcept override
     {
-        return source_.account()->work_metrics();
+        return source_ ? source_->account()->work_metrics() : owner_->retirement_metrics();
     }
 
     [[nodiscard]] const std::shared_ptr<AllocationAccount> &account() const noexcept
@@ -40,7 +43,7 @@ class BackendAllocationGrant final : public AllocationBudget
     }
 
   private:
-    std::shared_ptr<AllocationAccount> owner_;
-    AllocationReservation              source_;
+    std::shared_ptr<AllocationAccount>   owner_;
+    std::optional<AllocationReservation> source_;
 };
 } // namespace crowdb::tree::detail

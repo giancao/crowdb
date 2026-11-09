@@ -36,7 +36,7 @@ async fn runtime_split_base_is_read_only_and_rebuilds_after_source_writer_drop()
     )
     .await
     .unwrap();
-    let (generation, coverage, snapshot) = tree.checkpoint_snapshot(0).await.unwrap();
+    let (generation, coverage, snapshot) = tree.flush_with_persistent_view(0).await.unwrap();
     assert_eq!(coverage, 2);
     tree.apply(
         3,

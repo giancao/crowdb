@@ -124,8 +124,8 @@ impl PartitionTree for TestSamplingTree {
         self.memory.checkpoint(offset).await
     }
 
-    async fn checkpoint_snapshot(&self, offset: u64) -> Result<(u64, u64, Arc<dyn PartitionTree>)> {
-        self.memory.checkpoint_snapshot(offset).await
+    async fn flush_with_persistent_view(&self, offset: u64) -> Result<(u64, u64, Arc<dyn PartitionTree>)> {
+        self.memory.flush_with_persistent_view(offset).await
     }
 
     async fn rebuild_range(

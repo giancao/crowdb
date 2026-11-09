@@ -5,6 +5,7 @@ use super::kv_future::KVFuture;
 use super::{Batch, EngineCheckpointReport, EngineFlushReport};
 
 use bytes::Bytes;
+use futures::future::BoxFuture;
 
 /// Stable tag for an engine's snapshot byte format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +41,7 @@ pub trait SnapshotExporter: Send {
     /// # Errors
     /// Returns an error when `offset` is not the next sequential position or
     /// the underlying encoder cannot produce the chunk.
-    fn read(&mut self, offset: u64) -> Result<SnapshotChunk, String>;
+    fn read(&mut self, offset: u64) -> BoxFuture<'_, Result<SnapshotChunk, String>>;
 }
 
 /// Unique sequential owner of a staged snapshot import.
@@ -52,7 +53,7 @@ pub trait SnapshotImporter: Send {
     /// # Errors
     /// Returns an error when the stream is incomplete, corrupt, or cannot be
     /// installed into the target engine.
-    fn finish(self: Box<Self>) -> Result<u64, String>;
+    fn finish(self: Box<Self>) -> KVFuture<Result<u64, String>>;
     fn abort(self: Box<Self>);
 }
 
@@ -352,9 +353,12 @@ pub trait KVEngine: Send + Sync {
     /// # Errors
     /// Returns an error for an invalid chunk limit, an unsupported engine, or
     /// failure to pin and inspect the source view.
-    fn snapshot_export_begin(&self, chunk_bytes: usize) -> Result<Box<dyn SnapshotExporter>, String> {
+    fn snapshot_export_begin(
+        &self,
+        chunk_bytes: usize,
+    ) -> KVFuture<Result<Box<dyn SnapshotExporter>, String>> {
         let _ = chunk_bytes;
-        Err("snapshot export not supported by this engine".to_string())
+        KVFuture::ready(Err("snapshot export not supported by this engine".to_string()))
     }
 
     /// Begin staging an import into a fresh, unpublished engine.

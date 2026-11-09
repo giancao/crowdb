@@ -180,7 +180,7 @@ fn rpc_workers_is_only_an_explicit_override() {
 }
 
 #[test]
-fn production_tree_backend_defaults_to_block() {
+fn service_tree_backend_accepts_block_and_mem_block() {
     let defaults = Cli::parse_from([
         "crowdb-paxos-kv-server",
         "--root",
@@ -189,14 +189,36 @@ fn production_tree_backend_defaults_to_block() {
     assert_eq!(defaults.kv_backend, "block");
     assert_eq!(PaxosKvConfig::default().crowtree_backend, "block");
 
-    let file = Cli::parse_from([
+    let memory = Cli::parse_from([
+        "crowdb-paxos-kv-server",
+        "--root",
+        ".crowdb-runtime/ephemeral/cli-parse/n1",
+        "--kv-backend",
+        "mem-block",
+    ]);
+    assert_eq!(memory.kv_backend, "mem-block");
+    let error = Cli::try_parse_from([
         "crowdb-paxos-kv-server",
         "--root",
         ".crowdb-runtime/ephemeral/cli-parse/n1",
         "--kv-backend",
         "file",
-    ]);
-    assert_eq!(file.kv_backend, "file");
+    ])
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+}
+
+#[test]
+fn service_registry_rejects_file_tree_backend() {
+    let config = PaxosKvConfig {
+        crowtree_backend: "file".to_owned(),
+        ..PaxosKvConfig::default()
+    };
+    let Err(error) = PaxosKvStoreRegistry::try_with_config(config) else {
+        panic!("service registry accepted the file Tree backend");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("expected block or mem-block"));
 }
 
 #[test]

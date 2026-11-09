@@ -2,6 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 #include "runtime_snapshot_import.h"
 
+#include "crowdb-common/log.h"
+
 namespace crowdb::tree
 {
 Status RuntimeSnapshotImport::create(TreeCore &core, std::shared_ptr<RuntimeSnapshotImport> *out)
@@ -33,7 +35,9 @@ RuntimeSnapshotImport::RuntimeSnapshotImport(TreeCore &core, std::shared_ptr<det
 
 RuntimeSnapshotImport::~RuntimeSnapshotImport()
 {
-    metadata_->seal();
+    if (metadata_) {
+        metadata_->seal();
+    }
 }
 
 Status RuntimeSnapshotImport::fail(Status status)
@@ -45,7 +49,9 @@ Status RuntimeSnapshotImport::fail(Status status)
     catalog_.reset();
     key_    = detail::ReservedVector<uint8_t, AllocationKind::kScratch>(key_.get_allocator());
     window_ = detail::ReservedVector<uint8_t, AllocationKind::kScratch>(window_.get_allocator());
-    metadata_->seal();
+    if (metadata_) {
+        metadata_->seal();
+    }
     return status_;
 }
 
@@ -68,8 +74,8 @@ catch (const std::bad_alloc &) {
     return fail(Status::resource_exhausted("snapshot import staging allocation failed"));
 }
 
-Status RuntimeSnapshotImport::finish(uint64_t *coverage)
-try {
+Status RuntimeSnapshotImport::prepare_finish(std::shared_ptr<TreeCore> *core)
+{
     if (!status_.ok()) {
         return status_;
     }
@@ -80,8 +86,8 @@ try {
     if (part_ != Part::Complete || parsed_ != expected_) {
         return fail(Status::invalid_argument("snapshot import stream is truncated"));
     }
-    auto core = core_.lock();
-    if (!core || core->closed()) {
+    *core = core_.lock();
+    if (!*core || (*core)->closed()) {
         return fail(Status::unavailable("snapshot import Tree is closed"));
     }
     if (native_) {
@@ -93,11 +99,18 @@ try {
     portable_.reset();
     key_    = detail::ReservedVector<uint8_t, AllocationKind::kScratch>(key_.get_allocator());
     window_ = detail::ReservedVector<uint8_t, AllocationKind::kScratch>(window_.get_allocator());
-    if (status_.ok()) {
-        status_ = core->install_readable(std::move(catalog_), metadata_);
+    return status_;
+}
+
+Status RuntimeSnapshotImport::finish(uint64_t *coverage)
+try {
+    std::shared_ptr<TreeCore> core;
+    auto                      status = prepare_finish(&core);
+    if (status.ok()) {
+        status = core->install_readable(std::move(catalog_), metadata_);
     }
-    if (!status_.ok()) {
-        return fail(status_);
+    if (!status.ok()) {
+        return fail(std::move(status));
     }
     if (coverage != nullptr) {
         *coverage = coverage_;
@@ -107,5 +120,50 @@ try {
 }
 catch (const std::bad_alloc &) {
     return fail(Status::resource_exhausted("snapshot import validation allocation failed"));
+}
+
+Status RuntimeSnapshotImport::finish_async(SnapshotImportComplete complete)
+try {
+    if (!complete) {
+        return Status::invalid_argument();
+    }
+    std::shared_ptr<TreeCore> core;
+    auto                      status = prepare_finish(&core);
+    if (!status.ok()) {
+        return fail(std::move(status));
+    }
+
+    struct Completion
+    {
+        std::shared_ptr<TreeCore> core;
+        SnapshotImportComplete    receiver;
+        uint64_t                  coverage;
+
+        static void done(void *context, Status result) noexcept
+        {
+            auto &self = *static_cast<Completion *>(context);
+            try {
+                self.receiver(std::move(result), self.coverage);
+            }
+            catch (...) {
+                CRB_LOG_ERROR("portable import receiver threw after completion");
+            }
+        }
+    };
+
+    auto callback =
+        detail::reserved_shared<Completion>(core->binding()->lifecycle_budget(), core, std::move(complete), coverage_);
+    status =
+        core->install_readable_async(std::move(catalog_), metadata_,
+                                     {.context = callback.get(), .complete_fn = &Completion::done, .owner = callback});
+    if (!status.ok()) {
+        return fail(std::move(status));
+    }
+    // The install owns the reservation and seals it after graph validation.
+    metadata_.reset();
+    return Status::Ok();
+}
+catch (const std::bad_alloc &) {
+    return fail(Status::resource_exhausted());
 }
 } // namespace crowdb::tree

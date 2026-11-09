@@ -5,6 +5,8 @@
 #include "crowdb-tree/config.h"
 #include "tree_runtime_internal.h"
 
+#include <thread>
+
 namespace crowdb::tree
 {
 namespace
@@ -32,29 +34,40 @@ struct ProcessRuntime
     }
 
     std::atomic<DefaultRuntime *> value{nullptr};
+    std::atomic_flag              initializing = ATOMIC_FLAG_INIT;
 };
 
 ProcessRuntime process_runtime;
 
-Status default_runtime(std::shared_ptr<TreeRuntime> *out)
+Status default_runtime(std::shared_ptr<TreeRuntime> *out, bool *initializing)
 {
     auto *entry = process_runtime.value.load(std::memory_order_acquire);
     if (entry == nullptr) {
-        std::shared_ptr<TreeRuntime> runtime;
-        auto                         status = TreeRuntime::create({}, &runtime);
-        if (!status.ok()) {
-            return status;
+        while (process_runtime.initializing.test_and_set(std::memory_order_acquire)) {
+            if (auto *ready = process_runtime.value.load(std::memory_order_acquire); ready != nullptr) {
+                *out = ready->runtime;
+                return Status::Ok();
+            }
+            if (initializing != nullptr) {
+                *initializing = true;
+                return Status::unavailable();
+            }
+            std::this_thread::yield();
         }
-        auto                              metadata = TreeRuntimeAccess::lifecycle(*runtime);
-        MetadataAllocator<DefaultRuntime> allocator(metadata);
-        auto                             *prepared = allocator.allocate(1);
-        std::construct_at(prepared, DefaultRuntime{.runtime = std::move(runtime), .metadata = std::move(metadata)});
-        if (process_runtime.value.compare_exchange_strong(entry, prepared, std::memory_order_release,
-                                                          std::memory_order_acquire)) {
-            entry = prepared;
-        }
-        else {
-            DefaultRuntime::destroy(prepared);
+        auto release = [](std::atomic_flag *owner) { owner->clear(std::memory_order_release); };
+        const std::unique_ptr<std::atomic_flag, decltype(release)> owner(&process_runtime.initializing, release);
+        entry = process_runtime.value.load(std::memory_order_acquire);
+        if (entry == nullptr) {
+            std::shared_ptr<TreeRuntime> runtime;
+            auto                         status = TreeRuntime::create({}, &runtime);
+            if (!status.ok()) {
+                return status;
+            }
+            auto                              metadata = TreeRuntimeAccess::lifecycle(*runtime);
+            MetadataAllocator<DefaultRuntime> allocator(metadata);
+            entry = allocator.allocate(1);
+            std::construct_at(entry, DefaultRuntime{.runtime = std::move(runtime), .metadata = std::move(metadata)});
+            process_runtime.value.store(entry, std::memory_order_release);
         }
     }
     *out = entry->runtime;
@@ -62,12 +75,15 @@ Status default_runtime(std::shared_ptr<TreeRuntime> *out)
 }
 } // namespace
 
-Status configure_default_runtime(Config *config)
+Status configure_default_runtime(Config *config, bool *initializing)
 try {
+    if (initializing != nullptr) {
+        *initializing = false;
+    }
     if (config == nullptr) {
         return Status::invalid_argument();
     }
-    return config->runtime ? Status::Ok() : default_runtime(&config->runtime);
+    return config->runtime ? Status::Ok() : default_runtime(&config->runtime, initializing);
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted();

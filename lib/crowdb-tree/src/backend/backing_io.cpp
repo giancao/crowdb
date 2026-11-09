@@ -23,14 +23,13 @@ void submit_backing_read(AsyncPageStore &store, std::shared_ptr<const BackingRef
         complete.complete(Status::not_supported("Chunk reads require a paid backend lane"));
         return;
     }
-    const std::span<uint8_t> output(static_cast<uint8_t *>(buffer), bytes);
-    auto                     status =
-        scheduled->submit_step([pack     = backing->chunk, output,
-                                metadata = std::move(metadata)] { return read_chunk_backing(*pack, output, metadata); },
-                               complete, bytes, 0);
-    if (!status.ok()) {
-        complete.complete(std::move(status));
+    if (!backing->chunk || backing->chunk->read == nullptr ||
+        !chunk_backing_matches(*backing->chunk, backing->backend_id, bytes)) {
+        complete.complete(Status::corruption("read does not name one owned Chunk pack"));
+        return;
     }
+    backing->chunk->read(*scheduled, backing->chunk, {static_cast<uint8_t *>(buffer), bytes}, std::move(metadata),
+                         std::move(complete));
 }
 
 void submit_chunk_write(AsyncPageStore &store, std::shared_ptr<ChunkPackBacking> backing,
@@ -38,10 +37,11 @@ void submit_chunk_write(AsyncPageStore &store, std::shared_ptr<ChunkPackBacking>
                         AsyncCompletion complete)
 {
     auto *scheduled = dynamic_cast<ScheduledPageStore *>(&store);
-    if (scheduled == nullptr || !backing || !metadata) {
+    if (scheduled == nullptr || !backing || backing->write == nullptr || !metadata) {
         complete.complete(Status::not_supported("Chunk writes require a paid backend lane"));
         return;
     }
-    scheduled->submit_chunk(std::move(backing), input, std::move(complete));
+    const auto submit = backing->write;
+    submit(*scheduled, std::move(backing), input, std::move(complete));
 }
 } // namespace crowdb::tree

@@ -33,7 +33,7 @@ TEST(TreeCoreBlockAccount, ConstructorRecoversAndTransfersExistingBackendWithMon
         Crowdbtree tree(config);
         first = TreeCoreAccess::get(tree)->binding()->account();
         ASSERT_TRUE(tree.apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = "first"}}}).ok());
-        ASSERT_TRUE(tree.snapshot().ok());
+        ASSERT_TRUE(tree.flush_with_persistent().ok());
     }
     EXPECT_GT(first->snapshot().allocated[kRouting], 0U);
     {
@@ -48,7 +48,7 @@ TEST(TreeCoreBlockAccount, ConstructorRecoversAndTransfersExistingBackendWithMon
         EXPECT_EQ(old.slot(), 1U);
         ASSERT_TRUE(reopened.put("a", "second").ok());
         EXPECT_EQ(reopened.contiguous_slot(), 2U);
-        ASSERT_TRUE(reopened.snapshot().ok());
+        ASSERT_TRUE(reopened.flush_with_persistent().ok());
     }
     {
         Crowdbtree again(config);
@@ -98,7 +98,7 @@ TEST(TreeCoreBlockAccount, FailedOpenReleasesDomainAndPrivateCreateCannotBypassI
     {
         Crowdbtree accepted(config);
         ASSERT_TRUE(accepted.put("a", "value").ok());
-        ASSERT_TRUE(accepted.snapshot().ok());
+        ASSERT_TRUE(accepted.flush_with_persistent().ok());
     }
     ASSERT_TRUE(device->try_claim_runtime_domain());
     device->release_runtime_domain();
@@ -117,7 +117,7 @@ TEST(TreeCoreBlockAccount, FailedRecoveryRetainsRealBackendChargeAndReleasesDoma
     {
         Crowdbtree original(config);
         ASSERT_TRUE(original.put("a", "retained").ok());
-        ASSERT_TRUE(original.snapshot().ok());
+        ASSERT_TRUE(original.flush_with_persistent().ok());
     }
     std::vector<snapshot::CommitAnchor> anchors;
     ASSERT_TRUE(snapshot::read_valid_anchors(*device, device->iu_size(), &anchors).ok());

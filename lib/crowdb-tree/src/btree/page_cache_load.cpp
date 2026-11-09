@@ -8,7 +8,7 @@
 
 namespace crowdb::tree
 {
-void SharedPageCache::State::process(Request *request, bool queued)
+void SharedPageCache::State::process(Request *request)
 {
     for (auto &entry : entries) {
         if (entry.phase == Phase::Empty || entry.key != request->key) {
@@ -35,14 +35,9 @@ void SharedPageCache::State::process(Request *request, bool queued)
         }
         return;
     }
-    if (!queued && (pending[0] != nullptr || pending[1] != nullptr)) {
-        pend(request);
-        resume_requested = true;
-        return;
-    }
     auto *entry = victim();
     if (entry == nullptr) {
-        pend(request);
+        uncached(request);
         return;
     }
     if (next_identity >= UINT64_MAX / 2) {
@@ -52,19 +47,6 @@ void SharedPageCache::State::process(Request *request, bool queued)
     }
     discard(*entry);
     start(entry, request);
-}
-
-void SharedPageCache::State::pend(Request *request) noexcept
-{
-    const auto priority = static_cast<size_t>(request->priority);
-    request->next       = nullptr;
-    if (pending_tail[priority] != nullptr) {
-        pending_tail[priority]->next = request;
-    }
-    else {
-        pending[priority] = request;
-    }
-    pending_tail[priority] = request;
 }
 
 SharedPageCache::State::Entry *SharedPageCache::State::victim() noexcept
@@ -154,7 +136,6 @@ void SharedPageCache::State::complete(Entry *entry, uint64_t identity, Status st
 
 void SharedPageCache::State::loaded(Entry *entry)
 {
-    resume_requested = true;
     inflight.fetch_sub(1, std::memory_order_relaxed);
     entry->upstream.reset();
     detail::AllocationBound bytes;
@@ -301,7 +282,6 @@ void SharedPageCache::State::discard(Entry &entry) noexcept
 
 void SharedPageCache::State::evict_ready() noexcept
 {
-    resume_requested = true;
     for (auto &entry : entries) {
         if (entry.phase == Phase::Ready) {
             discard(entry);
@@ -312,31 +292,4 @@ void SharedPageCache::State::evict_ready() noexcept
     }
 }
 
-void SharedPageCache::State::resume_pending()
-{
-    // The burst bound gives foreground reads priority without starving the
-    // prepaid maintenance request which makes memory pressure progress.
-    for (size_t attempts = 0; attempts < requests.size(); ++attempts) {
-        if ((pending[0] == nullptr && pending[1] == nullptr) || victim() == nullptr) {
-            return;
-        }
-        const size_t priority =
-            pending[1] != nullptr && (pending[0] == nullptr || read_burst == limits.max_read_burst) ? 1 : 0;
-        auto *request     = pending[priority];
-        pending[priority] = request->next;
-        if (pending[priority] == nullptr) {
-            pending_tail[priority] = nullptr;
-        }
-        read_burst = priority == 1 ? 0 : std::min(read_burst + 1, limits.max_read_burst);
-        try {
-            process(request, true);
-        }
-        catch (const std::bad_alloc &) {
-            deliver(request, Status::resource_exhausted());
-        }
-        catch (...) {
-            deliver(request, Status::internal_error());
-        }
-    }
-}
 } // namespace crowdb::tree

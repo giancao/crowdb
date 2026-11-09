@@ -10,6 +10,10 @@ namespace crowdb::tree
 {
 struct PublishedByteExport::State
 {
+    struct AsyncPreflight;
+    struct AsyncRead;
+    struct Output;
+
     ~State()
     {
         if (metadata) {
@@ -19,7 +23,7 @@ struct PublishedByteExport::State
     enum class Phase : uint8_t { Header, Records, Trailer, Done };
     std::shared_ptr<detail::AllocationReservation> metadata;
     std::shared_ptr<TreeRuntimeBinding>            binding;
-    std::shared_ptr<PublishedSnapshotContext>      snapshot;
+    std::shared_ptr<PublishedReadViewContext>      snapshot;
     std::shared_ptr<PublishedSnapshotEntries>      entries;
     std::shared_ptr<PublishedNativeCursor>         native;
     snapshot_format                                format = snapshot_format::kPortable;
@@ -43,10 +47,15 @@ struct PublishedByteExport::State
     void   encode_header();
     Status preflight(const KeyRange &range);
     Status portable_preflight(const KeyRange &range);
+    Status measure_entry(const PublishedScanEntry &item, size_t &body_bytes, uint32_t &body_crc);
+    void   finish_portable_preflight(size_t body_bytes, uint32_t body_crc);
     Status native_preflight();
     Status next_piece(std::span<const uint8_t> *out);
     Status record_piece(std::span<const uint8_t> *out);
     void   consumed_piece();
+    Status start_next(Output &out);
+    Status advance(Output &out, bool *needs_entry);
+    void   finish_next(Output &output, SnapshotChunk *out, bool *done);
     Status next(SnapshotChunk *out, bool *done);
 };
 } // namespace crowdb::tree

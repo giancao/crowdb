@@ -15,25 +15,46 @@ fn config(runtime: Arc<TreeRuntime>) -> Config {
     }
 }
 
-#[test]
-fn fixed_snapshot_scans_both_directions_and_keeps_results_after_all_handles_close() {
+#[tokio::test(flavor = "current_thread")]
+async fn read_only_view_close_shares_completion_and_rejects_new_reads() {
+    let runtime = Arc::new(TreeRuntime::new(Default::default()).unwrap());
+    let tree = Crowdbtree::open(&config(runtime.clone())).unwrap();
+    tree.apply_put(1, b"key", b"value").unwrap();
+    let (sequence, coverage) = tree.flush_with_persistent_info().unwrap();
+    let view = tree.read_only_view(sequence, coverage).unwrap();
+
+    let (first, second) = tokio::join!(view.close(), view.close());
+    assert_eq!(first, Ok(()));
+    assert_eq!(second, Ok(()));
+    assert_eq!(view.get(b"key").await, Err(CtError::Unavailable));
+    assert_eq!(
+        view.scan(&ScanOptions::default()).await.unwrap_err(),
+        CtError::Unavailable
+    );
+    assert!(tree.get(b"key").unwrap().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fixed_snapshot_scans_both_directions_and_keeps_results_after_all_handles_close() {
     let runtime = Arc::new(TreeRuntime::new(Default::default()).unwrap());
     let tree = Crowdbtree::open(&config(runtime.clone())).unwrap();
     tree.apply_put(1, b"", b"empty").unwrap();
     tree.apply_put(2, b"b", b"old").unwrap();
     tree.apply_put(3, b"c", b"deleted").unwrap();
     tree.apply_delete(4, b"c").unwrap();
-    let (sequence, coverage) = tree.snapshot_info().unwrap();
-    let snapshot = tree.immutable_snapshot(sequence, coverage).unwrap();
+    let (sequence, coverage) = tree.flush_with_persistent_info().unwrap();
+    let snapshot = tree.read_only_view(sequence, coverage).unwrap();
     assert_eq!(
-        tree.immutable_snapshot(sequence, coverage + 1).unwrap_err(),
+        tree.read_only_view(sequence, coverage + 1).unwrap_err(),
         CtError::Unavailable
     );
     tree.apply_put(5, b"b", b"new").unwrap();
-    tree.snapshot_info().unwrap();
-    drop(tree);
-    drop(runtime);
-    assert_eq!(snapshot.get(b"b").unwrap().unwrap(), (2, b"old".to_vec()));
+    tree.flush_with_persistent_info().unwrap();
+    let closing = tree.begin_close().unwrap();
+    let (first, second) = tokio::join!(closing.wait(), closing.wait());
+    assert_eq!(first, Ok(()));
+    assert_eq!(second, Ok(()));
+    assert_eq!(snapshot.get(b"b").await.unwrap().unwrap(), (2, b"old".to_vec()));
     let (forward, truncated) = snapshot
         .scan(&ScanOptions {
             start: Some(vec![]),
@@ -41,6 +62,7 @@ fn fixed_snapshot_scans_both_directions_and_keeps_results_after_all_handles_clos
             limit: 8,
             ..ScanOptions::default()
         })
+        .await
         .unwrap();
     assert!(!truncated);
     assert_eq!(
@@ -55,6 +77,7 @@ fn fixed_snapshot_scans_both_directions_and_keeps_results_after_all_handles_clos
             limit: 8,
             ..ScanOptions::default()
         })
+        .await
         .unwrap();
     assert!(!truncated);
     assert_eq!(
@@ -69,39 +92,46 @@ fn fixed_snapshot_scans_both_directions_and_keeps_results_after_all_handles_clos
             strict_byte_budget: true,
             ..ScanOptions::default()
         })
+        .await
         .unwrap();
     assert!(bounded.is_empty());
     assert!(truncated);
+    snapshot.close().await.unwrap();
     drop(snapshot);
+    runtime.drain_cpu();
+    drop(runtime);
     assert_eq!(forward[1].value.as_ref(), b"old");
 }
 
-#[test]
-fn immutable_rebuild_copies_only_target_range_and_keeps_captured_frontier() {
+#[tokio::test(flavor = "current_thread")]
+async fn immutable_rebuild_copies_only_target_range_and_keeps_captured_frontier() {
     let runtime = Arc::new(TreeRuntime::new(Default::default()).unwrap());
     let tree = Crowdbtree::open(&config(runtime.clone())).unwrap();
     tree.apply_put(1, b"a", b"left").unwrap();
     tree.apply_put(2, b"z", &vec![b'v'; 9000]).unwrap();
-    let (sequence, coverage) = tree.snapshot_info().unwrap();
-    let snapshot = tree.immutable_snapshot(sequence, coverage).unwrap();
+    let (sequence, coverage) = tree.flush_with_persistent_info().unwrap();
+    let snapshot = tree.read_only_view(sequence, coverage).unwrap();
     tree.apply_put(3, b"z", b"changed").unwrap();
-    drop(tree);
+    tree.begin_close().unwrap().wait().await.unwrap();
     let options = Config {
         key_range: KeyRange::Bounded {
             start: Some(b"m".to_vec()),
             end: None,
         },
-        ..config(runtime)
+        ..config(runtime.clone())
     };
-    let (child, stats) = snapshot.rebuild_range(&options).unwrap();
+    let (child, stats) = snapshot.rebuild_range_async(&options).await.unwrap();
     assert_eq!(stats.entries_emitted, 1);
     assert_eq!(stats.pages_reused, 0);
     assert!(stats.pages_rebuilt > 0);
-    assert_eq!(child.snapshot_state().unwrap().1, coverage);
+    assert_eq!(child.durable_state().unwrap().1, coverage);
     assert_eq!(child.get(b"z").unwrap().unwrap().1, vec![b'v'; 9000]);
     assert_eq!(child.get(b"a").unwrap_err(), CtError::InvalidArgument);
+    snapshot.close().await.unwrap();
     drop(snapshot);
-    drop(child);
-    let reopened = Crowdbtree::open(&options).unwrap();
+    child.begin_close().unwrap().wait().await.unwrap();
+    let reopened = Crowdbtree::open_async(&options).await.unwrap();
     assert_eq!(reopened.get(b"z").unwrap().unwrap().1, vec![b'v'; 9000]);
+    reopened.begin_close().unwrap().wait().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }

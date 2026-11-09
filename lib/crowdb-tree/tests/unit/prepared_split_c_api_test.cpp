@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <future>
 #include <utility>
 
 namespace crowdb::tree
@@ -147,7 +148,22 @@ TEST_F(PreparedSplitCAbi, PreparedHandleSafelyOutlivesBothTreeFacades)
     EXPECT_EQ(out.generation, 71U);
     EXPECT_EQ(out.frontier, 79U);
     EXPECT_EQ(ct_prepared_split_overlay_committed_frontier(token, &start), 0);
-    ct_prepared_split_overlay_destroy(std::exchange(token, nullptr));
+    auto  signal  = std::make_unique<std::promise<void>>();
+    auto  done    = signal->get_future();
+    auto *context = signal.release();
+    auto  status  = ct_prepared_split_overlay_release_async(
+        token,
+        [](void *context) {
+            std::unique_ptr<std::promise<void>> released(static_cast<std::promise<void> *>(context));
+            released->set_value();
+        },
+        context);
+    if (status != 0) {
+        signal.reset(context);
+    }
+    ASSERT_EQ(status, 0);
+    token = nullptr;
+    ASSERT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
 }
 } // namespace
 } // namespace crowdb::tree

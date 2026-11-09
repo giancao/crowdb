@@ -16,6 +16,42 @@ namespace
 using namespace test_read;
 constexpr uint64_t kPage = MemPageStore::kBackingPageBytes;
 
+TEST(MemoryBackingGc, LedgerCompletionCanStartCleanupWithoutWaitingForItsOwnQueue)
+{
+    MemPageStore               store;
+    const std::vector<uint8_t> input(3 * kPage, 42);
+    ASSERT_TRUE(store.write_at(0, input.data(), input.size()).ok());
+    LedgerFixture ledger(
+        {.backend_id = 1, .region_begin = kPage, .file_size = input.size(), .address_limit = input.size()});
+    ASSERT_TRUE(ledger.activate().status.ok());
+    bool            completed = false;
+    bool            continued = false;
+    ProtectedExtent retained;
+    ASSERT_TRUE(ledger.ledger
+                    ->reserve(kPage, ledger.credits.credits.bytes,
+                              [&](ExtentLedgerResult reserved) {
+                                  ASSERT_TRUE(reserved.status.ok());
+                                  retained = std::move(reserved.extent);
+                                  collect_free_memory_blocks(store, ledger.ledger, 0, {}, ledger.credits.credits.bytes,
+                                                             [&](LocalBlockGcResult result) {
+                                                                 EXPECT_TRUE(continued);
+                                                                 EXPECT_TRUE(result.status.ok());
+                                                                 EXPECT_TRUE(result.complete);
+                                                                 EXPECT_EQ(result.protected_blocks, 1U);
+                                                                 EXPECT_EQ(result.deleted_blocks, 1U);
+                                                                 completed = true;
+                                                             });
+                                  EXPECT_FALSE(completed);
+                                  continued = true;
+                              })
+                    .ok());
+    EXPECT_TRUE(completed);
+    EXPECT_EQ(store.resident_bytes(), 2 * kPage);
+    uint8_t value = 0;
+    ASSERT_TRUE(store.read_at(kPage, &value, 1).ok());
+    EXPECT_EQ(value, 42);
+}
+
 TEST(MemoryBackingGc, PartialPagesAndReadersRemainProtectedUntilTheirLastOwnerDrops)
 {
     MemPageStore               store;
@@ -127,7 +163,7 @@ TEST(MemoryBackingGc, OnePublicSnapshotReclaimsMultipleWindowsWithoutRewritingTh
     ASSERT_TRUE(Crowdbtree::open(config, &tree).ok());
     ASSERT_TRUE(tree->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = "value"}}}).ok());
     uint64_t   coverage = 0;
-    const auto status   = tree->snapshot(&coverage);
+    const auto status   = tree->flush_with_persistent(&coverage);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 1U);
     auto *core = TreeCoreAccess::get(*tree);

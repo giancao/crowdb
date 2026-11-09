@@ -9,21 +9,21 @@ namespace crowdb::tree
 {
 struct MaintenancePublicationOptions
 {
-    PageMaintenanceLimits                          pages;
-    size_t                                         max_inner_children = 257;
-    size_t                                         max_inner_bytes    = 64 * 1024;
-    size_t                                         inner_merge_keys   = 64;
-    size_t                                         max_path_pages     = 64;
-    size_t                                         max_changed_pages  = 256;
-    std::shared_ptr<detail::AllocationReservation> metadata;
-    std::shared_ptr<detail::AllocationReservation> snapshot_metadata = nullptr;
+    PageMaintenanceLimits             pages;
+    size_t                            max_inner_children = 257;
+    size_t                            max_inner_bytes    = 64 * 1024;
+    size_t                            inner_merge_keys   = 64;
+    size_t                            max_path_pages     = 64;
+    size_t                            max_changed_pages  = 256;
+    std::shared_ptr<AllocationBudget> metadata;
+    std::shared_ptr<AllocationBudget> snapshot_metadata = nullptr;
 };
 
 struct MaintenancePublicationResult
 {
     MaintenancePublicationResult() = default;
 
-    explicit MaintenancePublicationResult(const std::shared_ptr<detail::AllocationReservation> &metadata)
+    explicit MaintenancePublicationResult(const std::shared_ptr<AllocationBudget> &metadata)
         : loads(detail::ReservationAllocator<BaseLoadRequest>(metadata)),
           transaction{.pages = PublicationTransaction::Pages(detail::ReservationAllocator<PageReplacement>(metadata)),
                       .metadata = metadata},

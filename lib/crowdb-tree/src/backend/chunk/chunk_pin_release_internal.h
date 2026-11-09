@@ -13,8 +13,9 @@ struct ChunkPinReleaseNode
     uint64_t                              tree = 0;
     ChunkStageId                          stage{};
     ChunkStageId                          pin{};
-    bool                                  armed  = false;
-    bool                                  writer = false;
-    ChunkPinReleaseNode                  *next   = nullptr;
+    bool                                  armed     = false;
+    bool                                  writer    = false;
+    bool                                  succeeded = false;
+    ChunkPinReleaseNode                  *next      = nullptr;
 };
 } // namespace crowdb::tree::detail

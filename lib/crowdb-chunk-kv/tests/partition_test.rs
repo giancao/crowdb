@@ -459,8 +459,11 @@ async fn native_partition_constructor_owns_tree_and_stream_storage() {
 #[tokio::test]
 async fn native_partition_reopens_the_latest_tree_root() {
     let page_store = Arc::new(crowdb_tree_ffi::PageStore::open_mem(1).unwrap());
+    let runtime =
+        Arc::new(crowdb_tree_ffi::TreeRuntime::new(crowdb_tree_ffi::TreeRuntimeOptions::default()).unwrap());
     let tree = crowdb_tree_ffi::Crowdbtree::open(&crowdb_tree_ffi::Config {
         page_store: Some(Arc::clone(&page_store)),
+        runtime: Some(runtime.clone()),
         key_range: crowdb_tree_ffi::KeyRange::Bounded {
             start: Some(b"a".to_vec()),
             end: Some(b"m".to_vec()),
@@ -470,7 +473,7 @@ async fn native_partition_reopens_the_latest_tree_root() {
     .unwrap();
     tree.apply_put(1, b"b", b"persisted").unwrap();
     tree.flush().unwrap();
-    tree.snapshot_info().unwrap();
+    tree.flush_with_persistent_info().unwrap();
     drop(tree);
 
     let stream_name = StreamName { high: 1, low: 10 };
@@ -503,7 +506,10 @@ async fn native_partition_reopens_the_latest_tree_root() {
         4,
         44,
         PartitionConfig::default(),
-        crowdb_tree_ffi::Config::default(),
+        crowdb_tree_ffi::Config {
+            runtime: Some(runtime.clone()),
+            ..Default::default()
+        },
         page_store,
         stream,
     )
@@ -514,6 +520,9 @@ async fn native_partition_reopens_the_latest_tree_root() {
         partition.get(4, b"b", None).await.unwrap().unwrap().value,
         b"persisted"
     );
+    partition.suspend_for_shutdown(4).await.unwrap();
+    partition.close().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1268,7 +1277,6 @@ async fn transfer_quiesce_drains_admitted_work_and_rejects_later_writes() {
         .await
         .unwrap();
     assert_eq!(reclaimed.tree_bytes, 0);
-    assert_eq!(reclaimed.orphan_bytes, 0);
     let metrics = partition.metrics().snapshot();
     assert_eq!(metrics.checkpoints, 1);
     assert_eq!(metrics.reclaimed_tree_bytes, 0);
@@ -1335,7 +1343,7 @@ async fn transition_generation_pin_suppresses_source_checkpoint_branching() {
         partition.checkpoint(10).await,
         Err(ChunkKvError::SplitRetry(_))
     ));
-    partition.release_generation_pin(transition).unwrap();
+    partition.release_generation_pin(transition).await.unwrap();
     assert!(partition.checkpoint(10).await.is_ok());
 }
 
@@ -1923,7 +1931,7 @@ async fn split_session_retains_parent_and_installs_live_child_at_ingress_frontie
         retained.checkpoint(9).await,
         Err(ChunkKvError::SplitRetry(_))
     ));
-    retained.release_generation_pin(plan.transition_id).unwrap();
+    retained.release_generation_pin(plan.transition_id).await.unwrap();
     assert_eq!(
         retained.checkpoint(9).await.unwrap().replay_offset,
         retained_replay_start.offset

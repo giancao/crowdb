@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "btree/allocation_account.h"
 #include "page_writeback_test_support.h"
 #include "snapshot/captured_frames.h"
 #include "test_tmp.h"
@@ -9,6 +10,38 @@
 namespace crowdb::tree
 {
 using namespace test_write;
+
+TEST(PageWriteback, AcceptedWriteUsesActualMemoryAboveTheCeilingWithoutAnIoPermit)
+{
+    TestWriter                                 test;
+    std::shared_ptr<detail::AllocationAccount> ongoing;
+    ASSERT_TRUE(
+        detail::AllocationAccount::create_ongoing(test.credits.account, detail::BudgetClass::kRouting, &ongoing).ok());
+    test.credits.credits.bytes = ongoing;
+    test.credits.credits.io.reset();
+    const auto                 baseline       = test.credits.account->snapshot().allocated[LoadCredits::kBytes];
+    constexpr size_t           retained_bytes = 8 * 1024 * 1024;
+    MetadataAllocator<uint8_t> allocator(ongoing);
+    auto                      *retained = allocator.allocate(retained_bytes);
+    ASSERT_TRUE(detail::ResourceBudget::memory_exhausted(test.credits.account));
+    test.store->deferred = true;
+    ASSERT_TRUE(test.prepare().ok());
+    Completion done;
+    auto       connected = stdexec::connect(test.operation->sender(), Receiver{.done = &done});
+    stdexec::start(connected);
+    test.runtime->drain();
+    ASSERT_EQ(test.store->writes, 1U);
+    EXPECT_EQ(done.values.load(), 0U);
+    EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
+    EXPECT_GT(test.credits.account->snapshot().allocated[LoadCredits::kBytes], baseline + retained_bytes);
+    test.store->finish();
+    EXPECT_EQ(done.values.load(), 1U);
+    EXPECT_TRUE(test.operation->result().backing->reloadable());
+    test.operation.reset();
+    allocator.deallocate(retained, retained_bytes);
+    EXPECT_EQ(test.credits.account->snapshot().allocated[LoadCredits::kBytes], baseline);
+    EXPECT_FALSE(detail::ResourceBudget::memory_exhausted(test.credits.account));
+}
 
 TEST(PageWriteback, HeldCreditPaysAlignedCodecAndIoAfterSealAndReturnsReloadableBacking)
 {
@@ -41,7 +74,7 @@ TEST(PageWriteback, HeldCreditPaysAlignedCodecAndIoAfterSealAndReturnsReloadable
         std::all_of(blob.begin() + test.operation->result().logical_bytes, blob.end(), [](auto b) { return b == 0; }));
 }
 
-TEST(PageWriteback, CancellationWaitsForWriteAndKeepsItsPermitAndExtentAlive)
+TEST(PageWriteback, CancellationWaitsForWriteAndKeepsItsBufferAndExtentAlive)
 {
     TestWriter test;
     test.store->deferred = true;
@@ -53,7 +86,7 @@ TEST(PageWriteback, CancellationWaitsForWriteAndKeepsItsPermitAndExtentAlive)
     ASSERT_EQ(test.store->writes, 1U);
     test.operation->request_stop();
     EXPECT_EQ(done.stopped.load(), 0U);
-    EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+    EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     EXPECT_EQ(test.credits.resources->snapshot().write_inflight_bytes,
               test.credits.account->snapshot().physical[static_cast<size_t>(AllocationKind::kIo)]);
     EXPECT_GT(test.credits.resources->snapshot().write_inflight_bytes, test.store->bytes);
@@ -82,7 +115,7 @@ TEST(PageWriteback, UnknownSubmissionOutcomeKeepsOwnedCallbackBufferUntilActualC
     test.operation.reset();
     test.credits.seal();
     EXPECT_GT(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
-    EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+    EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     EXPECT_EQ(test.credits.resources->snapshot().write_inflight_bytes,
               test.credits.account->snapshot().physical[static_cast<size_t>(AllocationKind::kIo)]);
     EXPECT_GT(test.credits.resources->snapshot().write_inflight_bytes, test.store->bytes);
@@ -93,7 +126,7 @@ TEST(PageWriteback, UnknownSubmissionOutcomeKeepsOwnedCallbackBufferUntilActualC
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
 }
 
-TEST(PageWriteback, BackendCapabilityAndMissingProgressPermitRejectBeforeWrite)
+TEST(PageWriteback, BackendMustBeReloadableAndLegacyIoCreditDoesNotLimitAcceptedWork)
 {
     TestWriter test;
     test.store->reloadable = false;
@@ -101,9 +134,14 @@ TEST(PageWriteback, BackendCapabilityAndMissingProgressPermitRejectBeforeWrite)
     EXPECT_EQ(test.store->writes, 0U);
     test.store->reloadable = true;
     AllocationLease occupied(test.credits.credits.io, 1);
-    EXPECT_EQ(test.prepare().code(), Code::kResourceExhausted);
-    EXPECT_FALSE(test.operation);
-    EXPECT_EQ(test.store->writes, 0U);
+    ASSERT_TRUE(test.prepare().ok());
+    ASSERT_TRUE(stdexec::sync_wait(test.operation->sender()));
+    test.runtime->drain();
+    EXPECT_EQ(test.store->writes, 1U);
+    EXPECT_TRUE(test.operation->result().backing);
+    test.operation.reset();
+    occupied.reset();
+    test.credits.seal();
     EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
 }
 

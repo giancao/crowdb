@@ -19,7 +19,7 @@ std::shared_ptr<const PublishedTreeState> PublicationCoordinator::capture_comple
 
 std::shared_ptr<const PublishedTreeState>
 PublicationCoordinator::prepare_complete_view(const Root &current, const PublishedTreeState &next,
-                                              const std::shared_ptr<detail::AllocationReservation> &metadata)
+                                              const std::shared_ptr<AllocationBudget> &metadata)
 {
     if (!next.pending_handoff && next.flush_admission_owner == 0) {
         return {};

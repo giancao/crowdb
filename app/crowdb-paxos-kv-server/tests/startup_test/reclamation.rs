@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use crowdb_paxos_kv::kv::CrowdbTreeEngine;
 use crowdb_paxos_kv::wal::gc::run_gc_pass;
 
 #[tokio::test]
@@ -35,7 +36,7 @@ async fn restored_wal_keeps_old_segments_visible_to_safe_reclamation() {
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowdbTreeBackend::File,
+        CrowdbTreeBackend::Block,
     )
     .await
     .unwrap();
@@ -49,11 +50,24 @@ async fn restored_wal_keeps_old_segments_visible_to_safe_reclamation() {
     assert_eq!(
         run_gc_pass(restored_wal, 20).await.unwrap(),
         0,
-        "no durable snapshot yet"
+        "no durable Tree coverage yet"
     );
-    group.local_replica().learner.engine().flush();
-    assert_eq!(group.local_replica().learner.engine().persist_snapshot(), 20);
+    let engine = group.local_replica().learner.engine();
+    engine.flush_async().unwrap().await.unwrap().status().unwrap();
+    let report = engine.persist_snapshot_async().unwrap().await.unwrap();
+    report.status.unwrap();
+    assert_eq!(report.durable_coverage, 20);
+    let tree = engine
+        .as_any()
+        .downcast_ref::<CrowdbTreeEngine>()
+        .unwrap()
+        .handle();
+    let close = tree.close_result().unwrap();
+    let release = tree.backend_release_service().unwrap();
+    drop(tree);
     drop(group);
+    close.wait().await.unwrap();
+    release.shutdown().await;
     let restarted = create_group_with_wal(
         0,
         1,
@@ -61,7 +75,7 @@ async fn restored_wal_keeps_old_segments_visible_to_safe_reclamation() {
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowdbTreeBackend::File,
+        CrowdbTreeBackend::Block,
     )
     .await
     .unwrap();

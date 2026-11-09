@@ -21,7 +21,7 @@ TEST(BackingStatsCAbi, ClosedLocalTreeCollectorSamplesWithoutRetainingPagesOrBac
     ASSERT_EQ(ct_open_with_runtime(&options, runtime, nullptr, &tree), 0);
     auto *facade = c_api_tree(tree);
     ASSERT_TRUE(facade->put("key", "value").ok());
-    ASSERT_TRUE(facade->snapshot().ok());
+    ASSERT_TRUE(facade->flush_with_persistent().ok());
     auto cpu = TreeCoreAccess::get(*facade)->binding()->cpu();
     cpu->drain();
     ct_work_metrics_collector *collector = nullptr;

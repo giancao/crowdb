@@ -5,8 +5,6 @@
 #include "c_api_internal.h"
 #include "c_api_owned_budget.h"
 
-#include <optional>
-
 using namespace crowdb::tree;
 
 ct_status ct_future_poll_scan_v2(ct_future *future, int32_t *done, ct_scan_result **out)
@@ -57,11 +55,9 @@ void ct_scan_result_free(ct_scan_result *result)
     ct_future_free(reinterpret_cast<ct_future *>(result));
 }
 
-namespace
+ct_status c_api_scan_options(const ct_scan_options_v2 *options, CoreScanOptions *out) noexcept
 {
-ct_status prepare_scan(ct_tree *tree, const ct_scan_options_v2 *options, CoreScanOptions *scan, TreeCore **core)
-{
-    if (tree == nullptr || options == nullptr || options->struct_size != sizeof(*options)) {
+    if (options == nullptr || options->struct_size != sizeof(*options)) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
     const auto &o = *options;
@@ -70,57 +66,35 @@ ct_status prepare_scan(ct_tree *tree, const ct_scan_options_v2 *options, CoreSca
         (o.strict_byte_budget != 0 && o.byte_budget == 0)) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    *core = TreeCoreAccess::get(*c_api_tree(tree));
-    if (*core == nullptr) {
-        return static_cast<ct_status>(Code::kUnavailable);
-    }
-    *scan = {.prefix             = Slice(o.prefix, o.prefix_len),
-             .start              = Slice(o.start, o.start_len),
-             .end                = Slice(o.end, o.end_len),
-             .begin              = Slice(o.begin, o.begin_len),
-             .limit              = o.limit,
-             .byte_budget        = o.byte_budget,
-             .deadline_ms        = o.deadline_ms,
-             .reverse            = o.reverse != 0,
-             .keys_only          = o.keys_only != 0,
-             .include_tombstones = o.include_tombstones != 0,
-             .has_start_bound    = o.has_start_bound != 0,
-             .start_inclusive    = o.start_inclusive != 0,
-             .strict_byte_budget = o.strict_byte_budget != 0};
+    *out = {.prefix             = Slice(o.prefix, o.prefix_len),
+            .start              = Slice(o.start, o.start_len),
+            .end                = Slice(o.end, o.end_len),
+            .begin              = Slice(o.begin, o.begin_len),
+            .limit              = o.limit,
+            .byte_budget        = o.byte_budget,
+            .deadline_ms        = o.deadline_ms,
+            .reverse            = o.reverse != 0,
+            .keys_only          = o.keys_only != 0,
+            .include_tombstones = o.include_tombstones != 0,
+            .has_start_bound    = o.has_start_bound != 0,
+            .start_inclusive    = o.start_inclusive != 0,
+            .strict_byte_budget = o.strict_byte_budget != 0};
     return 0;
 }
 
-// Validate the internal packed record framing while counting the bounded page.
-std::optional<size_t> count_entries(const ScanPackedBuf &packed)
+namespace
 {
-    size_t     offset      = 0;
-    size_t     count       = 0;
-    const auto skip_string = [&] {
-        if (packed.size() - offset < 4) {
-            return false;
-        }
-        uint32_t length = 0;
-        for (size_t i = 0; i < 4; ++i) {
-            length |= uint32_t{packed.data()[offset + i]} << (8 * i);
-        }
-        offset += 4;
-        if (length > packed.size() - offset) {
-            return false;
-        }
-        offset += length;
-        return true;
-    };
-    while (offset != packed.size()) {
-        if (!skip_string() || packed.size() - offset < 9) {
-            return {};
-        }
-        offset += 9;
-        if (!skip_string()) {
-            return {};
-        }
-        ++count;
+ct_status prepare_scan(ct_tree *tree, const ct_scan_options_v2 *options, CoreScanOptions *scan, TreeCore **core)
+{
+    if (tree == nullptr) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    return count;
+    const auto status = c_api_scan_options(options, scan);
+    if (status != 0) {
+        return status;
+    }
+    *core = TreeCoreAccess::get(*c_api_tree(tree));
+    return *core == nullptr ? static_cast<ct_status>(Code::kUnavailable) : 0;
 }
 } // namespace
 
@@ -171,23 +145,17 @@ try {
     impl->result_controls = c_api_result_controls(core->binding()->account());
     std::unique_ptr<ct_future_handle, decltype(&free_ct_future_handle)> handle(make_ct_future_handle(impl),
                                                                                free_ct_future_handle);
-    core->scan_async(
-        scan, [impl, signal = c_api_completion_signal(tree)](Status status, ScanPackedBuf packed, bool truncated) {
-            impl->status = static_cast<ct_status>(status.code());
-            if (status.ok()) {
-                const auto count = count_entries(packed);
-                if (count) {
-                    impl->scan_count     = *count;
-                    impl->scan_packed    = std::move(packed);
-                    impl->scan_truncated = truncated;
-                }
-                else {
-                    impl->status = static_cast<ct_status>(Code::kCorruption);
-                }
-            }
-            impl->done.store(true, std::memory_order_release);
-            c_api_notify_completion(signal);
-        });
+    core->scan_async(scan, [impl, signal = c_api_completion_signal(tree)](Status status, ScanPackedBuf packed,
+                                                                          size_t count, bool truncated) {
+        impl->status = static_cast<ct_status>(status.code());
+        if (status.ok()) {
+            impl->scan_count     = count;
+            impl->scan_packed    = std::move(packed);
+            impl->scan_truncated = truncated;
+        }
+        impl->done.store(true, std::memory_order_release);
+        c_api_notify_completion(signal);
+    });
     *out = reinterpret_cast<ct_future *>(handle.release());
     return 0;
 }

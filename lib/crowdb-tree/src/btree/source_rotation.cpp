@@ -129,6 +129,32 @@ void SourceRotation::drain() noexcept
     wait(requested_.load(std::memory_order_acquire));
 }
 
+void SourceRotation::drain_async(AsyncCompletion complete) noexcept
+{
+    stop();
+    on_drained_ = std::move(complete);
+    dispatcher_->request(drain_node_, weak_from_this().lock());
+}
+
+void SourceRotation::run_drain(void *context) noexcept
+{
+    auto &self = *static_cast<SourceRotation *>(context);
+    if (self.phase_.load(std::memory_order_acquire) == Phase::Idle &&
+        self.requested_.load(std::memory_order_acquire) == self.completed_.load(std::memory_order_acquire)) {
+        self.complete_drain();
+    }
+    else {
+        self.drain_pending_ = true;
+    }
+}
+
+void SourceRotation::complete_drain() noexcept
+{
+    drain_pending_ = false;
+    auto done      = std::move(on_drained_);
+    done.complete(Status::Ok());
+}
+
 void SourceRotation::rebind(SourceAdmission &sources, FlushController &controller) noexcept
 {
     assert(completed_.load() == requested_.load());
@@ -353,6 +379,9 @@ void SourceRotation::finish() noexcept
     progress_->advance();
     if (requested_.load(std::memory_order_acquire) != target_) {
         schedule();
+    }
+    else if (drain_pending_) {
+        complete_drain();
     }
 }
 } // namespace crowdb::tree

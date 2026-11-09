@@ -7,8 +7,8 @@
 
 namespace crowdb::tree
 {
-// The durable sink for one admitted flush. Page calls are serialized by the
-// flush's existing I/O window; unrelated subtree computation remains runnable.
+// The durable sink for one admitted flush. Independent page I/O overlaps;
+// receipt installation uses the existing serialized CPU progress dispatcher.
 class FlushPersistence : public std::enable_shared_from_this<FlushPersistence>
 {
     struct Page;
@@ -36,7 +36,7 @@ class FlushPersistence : public std::enable_shared_from_this<FlushPersistence>
     CheckpointResult                                                  report_;
     bool                                                              finished_   = false;
     uint64_t                                                          wal_offset_ = 0;
-    std::shared_ptr<detail::AllocationReservation>                    selection_metadata_;
+    std::shared_ptr<AllocationBudget>                                 selection_metadata_;
     std::optional<detail::ReservedVector<const SnapshotPageChange *>> pending_leaves_;
     void                                                              select_inputs();
 };

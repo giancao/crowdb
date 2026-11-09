@@ -5,6 +5,7 @@
 mod slot_map;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use crowdb_paxos_kv_client::{BatchOp, ChunkSlotMapClient, Error};
@@ -86,15 +87,26 @@ async fn interrupted_bootstrap_is_hidden_resumable_and_fences_stale_pages() {
 
 #[tokio::test]
 async fn competing_large_and_small_bootstraps_cannot_mix_assignments() {
+    async fn initialize(client: &ChunkSlotMapClient, map: &ChunkSlotMap<u64>) -> Result<(), Error> {
+        // A busy page CAS leaves the same intent resumable by its owner.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match client.initialize_service(map).await {
+                    Err(Error::CasBusy) => tokio::task::yield_now().await,
+                    result => return result,
+                }
+            }
+        })
+        .await
+        .expect("initializer must finish or observe the conflicting intent")
+    }
+
     for count in [2, 300] {
         let test = TestSlotMap::start().await;
         let client = ChunkSlotMapClient::new(Arc::clone(&test.kv));
         let large = services(1, 300);
         let competitor = services(1000, count);
-        let (a, b) = tokio::join!(
-            client.initialize_service(&large),
-            client.initialize_service(&competitor)
-        );
+        let (a, b) = tokio::join!(initialize(&client, &large), initialize(&client, &competitor));
         assert_ne!(a.is_ok(), b.is_ok(), "large={a:?}, competitor={b:?}");
         let actual = client.read_service().await.unwrap();
         let expected = if a.is_ok() { &large } else { &competitor };

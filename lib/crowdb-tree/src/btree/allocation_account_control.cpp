@@ -98,16 +98,28 @@ Status AllocationAccount::create_unbound(std::shared_ptr<AllocationAccount> *out
     return build({}, BudgetClass::kRouting, out);
 }
 
+Status AllocationAccount::create_ongoing(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category,
+                                         std::shared_ptr<AllocationAccount> *out)
+{
+    if (!account || out == nullptr || category == BudgetClass::kIo || category >= BudgetClass::kCount) {
+        return Status::invalid_argument("ongoing allocations require a byte account and output");
+    }
+    if (!ResourceBudget::accepting(account)) {
+        return Status::unavailable("allocation account admission is closed");
+    }
+    return build(std::move(account), category, out, true);
+}
+
 Status AllocationAccount::build(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category,
-                                std::shared_ptr<AllocationAccount> *out)
+                                std::shared_ptr<AllocationAccount> *out, bool ongoing)
 {
     constexpr auto bytes = sizeof(AllocationAccount);
-    if (account && !ResourceBudget::claim_allocation(account, category, bytes)) {
+    if (account && !ResourceBudget::claim_allocation(account, category, bytes, ongoing)) {
         return Status::resource_exhausted("backend allocation account reserve unavailable");
     }
     AllocationAccount *owner = nullptr;
     try {
-        owner = new AllocationAccount(account, category);
+        owner = new AllocationAccount(account, category, ongoing);
         owner->allocated_.store(bytes, std::memory_order_relaxed);
         owner->apply_record(static_cast<size_t>(AllocationKind::kMetadata), bytes, true);
         std::shared_ptr<AllocationAccount> result(

@@ -168,6 +168,46 @@ TEST(FlushRuntime, QueueAndLaneAreBoundedAndCloseDrainsAcceptedTasks)
     EXPECT_EQ(runtime.snapshot().rejected, 3U);
 }
 
+TEST(FlushRuntime, ClosingLaneRejectsNewJobsAndCompletesOnce)
+{
+    FlushRuntime runtime(1, 4);
+    auto         lane  = std::make_shared<FlushRuntime::Lane>(2);
+    auto         other = std::make_shared<FlushRuntime::Lane>(2);
+
+    struct Gate
+    {
+        std::latch            entered{1};
+        std::latch            release{1};
+        std::atomic<unsigned> completions{0};
+    } gate;
+
+    const auto blocker = [](void *context) noexcept {
+        auto &gate = *static_cast<Gate *>(context);
+        gate.entered.count_down();
+        gate.release.wait();
+    };
+    const auto noop = [](void *) noexcept {};
+    ASSERT_TRUE(runtime.try_submit(lane, blocker, &gate).ok());
+    gate.entered.wait();
+    EXPECT_TRUE(runtime.try_submit(lane, noop, nullptr).ok());
+    lane->close_async({.context = &gate, .complete_fn = [](void *context, Status status) noexcept {
+                           EXPECT_TRUE(status.ok());
+                           static_cast<Gate *>(context)->completions.fetch_add(1);
+                       }});
+    EXPECT_EQ(gate.completions.load(), 0U);
+    EXPECT_EQ(runtime.try_submit(lane, noop, nullptr).code(), Code::kUnavailable);
+    EXPECT_TRUE(runtime.try_submit(other, noop, nullptr).ok());
+    gate.release.count_down();
+    runtime.drain();
+    EXPECT_EQ(gate.completions.load(), 1U);
+    EXPECT_EQ(runtime.try_submit(lane, noop, nullptr).code(), Code::kUnavailable);
+    std::shared_ptr<FlushRuntime::Progress> progress;
+    EXPECT_EQ(runtime.reserve_progress(lane, noop, nullptr, {}, &progress).code(), Code::kUnavailable);
+    runtime.drain();
+    EXPECT_EQ(gate.completions.load(), 1U);
+    EXPECT_EQ(runtime.snapshot().completed, 3U);
+}
+
 TEST(FlushRuntime, LaneDrainIncludesProgressOwnerDestructionWithoutWaitingForAnotherTree)
 {
     FlushRuntime runtime(2, 4);

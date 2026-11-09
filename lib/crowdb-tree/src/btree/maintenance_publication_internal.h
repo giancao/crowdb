@@ -20,7 +20,7 @@ using MaintenancePath = ReservedVector<MaintenancePathEntry>;
 
 struct MaintenanceChildren
 {
-    explicit MaintenanceChildren(const std::shared_ptr<AllocationReservation> &metadata)
+    explicit MaintenanceChildren(const std::shared_ptr<AllocationBudget> &metadata)
         : pids(ReservationAllocator<uint64_t>(metadata)),
           separators(ReservationAllocator<OwnedKey>(metadata))
     {

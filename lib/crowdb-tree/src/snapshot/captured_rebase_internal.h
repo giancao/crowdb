@@ -33,7 +33,7 @@ struct CapturedRebaseOperation::State : std::enable_shared_from_this<State>
     CapturedDurablePages::Frames::const_iterator    next;
     std::shared_ptr<detail::FlushRuntime>           runtime;
     std::shared_ptr<detail::FlushRuntime::Progress> progress;
-    std::shared_ptr<detail::AllocationReservation>  metadata;
+    std::shared_ptr<AllocationBudget>               metadata;
     std::shared_ptr<PublicationRequest>             request;
     std::shared_ptr<WritebackMetrics>               writeback_metrics;
     size_t                                          max_sources     = 0;

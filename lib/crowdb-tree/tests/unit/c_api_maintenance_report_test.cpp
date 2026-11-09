@@ -108,7 +108,7 @@ TEST_F(MaintenanceReportCAbi, WritebackAndDurableCheckpointKeepDistinctReports)
     EXPECT_EQ(ct_durable_coverage(tree), 0U);
     EXPECT_GT(report.written_frames, report.primary_frames);
     EXPECT_GT(report.rebased_pages, 0U);
-    ASSERT_EQ(ct_checkpoint_report_async(tree, &future), 0);
+    ASSERT_EQ(ct_flush_with_persistent_report_async(tree, &future), 0);
     done = 0;
     while (done == 0) {
         ASSERT_EQ(ct_future_poll_checkpoint_report(future, &done, &report), 0);

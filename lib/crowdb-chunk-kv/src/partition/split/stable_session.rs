@@ -43,45 +43,7 @@ impl Partition {
             .prepared_artifact
             .load_full()
             .ok_or_else(|| ChunkKvError::SplitRetry("installed child handoff proof is absent".into()))?;
-        let artifact = if let Some(retained) = self.retained_child_artifact(&plan).await? {
-            retained
-        } else {
-            let (manifest, base_seq) = self.tree.checkpoint_state()?;
-            let checkpoint = Checkpoint {
-                tree_id: self.tree_id(),
-                tree_manifest: manifest,
-                root_manifest_generation: self.tree.root_manifest_generation()?,
-                applied_seq: base_seq,
-                stream_name: self.journal.stream_name(),
-                stream_generation: self.journal.record_generation(),
-                replay_offset: proof.parent_replay_offset,
-            };
-            let frontier = SplitSourceFrontier {
-                parent_id: plan.parent_id,
-                parent_epoch: plan.parent_epoch,
-                checkpoint: checkpoint.clone(),
-                cutover_offset: proof.parent_cutover_offset,
-                cutover_seq: proof.applied_seq,
-                journal: self.journal.clone(),
-            };
-            let mut retained = prepare_retained_parent(
-                &plan,
-                (manifest, checkpoint.root_manifest_generation, base_seq),
-                &frontier,
-            )?;
-            retained.applied_seq = proof.applied_seq;
-            retained.child_stream_start_seq = proof.child_stream_start_seq;
-            SplitArtifact {
-                transition_id: plan.transition_id,
-                parent_id: plan.parent_id,
-                parent_epoch: plan.parent_epoch,
-                parent_next_epoch: plan.parent_next_epoch,
-                shared_view_generation: 0,
-                cutover_seq: proof.applied_seq,
-                retained_parent: retained,
-                child: (*proof).clone(),
-            }
-        };
+        let artifact = self.retained_child_artifact(&plan).await?;
         super::super::validate_split_artifact(&plan, &artifact, proof.applied_seq)?;
         let artifact = self
             .finish_child_inheritance(&plan, &artifact, child.tree.as_ref())
@@ -161,15 +123,15 @@ impl Partition {
             overlay: overlay.clone(),
             completion,
         });
-        let (started, running) = tokio::sync::oneshot::channel();
-        // A started blocking task survives caller cancellation and runtime
-        // shutdown. All native preparation is finished before it occupies a
-        // host thread, so even a one-thread blocking pool can make progress.
-        let installed = tokio::task::spawn_blocking(move || {
-            let _ = started.send(());
-            complete_prepared_cutover(overlay, installed)
+        // This task retains the capability before the mutation worker takes
+        // its copy. Dropping the caller's join handle leaves cleanup running.
+        let installed = tokio::spawn(async move {
+            let result = installed.await.map_err(|_| ChunkKvError::WriteStalled);
+            let released = overlay.release().await;
+            let installed = result??;
+            released?;
+            Ok::<_, ChunkKvError>(installed)
         });
-        running.await.map_err(|_| ChunkKvError::WriteStalled)?;
         // The observer was registered before replay. A full observer expires
         // this installation, without rejecting any parent mutation.
         permit.send(super::super::WorkerRequest::ChildSplitCutover(request));
@@ -296,15 +258,4 @@ fn prepare_cutover_writers(
         child: child.artifact.clone(),
     };
     Ok((artifact, child))
-}
-
-fn complete_prepared_cutover(
-    overlay: Arc<dyn crate::PreparedSplitOverlay>,
-    installed: tokio::sync::oneshot::Receiver<Result<(SplitArtifact, PreparedSplitWriter)>>,
-) -> Result<(SplitArtifact, PreparedSplitWriter)> {
-    let result = installed.blocking_recv().map_err(|_| ChunkKvError::WriteStalled);
-    // The worker (or a cancelled request) drops its token before completing
-    // this channel. Native capability destruction therefore stays on the host.
-    drop(overlay);
-    result?
 }

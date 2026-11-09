@@ -4,6 +4,7 @@
 
 #include "allocation_bound.h"
 
+#include <algorithm>
 #include <cassert>
 
 namespace crowdb::tree
@@ -24,6 +25,7 @@ struct ReplayControls::Slot
     std::shared_ptr<detail::AllocationReservation> metadata;
     const size_t                                   available;
     std::atomic<bool>                              busy{false};
+    std::atomic<uint64_t>                          replay_slot{0};
 };
 
 ReplayControls::ReplayControls(std::shared_ptr<detail::AllocationReservation> metadata)
@@ -66,7 +68,7 @@ Status ReplayControls::create(const std::shared_ptr<detail::ResourceBudget::Acco
     return Status::Ok();
 }
 
-ReplayControls::Lease ReplayControls::acquire(bool current_gap) noexcept
+ReplayControls::Lease ReplayControls::acquire(uint64_t replay_slot, bool current_gap) noexcept
 {
     const auto begin = current_gap ? size_t{0} : size_t{2};
     const auto end   = slots_.size();
@@ -82,14 +84,31 @@ ReplayControls::Lease ReplayControls::acquire(bool current_gap) noexcept
             slot->busy.store(false, std::memory_order_release);
             continue;
         }
+        slot->replay_slot.store(replay_slot, std::memory_order_release);
         return Lease(slot);
     }
     return {};
 }
 
+void ReplayControls::stop_admission() noexcept
+{
+    admission_drained_.store(true, std::memory_order_release);
+}
+
+bool ReplayControls::can_wait_for(uint64_t missing_slot) const noexcept
+{
+    if (!admission_drained_.load(std::memory_order_acquire)) {
+        return true;
+    }
+    return std::ranges::any_of(slots_, [missing_slot](const auto &slot) {
+        return slot->replay_slot.load(std::memory_order_acquire) == missing_slot;
+    });
+}
+
 ReplayControls::Lease::~Lease()
 {
     if (slot_) {
+        clear_replay_slot();
         slot_->busy.store(false, std::memory_order_release);
     }
 }
@@ -102,11 +121,18 @@ ReplayControls::Lease &ReplayControls::Lease::operator=(Lease &&other) noexcept
 {
     if (this != &other) {
         if (slot_) {
+            clear_replay_slot();
             slot_->busy.store(false, std::memory_order_release);
         }
         slot_ = std::move(other.slot_);
     }
     return *this;
+}
+
+void ReplayControls::Lease::clear_replay_slot() noexcept
+{
+    assert(slot_);
+    slot_->replay_slot.store(0, std::memory_order_release);
 }
 
 const std::shared_ptr<detail::AllocationReservation> &ReplayControls::Lease::budget() const noexcept

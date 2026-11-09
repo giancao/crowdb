@@ -1,7 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core.h"
+#include "crowdb-tree/btree/scan_packed.h"
 #include "local_recovery_test_support.h"
+#include "snapshot/published_snapshot.h"
 
 #include <chrono>
 #include <future>
@@ -13,17 +15,25 @@ namespace
 {
 struct TestReadCpuGate
 {
-    std::shared_ptr<TreeRuntimeBinding> binding;
-    std::binary_semaphore               entered{0};
-    std::atomic<bool>                   released{false};
+    std::shared_ptr<TreeRuntimeBinding>         binding;
+    std::shared_ptr<detail::FlushRuntime::Lane> lane;
+    std::binary_semaphore                       entered{0};
+    std::atomic<bool>                           released{false};
 
-    explicit TestReadCpuGate(std::shared_ptr<TreeRuntimeBinding> owner) : binding(std::move(owner))
+    explicit TestReadCpuGate(std::shared_ptr<TreeRuntimeBinding>         owner,
+                             std::shared_ptr<detail::FlushRuntime::Lane> target = {})
+        : binding(std::move(owner)),
+          lane(target ? std::move(target) : binding->lane())
     {
-        EXPECT_TRUE(binding->cpu()->try_submit(binding->lane(), &run, this).ok());
+        const auto status = binding->cpu()->try_submit(lane, &run, this);
+        if (!status.ok()) {
+            ADD_FAILURE() << status.to_string();
+            return;
+        }
         entered.acquire();
         auto queued = Status::Ok();
         for (size_t i = 0; i <= binding->options().cpu_queue_limit; ++i) {
-            queued = binding->cpu()->try_submit(binding->lane(), +[](void *) noexcept {}, nullptr);
+            queued = binding->cpu()->try_submit(lane, +[](void *) noexcept {}, nullptr);
             if (!queued.ok()) {
                 break;
             }
@@ -34,7 +44,7 @@ struct TestReadCpuGate
     ~TestReadCpuGate()
     {
         release();
-        binding->drain();
+        lane->drain();
     }
 
     static void run(void *context) noexcept
@@ -88,7 +98,7 @@ struct TestProgressReadStore final : AsyncPageStore
     }
 };
 
-TEST(TreeReadProgress, AdmittedAsyncReadWaitsForFullOrdinaryCpuQueue)
+TEST(TreeReadProgress, AdmittedAsyncReadsWaitForFullOrdinaryCpuQueue)
 {
     Config             config;
     TreeRuntimeOptions host;
@@ -106,7 +116,9 @@ TEST(TreeReadProgress, AdmittedAsyncReadWaitsForFullOrdinaryCpuQueue)
     ASSERT_TRUE(core->apply(1, Batch{.ops = {{.key = "key", .kind = OpKind::kPut, .value = "value"}}}).ok());
     core->binding()->drain();
     std::promise<Status> done;
-    auto                 completed = done.get_future();
+    std::promise<Status> scan_done;
+    auto                 completed      = done.get_future();
+    auto                 scan_completed = scan_done.get_future();
     TestReadCpuGate      gate(core->binding());
     core->get_async("key", [&](Status status, GetView value) {
         if (status.ok()) {
@@ -114,11 +126,23 @@ TEST(TreeReadProgress, AdmittedAsyncReadWaitsForFullOrdinaryCpuQueue)
         }
         done.set_value(std::move(status));
     });
-    const auto pending = completed.wait_for(std::chrono::milliseconds(20));
+    core->scan_async({}, [&](Status status, ScanPackedBuf packed, size_t count, bool truncated) {
+        if (status.ok()) {
+            EXPECT_NE(packed.size(), 0U);
+            EXPECT_EQ(count, 1U);
+            EXPECT_FALSE(truncated);
+        }
+        scan_done.set_value(std::move(status));
+    });
+    const auto pending      = completed.wait_for(std::chrono::milliseconds(20));
+    const auto scan_pending = scan_completed.wait_for(std::chrono::milliseconds(0));
     gate.release();
-    const auto status = completed.get();
+    const auto status      = completed.get();
+    const auto scan_status = scan_completed.get();
     EXPECT_EQ(pending, std::future_status::timeout);
+    EXPECT_EQ(scan_pending, std::future_status::timeout);
     ASSERT_TRUE(status.ok()) << status.to_string();
+    ASSERT_TRUE(scan_status.ok()) << scan_status.to_string();
 }
 
 TEST(TreeReadProgress, ColdDecodeUsesReservedProgressWhenOrdinaryCpuQueueFills)
@@ -160,6 +184,47 @@ TEST(TreeReadProgress, ColdDecodeUsesReservedProgressWhenOrdinaryCpuQueueFills)
     const auto status = completed.get();
     EXPECT_EQ(pending, std::future_status::timeout);
     ASSERT_TRUE(status.ok()) << status.to_string();
+}
+
+TEST(TreeReadProgress, DetachedScanUsesHostProgressWhenCpuQueueIsFull)
+{
+    Config config;
+    ASSERT_TRUE(TreeRuntime::create({.workers = 1, .cpu_queue_limit = 8}, &config.runtime).ok());
+    config.runtime_binding.cpu_queue_limit = 8;
+    auto store                             = std::make_shared<MemPageStore>(4096);
+    config.page_store                      = store.get();
+    config.backend_owner                   = store;
+    config.frame_bytes                     = 4096;
+    config.leaf_split_bytes                = 3000;
+    std::shared_ptr<TreeCore> core;
+    const auto                opened = TreeCore::open(config, &core);
+    ASSERT_TRUE(opened.ok()) << opened.to_string();
+    ASSERT_TRUE(core->apply(1, Batch{.ops = {{.key = "key", .kind = OpKind::kPut, .value = "value"}}}).ok());
+    ASSERT_TRUE(core->flush().ok());
+    std::shared_ptr<PublishedReadViewContext> view;
+    ASSERT_TRUE(core->capture_read_only_view(&view).ok());
+    core.reset();
+
+    auto            done      = std::make_shared<std::promise<Status>>();
+    auto            completed = done->get_future();
+    TestReadCpuGate gate(view->binding(), view->lane());
+    ASSERT_TRUE(view->scan_async({},
+                                 [done](Status status, ScanPackedBuf packed, size_t count, bool truncated) {
+                                     if (status.ok()) {
+                                         EXPECT_NE(packed.size(), 0U);
+                                         EXPECT_EQ(count, 1U);
+                                         EXPECT_FALSE(truncated);
+                                     }
+                                     done->set_value(std::move(status));
+                                 })
+                    .ok());
+    EXPECT_EQ(completed.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    gate.release();
+    ASSERT_EQ(completed.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    const auto status = completed.get();
+    EXPECT_TRUE(status.ok()) << status.to_string();
+    view.reset();
+    config.runtime->drain_cpu();
 }
 } // namespace
 } // namespace crowdb::tree

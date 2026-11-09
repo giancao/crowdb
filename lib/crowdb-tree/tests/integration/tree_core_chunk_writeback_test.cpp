@@ -55,7 +55,7 @@ TEST(TreeCoreChunkWriteback, ColdUncommittedPacksStayReadableButReopenUsesTheDur
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, "committed").ok());
     test.store->request_wal_offset(4096);
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     auto *core = TreeCoreAccess::get(*test.tree);
     ASSERT_TRUE(test.put(2, std::string(20000, 's')).ok());
     test.store->request_wal_offset(8192);
@@ -85,7 +85,7 @@ TEST(TreeCoreChunkWriteback, ColdUncommittedPacksStayReadableButReopenUsesTheDur
     const auto reopened = test.open();
     ASSERT_TRUE(reopened.ok()) << reopened.to_string();
     EXPECT_EQ(test.tree->get_view("key").value().to_string(), "committed");
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 1U);
+    EXPECT_EQ(test.tree->durable_coverage(), 1U);
     EXPECT_EQ(test.store->durable_wal_offset(), 4096U);
 }
 
@@ -94,7 +94,7 @@ TEST(TreeCoreChunkWriteback, PendingAllocationSerializesCheckpointsAndCancellati
     test_chunk::TestCoreChunk test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, "committed").ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     ASSERT_TRUE(test.put(2, std::string(12000, 's')).ok());
     auto gate                                 = std::make_shared<TestPendingAllocation>();
     auto entered                              = gate->entered.get_future();
@@ -115,12 +115,12 @@ TEST(TreeCoreChunkWriteback, PendingAllocationSerializesCheckpointsAndCancellati
     EXPECT_FALSE(completion.done.completed_for_tests());
     auto second        = std::make_shared<std::promise<Status>>();
     auto second_result = second->get_future();
-    test.tree->snapshot_async([second](Status status, uint64_t) { second->set_value(std::move(status)); });
+    test.tree->flush_with_persistent_async([second](Status status, uint64_t) { second->set_value(std::move(status)); });
     EXPECT_EQ(second_result.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
     ASSERT_TRUE(test.put(3, "newer").ok());
     writeback->request_stop();
     EXPECT_FALSE(completion.done.completed_for_tests());
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 1U);
+    EXPECT_EQ(test.tree->durable_coverage(), 1U);
     gate->resume();
     completion.done.wait();
     EXPECT_EQ(completion.status.code(), Code::kUnavailable);
@@ -129,12 +129,12 @@ TEST(TreeCoreChunkWriteback, PendingAllocationSerializesCheckpointsAndCancellati
     EXPECT_FALSE(core->capture()->checkpoint_inflight);
     EXPECT_EQ(test.tree->get_view("key").value().to_string(), "newer");
     EXPECT_EQ(test.backend.catalog->commit_calls, 2U);
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 3U);
+    EXPECT_EQ(test.tree->durable_coverage(), 3U);
     writeback.reset();
     test.backend.transport->before_allocate = {};
-    const auto committed                    = test.tree->snapshot();
+    const auto committed                    = test.tree->flush_with_persistent();
     ASSERT_TRUE(committed.ok()) << committed.to_string();
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 3U);
+    EXPECT_EQ(test.tree->durable_coverage(), 3U);
     test.tree.reset();
     ASSERT_TRUE(test.open().ok());
     EXPECT_EQ(test.tree->get_view("key").value().to_string(), "newer");

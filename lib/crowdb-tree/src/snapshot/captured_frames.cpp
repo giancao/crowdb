@@ -164,10 +164,6 @@ void CapturedFrameStream::State::wake() noexcept
     assert(self);
     for (;;) {
         queued_owner = self;
-        if (limits.cpu_progress) {
-            limits.cpu_progress->request(cpu_node, self);
-            return;
-        }
         Status status;
         try {
             status = runtime->try_submit(lane, &State::run, this);
@@ -176,6 +172,10 @@ void CapturedFrameStream::State::wake() noexcept
             status = Status::resource_exhausted();
         }
         if (status.ok()) {
+            return;
+        }
+        if (limits.cpu_progress) {
+            limits.cpu_progress->request(cpu_node, self);
             return;
         }
         queued_owner.reset();

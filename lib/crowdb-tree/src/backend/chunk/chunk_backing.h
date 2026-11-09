@@ -8,6 +8,7 @@
 namespace crowdb::tree
 {
 class BackingMetricExtent;
+class ScheduledPageStore;
 class ChunkPhysicalRegistry;
 struct ChunkPhysicalPack;
 
@@ -32,8 +33,10 @@ struct ChunkBackingDomain
 // observation; no per-page copy of whole-pack storage accounting is needed.
 struct ChunkPackBacking
 {
-    using Read  = Status (*)(const ChunkPackBacking &, std::span<uint8_t>, const std::shared_ptr<AllocationBudget> &);
-    using Write = Status (*)(ChunkPackBacking &, std::span<const uint8_t>, const std::shared_ptr<AllocationBudget> &);
+    using Read  = void (*)(ScheduledPageStore &, std::shared_ptr<const ChunkPackBacking>, std::span<uint8_t>,
+                           std::shared_ptr<AllocationBudget>, AsyncCompletion);
+    using Write = void (*)(ScheduledPageStore &, std::shared_ptr<ChunkPackBacking>, std::span<const uint8_t>,
+                           AsyncCompletion);
     Read                                      read  = nullptr;
     Write                                     write = nullptr;
     detail::ChunkFixedPackRef                 pack;
@@ -59,6 +62,13 @@ Status prepare_chunk_backing(const std::shared_ptr<const ChunkBackingDomain> &do
 Status pin_chunk_backing(const std::shared_ptr<const ChunkBackingDomain> &domain, detail::ChunkFixedPackRef pack,
                          detail::ChunkStageId pin, const std::shared_ptr<AllocationBudget> &metadata,
                          std::shared_ptr<const ChunkPackBacking> *out);
+
+void   initialize_chunk_backing_io(ChunkPackBacking &backing) noexcept;
+Status validate_chunk_pin_stage(const ChunkBackingDomain &domain, const detail::ChunkFixedPackRef &pack,
+                                const std::optional<detail::ChunkStageRecord> &record);
+void   submit_pin_chunk_backing(const std::shared_ptr<const ChunkBackingDomain> &domain, detail::ChunkFixedPackRef pack,
+                                detail::ChunkStageId pin, const std::shared_ptr<AllocationBudget> &metadata,
+                                std::shared_ptr<const ChunkPackBacking> *out, AsyncCompletion complete);
 
 // Finite blocking backend steps; the caller must dispatch them on its bounded
 // backend lane. Exact identities are never translated to synthetic file

@@ -26,7 +26,7 @@ class CapturedRebaseOperation
     static Status
     create(PublicationCoordinator &publisher, std::shared_ptr<const PublishedTreeState> captured,
            std::shared_ptr<const CapturedDurablePages> pages, std::shared_ptr<detail::FlushRuntime> runtime,
-           std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<detail::AllocationReservation> metadata,
+           std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<AllocationBudget> metadata,
            std::shared_ptr<CapturedRebaseOperation> *out, size_t max_sources = 128,
            std::shared_ptr<WritebackMetrics> writeback_metrics = {}, std::shared_ptr<ApplyDispatcher> cpu_progress = {},
            std::shared_ptr<PublicationLane> publication = {}, TreeWorkCause cause = TreeWorkCause::Checkpoint);
@@ -42,14 +42,13 @@ class CapturedRebaseOperation
     {
     }
 
-    static void            submit(void *source, detail::CallbackComplete complete, void *context);
-    static Status          initialize(std::shared_ptr<State> state, std::shared_ptr<detail::FlushRuntime> runtime,
-                                      std::shared_ptr<detail::FlushRuntime::Lane>    lane,
-                                      std::shared_ptr<detail::AllocationReservation> metadata,
-                                      std::shared_ptr<CapturedRebaseOperation> *out, size_t max_sources,
-                                      std::shared_ptr<WritebackMetrics> writeback_metrics,
-                                      std::shared_ptr<ApplyDispatcher>  cpu_progress,
-                                      std::shared_ptr<PublicationLane> publication, TreeWorkCause cause);
+    static void   submit(void *source, detail::CallbackComplete complete, void *context);
+    static Status initialize(std::shared_ptr<State> state, std::shared_ptr<detail::FlushRuntime> runtime,
+                             std::shared_ptr<detail::FlushRuntime::Lane> lane,
+                             std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<CapturedRebaseOperation> *out,
+                             size_t max_sources, std::shared_ptr<WritebackMetrics> writeback_metrics,
+                             std::shared_ptr<ApplyDispatcher> cpu_progress,
+                             std::shared_ptr<PublicationLane> publication, TreeWorkCause cause);
     std::shared_ptr<State> state_;
 };
 } // namespace crowdb::tree

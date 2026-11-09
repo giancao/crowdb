@@ -21,7 +21,7 @@ size_t ExtentLedger::reservation_metadata_bound() noexcept
            (4 * 256);
 }
 
-ExtentLedger::State::State(ExtentLedgerLimits bounds, const std::shared_ptr<detail::AllocationReservation> &metadata)
+ExtentLedger::State::State(ExtentLedgerLimits bounds, const std::shared_ptr<AllocationBudget> &metadata)
     : limits(bounds),
       append(bounds.file_size),
       address_high_water(bounds.file_size)
@@ -38,13 +38,14 @@ ExtentLedger::State::~State()
     assert(protected_ranges.load() == 0 && incoming.load() == nullptr && excluded == nullptr);
 }
 
-Status ExtentLedger::create(ExtentLedgerLimits limits, std::shared_ptr<detail::AllocationReservation> metadata,
+Status ExtentLedger::create(ExtentLedgerLimits limits, std::shared_ptr<AllocationBudget> metadata,
                             std::shared_ptr<ExtentLedger> *out)
 {
     if (out == nullptr || limits.backend_id == 0 || limits.generation == 0 || limits.iu_size == 0 ||
         limits.region_begin % limits.iu_size != 0 || limits.file_size % limits.iu_size != 0 ||
         limits.file_size < limits.region_begin || limits.file_size > limits.address_limit || limits.max_ranges == 0 ||
-        limits.queue_capacity == 0 || (metadata && metadata->category() == detail::BudgetClass::kIo)) {
+        (std::dynamic_pointer_cast<detail::AllocationReservation>(metadata) &&
+         std::dynamic_pointer_cast<detail::AllocationReservation>(metadata)->category() == detail::BudgetClass::kIo)) {
         return Status::invalid_argument();
     }
     try {
@@ -58,37 +59,36 @@ Status ExtentLedger::create(ExtentLedgerLimits limits, std::shared_ptr<detail::A
     return Status::Ok();
 }
 
-Status ExtentLedger::recover(uint64_t address, uint64_t length, std::shared_ptr<detail::AllocationReservation> metadata,
+Status ExtentLedger::recover(uint64_t address, uint64_t length, std::shared_ptr<AllocationBudget> metadata,
                              Complete complete)
 {
     return state_->submit(State::Action::Recover, address, length, std::move(metadata), std::move(complete));
 }
 
-Status ExtentLedger::activate(std::shared_ptr<detail::AllocationReservation> metadata, Complete complete)
+Status ExtentLedger::activate(std::shared_ptr<AllocationBudget> metadata, Complete complete)
 {
     return state_->submit(State::Action::Activate, 0, 0, std::move(metadata), std::move(complete));
 }
 
-Status ExtentLedger::reserve(uint64_t length, std::shared_ptr<detail::AllocationReservation> metadata,
-                             Complete complete)
+Status ExtentLedger::reserve(uint64_t length, std::shared_ptr<AllocationBudget> metadata, Complete complete)
 {
     return state_->submit(State::Action::Reserve, 0, length, std::move(metadata), std::move(complete));
 }
 
-Status ExtentLedger::retain(uint64_t address, uint64_t length, std::shared_ptr<detail::AllocationReservation> metadata,
+Status ExtentLedger::retain(uint64_t address, uint64_t length, std::shared_ptr<AllocationBudget> metadata,
                             Complete complete)
 {
     return state_->submit(State::Action::Retain, address, length, std::move(metadata), std::move(complete));
 }
 
-Status ExtentLedger::claim_free(uint64_t address, uint64_t length,
-                                std::shared_ptr<detail::AllocationReservation> metadata, Complete complete)
+Status ExtentLedger::claim_free(uint64_t address, uint64_t length, std::shared_ptr<AllocationBudget> metadata,
+                                Complete complete)
 {
     return state_->submit(State::Action::ClaimFree, address, length, std::move(metadata), std::move(complete));
 }
 
-Status ExtentLedger::exclude_allocations(uint64_t address, uint64_t length,
-                                         std::shared_ptr<detail::AllocationReservation> metadata, Complete complete)
+Status ExtentLedger::exclude_allocations(uint64_t address, uint64_t length, std::shared_ptr<AllocationBudget> metadata,
+                                         Complete complete)
 {
     return state_->submit(State::Action::Exclude, address, length, std::move(metadata), std::move(complete));
 }
@@ -113,9 +113,11 @@ void ExtentLedger::close() noexcept
 }
 
 Status ExtentLedger::State::submit(Action action, uint64_t address, uint64_t length,
-                                   std::shared_ptr<detail::AllocationReservation> metadata, Complete complete)
+                                   std::shared_ptr<AllocationBudget> metadata, Complete complete)
 {
-    if (!complete || (metadata && metadata->category() == detail::BudgetClass::kIo)) {
+    if (!complete ||
+        (std::dynamic_pointer_cast<detail::AllocationReservation>(metadata) &&
+         std::dynamic_pointer_cast<detail::AllocationReservation>(metadata)->category() == detail::BudgetClass::kIo)) {
         return Status::invalid_argument();
     }
     if (closed.load(std::memory_order_acquire)) {
@@ -133,12 +135,6 @@ Status ExtentLedger::State::submit(Action action, uint64_t address, uint64_t len
     catch (const std::bad_alloc &) {
         return Status::resource_exhausted();
     }
-    auto count = queued.load(std::memory_order_relaxed);
-    do {
-        if (count >= limits.queue_capacity) {
-            return Status::resource_exhausted();
-        }
-    } while (!queued.compare_exchange_weak(count, count + 1, std::memory_order_acq_rel));
     request->ledger       = shared_from_this();
     request->queued_owner = request;
     enqueue(&request->command);
@@ -200,7 +196,6 @@ void ExtentLedger::State::process(Request *request) noexcept
     catch (...) {
         result.status = Status::internal_error();
     }
-    queued.fetch_sub(1, std::memory_order_release);
     try {
         request->complete(std::move(result));
     }

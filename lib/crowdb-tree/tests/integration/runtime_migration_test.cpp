@@ -58,7 +58,7 @@ TEST(RuntimeMigration, LegacyBlockCheckpointOpensOnTheSamePathAndRemainsDurable)
     ASSERT_TRUE(tree->flush().ok());
     uint64_t coverage = 0;
     uint64_t sequence = 0;
-    status            = tree->snapshot(&coverage, &sequence);
+    status            = tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_EQ(coverage, 3U);
     tree.reset();
@@ -69,7 +69,7 @@ TEST(RuntimeMigration, LegacyBlockCheckpointOpensOnTheSamePathAndRemainsDurable)
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
     status = Crowdbtree::open(config, &tree);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    ASSERT_EQ(tree->durable_snapshot_last_applied_slot(), 3U);
+    ASSERT_EQ(tree->durable_coverage(), 3U);
     auto *core = TreeCoreAccess::get(*tree);
     ASSERT_NE(core, nullptr);
     GetView found;
@@ -92,7 +92,7 @@ TEST(RuntimeMigration, LegacyBlockCheckpointOpensOnTheSamePathAndRemainsDurable)
     EXPECT_EQ(rows.front().value, large);
     expect_canonical_native(*tree, false, true);
     // A checkpoint with no writes reuses the legacy primary and overflow extents.
-    status = tree->snapshot(&coverage, &sequence);
+    status = tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_EQ(coverage, 3U);
     tree.reset();
@@ -103,7 +103,7 @@ TEST(RuntimeMigration, LegacyBlockCheckpointOpensOnTheSamePathAndRemainsDurable)
     ASSERT_TRUE(status.ok()) << status.to_string();
     expect_canonical_native(*tree, false, true);
     ASSERT_TRUE(tree->apply(4, Batch{.ops = {{.key = "gamma", .kind = OpKind::kPut, .value = "runtime"}}}).ok());
-    status = tree->snapshot(&coverage, &sequence);
+    status = tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 4U);
     tree.reset();
@@ -112,7 +112,7 @@ TEST(RuntimeMigration, LegacyBlockCheckpointOpensOnTheSamePathAndRemainsDurable)
     config.page_store = store.get();
     status            = Crowdbtree::open(config, &tree);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    EXPECT_EQ(tree->durable_snapshot_last_applied_slot(), 4U);
+    EXPECT_EQ(tree->durable_coverage(), 4U);
     core   = TreeCoreAccess::get(*tree);
     status = core->get("gamma", &found);
     ASSERT_TRUE(status.ok()) << status.to_string();
@@ -146,7 +146,7 @@ TEST(RuntimeMigration, LegacyInnerTreeRemainsColdReadableAndExportsCanonicalFram
     }
     ASSERT_TRUE(tree->flush().ok());
     uint64_t coverage = 0;
-    ASSERT_TRUE(tree->snapshot(&coverage).ok());
+    ASSERT_TRUE(tree->flush_with_persistent(&coverage).ok());
     ASSERT_EQ(coverage, 64U);
     ASSERT_GT(tree->tree_summary().reachable_inner_pages, 0U);
     tree.reset();
@@ -157,7 +157,7 @@ TEST(RuntimeMigration, LegacyInnerTreeRemainsColdReadableAndExportsCanonicalFram
         config.page_store = store.get();
         auto status       = Crowdbtree::open(config, &tree);
         ASSERT_TRUE(status.ok()) << status.to_string();
-        EXPECT_EQ(tree->durable_snapshot_last_applied_slot(), 64U);
+        EXPECT_EQ(tree->durable_coverage(), 64U);
         EXPECT_GT(tree->tree_state_stats().logical.inner_pages, 0U);
         GetView found;
         status = TreeCoreAccess::get(*tree)->get("key1064", &found);
@@ -173,7 +173,7 @@ TEST(RuntimeMigration, LegacyInnerTreeRemainsColdReadableAndExportsCanonicalFram
         EXPECT_FALSE(truncated);
         EXPECT_EQ(rows.size(), 64U);
         expect_canonical_native(*tree, true, false);
-        status = tree->snapshot(&coverage);
+        status = tree->flush_with_persistent(&coverage);
         ASSERT_TRUE(status.ok()) << status.to_string();
         EXPECT_EQ(coverage, 64U);
         tree.reset();

@@ -32,15 +32,15 @@ class SnapshotReadError final : public std::runtime_error
 class PublishedSnapshotView final : public Snapshot
 {
   public:
-    static Status create(std::shared_ptr<PublishedSnapshotContext> context, size_t max_bytes,
+    static Status create(std::shared_ptr<PublishedReadViewContext> context, size_t max_bytes,
                          std::shared_ptr<Snapshot> *out);
     ~PublishedSnapshotView() override;
     [[nodiscard]] const std::vector<leaf_entry> &entries() const override;
     [[nodiscard]] bool get(Slice key, uint64_t *out_slot, std::string *out_value) const override;
 
   private:
-    PublishedSnapshotView(std::shared_ptr<PublishedSnapshotContext> context, size_t max_bytes);
-    std::shared_ptr<PublishedSnapshotContext>   context_;
+    PublishedSnapshotView(std::shared_ptr<PublishedReadViewContext> context, size_t max_bytes);
+    std::shared_ptr<PublishedReadViewContext>   context_;
     size_t                                      max_bytes_;
     mutable std::atomic<SnapshotMaterialized *> materialized_{nullptr};
 };

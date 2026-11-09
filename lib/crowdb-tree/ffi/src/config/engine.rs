@@ -45,7 +45,7 @@ impl TreeEngineConfig {
     /// Validate before creating or recovering storage.
     /// # Errors
     /// Returns the incompatible configuration field or window.
-    pub fn validate(&self, runtime: &TreeRuntimeConfig) -> Result<(), String> {
+    pub fn validate(&self, _runtime: &TreeRuntimeConfig) -> Result<(), String> {
         if !(512..=65536).contains(&self.frame_bytes) || self.buffer_pool_bytes < u64::from(self.frame_bytes)
         {
             return Err("tree.frame_bytes must be in 512..=65536 and fit buffer_pool_bytes".to_owned());
@@ -89,11 +89,6 @@ impl TreeEngineConfig {
             || t.maintenance_visits_per_step > t.maintenance_max_visits
         {
             return Err("tree.tuning step must fit its enclosing work window".to_owned());
-        }
-        if t.flush_parallelism > runtime.runtime_options().workers
-            || t.flush_parallelism > runtime.binding_options().limits.io_operations
-        {
-            return Err("tree.tuning.flush_parallelism exceeds host workers or Tree I/O permits".to_owned());
         }
         Ok(())
     }

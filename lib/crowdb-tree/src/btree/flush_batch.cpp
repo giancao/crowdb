@@ -9,8 +9,8 @@ namespace crowdb::tree
 Status FlushBatch::prepare(PublicationCoordinator &publisher, detail::FlushRuntime &runtime,
                            std::shared_ptr<detail::FlushRuntime::Lane> lane, uint64_t batch_id, uint64_t frontier,
                            FlushBatchOptions options, Maintenance maintenance, std::shared_ptr<FlushBatch> *out,
-                           std::shared_ptr<const PublishedSources>        inputs,
-                           std::shared_ptr<detail::AllocationReservation> metadata, uint64_t flush_admission_owner)
+                           std::shared_ptr<const PublishedSources> inputs, std::shared_ptr<AllocationBudget> metadata,
+                           uint64_t flush_admission_owner)
 try {
     if (out == nullptr || !lane || options.parallelism == 0 || options.install_run_window == 0 ||
         options.inline_entries == 0 || options.inline_bytes == 0 || options.max_run_bytes == 0 ||

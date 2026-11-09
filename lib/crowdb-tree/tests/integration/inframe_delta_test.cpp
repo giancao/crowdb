@@ -83,7 +83,7 @@ TEST(InFrameDelta, ReadOverlayAndFoldReopen)
             ASSERT_TRUE(t.get(Slice(kv.first), &s, &v)) << "missing " << kv.first;
             EXPECT_EQ(v, kv.second);
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     }
 
     // Reopen: any in-frame deltas persisted in leaf frames overlay on read.

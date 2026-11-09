@@ -13,20 +13,37 @@ use reqwest::{Method, StatusCode};
 use std::sync::Arc;
 
 async fn removal_preserves_accepted_work(method: Method, path: &str) {
-    let fixture = TestRuntimeShutdown::start().await;
+    let mut fixture = TestRuntimeShutdown::start().await;
     let (status, body) = fixture.request(method.clone(), path).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert!(body.contains("shutdown incomplete"), "{body}");
     fixture.assert_retained();
     fixture.repair().await;
     let (status, body) = fixture.request(method, path).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body.contains("old Tree release"), "{body}");
+    assert!(fixture.store.get_group(1).is_none());
+    assert!(fixture.engine_marker.exists());
+    assert!(fixture.wal_marker.exists());
     assert_eq!(
-        fixture.group.local_replica().learner.engine().resume_from_slot(),
+        fixture
+            .group()
+            .local_replica()
+            .learner
+            .engine()
+            .resume_from_slot(),
         2
     );
+    drop(fixture.group.take());
+    tokio::time::timeout(DEADLINE, fixture.registry.wait_management_idle())
+        .await
+        .unwrap();
     assert!(!fixture.engine_marker.exists());
     assert!(!fixture.wal_marker.exists());
+    if path.ends_with("wipe-user-data") {
+        let replacement = fixture.store.get_group(1).unwrap();
+        assert_eq!(replacement.local_replica().learner.engine().resume_from_slot(), 0);
+    }
     if fixture.registry.get_store(1).is_some() {
         assert!(fixture.store.shutdown(DEADLINE).await.is_clean());
     }
@@ -43,6 +60,50 @@ async fn group_removal_retains_registry_and_wal_until_accepted_gap_drains() {
 async fn wipe_retains_registry_and_wal_until_accepted_gap_drains() {
     removal_preserves_accepted_work(Method::POST, "/stores/1/groups/1/wipe-user-data").await;
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn group_removal_waits_for_independent_block_reader_after_tree_close() {
+    use crowdb_paxos_kv::kv::CrowdbTreeEngine;
+
+    let mut fixture = TestRuntimeShutdown::start_with_backend("block").await;
+    fixture.repair().await;
+    let tree = fixture
+        .group()
+        .local_replica()
+        .learner
+        .engine()
+        .as_any()
+        .downcast_ref::<CrowdbTreeEngine>()
+        .unwrap()
+        .handle();
+    let (sequence, coverage) = tree.flush_with_persistent_info().unwrap();
+    let view = tree.read_only_view(sequence, coverage).unwrap();
+    let closed = tree.close_result().unwrap();
+    drop(tree);
+    drop(fixture.group.take());
+
+    let (status, body) = fixture.request(Method::DELETE, "/stores/1/groups/1").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body.contains("old Tree release"), "{body}");
+    tokio::time::timeout(DEADLINE, closed.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(fixture.engine_marker.exists());
+    assert!(fixture.wal_marker.exists());
+    let key = 2u64.to_le_bytes();
+    assert_eq!(view.get(&key).await.unwrap().unwrap().1, key);
+
+    view.close().await.unwrap();
+    drop(view);
+    tokio::time::timeout(DEADLINE, fixture.registry.wait_management_idle())
+        .await
+        .unwrap();
+    assert!(!fixture.engine_marker.exists());
+    assert!(!fixture.wal_marker.exists());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn host_timeout_retains_all_peer_servers_and_waits_for_real_progress() {
     let fixture = TestRuntimeShutdown::start().await;
@@ -84,7 +145,12 @@ async fn host_timeout_retains_all_peer_servers_and_waits_for_real_progress() {
     let report = tokio::time::timeout(DEADLINE, shutdown).await.unwrap().unwrap();
     assert!(report.is_clean(), "{:?}", report.errors);
     assert_eq!(
-        fixture.group.local_replica().learner.engine().resume_from_slot(),
+        fixture
+            .group()
+            .local_replica()
+            .learner
+            .engine()
+            .resume_from_slot(),
         2
     );
 }

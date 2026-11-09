@@ -134,8 +134,7 @@ void Crowdbtree::init_core_metrics(const std::string &prefix)
     });
     registry->register_callback_gauge_inline(prefix, ".frontier.published.g",
                                              [this] { return core_->capture()->coverage; });
-    registry->register_callback_gauge_inline(prefix, ".frontier.durable.g",
-                                             [this] { return durable_snapshot_last_applied_slot(); });
+    registry->register_callback_gauge_inline(prefix, ".frontier.durable.g", [this] { return durable_coverage(); });
     registry->register_callback_gauge_inline(prefix, ".flush.repair.pending.g", [this] {
         return static_cast<uint64_t>(core_->capture()->pending_handoff.has_value());
     });

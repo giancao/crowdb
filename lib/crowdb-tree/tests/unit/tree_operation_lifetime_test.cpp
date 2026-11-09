@@ -15,13 +15,12 @@ using test_read::LoadCredits;
 TEST(TreeOperationLifetime, CloseRejectsIngressAndWaitsForEveryAcceptedOwner)
 {
     LoadCredits                                    credits;
-    TreeOperationLifetime                          lifetime(2, credits.credits.reservation());
+    TreeOperationLifetime                          lifetime(credits.credits.reservation());
     std::shared_ptr<TreeOperationLifetime::Ticket> first;
     std::shared_ptr<TreeOperationLifetime::Ticket> second;
     std::shared_ptr<TreeOperationLifetime::Ticket> rejected;
     ASSERT_TRUE(lifetime.acquire(credits.credits.reservation(), &first).ok());
     ASSERT_TRUE(lifetime.acquire(credits.credits.reservation(), &second).ok());
-    EXPECT_EQ(lifetime.acquire(credits.credits.reservation(), &rejected).code(), Code::kResourceExhausted);
     lifetime.close();
     EXPECT_EQ(lifetime.acquire(credits.credits.reservation(), &rejected).code(), Code::kUnavailable);
     std::atomic<bool>  drained{false};
@@ -46,7 +45,7 @@ TEST(TreeOperationLifetime, CloseRejectsIngressAndWaitsForEveryAcceptedOwner)
 TEST(TreeOperationLifetime, ObjectAndControlBlockAllocationFailuresReturnCapacityExactlyOnce)
 {
     LoadCredits           credits;
-    TreeOperationLifetime lifetime(1);
+    TreeOperationLifetime lifetime;
     // Exercise both object allocation and the later shared control allocation.
     // The latter destroys the newly constructed Ticket during rollback.
     const auto bound    = TreeOperationLifetime::ticket_allocation_bound();
@@ -75,24 +74,52 @@ TEST(TreeOperationLifetime, ObjectAndControlBlockAllocationFailuresReturnCapacit
     lifetime.close_and_drain();
 }
 
-TEST(TreeOperationLifetime, SoftAdmissionReportsOccupiedCapacityWithoutChangingTheHardContract)
+TEST(TreeOperationLifetime, CompletionCanRegisterAfterAdmissionWasFenced)
 {
-    TreeOperationLifetime                          lifetime(1);
-    std::shared_ptr<TreeOperationLifetime::Ticket> first;
-    std::shared_ptr<TreeOperationLifetime::Ticket> next;
-    ASSERT_TRUE(lifetime.acquire({}, &first).ok());
-    EXPECT_EQ(lifetime.try_acquire({}, &next).code(), Code::kUnavailable);
-    EXPECT_EQ(lifetime.acquire({}, &next).code(), Code::kResourceExhausted);
-    const auto usage = lifetime.resource_usage();
-    EXPECT_EQ(usage.limit, 1U);
-    EXPECT_EQ(usage.used, 1U);
-    EXPECT_EQ(usage.denied_tree, 2U);
-    first.reset();
-    ASSERT_TRUE(lifetime.try_acquire({}, &next).ok());
-    EXPECT_EQ(lifetime.resource_usage().used, 1U);
-    next.reset();
-    EXPECT_EQ(lifetime.resource_usage().used, 0U);
-    EXPECT_EQ(lifetime.resource_usage().denied_tree, 2U);
+    LoadCredits credits;
+    for (bool release_first : {false, true}) {
+        std::atomic<unsigned>                          completed{0};
+        TreeOperationLifetime                          lifetime(credits.credits.reservation());
+        std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
+        ASSERT_TRUE(lifetime.acquire(credits.credits.reservation(), &ticket).ok());
+        lifetime.close();
+        if (release_first) {
+            ticket.reset();
+        }
+        lifetime.close_async({.context = &completed, .complete_fn = [](void *context, Status status) noexcept {
+                                  EXPECT_TRUE(status.ok());
+                                  static_cast<std::atomic<unsigned> *>(context)->fetch_add(1,
+                                                                                           std::memory_order_relaxed);
+                              }});
+        EXPECT_EQ(completed.load(), release_first ? 1U : 0U);
+        EXPECT_EQ(lifetime.outstanding(), release_first ? 0U : 1U);
+        std::shared_ptr<TreeOperationLifetime::Ticket> rejected;
+        EXPECT_EQ(lifetime.acquire(credits.credits.reservation(), &rejected).code(), Code::kUnavailable);
+        ticket.reset();
+        lifetime.close();
+        EXPECT_EQ(completed.load(), 1U);
+        EXPECT_EQ(lifetime.outstanding(), 0U);
+    }
+}
+
+TEST(TreeOperationLifetime, SuspendedOperationCountUsesActualMemoryRatherThanACpuWindow)
+{
+    LoadCredits                                                 credits;
+    TreeOperationLifetime                                       lifetime(credits.credits.reservation());
+    std::vector<std::shared_ptr<TreeOperationLifetime::Ticket>> tickets;
+    for (size_t index = 0; index < 1024; ++index) {
+        std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
+        const auto status = index % 2 == 0 ? lifetime.acquire(credits.credits.reservation(), &ticket)
+                                           : lifetime.try_acquire(credits.credits.reservation(), &ticket);
+        ASSERT_TRUE(status.ok());
+        tickets.push_back(std::move(ticket));
+    }
+    EXPECT_EQ(lifetime.resource_usage().limit, 0U);
+    EXPECT_EQ(lifetime.outstanding(), tickets.size());
+    EXPECT_EQ(lifetime.resource_usage().denied_tree, 0U);
+    tickets.clear();
+    EXPECT_EQ(lifetime.outstanding(), 0U);
+    lifetime.close_and_drain();
 }
 
 TEST(TreeOperationLifetime, TicketRetainsChargedStateAndHostAfterIngressOwnerIsDropped)
@@ -102,7 +129,7 @@ TEST(TreeOperationLifetime, TicketRetainsChargedStateAndHostAfterIngressOwnerIsD
     const std::weak_ptr<int>                       weak = host;
     std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
     {
-        TreeOperationLifetime lifetime(1, credits.credits.reservation(), host);
+        TreeOperationLifetime lifetime(credits.credits.reservation(), host);
         ASSERT_TRUE(lifetime.acquire(credits.credits.reservation(), &ticket).ok());
         host.reset();
         EXPECT_FALSE(weak.expired());

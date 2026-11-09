@@ -23,6 +23,9 @@ pub struct PaxosKvArgs {
     /// Snapshot success > 0, failure = 0, elections = 0 over the complete load.
     #[arg(long, global = true)]
     pub require_snapshot: bool,
+    /// For write only, use an existing verified dataset on the same deployment.
+    #[arg(long, global = true)]
+    pub reuse_dataset: bool,
     #[arg(long, global = true)]
     pub expect_window: Option<u64>,
     #[arg(long, global = true)]

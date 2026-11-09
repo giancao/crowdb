@@ -48,7 +48,7 @@ class RuntimeRangeRebuild : public testing::Test
         }
         ASSERT_TRUE(source->apply(1, batch).ok());
         ASSERT_TRUE(source->apply(2, Batch{.ops = {{.key = "050", .kind = OpKind::kDelete, .value = ""}}}).ok());
-        ASSERT_TRUE(source->snapshot().ok());
+        ASSERT_TRUE(source->flush_with_persistent().ok());
     }
 
     Config target_options(bool explicit_runtime = true)
@@ -88,7 +88,7 @@ TEST_F(RuntimeRangeRebuild, BoundedRebuildPersistsOnlyItsRangeAndRemainsIndepend
     ASSERT_TRUE(target->put("040", "target changed").ok());
     EXPECT_EQ(target->get_view("040").slot(), 3U);
     EXPECT_EQ(target->put("outside", "rejected").code(), Code::kInvalidArgument);
-    ASSERT_TRUE(target->snapshot().ok());
+    ASSERT_TRUE(target->flush_with_persistent().ok());
     target.reset();
     options.key_range = range;
     status            = Crowdbtree::open(options, &target);
@@ -141,7 +141,7 @@ TEST_F(RuntimeRangeRebuild, DifferentGeometryAndEmptyRangePreserveCapturedCovera
     options.key_range = range;
     status            = Crowdbtree::open(options, &target);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    EXPECT_EQ(target->durable_snapshot_last_applied_slot(), 2U);
+    EXPECT_EQ(target->durable_coverage(), 2U);
 }
 
 TEST_F(RuntimeRangeRebuild, FailedDestinationStagingPreservesExistingOutputAndSourceValues)

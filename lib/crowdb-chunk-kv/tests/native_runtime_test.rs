@@ -39,6 +39,18 @@ async fn range_rebuild_keeps_the_runtime_available_during_catalog_io() {
         .await
         .unwrap();
     source.checkpoint(0).await.unwrap();
+    for (sequence, key, value) in [(2, b"key", b"new"), (3, b"out", b"old")] {
+        source
+            .apply(
+                sequence,
+                &MutationOperation::Put {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+    }
     let mut child_backend = TestChunkBackend::new(92, 1).unwrap();
     let hook = observed.clone();
     child_backend
@@ -51,11 +63,19 @@ async fn range_rebuild_keeps_the_runtime_available_during_catalog_io() {
         progress.async_progress.store(true, Ordering::Release);
     });
     observed.armed.store(true, Ordering::Release);
-    let (child, _) = tokio::spawn(async move {
-        source
-            .rebuild_range(92, &PartitionRange::default(), child_config)
+    let (source, child, stats) = tokio::spawn(async move {
+        let (child, stats) = source
+            .rebuild_range(
+                92,
+                &PartitionRange {
+                    start: Some(b"k".to_vec()),
+                    end: Some(b"l".to_vec()),
+                },
+                child_config,
+            )
             .await
-            .unwrap()
+            .unwrap();
+        (source, child, stats)
     })
     .await
     .unwrap();
@@ -64,7 +84,11 @@ async fn range_rebuild_keeps_the_runtime_available_during_catalog_io() {
         observed.observed_progress.load(Ordering::Acquire),
         "catalog IO blocked the only async worker"
     );
-    assert_eq!(child.get(b"key").await.unwrap().unwrap().value, b"value");
+    assert_eq!(source.checkpoint_state().unwrap().1, 1);
+    assert_eq!(child.checkpoint_state().unwrap().1, 3);
+    assert_eq!(stats.entries_emitted, 1);
+    assert_eq!(child.get(b"key").await.unwrap().unwrap().value, b"new");
+    assert!(child.get(b"out").await.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

@@ -35,9 +35,14 @@ template <class T> class GrantControlAllocator
         if (count > std::numeric_limits<size_t>::max() / sizeof(T)) {
             throw std::bad_array_new_length();
         }
-        const auto bytes  = count * sizeof(T);
-        auto       credit = source_->allocate(bytes);
-        if (!credit || !owner_->adopt_allocated(&*credit)) {
+        const auto bytes = count * sizeof(T);
+        if (source_ != nullptr) {
+            auto credit = source_->allocate(bytes);
+            if (!credit || !owner_->adopt_allocated(&*credit)) {
+                throw std::bad_alloc();
+            }
+        }
+        else if (!owner_->claim_ongoing(bytes)) {
             throw std::bad_alloc();
         }
         try {
@@ -81,8 +86,26 @@ template <class T> class GrantControlAllocator
 
 BackendAllocationGrant::BackendAllocationGrant(std::shared_ptr<AllocationAccount> owner, ResourceBudget::Credit credit)
     : owner_(std::move(owner)),
-      source_(std::move(credit))
+      source_(std::in_place, std::move(credit))
 {
+}
+
+BackendAllocationGrant::BackendAllocationGrant(std::shared_ptr<AllocationAccount> owner) : owner_(std::move(owner))
+{
+}
+
+Status BackendAllocationGrant::create_ongoing(std::shared_ptr<AllocationAccount>       owner,
+                                              std::shared_ptr<BackendAllocationGrant> *out)
+try {
+    if (!owner || out == nullptr || *out) {
+        return Status::invalid_argument("accepted backend work requires its stable account");
+    }
+    *out = std::allocate_shared<BackendAllocationGrant>(GrantControlAllocator<BackendAllocationGrant>(owner, nullptr),
+                                                        owner);
+    return Status::Ok();
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted();
 }
 
 Status BackendAllocationGrant::create(std::shared_ptr<AllocationAccount> owner, ResourceBudget::Credit credit,
@@ -104,12 +127,17 @@ catch (const std::invalid_argument &) {
 
 bool BackendAllocationGrant::claim(size_t bytes) noexcept
 {
-    return owner_->claim_from(source_, bytes);
+    return source_ ? owner_->claim_from(*source_, bytes) : owner_->claim_ongoing(bytes);
 }
 
 void BackendAllocationGrant::release(size_t bytes) noexcept
 {
-    owner_->release_to(source_, bytes);
+    if (source_) {
+        owner_->release_to(*source_, bytes);
+    }
+    else {
+        owner_->release(bytes);
+    }
 }
 
 void BackendAllocationGrant::record_allocation(AllocationKind kind, size_t bytes, bool acquired) noexcept
@@ -124,6 +152,8 @@ const void *BackendAllocationGrant::domain() const noexcept
 
 void BackendAllocationGrant::seal() noexcept
 {
-    source_.seal();
+    if (source_) {
+        source_->seal();
+    }
 }
 } // namespace crowdb::tree::detail

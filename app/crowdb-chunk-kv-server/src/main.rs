@@ -173,7 +173,8 @@ async fn main() -> std::process::ExitCode {
         metrics_runner.as_mut(),
     )
     .await;
-    host.close().await;
+    host.close(std::time::Duration::from_millis(config.shutdown_drain_timeout_ms))
+        .await;
     if let Some(runner) = &mut metrics_runner {
         runner.stop().await;
     }
@@ -263,7 +264,10 @@ async fn serve_host(
         .await
     {
         Ok(Some((head, pages, recovered))) => {
-            if let Err(error) = service.install_catalog_and_reconcile(&head, &pages, &recovered) {
+            if let Err(error) = service
+                .install_catalog_and_reconcile(&head, &pages, &recovered)
+                .await
+            {
                 error!(%error, "failed to install initial chunk KV catalog and partitions");
                 return std::process::ExitCode::FAILURE;
             }
@@ -285,7 +289,9 @@ async fn serve_host(
                 .await
                 {
                     Ok((head, pages, partition)) => {
-                        if let Err(error) = service.install_catalog_and_reconcile(&head, &pages, &[partition])
+                        if let Err(error) = service
+                            .install_catalog_and_reconcile(&head, &pages, &[partition])
+                            .await
                         {
                             error!(%error, "failed to install bootstrapped chunk KV catalog");
                             return std::process::ExitCode::FAILURE;
@@ -488,7 +494,6 @@ async fn serve_host(
     }
     install_latest_grant(&control_store, &service, config).await;
     let materialization_service = Arc::clone(&service);
-    let materialization_storage = Arc::clone(&storage);
     let materialization_interval = std::time::Duration::from_millis(config.catalog_refresh_interval_ms);
     let stop = host.stop.clone();
     let materialization_task = tokio::spawn(async move {
@@ -514,13 +519,6 @@ async fn serve_host(
                     false
                 }
             };
-            match materialization_service
-                .resume_legacy_retirement(&materialization_storage)
-                .await
-            {
-                Ok(backlog) => pending |= backlog,
-                Err(error) => warn!(%error, "legacy Chunk retirement deferred; retaining durable claims"),
-            }
         }
     });
     host.tasks[2] = Some(materialization_task);

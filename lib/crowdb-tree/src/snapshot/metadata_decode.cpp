@@ -20,16 +20,6 @@ template <class T> T get(std::span<const uint8_t> input, size_t offset)
     return value;
 }
 
-bool valid_word(uint64_t word, uint16_t version)
-{
-    if (slot_word::is_empty(word)) {
-        return true;
-    }
-    if (slot_word::is_page_ref(word)) {
-        return version == 2 && slot_word::page_ref_iu_count(word) != 0;
-    }
-    return slot_word::is_byte_location(word) && slot_word::unloaded_iu_count(word) != 0;
-}
 } // namespace
 
 Status decode_segment_into(std::span<const uint8_t> input, SegmentImageHeader *header, std::span<uint64_t> words)
@@ -47,8 +37,8 @@ Status decode_segment_into(std::span<const uint8_t> input, SegmentImageHeader *h
                                      .generation     = get<uint64_t>(input, 12),
                                      .slot_count     = get<uint32_t>(input, 20),
                                      .live_count     = get<uint32_t>(input, 24)};
-    if (((decoded.format_version != 1 || decoded.flags != 0) && (decoded.format_version != 2 || decoded.flags != 1)) ||
-        decoded.live_count > decoded.slot_count || input.size() < segment_image_encoded_size(decoded.slot_count)) {
+    if (decoded.format_version != 1 || decoded.flags != 0 || decoded.live_count > decoded.slot_count ||
+        input.size() < segment_image_encoded_size(decoded.slot_count)) {
         return Status::corruption();
     }
     if (words.size() < decoded.slot_count) {
@@ -62,7 +52,7 @@ Status decode_segment_into(std::span<const uint8_t> input, SegmentImageHeader *h
     uint32_t live = 0;
     for (uint32_t i = 0; i < decoded.slot_count; ++i) {
         const auto word = get<uint64_t>(input, 32 + (static_cast<size_t>(i) * sizeof(uint64_t)));
-        if (!valid_word(word, decoded.format_version)) {
+        if (!slot_word::is_empty(word) && (!slot_word::is_unloaded(word) || slot_word::unloaded_iu_count(word) == 0)) {
             return Status::corruption();
         }
         live += slot_word::is_empty(word) ? 0 : 1;

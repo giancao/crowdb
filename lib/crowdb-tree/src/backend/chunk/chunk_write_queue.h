@@ -20,6 +20,11 @@ class ChunkWriteQueue : public std::enable_shared_from_this<ChunkWriteQueue>
     struct Batch;
 
   public:
+    static std::shared_ptr<ChunkWriteQueue> create(const std::shared_ptr<AllocationBudget> &metadata)
+    {
+        return std::allocate_shared<ChunkWriteQueue>(MetadataAllocator<ChunkWriteQueue>(metadata), metadata);
+    }
+
     explicit ChunkWriteQueue(std::shared_ptr<AllocationBudget> metadata) : metadata_(std::move(metadata))
     {
     }

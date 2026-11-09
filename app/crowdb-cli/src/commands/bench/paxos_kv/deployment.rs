@@ -43,11 +43,19 @@ pub(super) fn validate_budget(args: &PaxosKvArgs, nodes: &[ServerProcess]) -> Re
     for node in nodes {
         let (limit, current) = memory(node)?;
         let Some(limit) = limit else { continue };
+        let guard = u128::from(limit) * u128::from(args.memory_guard_percent);
+        if args.reuse_dataset {
+            if u128::from(current) * 100 >= guard {
+                return Err(format!(
+                    "{}: memory guard rejected load at {current}/{limit} bytes ({}% limit)",
+                    node.evidence["name"], args.memory_guard_percent
+                ));
+            }
+            continue;
+        }
         // Startup estimate for replicas' WAL, Tree and working buffers;
         // the runtime guard remains necessary because write amplification is variable.
-        if (u128::from(current) + u128::from(payload) * 2) * 100
-            > u128::from(limit) * u128::from(args.memory_guard_percent)
-        {
+        if (u128::from(current) + u128::from(payload) * 2) * 100 > guard {
             return Err(format!("{}: dataset {payload} bytes exceeds memory budget: current={current}, limit={limit}; reduce --key-space or --value-size", node.evidence["name"]));
         }
     }

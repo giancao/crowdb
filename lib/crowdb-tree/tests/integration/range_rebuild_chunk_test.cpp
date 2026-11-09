@@ -35,7 +35,7 @@ void fill(TestCoreChunk &test)
     for (size_t index = 0; index < 80; ++index) {
         ASSERT_TRUE(test.tree->put("k" + std::to_string(1000 + index), std::string(128, 'v')).ok());
     }
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
 }
 
 Status rebuild(TestCoreChunk &source, TestCoreChunk &child, const KeyRange &range, RangeRebuildStats *stats = nullptr)
@@ -70,7 +70,7 @@ TEST(RangeRebuildChunk, ChildPublishesIndependentPaidBackingAndKeepsParentUnchan
     ASSERT_TRUE(child_root->primary);
     EXPECT_NE(source_root->primary->frame.backing, child_root->primary->frame.backing);
     ASSERT_TRUE(child.tree->put("new-key", "child-only").ok());
-    const auto checkpoint_status = child.tree->snapshot();
+    const auto checkpoint_status = child.tree->flush_with_persistent();
     ASSERT_TRUE(checkpoint_status.ok()) << checkpoint_status.to_string();
     EXPECT_EQ(source.backend.catalog->committed_manifest, old_source);
     EXPECT_FALSE(contents(*source.tree).contains("new-key"));
@@ -86,22 +86,22 @@ TEST(RangeRebuildChunk, ImportedGenerationCanCheckpointLaterWritesAndReopenExact
     ASSERT_TRUE(source.tree->flush().ok());
     auto status = rebuild(source, child, KeyRange::unbounded());
     ASSERT_TRUE(status.ok()) << status.to_string();
-    EXPECT_EQ(child.tree->durable_snapshot_last_applied_slot(), 1U);
-    EXPECT_EQ(child.tree->durable_snapshot_seq(), 1U);
+    EXPECT_EQ(child.tree->durable_coverage(), 1U);
+    EXPECT_EQ(child.tree->durable_sequence(), 1U);
     for (uint64_t slot = 2; slot <= 3; ++slot) {
         ASSERT_TRUE(
             child.tree->apply(slot, Batch{.ops = {{.key = "c", .kind = OpKind::kPut, .value = std::to_string(slot)}}})
                 .ok());
-        status = child.tree->snapshot();
+        status = child.tree->flush_with_persistent();
         ASSERT_TRUE(status.ok()) << status.to_string();
-        EXPECT_EQ(child.tree->durable_snapshot_last_applied_slot(), slot);
-        EXPECT_EQ(child.tree->durable_snapshot_seq(), slot);
+        EXPECT_EQ(child.tree->durable_coverage(), slot);
+        EXPECT_EQ(child.tree->durable_sequence(), slot);
     }
     const auto generation = child.backend.catalog->current_generation;
     child.tree.reset();
     status = child.open(generation);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    EXPECT_EQ(child.tree->durable_snapshot_last_applied_slot(), 3U);
+    EXPECT_EQ(child.tree->durable_coverage(), 3U);
     EXPECT_EQ(contents(*child.tree), (std::map<std::string, std::string>{
                                          {"b", "base"},
                                          {"c", "3"   }
@@ -114,12 +114,12 @@ TEST(RangeRebuildChunk, RetryReplacesAnAlreadyCommittedChildThroughItsAuthority)
     TestCoreChunk child;
     ASSERT_TRUE(source.open().ok());
     ASSERT_TRUE(source.tree->put("a", "first").ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
     ASSERT_TRUE(rebuild(source, child, KeyRange::unbounded()).ok());
     const auto generation = child.backend.catalog->current_generation;
     next_owner(child);
     ASSERT_TRUE(source.tree->put("b", "second").ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
     ASSERT_TRUE(rebuild(source, child, KeyRange::unbounded()).ok());
     EXPECT_GT(child.backend.catalog->current_generation, generation);
     EXPECT_EQ(contents(*child.tree), (std::map<std::string, std::string>{
@@ -154,7 +154,7 @@ TEST(RangeRebuildChunk, BoundedChildHasOnlyItsReachableGraphAndReopens)
     EXPECT_FALSE(contents(*child.tree).contains("k1019"));
     EXPECT_FALSE(contents(*child.tree).contains("k1060"));
     ASSERT_TRUE(child.tree->put("k1030x", "after-reopen").ok());
-    ASSERT_TRUE(child.tree->snapshot().ok());
+    ASSERT_TRUE(child.tree->flush_with_persistent().ok());
     child.tree.reset();
     ASSERT_TRUE(child.open(child.backend.catalog->current_generation).ok());
     EXPECT_EQ(contents(*child.tree).at("k1030x"), "after-reopen");
@@ -166,12 +166,12 @@ TEST(RangeRebuildChunk, UncheckpointedPublishedSourceIsCopiedAndDurableInChild)
     TestCoreChunk child;
     ASSERT_TRUE(source.open().ok());
     ASSERT_TRUE(source.tree->put("key", "old").ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
-    const auto durable = source.tree->durable_snapshot_last_applied_slot();
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
+    const auto durable = source.tree->durable_coverage();
     ASSERT_TRUE(source.tree->put("key", "new").ok());
     ASSERT_TRUE(source.tree->flush().ok());
     ASSERT_TRUE(rebuild(source, child, KeyRange::unbounded()).ok());
-    EXPECT_EQ(source.tree->durable_snapshot_last_applied_slot(), durable);
+    EXPECT_EQ(source.tree->durable_coverage(), durable);
     EXPECT_EQ(contents(*child.tree).at("key"), "new");
     child.tree.reset();
     ASSERT_TRUE(child.open(child.backend.catalog->current_generation).ok());
@@ -184,12 +184,12 @@ TEST(RangeRebuildChunk, FailedReplacementKeepsOldRootRecoverable)
     TestCoreChunk child;
     ASSERT_TRUE(source.open().ok());
     ASSERT_TRUE(source.tree->put("key", "old").ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
     ASSERT_TRUE(rebuild(source, child, KeyRange::unbounded()).ok());
     const auto generation = child.backend.catalog->current_generation;
     next_owner(child);
     ASSERT_TRUE(source.tree->put("key", "new").ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
     child.backend.catalog->fail_commit = true;
     EXPECT_FALSE(rebuild(source, child, KeyRange::unbounded()).ok());
     EXPECT_FALSE(child.tree);

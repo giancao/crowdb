@@ -191,7 +191,11 @@ async fn concurrent_transition_pin_keeps_source_wal_and_chunk_records() {
         .await
         .unwrap()
         .is_empty());
-    fixture.partition.release_generation_pin(transition).unwrap();
+    fixture
+        .partition
+        .release_generation_pin(transition)
+        .await
+        .unwrap();
     fixture.drain().await;
     assert_eq!(fixture.store.chunk_records_for_tests(NAME).await.unwrap(), before);
     assert_eq!(
@@ -300,7 +304,11 @@ async fn collection_failure_preserves_retry_and_transition_pin_suppresses_collec
     assert_ne!(checkpoint.root_manifest_generation, 0);
     assert!(!fixture.partition.maintain_serving_metadata(EPOCH).await.unwrap());
     assert_eq!(fixture.tree.collection_calls_for_tests(), 1);
-    fixture.partition.release_generation_pin(transition).unwrap();
+    fixture
+        .partition
+        .release_generation_pin(transition)
+        .await
+        .unwrap();
     assert!(fixture.partition.maintain_serving_metadata(EPOCH).await.unwrap());
     assert!(!fixture.partition.maintain_serving_metadata(EPOCH).await.unwrap());
     assert_eq!(fixture.tree.collection_calls_for_tests(), 3);

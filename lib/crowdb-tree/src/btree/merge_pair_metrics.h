@@ -77,7 +77,7 @@ class MergePairMetrics
     class Prepared
     {
       public:
-        Prepared(MergePairMetrics &owner, const std::shared_ptr<detail::AllocationReservation> &metadata,
+        Prepared(MergePairMetrics &owner, const std::shared_ptr<AllocationBudget> &metadata,
                  std::shared_ptr<const void> resource_owner);
         Prepared(const Prepared &)                                              = delete;
         Prepared                                   &operator=(const Prepared &) = delete;

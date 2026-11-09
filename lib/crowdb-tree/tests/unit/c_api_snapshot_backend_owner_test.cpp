@@ -8,6 +8,9 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <future>
+
 namespace crowdb::tree
 {
 namespace
@@ -42,7 +45,7 @@ void continue_after_close(bool injected)
                   0);
     }
     uint64_t coverage = 0;
-    ASSERT_EQ(ct_snapshot(tree.get(), &coverage), 0);
+    ASSERT_EQ(ct_flush_with_persistent(tree.get(), &coverage), 0);
     ASSERT_EQ(coverage, 2U);
     tree.reset();
     raw_tree = nullptr;
@@ -70,8 +73,32 @@ void continue_after_close(bool injected)
     ASSERT_LE(returned, 64U);
     ASSERT_NE(first_data, nullptr);
     ct_snapshot_chunk_free(first);
-    tree.reset();
-    runtime.reset();
+    if (injected) {
+        // A consuming close must release the source without joining this
+        // independent reader. The runtime host remains live for the stream.
+        auto       completed = std::make_unique<std::promise<ct_status>>();
+        auto       result    = completed->get_future();
+        auto      *context   = completed.release();
+        auto      *source    = tree.release();
+        const auto accepted  = ct_close_async(
+            source,
+            [](void *context, ct_status status) {
+                std::unique_ptr<std::promise<ct_status>> ready(static_cast<std::promise<ct_status> *>(context));
+                ready->set_value(status);
+            },
+            context);
+        if (accepted != 0) {
+            tree.reset(source);
+            completed.reset(context);
+        }
+        ASSERT_EQ(accepted, 0);
+        ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(result.get(), 0);
+    }
+    else {
+        tree.reset();
+        runtime.reset();
+    }
     ASSERT_FALSE(backend.expired());
     ASSERT_FALSE(domain.expired());
     while (done == 0) {
@@ -89,6 +116,9 @@ void continue_after_close(bool injected)
     }
     EXPECT_EQ(returned, total);
     stream.reset();
+    if (runtime) {
+        ct_runtime_drain_cpu(runtime.get());
+    }
     EXPECT_TRUE(backend.expired());
     EXPECT_TRUE(domain.expired());
 }

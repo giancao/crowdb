@@ -151,14 +151,14 @@ std::shared_ptr<const PublishedPage> FlushBatch::State::Subtree::lookup(uint64_t
     return builder ? builder->lookup(page_id) : owner.captured->mapping.get(page_id);
 }
 
-Status FlushBatch::State::Subtree::collect(PublicationTransaction &transaction)
+Status FlushBatch::State::Subtree::collect(PublicationTransaction &transaction, uint64_t &handoff_bytes)
 {
     if (range) {
-        transaction.required_installs.push_back(range->record);
+        handoff_bytes += range->bytes;
     }
     for (auto &child : children) {
         if (child) {
-            auto status = child->collect(transaction);
+            auto status = child->collect(transaction, handoff_bytes);
             if (!status.ok()) {
                 return status;
             }
@@ -262,7 +262,7 @@ Status FlushBatch::State::Subtree::prepare_root()
     return Status::Ok();
 }
 
-Status FlushBatch::State::collect_subtree(PublicationTransaction &transaction)
+Status FlushBatch::State::collect_subtree(PublicationTransaction &transaction, uint64_t &handoff_bytes)
 {
     if (!options.consolidation) {
         return Status::internal_error("flush consolidation options are absent");
@@ -280,15 +280,17 @@ Status FlushBatch::State::collect_subtree(PublicationTransaction &transaction)
     transaction.expected_next_page_id = captured->next_page_id;
     transaction.next_page_id          = next_pid.load(std::memory_order_relaxed);
     transaction.snapshot_metadata     = snapshot_metadata;
-    auto status                       = subtree->collect(transaction);
+    auto status                       = subtree->collect(transaction, handoff_bytes);
     if (!status.ok()) {
         return status;
     }
     std::sort(transaction.pages.begin(), transaction.pages.end(),
               [](const auto &a, const auto &b) { return a.page_id < b.page_id; });
-    // The root publishes the complete fork/join result. The idle maintenance
-    // window only prepaid a bounded subset, so size this final publication
-    // from its actual replacement set before entering the publication lane.
+    const auto reserved_metadata = std::dynamic_pointer_cast<detail::AllocationReservation>(metadata);
+    if (!reserved_metadata) {
+        return Status::Ok();
+    }
+    // Legacy standalone maintenance can still supply prepaid metadata.
     const auto bytes =
         detail::AllocationBound(detail::shared_allocation_bound<detail::AllocationReservation>())
             .add_product(transaction.pages.size(), PublicationCoordinator::snapshot_change_reserve_bytes())
@@ -296,11 +298,13 @@ Status FlushBatch::State::collect_subtree(PublicationTransaction &transaction)
     if (!bytes) {
         return Status::resource_exhausted("flush publication metadata bound overflow");
     }
-    if (metadata && (!snapshot_metadata || snapshot_metadata->available() < *bytes)) {
-        if (snapshot_metadata) {
-            snapshot_metadata->seal();
+    const auto reserved_snapshot = std::dynamic_pointer_cast<detail::AllocationReservation>(snapshot_metadata);
+    if (!reserved_snapshot || reserved_snapshot->available() < *bytes) {
+        if (reserved_snapshot) {
+            reserved_snapshot->seal();
         }
-        auto credit = detail::ResourceBudget::try_reserve(metadata->account(), detail::BudgetClass::kRouting, *bytes);
+        auto credit =
+            detail::ResourceBudget::try_reserve(reserved_metadata->account(), detail::BudgetClass::kRouting, *bytes);
         if (!credit) {
             return Status::resource_exhausted("flush publication metadata credit unavailable");
         }

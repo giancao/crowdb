@@ -24,8 +24,9 @@ impl AsyncCrowdbtree {
     }
 
     /// Await a durable checkpoint and retain its progress even on failure.
-    pub async fn checkpoint_report(&self) -> Result<CheckpointReport, CtError> {
-        self.checkpoint_with(sys::ct_checkpoint_report_async).await
+    pub async fn flush_with_persistent_report(&self) -> Result<CheckpointReport, CtError> {
+        self.checkpoint_with(sys::ct_flush_with_persistent_report_async)
+            .await
     }
 
     async fn checkpoint_with(

@@ -10,7 +10,7 @@
 namespace crowdb::tree
 {
 LocalCheckpointOperation::State::Window::Window(size_t size, size_t alignment,
-                                                const std::shared_ptr<detail::AllocationReservation> &budget)
+                                                const std::shared_ptr<AllocationBudget> &budget)
     : storage(size + alignment - 1, detail::ReservationAllocator<uint8_t, AllocationKind::kIo>(budget))
 {
     void *data     = storage.data();
@@ -22,7 +22,7 @@ LocalCheckpointOperation::State::Window::Window(size_t size, size_t alignment,
 
 LocalCheckpointOperation::State::State(PageLoadBudget credits)
     : budget(std::move(credits)),
-      directory(detail::ReservationAllocator<DirEntry>(budget.reservation()))
+      directory(detail::ReservationAllocator<DirEntry>(budget.bytes))
 {
 }
 
@@ -35,26 +35,25 @@ Status LocalCheckpointOperation::create(std::shared_ptr<const CapturedDurablePag
 {
     if (!pages || !registry || !store || !runtime || !lane || out == nullptr || limits.max_segments == 0 ||
         limits.max_segments > kMaxMappingSegments ||
-        static_cast<bool>(budget.reservation()) != static_cast<bool>(budget.io) ||
-        (budget.reservation() && ((budget.reservation()->category() != detail::BudgetClass::kRouting &&
-                                   budget.reservation()->category() != detail::BudgetClass::kReclaim) ||
-                                  budget.io->category() != detail::BudgetClass::kIo ||
-                                  budget.reservation()->account() != budget.io->account()))) {
+        (budget.reservation() && budget.reservation()->category() != detail::BudgetClass::kRouting &&
+         budget.reservation()->category() != detail::BudgetClass::kReclaim) ||
+        (budget.io && (!budget.reservation() || budget.io->category() != detail::BudgetClass::kIo ||
+                       budget.reservation()->account() != budget.io->account()))) {
         return Status::invalid_argument();
     }
     if (!store->write_completion_is_reloadable()) {
         return Status::not_supported();
     }
     try {
-        auto state          = detail::reserved_shared<State>(budget.reservation(), budget);
+        auto state          = detail::reserved_shared<State>(budget.bytes, budget);
         state->limits       = limits;
         state->registry     = std::move(registry);
         state->store        = std::move(store);
         state->runtime      = std::move(runtime);
         state->lane         = std::move(lane);
-        state->image        = detail::reserved_shared<ProtectedCheckpoint>(budget.reservation(), budget.reservation());
+        state->image        = detail::reserved_shared<ProtectedCheckpoint>(budget.bytes, budget.bytes);
         state->image->pages = std::move(pages);
-        *out = detail::reserved_construct<LocalCheckpointOperation>(budget.reservation(), [&](auto *storage) {
+        *out                = detail::reserved_construct<LocalCheckpointOperation>(budget.bytes, [&](auto *storage) {
             ::new (static_cast<void *>(storage)) LocalCheckpointOperation(std::move(state));
         });
     }
@@ -135,9 +134,9 @@ void LocalCheckpointOperation::State::begin()
     previous            = sequence == 0 ? nullptr : registry->anchors_[sequence % 2 == 0 ? 1 : 0];
     iu                  = registry->ledger_->limits().iu_size;
     segment_bytes       = round_up_to_iu(segment_image_encoded_size(kMappingSegmentSize), iu);
-    window = detail::reserved_shared<Window>(budget.reservation(),
+    window = detail::reserved_shared<Window>(budget.bytes,
                                              std::max<uint64_t>(segment_bytes, snapshot::superblock_slot_bytes(iu)),
-                                             std::bit_ceil(std::max<size_t>(4096, iu)), budget.reservation());
+                                             std::bit_ceil(std::max<size_t>(4096, iu)), budget.bytes);
     auto &anchor             = image->anchor;
     anchor.magic             = snapshot::kAnchorMagic;
     anchor.format_version    = snapshot::kFormatVersion;

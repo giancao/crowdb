@@ -89,7 +89,7 @@ TEST(SourceHostWait, SplitCaptureWaitsForThePreparingController)
     EXPECT_EQ(tree.get_view("key").value().to_string(), "value");
 }
 
-TEST(SourceHostWait, SplitCaptureReturnsQuotaFailureWithoutWaiting)
+TEST(SourceHostWait, SplitCaptureUsesActualMemoryWithASmallReclaimPartition)
 {
     Config             config;
     TreeRuntimeOptions host;
@@ -104,9 +104,10 @@ TEST(SourceHostWait, SplitCaptureReturnsQuotaFailureWithoutWaiting)
     uint64_t   session  = 71;
     uint64_t   frontier = 72;
     const auto status   = tree.begin_split_memtable_view(&session, &frontier);
-    EXPECT_EQ(status.code(), Code::kResourceExhausted) << status.to_string();
-    EXPECT_EQ(session, 71U);
-    EXPECT_EQ(frontier, 72U);
+    ASSERT_TRUE(status.ok()) << status.to_string();
+    EXPECT_NE(session, 0U);
+    EXPECT_EQ(frontier, 1U);
+    ASSERT_TRUE(tree.release_split_memtable_view(session).ok());
     EXPECT_EQ(tree.get_view("key").value().to_string(), "value");
 }
 

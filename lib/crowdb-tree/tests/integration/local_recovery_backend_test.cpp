@@ -90,8 +90,7 @@ TEST(LocalRecovery, ReopenedBlockFilesRebuildProtectedPrimaryAndOverflowOwners)
     recovery.reset();
     EXPECT_EQ(ledger->stats().protected_ranges, pages->frames.size());
     auto loader = std::make_shared<AsyncStorePageLoader>(
-        store, test.source.runtime, test.source.lane,
-        PageLoadLimits{.max_inflight = 1, .max_blob_bytes = 4096, .max_frame_bytes = 4096},
+        store, test.source.runtime, test.source.lane, PageLoadLimits{.max_blob_bytes = 4096, .max_frame_bytes = 4096},
         [pages](uint64_t pid, std::shared_ptr<const BackingRef> *out) {
             const auto frame = pages->frames.find(pid);
             if (frame == pages->frames.end()) {

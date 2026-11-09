@@ -24,7 +24,7 @@ TEST_P(ChunkSnapshotExport, ColdCapturedStreamImportsAfterSourceWriterReplacemen
     batch.ops.push_back({.key = "gone", .kind = OpKind::kPut, .value = "deleted"});
     ASSERT_TRUE(source.tree->apply(1, batch).ok());
     ASSERT_TRUE(source.tree->apply(2, Batch{.ops = {{.key = "gone", .kind = OpKind::kDelete, .value = ""}}}).ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
     source.tree.reset();
     ASSERT_TRUE(source.open().ok());
     std::unique_ptr<SnapshotExport> exporter;
@@ -38,7 +38,7 @@ TEST_P(ChunkSnapshotExport, ColdCapturedStreamImportsAfterSourceWriterReplacemen
                                         {.key = "later", .kind = OpKind::kPut, .value = "new"}}
     })
                     .ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
     source.tree.reset();
 
     test_chunk::TestCoreChunk destination;
@@ -67,10 +67,10 @@ TEST_P(ChunkSnapshotExport, ColdCapturedStreamImportsAfterSourceWriterReplacemen
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(slot, 2U);
     exporter.reset();
-    ASSERT_TRUE(destination.tree->snapshot().ok());
+    ASSERT_TRUE(destination.tree->flush_with_persistent().ok());
     destination.tree.reset();
     ASSERT_TRUE(destination.open().ok());
-    EXPECT_EQ(destination.tree->durable_snapshot_last_applied_slot(), 2U);
+    EXPECT_EQ(destination.tree->durable_coverage(), 2U);
     EXPECT_EQ(destination.tree->get_view("overflow").value().to_string(), overflow);
     EXPECT_FALSE(destination.tree->get_view("gone").found());
     EXPECT_FALSE(destination.tree->get_view("later").found());

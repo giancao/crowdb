@@ -18,7 +18,9 @@ TEST(RpcChunkStaging, FixedIdentityIsInTheSubmittedAllocation)
     options.chunkdb_resolver = fixture.resolver();
     RpcChunkTransport transport(options);
     const ChunkId     id(0x0200'0000'0000'0042ULL, 144);
-    ASSERT_TRUE(transport.allocate_fixed_chunk(id, 4096, 17, PagePurpose::kBtreePage).ok());
+    ASSERT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(transport, id, 4096, 17,
+                                                                                 PagePurpose::kBtreePage)
+                    .ok());
     EXPECT_EQ(fixture.services[0].requested_low.load(), id.low);
     EXPECT_EQ(fixture.services[0].allocations.load(), 1U);
     EXPECT_EQ(fixture.services[1].allocations.load(), 0U);
@@ -36,7 +38,9 @@ TEST(RpcChunkStaging, UnknownAllocationDoesNotRetryWithAnotherIdentity)
     options.chunkdb_resolver = fixture.resolver();
     RpcChunkTransport transport(options);
     const ChunkId     id(0x0200'0000'0000'0042ULL, 145);
-    EXPECT_FALSE(transport.allocate_fixed_chunk(id, 4096, 17, PagePurpose::kBtreePage).ok());
+    EXPECT_FALSE(await_chunk_rpc<&RpcChunkTransport::submit_allocate_fixed_chunk>(transport, id, 4096, 17,
+                                                                                  PagePurpose::kBtreePage)
+                     .ok());
     EXPECT_EQ(fixture.services[1].requested_low.load(), id.low);
     EXPECT_EQ(fixture.services[1].allocations.load(), 1U);
     EXPECT_EQ(fixture.services[0].allocations.load(), 0U);
@@ -54,10 +58,10 @@ TEST(RpcChunkStaging, DeleteRequiresACompleteTombstoneAndFencesMissingAllocation
     RpcChunkTransport transport(options);
     const ChunkId     id(0x0200'0000'0000'0042ULL, 144);
     fixture.services[0].unfinished_delete = true;
-    EXPECT_FALSE(transport.delete_chunk(id).ok());
+    EXPECT_FALSE(await_chunk_rpc<&RpcChunkTransport::submit_delete_chunk>(transport, id).ok());
     EXPECT_TRUE(fixture.services[0].fence_missing.load());
     fixture.services[0].unfinished_delete = false;
-    EXPECT_TRUE(transport.delete_chunk(id).ok());
+    EXPECT_TRUE(await_chunk_rpc<&RpcChunkTransport::submit_delete_chunk>(transport, id).ok());
     EXPECT_EQ(fixture.services[0].deletes.load(), 2U);
 }
 } // namespace crowdb::tree::detail

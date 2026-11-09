@@ -39,6 +39,10 @@ struct ChunkPhysicalRegistry::State : std::enable_shared_from_this<State>
         std::optional<detail::ChunkAllocationIdentity> receipt;
         Status                                         status;
         std::atomic<bool>                              done{false};
+        detail::ChunkTransportCompletion               completion;
+        std::shared_ptr<ChunkPhysicalPack>            *output    = nullptr;
+        ChunkPhysicalAdmission                        *admission = nullptr;
+        std::shared_ptr<Request>                       rollback;
     };
 
     explicit State(std::shared_ptr<detail::RetirementQueue> queue) : queue(std::move(queue))
@@ -47,6 +51,7 @@ struct ChunkPhysicalRegistry::State : std::enable_shared_from_this<State>
 
     bool        retire_step() noexcept;
     Status      execute(const std::shared_ptr<Request> &request);
+    void        submit(const std::shared_ptr<Request> &request);
     void        apply(Request &request);
     static bool dispatch(detail::RetirementNode *node) noexcept;
     static void abort(const std::shared_ptr<void> &owner) noexcept;

@@ -85,21 +85,11 @@ void TreeCore::checkpoint_async(std::function<void(Status, uint64_t)> complete)
         else {
             fallback_coverage = durable_coverage();
             using namespace detail;
-            constexpr auto bytes =
-                shared_allocation_bound<CheckpointCall>() + shared_allocation_bound<AllocationReservation>();
-            auto reserved = ResourceBudget::try_reserve(binding()->account(), BudgetClass::kReclaim, bytes);
-            if (!reserved) {
-                status = Status::resource_exhausted("checkpoint callback credit unavailable");
-            }
-            else {
-                auto                                 credit = AllocationReservation::create(std::move(*reserved));
-                std::shared_ptr<CheckpointOperation> operation;
-                status = prepare_checkpoint(checkpoint_detail::defaults(*this), &operation);
-                if (status.ok()) {
-                    call = reserved_shared<CheckpointCall>(credit, std::move(operation));
-                    call->callback.swap(complete);
-                    credit->seal();
-                }
+            std::shared_ptr<CheckpointOperation> operation;
+            status = prepare_checkpoint(checkpoint_detail::defaults(*this), &operation);
+            if (status.ok()) {
+                call = reserved_shared<CheckpointCall>(state_->work_allocations, std::move(operation));
+                call->callback.swap(complete);
             }
         }
     }

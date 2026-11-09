@@ -8,6 +8,8 @@
 #include "snapshot/primary_backing.h"
 #include "test_tmp.h"
 
+#include <future>
+
 namespace crowdb::tree
 {
 namespace
@@ -25,7 +27,11 @@ TEST(SparseBlockRelocation, SelectionSkipsDenseEmptyAndMissingBlocksAndKeepsItsF
     auto                     sparse = test.recover(4 * block, 4096);
     ASSERT_TRUE(dense.status.ok() && sparse.status.ok());
     ASSERT_TRUE(test.activate().status.ok());
-    auto selected = select_sparse_local_block(*device, *test.ledger, 0, test.credits.credits.reservation());
+    std::promise<LocalSparseBlock> completed;
+    auto                           result = completed.get_future();
+    select_sparse_local_block_async(*device, test.ledger, 0, test.credits.credits.reservation(), 0.5, {},
+                                    [&](LocalSparseBlock selected) { completed.set_value(std::move(selected)); });
+    auto selected = result.get();
     ASSERT_TRUE(selected.status.ok()) << selected.status.to_string();
     EXPECT_EQ(selected.exclusion.address, 4 * block);
     EXPECT_EQ(selected.exclusion.length, block);
@@ -123,6 +129,39 @@ TEST(SparseBlockRelocation, CopiesOnlyTheSelectedOverflowFramesAndRetainsOldRead
     ASSERT_TRUE(TreeCore::open(config, &core).ok());
     ASSERT_TRUE(core->get("a", &actual).ok());
     EXPECT_EQ(actual.value().to_string(), payload);
+}
+
+TEST(SparseBlockRelocation, AsyncSelectionReturnsFromTheActiveLedgerCallbackBeforeItsFenceReply)
+{
+    tree_test::TempDir              directory("sparse_async_");
+    std::unique_ptr<BlockPageStore> device;
+    constexpr uint64_t              block = 16384;
+    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, block, 4096, &device).ok());
+    ASSERT_TRUE(device->ensure_extents(0, 4 * block).ok());
+    test_read::LedgerFixture test({.backend_id = 1, .file_size = 4 * block, .address_limit = 4 * block});
+    auto                     dense  = test.recover(block, block);
+    auto                     sparse = test.recover(2 * block, 4096);
+    ASSERT_TRUE(dense.status.ok() && sparse.status.ok());
+    ASSERT_TRUE(test.activate().status.ok());
+    bool                           returned = false;
+    std::promise<LocalSparseBlock> completed;
+    auto                           result   = completed.get_future();
+    const auto                     metadata = test.credits.credits.reservation();
+    auto status = test.ledger->retain(block, block, metadata, [&](ExtentLedgerResult retained) {
+        EXPECT_TRUE(retained.status.ok());
+        select_sparse_local_block_async(*device, test.ledger, 0, metadata, 0.5, {}, [&](LocalSparseBlock candidate) {
+            EXPECT_TRUE(returned);
+            completed.set_value(std::move(candidate));
+        });
+        returned = true;
+    });
+    ASSERT_TRUE(status.ok()) << status.to_string();
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto selected = result.get();
+    ASSERT_TRUE(selected.status.ok()) << selected.status.to_string();
+    EXPECT_EQ(selected.exclusion.address, 2 * block);
+    EXPECT_EQ(selected.exclusion.length, block);
+    EXPECT_EQ(selected.next_block, 3U);
 }
 } // namespace
 } // namespace crowdb::tree

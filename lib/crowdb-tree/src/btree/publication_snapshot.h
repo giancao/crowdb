@@ -9,8 +9,7 @@ namespace crowdb::tree
 [[nodiscard]] bool   logical_page_change(const PageReplacement &page);
 [[nodiscard]] Status validate_snapshot_publication(const PublicationTransaction &transaction,
                                                    const PublishedTreeState     &current);
-void                 initialize_snapshot_changes(PublishedTreeState                                   &state,
-                                                 const std::shared_ptr<detail::AllocationReservation> &metadata);
+void initialize_snapshot_changes(PublishedTreeState &state, const std::shared_ptr<AllocationBudget> &metadata);
 void prepare_snapshot_changes(const PublicationTransaction &transaction, const PublishedTreeState &current,
                               PublishedTreeState &next);
 } // namespace crowdb::tree

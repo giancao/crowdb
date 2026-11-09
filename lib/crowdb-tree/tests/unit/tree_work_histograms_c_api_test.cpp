@@ -126,13 +126,12 @@ TEST(TreeWorkHistogramsCAbi, EnableBudgetFailurePreservesThePublishedViewAndSubs
     ct_options options{};
     ct_tree   *tree = nullptr;
     ASSERT_EQ(ct_open_with_runtime(&options, runtime, nullptr, &tree), 0);
-    auto      *core    = TreeCoreAccess::get(*c_api_tree(tree));
-    const auto before  = core->capture();
-    auto       account = core->binding()->account();
-    const auto stats   = account->snapshot();
-    const auto index   = static_cast<size_t>(detail::BudgetClass::kRouting);
-    const auto available =
-        core->binding()->options().limits.routing_bytes - stats.allocated[index] - stats.reserved[index];
+    auto *core = TreeCoreAccess::get(*c_api_tree(tree));
+    core->binding()->drain();
+    const auto  before    = core->capture();
+    const auto &account   = core->binding()->account();
+    const auto  available = detail::ResourceBudget::available(account, detail::BudgetClass::kRouting);
+    ASSERT_GT(available, 0U);
     auto held = detail::ResourceBudget::try_reserve(account, detail::BudgetClass::kRouting, available);
     ASSERT_TRUE(held);
     EXPECT_EQ(ct_work_histogram_enable_v1(tree, 0), static_cast<int32_t>(Code::kResourceExhausted));

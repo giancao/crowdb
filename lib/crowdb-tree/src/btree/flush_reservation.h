@@ -22,6 +22,7 @@ struct FlushPreparationOptions
     std::shared_ptr<SharedPageCache>      cache        = nullptr;
     std::shared_ptr<ApplyDispatcher>      cpu_progress = nullptr;
     std::shared_ptr<PublicationLane>      publication  = nullptr;
+    std::shared_ptr<AllocationBudget>     allocations  = nullptr;
 };
 
 namespace detail
@@ -39,20 +40,18 @@ using FlushCredits = std::array<ResourceBudget::Credit, FlushReserveBounds::cate
 
 struct FlushReservations
 {
-    std::shared_ptr<AllocationBudget>      backend;
-    std::shared_ptr<SharedPageCache>       cache;
-    std::shared_ptr<AllocationReservation> handoff;
-    std::shared_ptr<AllocationReservation> routing;
-    std::shared_ptr<AllocationReservation> reclaim;
-    std::shared_ptr<AllocationReservation> snapshot;
+    std::shared_ptr<AllocationBudget> backend;
+    std::shared_ptr<SharedPageCache>  cache;
+    std::shared_ptr<AllocationBudget> handoff;
+    std::shared_ptr<AllocationBudget> routing;
+    std::shared_ptr<AllocationBudget> reclaim;
+    std::shared_ptr<AllocationBudget> snapshot;
 
     void seal() const noexcept
     {
         seal_backend_budget(backend);
         for (const auto &credit : {handoff, routing, reclaim, snapshot}) {
-            if (credit) {
-                credit->seal();
-            }
+            seal_reservation(credit);
         }
     }
 };

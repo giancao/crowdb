@@ -4,6 +4,12 @@
 #include "crowdb-tree/backend/backend_release_service.h"
 #include "crowdb-tree/backend/block_page_store.h"
 #include "test_tmp.h"
+#ifdef CROWDB_HAVE_LIBURING
+#    include "crowdb-common/diskio_uring.h"
+
+#    include <future>
+#    include <latch>
+#endif
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -106,5 +112,100 @@ TEST(BlockReleaseService, FailedSingleFileOpenReturnsAllQueuedCloseControls)
     EXPECT_FALSE(status.ok());
     EXPECT_FALSE(store);
 }
+
+#ifdef CROWDB_HAVE_LIBURING
+TEST(BlockReleaseService, CloseDoesNotDrainUntilKernelCompletionReleasesItsStorage)
+{
+    tree_test::TempDir              path("block_kernel_release_");
+    std::unique_ptr<BlockPageStore> store;
+    ASSERT_TRUE(BlockPageStore::open_blocks(path.path, 3, 4, 4096, 1, &store).ok());
+    common::Topology topology;
+    topology.pipelines.push_back({});
+    common::DiskIOUring reactor(std::move(topology));
+    ASSERT_TRUE(reactor.valid());
+    const uint8_t value = 23;
+    ASSERT_TRUE(store->write_at(4096, &value, 1).ok());
+    auto service  = store->release_service();
+    auto notified = std::make_shared<std::atomic<size_t>>(0);
+    ASSERT_TRUE(service
+                    ->bind_wake(
+                        notified,
+                        [](void *context) noexcept {
+                            static_cast<std::atomic<size_t> *>(context)->fetch_add(1, std::memory_order_release);
+                        },
+                        notified.get())
+                    .ok());
+
+    uint64_t local  = 0;
+    auto     reader = store->file_for_offset(4096, &local);
+    ASSERT_TRUE(reader);
+    const int fd = reader->fd();
+    ASSERT_TRUE(store->delete_block(1).ok());
+    EXPECT_GE(::fcntl(fd, F_GETFD), 0);
+
+    struct Gate
+    {
+        std::promise<int> entered;
+        std::latch        resume{1};
+    };
+
+    auto gate = std::make_shared<Gate>();
+
+    struct Resume
+    {
+        std::shared_ptr<Gate> gate;
+
+        ~Resume()
+        {
+            if (gate) {
+                gate->resume.count_down();
+            }
+        }
+    } resume{gate};
+
+    auto entered = gate->entered.get_future();
+    reactor.submit_fsync(store->fd_for_offset(0, &local), [gate](int result) {
+        gate->entered.set_value(result);
+        if (result >= 0) {
+            gate->resume.wait();
+        }
+    });
+    ASSERT_EQ(entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(entered.get(), 0);
+
+    reader.reset();
+    const auto start = service->pump(1, &reactor);
+    EXPECT_EQ(start.visited, 1U);
+    EXPECT_EQ(start.completed, 0U);
+    EXPECT_FALSE(start.more);
+    EXPECT_EQ(service->snapshot().pending, 1U);
+    EXPECT_EQ(reactor.total_in_flight_count(), 1U);
+    EXPECT_GE(::fcntl(fd, F_GETFD), 0);
+    EXPECT_EQ(service->pump(1, &reactor).visited, 0U);
+    const auto before = notified->load(std::memory_order_acquire);
+    gate->resume.count_down();
+    resume.gate.reset();
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (notified->load(std::memory_order_acquire) == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_GT(notified->load(std::memory_order_acquire), before);
+    EXPECT_EQ(service->pump(1, &reactor).completed, 1U);
+    EXPECT_EQ(service->snapshot().pending, 0U);
+    errno = 0;
+    EXPECT_EQ(::fcntl(fd, F_GETFD), -1);
+    EXPECT_EQ(errno, EBADF);
+
+    store.reset();
+    const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!service->drained() && std::chrono::steady_clock::now() < drain_deadline) {
+        (void)service->pump(64, &reactor);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(service->drained());
+    EXPECT_EQ(reactor.total_in_flight_count(), 0U);
+}
+#endif
 } // namespace
 } // namespace crowdb::tree

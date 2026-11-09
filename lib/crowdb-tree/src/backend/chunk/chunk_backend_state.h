@@ -63,6 +63,6 @@ struct ChunkBackendState final : CheckpointBackend
     void   completed(const ChunkRootCommit &operation) noexcept;
     [[nodiscard]] ChunkRootIdentity next_identity(const PublishedTreeState &view) const noexcept;
     [[nodiscard]] PageWriteOperation::ReserveExtent
-    reserve(const std::shared_ptr<detail::AllocationReservation> &metadata) const override;
+    reserve(const std::shared_ptr<AllocationBudget> &metadata) const override;
 };
 } // namespace crowdb::tree

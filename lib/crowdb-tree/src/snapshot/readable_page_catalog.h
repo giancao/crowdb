@@ -23,7 +23,7 @@ struct ReadablePageCatalog
     using Entry  = std::pair<const uint64_t, DurableCapturedFrame>;
     using Frames = ReadablePageFrames;
 
-    explicit ReadablePageCatalog(const std::shared_ptr<detail::AllocationReservation> &metadata) : frames(metadata)
+    explicit ReadablePageCatalog(const std::shared_ptr<AllocationBudget> &metadata) : frames(metadata)
     {
     }
 

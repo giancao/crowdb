@@ -17,6 +17,15 @@ TreeApplyOperation::State::State(std::weak_ptr<TreeCore> core, uint64_t generati
 {
 }
 
+TreeApplyOperation::State::~State()
+{
+    if (replay_control && apply_ticket) {
+        // An accepted but unstarted replay can be abandoned during close.
+        replay_control.clear_replay_slot();
+        progress->advance();
+    }
+}
+
 std::optional<size_t> TreeApplyOperation::allocation_bound(size_t retained_metadata_bytes) noexcept
 {
     return detail::AllocationBound(detail::shared_allocation_bound<State>())

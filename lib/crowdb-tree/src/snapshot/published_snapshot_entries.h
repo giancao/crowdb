@@ -15,9 +15,13 @@ class PublishedSnapshotEntries
     struct State;
 
   public:
-    static Status create(std::shared_ptr<PublishedSnapshotContext>  snapshot,
+    using Complete = std::function<void(Status, std::optional<PublishedScanEntry>, bool)>;
+
+    static Status create(std::shared_ptr<PublishedReadViewContext>  snapshot,
                          std::shared_ptr<PublishedSnapshotEntries> *out, const KeyRange &range = KeyRange::unbounded());
     Status        next(std::optional<PublishedScanEntry> *out, bool *complete);
+    // For detached views. Acceptance owns one window until its completion.
+    Status                 next_async(Complete complete);
     [[nodiscard]] uint64_t skipped_subtrees() const noexcept;
 
   private:
@@ -25,6 +29,7 @@ class PublishedSnapshotEntries
     {
     }
 
+    Status                 next_impl(Complete complete, std::shared_ptr<TreeCore> *host_core);
     std::shared_ptr<State> state_;
 };
 } // namespace crowdb::tree

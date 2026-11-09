@@ -118,7 +118,7 @@ TEST(MemTableFailure, FailedPublicationPreservesAtomicOldSnapshotAndRepairableSo
     EXPECT_EQ(value, "old");
     publisher.set_before_root_for_tests({});
     ASSERT_TRUE(tree.flush().ok());
-    ASSERT_TRUE(tree.snapshot().ok());
+    ASSERT_TRUE(tree.flush_with_persistent().ok());
     EXPECT_EQ(tree.last_applied_slot(), 2U);
     EXPECT_EQ(tree.get_view("b").value().to_string(), "new");
     ASSERT_TRUE(snapshot->get("b", &slot, &value));

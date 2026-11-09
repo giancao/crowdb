@@ -147,19 +147,20 @@ void PageCacheResidency::clear() noexcept
     state_->leave();
 }
 
-void PageCacheResidency::close_and_drain() noexcept
+void PageCacheResidency::close_async(AsyncCompletion complete) noexcept
 {
-    auto value = state_->producers.fetch_or(State::kClosed, std::memory_order_acq_rel) | State::kClosed;
-    while ((value & ~State::kClosed) != 0) {
-        state_->producers.wait(value, std::memory_order_acquire);
-        value = state_->producers.load(std::memory_order_acquire);
+    auto state        = state_;
+    state->on_drained = std::move(complete);
+    if (state->producers.fetch_or(State::kClosed, std::memory_order_acq_rel) == 0) {
+        state->close_progress();
     }
-    state_->clear_requested.store(true, std::memory_order_release);
-    state_->wake();
-    // Internal reruns remain enabled until every bounded clear step finishes.
-    state_->progress->drain();
-    state_->progress->close_and_drain();
-    state_->bases.clear();
+}
+
+void PageCacheResidency::State::close_progress() noexcept
+{
+    clear_requested.store(true, std::memory_order_release);
+    wake();
+    progress->close_async(std::move(on_drained));
 }
 
 uint64_t PageCacheResidency::proxy_pages() const noexcept

@@ -21,7 +21,7 @@ TEST(LocalCheckpoint, CancellationDrainsMetadataButFinishesAnAttemptedAnchor)
         test.source.runtime->drain();
         EXPECT_EQ(done.stopped.load(), 0U);
         EXPECT_EQ(done.values.load(), 0U);
-        EXPECT_EQ(test.source.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+        EXPECT_EQ(test.source.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
         test.store->finish();
         test.source.runtime->drain();
         EXPECT_EQ(done.stopped.load(), pause == 1 ? 1U : 0U);
@@ -48,7 +48,7 @@ TEST(LocalCheckpoint, UnknownSubmissionRetainsBufferAndExtentsUntilLateCallback)
         test.operation.reset();
         test.source.operation.reset();
         EXPECT_EQ(test.source.ledger->stats().protected_ranges, unknown == 1 ? 2U : 3U);
-        EXPECT_EQ(test.source.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+        EXPECT_EQ(test.source.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
         auto duplicate = test.store->pending;
         test.store->finish();
         duplicate.complete(Status::Ok());

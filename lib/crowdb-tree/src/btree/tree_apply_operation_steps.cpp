@@ -87,11 +87,11 @@ void TreeApplyOperation::State::step()
         return;
     }
     observed = progress->sequence();
-    if (!frontier->check_slot(slot).ok()) {
-        await_progress(observed);
+    if (replay_input && !prepare_replay_batch()) {
         return;
     }
-    if (replay_input && !prepare_replay_batch()) {
+    if (!frontier->check_slot(slot).ok()) {
+        await_progress(observed);
         return;
     }
     auto status = batch->try_commit(*sources, *frontier, slot);
@@ -142,6 +142,11 @@ void TreeApplyOperation::State::start_flush()
         connect_flush(std::move(operation));
         return;
     }
+    if (preparation.allocations) {
+        resumed = Status::Ok();
+        credit_ready();
+        return;
+    }
     next_credit = 0;
     admission_metrics.emplace(work, TreeStage::FlushAdmissionWait, tree_metrics_now_ns());
     await_credit();
@@ -174,9 +179,15 @@ void TreeApplyOperation::State::finish(Status status) noexcept
     plan    = {};
     batch.reset();
     replay_input.reset();
+    if (replay_control) {
+        replay_control.clear_replay_slot();
+    }
     if (owns_replay_waiters) {
         owns_replay_waiters = false;
         waiters->release();
+        progress->advance();
+    }
+    else if (replay_control && !status.ok()) {
         progress->advance();
     }
     waiters.reset();

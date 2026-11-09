@@ -30,20 +30,19 @@ Status prepare(TreeCore &core, std::shared_ptr<const PublishedTreeState> view, P
     if (!status.ok()) {
         return status;
     }
-    auto loads         = core.load_limits();
-    loads.max_inflight = 1;
-    auto loader = reserved_shared<AsyncStorePageLoader>(ready.credit, ready.ticket->backend(core.async_backend()),
-                                                        ready.binding->cpu(), ready.binding->lane(), loads,
-                                                        OverflowBackingResolver{},
-                                                        PageLoadBudget{.bytes        = ready.credit,
-                                                                       .account      = ready.binding->account(),
-                                                                       .work_metrics = core.publisher().work_metrics(),
-                                                                       .cpu_progress = core.cpu_progress(),
-                                                                       .cause        = TreeWorkCause::Read});
-    status      = core.cache()->bind_reserved(std::move(loader), ready.credit, &ready.loader);
-    if (status.ok()) {
-        *out = std::move(ready);
-    }
-    return status;
+    ready.credit          = core.accepted_allocations();
+    ready.limits.metadata = ready.credit;
+    auto loads            = core.load_limits();
+
+    auto loader  = reserved_shared<AsyncStorePageLoader>(ready.credit, ready.ticket->backend(core.async_backend()),
+                                                         ready.binding->cpu(), ready.binding->lane(), loads,
+                                                         OverflowBackingResolver{},
+                                                         PageLoadBudget{.bytes        = ready.credit,
+                                                                        .work_metrics = core.publisher().work_metrics(),
+                                                                        .cpu_progress = core.cpu_progress(),
+                                                                        .cause        = TreeWorkCause::Read});
+    ready.loader = core.cache()->bind(std::move(loader), ready.credit);
+    *out         = std::move(ready);
+    return Status::Ok();
 }
 } // namespace crowdb::tree::core_read_detail

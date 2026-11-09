@@ -5,17 +5,17 @@
 
 namespace crowdb::tree
 {
-Status TreeCore::capture_snapshot(std::shared_ptr<PublishedSnapshotContext> *out)
+Status TreeCore::capture_read_only_view(std::shared_ptr<PublishedReadViewContext> *out)
 {
     State::Ingress ingress(*state_);
     if (ingress.owner == nullptr) {
         return Status::unavailable("Tree snapshot admission closed");
     }
-    return PublishedSnapshotContext::capture_admitted(shared_from_this(), out);
+    return PublishedReadViewContext::capture_admitted(shared_from_this(), out);
 }
 
-Status TreeCore::capture_snapshot(std::shared_ptr<const PublishedTreeState>  view,
-                                  std::shared_ptr<PublishedSnapshotContext> *out)
+Status TreeCore::capture_read_only_view(std::shared_ptr<const PublishedTreeState>  view,
+                                        std::shared_ptr<PublishedReadViewContext> *out)
 {
     State::Ingress ingress(*state_);
     if (ingress.owner == nullptr) {
@@ -24,7 +24,7 @@ Status TreeCore::capture_snapshot(std::shared_ptr<const PublishedTreeState>  vie
     if (!view || view->generation != capture()->generation) {
         return Status::unavailable("fixed snapshot belongs to an old Tree generation");
     }
-    return PublishedSnapshotContext::capture_admitted(shared_from_this(), out, std::move(view));
+    return PublishedReadViewContext::capture_admitted(shared_from_this(), out, std::move(view));
 }
 
 Status TreeCore::acquire_snapshot_window(const std::shared_ptr<AllocationBudget>        &metadata,

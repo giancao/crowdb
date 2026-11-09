@@ -12,14 +12,13 @@ class BackingMetricExtent;
 
 struct ExtentLedgerLimits
 {
-    uint64_t backend_id     = 0;
-    uint64_t generation     = 1;
-    uint64_t region_begin   = 8192;
-    uint64_t file_size      = 8192;
-    uint64_t address_limit  = UINT64_MAX;
-    uint32_t iu_size        = 4096;
-    size_t   max_ranges     = 1024 * 1024;
-    size_t   queue_capacity = 64;
+    uint64_t backend_id    = 0;
+    uint64_t generation    = 1;
+    uint64_t region_begin  = 8192;
+    uint64_t file_size     = 8192;
+    uint64_t address_limit = UINT64_MAX;
+    uint32_t iu_size       = 4096;
+    size_t   max_ranges    = 1024 * 1024;
 };
 
 struct ProtectedExtent
@@ -60,29 +59,26 @@ class ExtentLedger
 
   public:
     using Complete = detail::InlineFunction<void(ExtentLedgerResult)>;
-    static Status create(ExtentLedgerLimits limits, std::shared_ptr<detail::AllocationReservation> metadata,
-                         std::shared_ptr<ExtentLedger> *out);
+    static Status               create(ExtentLedgerLimits limits, std::shared_ptr<AllocationBudget> metadata,
+                                       std::shared_ptr<ExtentLedger> *out);
     [[nodiscard]] static size_t creation_metadata_bound() noexcept;
     [[nodiscard]] static size_t reservation_metadata_bound() noexcept;
     // Submission failure does not invoke complete. Accepted commands invoke it once.
-    Status recover(uint64_t address, uint64_t length, std::shared_ptr<detail::AllocationReservation> metadata,
-                   Complete complete);
-    Status activate(std::shared_ptr<detail::AllocationReservation> metadata, Complete complete);
-    Status reserve(uint64_t length, std::shared_ptr<detail::AllocationReservation> metadata, Complete complete);
-    Status retain(uint64_t address, uint64_t length, std::shared_ptr<detail::AllocationReservation> metadata,
-                  Complete complete);
+    Status recover(uint64_t address, uint64_t length, std::shared_ptr<AllocationBudget> metadata, Complete complete);
+    Status activate(std::shared_ptr<AllocationBudget> metadata, Complete complete);
+    Status reserve(uint64_t length, std::shared_ptr<AllocationBudget> metadata, Complete complete);
+    Status retain(uint64_t address, uint64_t length, std::shared_ptr<AllocationBudget> metadata, Complete complete);
     // Exclusively protect an already free byte range during physical deletion.
     // Never borrows a data owner or extends the allocation frontier. Retain
     // rejects this temporary lease so it cannot become a readable backing.
-    Status claim_free(uint64_t address, uint64_t length, std::shared_ptr<detail::AllocationReservation> metadata,
-                      Complete complete);
+    Status claim_free(uint64_t address, uint64_t length, std::shared_ptr<AllocationBudget> metadata, Complete complete);
     // Freeze allocation into one existing byte interval while compaction moves
     // its live references elsewhere. Existing data owners remain readable.
     // The returned owner is an allocation exclusion, never readable backing.
     // occupied_bytes counts protected bytes at admission. One exclusion per
     // ledger and at most 4096 range visits keep metadata work bounded.
-    Status exclude_allocations(uint64_t address, uint64_t length,
-                               std::shared_ptr<detail::AllocationReservation> metadata, Complete complete);
+    Status exclude_allocations(uint64_t address, uint64_t length, std::shared_ptr<AllocationBudget> metadata,
+                               Complete complete);
     [[nodiscard]] ExtentLedgerStats         stats() const noexcept;
     [[nodiscard]] const ExtentLedgerLimits &limits() const noexcept;
     void                                    close() noexcept;

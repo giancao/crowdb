@@ -13,7 +13,7 @@ namespace crowdb::tree
 Status CapturedRebaseOperation::create(
     PublicationCoordinator &publisher, std::shared_ptr<const PublishedTreeState> captured,
     std::shared_ptr<const CapturedDurablePages> pages, std::shared_ptr<detail::FlushRuntime> runtime,
-    std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<detail::AllocationReservation> metadata,
+    std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<AllocationBudget> metadata,
     std::shared_ptr<CapturedRebaseOperation> *out, size_t max_sources,
     std::shared_ptr<WritebackMetrics> writeback_metrics, std::shared_ptr<ApplyDispatcher> cpu_progress,
     std::shared_ptr<PublicationLane> publication, TreeWorkCause cause)
@@ -34,8 +34,8 @@ catch (const std::bad_alloc &) {
 }
 
 Status CapturedRebaseOperation::initialize(std::shared_ptr<State> state, std::shared_ptr<detail::FlushRuntime> runtime,
-                                           std::shared_ptr<detail::FlushRuntime::Lane>    lane,
-                                           std::shared_ptr<detail::AllocationReservation> metadata,
+                                           std::shared_ptr<detail::FlushRuntime::Lane> lane,
+                                           std::shared_ptr<AllocationBudget>           metadata,
                                            std::shared_ptr<CapturedRebaseOperation> *out, size_t max_sources,
                                            std::shared_ptr<WritebackMetrics> writeback_metrics,
                                            std::shared_ptr<ApplyDispatcher>  cpu_progress,

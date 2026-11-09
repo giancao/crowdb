@@ -57,7 +57,6 @@ struct LeafLoad : PageLoadProgress, std::enable_shared_from_this<LeafLoad>
         catch (const std::bad_alloc &) {
             status = Status::resource_exhausted("leaf decode allocation failed");
         }
-        release_if_idle();
         (void)metrics.finish(status.ok() ? TreeOutcome::Success : TreeOutcome::Error, tree_metrics_now_ns());
         auto callback = std::move(complete);
         complete_page_load(callback, std::move(status), std::move(leaf));
@@ -78,7 +77,7 @@ std::optional<size_t> AsyncStorePageLoader::primary_reserve_bound(const PageLoad
 {
     using detail::AllocationBound;
     using detail::shared_allocation_bound;
-    if (limits.max_inflight == 0 || limits.max_leaf_entries == 0) {
+    if (limits.max_leaf_entries == 0) {
         return {};
     }
     const auto chunk_window = chunk_load_window_bound(limits);
@@ -156,10 +155,6 @@ void AsyncStorePageLoader::load_leaf(BaseRef base, LeafComplete complete)
         reject(Status::resource_exhausted("leaf blob exceeds load budget"));
         return;
     }
-    if (!acquire_page_load(state_->inflight, state_->limits.max_inflight)) {
-        reject(Status::resource_exhausted("leaf load concurrency budget exhausted"));
-        return;
-    }
     std::shared_ptr<LeafLoad> operation;
     try {
         operation               = detail::reserved_shared<LeafLoad>(state_->budget.bytes, state_->budget, started_at);
@@ -167,10 +162,10 @@ void AsyncStorePageLoader::load_leaf(BaseRef base, LeafComplete complete)
         operation->runtime      = state_->runtime;
         operation->lane         = state_->lane;
         operation->loader_owner = state_;
-        operation->inflight     = &state_->inflight;
-        operation->limits       = state_->limits;
-        operation->base         = std::move(base);
-        operation->complete     = std::move(complete);
+
+        operation->limits   = state_->limits;
+        operation->base     = std::move(base);
+        operation->complete = std::move(complete);
         if (operation->base.backing->storage == BackingStorage::kResidentFrame) {
             queue_page_load(operation, &LeafLoad::decode);
         }
@@ -184,7 +179,7 @@ void AsyncStorePageLoader::load_leaf(BaseRef base, LeafComplete complete)
             operation->finish(Status::resource_exhausted("leaf load allocation failed"));
         }
         else {
-            state_->inflight.fetch_sub(1, std::memory_order_release);
+
             reject(Status::resource_exhausted("leaf load allocation failed"));
         }
     }

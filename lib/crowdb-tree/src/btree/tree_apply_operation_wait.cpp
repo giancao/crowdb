@@ -57,21 +57,23 @@ void TreeApplyOperation::State::credit_ready()
         finish(std::move(resumed));
         return;
     }
-    if (!credit_attempt) {
-        finish(Status::internal_error("apply budget terminal has no registered request"));
-        return;
-    }
-    auto paid = credit_attempt->request.take_credit();
-    credit_attempt.reset();
-    waiting = Wait::kNone;
-    if (!paid) {
-        finish(Status::internal_error("completed apply budget request has no grant"));
-        return;
-    }
-    credits[next_credit++] = std::move(*paid);
-    if (next_credit != credits.size()) {
-        await_credit();
-        return;
+    if (!preparation.allocations) {
+        if (!credit_attempt) {
+            finish(Status::internal_error("apply budget terminal has no registered request"));
+            return;
+        }
+        auto paid = credit_attempt->request.take_credit();
+        credit_attempt.reset();
+        waiting = Wait::kNone;
+        if (!paid) {
+            finish(Status::internal_error("completed apply budget request has no grant"));
+            return;
+        }
+        credits[next_credit++] = std::move(*paid);
+        if (next_credit != credits.size()) {
+            await_credit();
+            return;
+        }
     }
     std::shared_ptr<FlushOperation> operation;
     auto                            status = flush->prepare_prepaid(preparation, plan, std::move(credits), &operation);

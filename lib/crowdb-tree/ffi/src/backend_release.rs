@@ -26,7 +26,7 @@ impl Drop for ServiceState {
 
 /// An independent host handle, also retained by the bounded background pump.
 /// Keep the Tokio host alive until `shutdown` has completed. Dropping a Tree or
-/// this handle never closes admission while retained snapshots can still read.
+/// this handle never closes admission while retained readers can still read.
 #[derive(Clone)]
 pub struct BackendReleaseService {
     state: Arc<ServiceState>,
@@ -36,19 +36,30 @@ impl BackendReleaseService {
         let Ok(executor) = tokio::runtime::Handle::try_current() else {
             return Ok(None);
         };
+        match Self::attach_with(&executor, |wake, drop, context, native| unsafe {
+            sys::ct_tree_backend_release_service(tree.as_ptr(), wake, drop, context, native)
+        }) {
+            Ok(service) => Ok(Some(service)),
+            Err(CtError::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn attach_with(
+        executor: &tokio::runtime::Handle,
+        bind: impl FnOnce(
+            unsafe extern "C" fn(*mut c_void),
+            unsafe extern "C" fn(*mut c_void),
+            *mut c_void,
+            *mut *mut sys::ct_backend_release_service,
+        ) -> i32,
+    ) -> Result<Self, CtError> {
         let wake = Arc::new(Notify::new());
         let context = Arc::into_raw(wake.clone()).cast_mut().cast::<c_void>();
         let mut native = std::ptr::null_mut();
-        let status = unsafe {
-            sys::ct_tree_backend_release_service(tree.as_ptr(), wake_queue, drop_wake, context, &mut native)
-        };
-        if let Err(error) = check(status) {
+        if let Err(error) = check(bind(wake_queue, drop_wake, context, &mut native)) {
             unsafe { drop_wake(context) };
-            return if matches!(error, CtError::NotFound) {
-                Ok(None)
-            } else {
-                Err(error)
-            };
+            return Err(error);
         }
         let state = Arc::new(ServiceState {
             native: NonNull::new(native).ok_or(CtError::Internal)?,
@@ -57,7 +68,7 @@ impl BackendReleaseService {
             completion: Notify::new(),
         });
         executor.spawn(pump(state.clone()));
-        Ok(Some(Self { state }))
+        Ok(Self { state })
     }
     /// Call only after closing host ingress to all users of the backend. This
     /// waits for retained readers and actual close jobs, without retaining a
@@ -77,17 +88,24 @@ impl BackendReleaseService {
     }
 }
 async fn pump(state: Arc<ServiceState>) {
+    let asynchronous = unsafe { sys::ct_backend_release_service_is_async(state.native.as_ptr()) != 0 };
     loop {
         let wake = state.wake.notified();
         tokio::pin!(wake);
         wake.as_mut().enable();
-        let owner = state.clone();
-        let step = tokio::task::spawn_blocking(move || unsafe {
-            sys::ct_backend_release_service_pump(owner.native.as_ptr(), 8)
-        })
-        .await;
-        let Ok(step) = step else {
-            return;
+        let step = if asynchronous {
+            unsafe { sys::ct_backend_release_service_pump(state.native.as_ptr(), 8) }
+        } else {
+            // Explicit compatibility driver for file stores without a reactor.
+            let owner = state.clone();
+            let step = tokio::task::spawn_blocking(move || unsafe {
+                sys::ct_backend_release_service_pump(owner.native.as_ptr(), 8)
+            })
+            .await;
+            let Ok(step) = step else {
+                return;
+            };
+            step
         };
         if step.drained != 0 {
             state.done.store(true, Ordering::Release);
@@ -96,6 +114,8 @@ async fn pump(state: Arc<ServiceState>) {
         }
         if step.more == 0 {
             wake.await;
+        } else {
+            tokio::task::yield_now().await;
         }
     }
 }

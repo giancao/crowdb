@@ -48,7 +48,7 @@ impl Partition {
             .journal
             .reclaim_metadata_before(generation, self.config.metadata_reclaim_records_per_pass)
             .await?;
-        self.metrics.reclaim(0, reclaimed, 0, 0);
+        self.metrics.reclaim(0, reclaimed, 0);
         let pending = reclaimed > 0;
         self.metadata_reclaim
             .store(Some(Arc::new(MetadataReclaim { generation, pending })));

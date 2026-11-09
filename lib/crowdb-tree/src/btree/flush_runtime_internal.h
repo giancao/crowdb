@@ -33,6 +33,20 @@ inline uint64_t flush_runtime_now_ns() noexcept
 struct FlushRuntime::State
 {
     static constexpr uint64_t kClosed = uint64_t{1} << 63;
+    static constexpr uint64_t kDrain  = uint64_t{1} << 62;
+    static constexpr uint64_t kJobs   = ~(kClosed | kDrain);
+
+    struct Activity
+    {
+        std::atomic<uint64_t> jobs{0};
+        AsyncCompletion       on_drained;
+
+        void complete() noexcept
+        {
+            auto done = std::move(on_drained);
+            done.complete(Status::Ok());
+        }
+    };
 
     struct Job;
 
@@ -89,7 +103,7 @@ struct FlushRuntime::State
           worker_count(workers),
           queue_limit(limit),
           slots(workers + limit, MetadataAllocator<Slot>(budget)),
-          lifecycle(std::allocate_shared<std::atomic<uint64_t>>(MetadataAllocator<std::atomic<uint64_t>>(budget), 0))
+          lifecycle(std::allocate_shared<Activity>(MetadataAllocator<Activity>(budget)))
     {
         // Register on the bootstrap thread once. A cached target scheduler
         // submits through its existing shared MPSC remote queue, without
@@ -137,9 +151,14 @@ struct FlushRuntime::State
     {
         // Zero lets the host start teardown. Retain the notification word
         // until notification returns; pool teardown joins this receiver.
-        auto completion = lifecycle;
-        completion->fetch_sub(1, std::memory_order_acq_rel);
-        completion->notify_all();
+        auto       completion = lifecycle;
+        const auto previous   = completion->jobs.fetch_sub(1, std::memory_order_acq_rel);
+        if ((previous & kJobs) == 1) {
+            completion->jobs.notify_all();
+            if ((previous & kDrain) != 0) {
+                completion->complete();
+            }
+        }
     }
 
     PoolStorage              pool_storage;
@@ -149,7 +168,7 @@ struct FlushRuntime::State
     size_t                                     queue_limit;
     std::vector<Slot, MetadataAllocator<Slot>> slots;
     std::atomic<size_t>                        next_slot{0};
-    std::shared_ptr<std::atomic<uint64_t>>     lifecycle;
+    std::shared_ptr<Activity>                  lifecycle;
     std::atomic<size_t>                        queue_permits{0};
     std::atomic<size_t>                        queued{0};
     std::atomic<uint64_t>                      inflight{0};
@@ -162,6 +181,10 @@ struct FlushRuntime::State
 
 struct FlushRuntime::ProgressState : std::enable_shared_from_this<ProgressState>
 {
+    static constexpr uint64_t kCloseArmed = uint64_t{1} << 61;
+    static constexpr uint64_t kStopArmed  = uint64_t{1} << 62;
+    static constexpr uint64_t kWork       = ~(State::kClosed | kStopArmed | kCloseArmed);
+
     ProgressState(State *runtime, size_t index, std::shared_ptr<Lane> tree_lane, Task work, void *argument)
         : runtime(runtime),
           slot(index),
@@ -175,7 +198,12 @@ struct FlushRuntime::ProgressState : std::enable_shared_from_this<ProgressState>
     void request(const std::shared_ptr<const void> &owner) noexcept;
     void schedule(const std::shared_ptr<const void> &owner) noexcept;
     void complete(const std::shared_ptr<const void> &owner) noexcept;
+    void finish_work() noexcept;
     void drain() noexcept;
+    void close_async(AsyncCompletion complete) noexcept;
+    void stop_async(AsyncCompletion complete) noexcept;
+    void arm_close(uint64_t flags) noexcept;
+    void finish_close(uint64_t idle) noexcept;
     void close_and_drain() noexcept;
     void detach() noexcept;
 
@@ -185,8 +213,10 @@ struct FlushRuntime::ProgressState : std::enable_shared_from_this<ProgressState>
     Task                  task;
     void                 *context;
     std::atomic<bool>     active{false}, requested{false};
-    std::atomic<uint64_t> ingress{0};
-    std::atomic<size_t>   jobs{0};
+    // Producers and scheduled jobs both retain the registration until its
+    // final idle transition. A producer may schedule after the last job ends.
+    std::atomic<uint64_t> work{0};
+    AsyncCompletion       on_drained;
     std::atomic<bool>     detached{false};
 };
 

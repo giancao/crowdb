@@ -4,6 +4,7 @@
 #pragma once
 
 #include "crowdb-rpc/connection.h"
+#include "crowdb-rpc/scheduled_executor.h"
 #include "crowdb-rpc/transport.h"
 #include "crowdb-rpc/transport/rdma/rdma_config.h"
 #ifdef CROWDB_RPC_HAVE_RDMA
@@ -370,6 +371,10 @@ class SocketTransport : public Transport
     void start();
     void stop();
 
+    ScheduledExecutor::TaskId schedule(ScheduledExecutor::Task task, uint32_t delay_ms,
+                                       ScheduledExecutor::Task cancelled = {});
+    bool                      cancel_scheduled(ScheduledExecutor::TaskId id);
+
     // Get a worker for a new connection (round-robin).
     Worker *get_worker();
 
@@ -383,6 +388,11 @@ class SocketTransport : public Transport
     // peer, register the connection with a worker. Returns the connection
     // (nullptr on failure). The connection can both send and receive.
     std::shared_ptr<Connection> connect(const std::string &addr, int port);
+
+#ifdef CROWDB_RPC_HAVE_RDMA
+    class ConnectAttempt;
+    std::unique_ptr<ConnectAttempt> start_rdma_connect(const std::string &addr, int port);
+#endif
 
     // Attach an RDMA connection to the common callback/registry lifecycle.
     void attach_rdma_connection(const std::shared_ptr<Connection> &conn, Connection::OnFrameCallback on_frame = {},
@@ -551,6 +561,9 @@ class SocketTransport : public Transport
 #endif
 
   private:
+    void                              run_scheduled(bool timer_event = false);
+    ScheduledExecutor                 scheduled_;
+    std::atomic<bool>                 scheduled_changed_{false};
     std::shared_ptr<Connection>       connect_tcp(const std::string &addr, int port);
     void                              prepare_tcp_socket(int fd) const;
     BufferPool                       *pool_;

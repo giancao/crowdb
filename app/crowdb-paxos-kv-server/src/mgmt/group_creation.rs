@@ -4,9 +4,7 @@
 //! Durable creation ownership precedes ordinary-group WAL and engine effects.
 
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -16,6 +14,10 @@ use axum::{
     Json,
 };
 use crowdb_protocol::mgmt::{AddGroupRequest, GroupCreationStatus};
+use tokio::{
+    fs::{self, File, OpenOptions},
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
 use super::{err_json, system_bootstrap::ManagementError, RegistryArc};
 
@@ -23,7 +25,8 @@ pub(super) async fn status(
     State(state): State<RegistryArc>,
     AxumPath((store, group)): AxumPath<(u64, u64)>,
 ) -> Result<Json<GroupCreationStatus>, ManagementError> {
-    read(&state.config.config_root, store, group)?
+    read(&state.config.config_root, store, group)
+        .await?
         .map(Json)
         .ok_or_else(|| err_json(StatusCode::NOT_FOUND, "group creation ownership is absent"))
 }
@@ -53,7 +56,7 @@ pub(super) async fn accept(
     };
     validate(&expected)?;
     let root = &state.config.config_root;
-    if let Some(current) = read(root, store, request.group_id)? {
+    if let Some(current) = read(root, store, request.group_id).await? {
         return matches(&current, &expected);
     }
     if state
@@ -84,51 +87,64 @@ pub(super) async fn accept(
     }
     if request.deployment.is_some()
         && (persisted.group(store, request.group_id).is_some()
-            || crate::recovery::startup::store_crowdb_tree_path(
+            || fs::metadata(crate::recovery::startup::store_crowdb_tree_path(
                 &state.config.data_root,
                 store,
                 request.group_id,
+            ))
+            .await
+            .is_ok()
+            || fs::metadata(
+                crate::recovery::startup::store_wal_root(&state.config.wal_root, store)
+                    .join(format!("group{}", request.group_id)),
             )
-            .exists()
-            || crate::recovery::startup::store_wal_root(&state.config.wal_root, store)
-                .join(format!("group{}", request.group_id))
-                .exists())
+            .await
+            .is_ok())
     {
         return Err(err_json(
             StatusCode::CONFLICT,
             "existing group has no matching deployment ownership",
         ));
     }
-    fs::create_dir_all(root).map_err(storage_error)?;
-    publish(root, &expected, false)?;
-    let current = read(root, store, request.group_id)?
+    fs::create_dir_all(root).await.map_err(storage_error)?;
+    publish(root, &expected, false).await?;
+    let current = read(root, store, request.group_id)
+        .await?
         .ok_or_else(|| err_json(StatusCode::CONFLICT, "group creation ownership disappeared"))?;
     matches(&current, &expected)
 }
 
-pub(super) fn retire(state: &RegistryArc, store: u64, group: u64) -> Result<(), ManagementError> {
-    if let Some(mut current) = read(&state.config.config_root, store, group)? {
+pub(super) async fn retire(state: &RegistryArc, store: u64, group: u64) -> Result<(), ManagementError> {
+    if let Some(mut current) = read(&state.config.config_root, store, group).await? {
         if !current.retired {
             current.retired = true;
-            publish(&state.config.config_root, &current, true)?;
+            publish(&state.config.config_root, &current, true).await?;
         }
     }
     Ok(())
 }
 
-pub(super) fn finish_removal(state: &RegistryArc, store: u64, group: u64) -> Result<(), ManagementError> {
+pub(super) async fn finish_removal(
+    state: &RegistryArc,
+    store: u64,
+    group: u64,
+) -> Result<(), ManagementError> {
     let root = &state.config.config_root;
-    if read(root, store, group)?.is_some_and(|current| current.deployment.is_none() && current.retired) {
-        fs::remove_file(path(root, store, group)).map_err(storage_error)?;
-        File::open(root)
-            .and_then(|file| file.sync_all())
+    if read(root, store, group)
+        .await?
+        .is_some_and(|current| current.deployment.is_none() && current.retired)
+    {
+        fs::remove_file(path(root, store, group))
+            .await
             .map_err(storage_error)?;
+        let directory = File::open(root).await.map_err(storage_error)?;
+        directory.sync_all().await.map_err(storage_error)?;
     }
     Ok(())
 }
 
-pub(crate) fn check_restore(root: &Path, store: u64, group: u64, replica: u64) -> std::io::Result<()> {
-    let status = read(root, store, group).map_err(|_| {
+pub(crate) async fn check_restore(root: &Path, store: u64, group: u64, replica: u64) -> std::io::Result<()> {
+    let status = read(root, store, group).await.map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "invalid durable group creation ownership",
@@ -157,9 +173,9 @@ fn path(root: &Path, store: u64, group: u64) -> PathBuf {
     root.join(format!("group-creation-{store}-{group}.json"))
 }
 
-fn read(root: &Path, store: u64, group: u64) -> Result<Option<GroupCreationStatus>, ManagementError> {
+async fn read(root: &Path, store: u64, group: u64) -> Result<Option<GroupCreationStatus>, ManagementError> {
     let path = path(root, store, group);
-    let metadata = match fs::symlink_metadata(&path) {
+    let metadata = match fs::symlink_metadata(&path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage_error(error)),
@@ -175,9 +191,11 @@ fn read(root: &Path, store: u64, group: u64) -> Result<Option<GroupCreationStatu
     }
     let mut bytes = Vec::new();
     File::open(path)
+        .await
         .map_err(storage_error)?
         .take(4097)
         .read_to_end(&mut bytes)
+        .await
         .map_err(storage_error)?;
     if bytes.len() > 4096 {
         return Err(err_json(
@@ -211,29 +229,33 @@ fn validate(status: &GroupCreationStatus) -> Result<(), ManagementError> {
     Ok(())
 }
 
-fn publish(root: &Path, status: &GroupCreationStatus, replace: bool) -> Result<(), ManagementError> {
+async fn publish(root: &Path, status: &GroupCreationStatus, replace: bool) -> Result<(), ManagementError> {
     let temporary = root.join(format!(".group-creation-{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
+    let result = async {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(&serde_json::to_vec(status).map_err(std::io::Error::other)?)?;
-        file.sync_all()?;
+            .open(&temporary)
+            .await?;
+        file.write_all(&serde_json::to_vec(status).map_err(std::io::Error::other)?)
+            .await?;
+        file.flush().await?;
+        file.sync_all().await?;
         let target = path(root, status.store_id, status.group_id);
         if replace {
-            fs::rename(&temporary, target)?;
+            fs::rename(&temporary, target).await?;
         } else {
-            match fs::hard_link(&temporary, target) {
+            match fs::hard_link(&temporary, target).await {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
         }
-        File::open(root)?.sync_all()
-    })();
-    match fs::remove_file(temporary) {
+        File::open(root).await?.sync_all().await
+    }
+    .await;
+    match fs::remove_file(temporary).await {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) if result.is_ok() => return Err(storage_error(error)),
         Ok(()) | Err(_) => {}

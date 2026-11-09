@@ -15,8 +15,8 @@ namespace
 {
 std::atomic<uint64_t> next_publisher_identity{1};
 
-std::shared_ptr<const PublishedSources> initial_sources(const std::shared_ptr<detail::AllocationReservation> &metadata,
-                                                        uint64_t                                              floor)
+std::shared_ptr<const PublishedSources> initial_sources(const std::shared_ptr<AllocationBudget> &metadata,
+                                                        uint64_t                                 floor)
 {
     auto sources   = detail::reserved_shared<PublishedSources>(metadata, metadata);
     sources->floor = floor;
@@ -64,7 +64,7 @@ std::shared_ptr<const PublishedTreeState> initial_state(const PublicationBootstr
 }
 } // namespace
 
-PublishedTreeState::PublishedTreeState(std::shared_ptr<detail::AllocationReservation> metadata, uint64_t source_floor)
+PublishedTreeState::PublishedTreeState(std::shared_ptr<AllocationBudget> metadata, uint64_t source_floor)
     : sources(initial_sources(metadata, source_floor))
 {
 }

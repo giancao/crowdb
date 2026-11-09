@@ -371,14 +371,10 @@ mod tests {
             .join("port-allocator-tests")
             .join(format!("{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        // Each test gets a unique offset so probes land in a range
-        // above the real-service ports (10000-15999) but below the Linux
-        // ephemeral port range (32768-60999). Probing inside the ephemeral
-        // range is racy: under load the kernel assigns those ports as
-        // ephemeral source ports, making bind probes fail spuriously.
-        // 500-port windows per test; id is bounded by the test count
-        // (~10), so the highest window stays well under 32768.
-        let offset = 6000 + ((id & 0xFF) as u16) * 500;
+        // Place the initial Paxos-KV and DiskDB probes between the
+        // CrowDB service ranges and the default Linux ephemeral range.
+        // Each test shifts its initial ports by 32.
+        let offset = 17_065 + u16::try_from(id).unwrap() * 32;
         PortAllocConfig::new(&dir).with_offset(offset)
     }
 
@@ -423,12 +419,14 @@ mod tests {
     #[test]
     fn alloc_range() {
         let cfg = unique_cfg();
-        let base = ServicePort::PaxosKvServerRpc.base() + cfg.offset;
-        let ports = alloc_port_range(ServicePort::PaxosKvServerRpc, 0, 3, &cfg).unwrap();
+        let service = ServicePort::PaxosKvServerRpc;
+        let base = service.base() + cfg.offset;
+        mark_failed(base + 1, &cfg).unwrap();
+        let ports = alloc_port_range(service, 0, 3, &cfg).unwrap();
         assert_eq!(ports.len(), 3);
-        assert_eq!(ports[0], base);
-        assert_eq!(ports[1], base + 1);
-        assert_eq!(ports[2], base + 2);
+        assert!(ports[0] >= base + 2);
+        assert!(ports[2] < base + service.range_size());
+        assert!(ports.windows(2).all(|pair| pair[1] == pair[0] + 1));
         let claimed = read_claimed_ports(&cfg).unwrap();
         for p in &ports {
             assert!(claimed.contains(p));

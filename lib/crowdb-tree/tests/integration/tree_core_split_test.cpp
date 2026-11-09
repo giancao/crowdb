@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <future>
 
 namespace crowdb::tree
@@ -297,7 +298,7 @@ TEST_F(TreeCoreSplit, ColdOverflowBaselineBecomesIndependentOfTheParentBackend)
     ASSERT_TRUE(Crowdbtree::open(options, &parent).ok());
     const std::string value(12000, 'v');
     ASSERT_TRUE(put(*parent, 1, "x", value).ok());
-    ASSERT_TRUE(parent->snapshot().ok());
+    ASSERT_TRUE(parent->flush_with_persistent().ok());
     // Checkpoint rebase already publishes a reloadable cold base.
     {
         const auto view = TreeCoreAccess::get(*parent)->capture();
@@ -348,19 +349,24 @@ TEST_F(TreeCoreSplit, PartialCoverageFailureRetriesTheSameBatchAndKeepsChildWrit
     uint64_t generation = 0;
     uint64_t frontier   = 0;
     ASSERT_TRUE(parent->begin_split_memtable_view(&generation, &frontier).ok());
-    auto  &publisher    = TreeCoreAccess::get(*destination)->publisher();
-    size_t publications = 0;
+    auto      &publisher    = TreeCoreAccess::get(*destination)->publisher();
+    const auto before       = publisher.capture();
+    size_t     publications = 0;
     publisher.set_before_root_for_tests([&] {
-        if (++publications == 3) {
+        ++publications;
+        if (publisher.capture()->pending_handoff) {
             throw std::bad_alloc();
         }
     });
     const auto failed = parent->publish_split_memtable_view(generation, frontier, *destination, KeyRange::unbounded());
     publisher.set_before_root_for_tests({});
     EXPECT_FALSE(failed.ok());
-    EXPECT_EQ(publications, 3U);
+    EXPECT_EQ(publications, 2U);
     EXPECT_EQ(destination->last_applied_slot(), 0U);
-    EXPECT_TRUE(TreeCoreAccess::get(*destination)->capture()->pending_handoff);
+    const auto after_failure = publisher.capture();
+    EXPECT_TRUE(after_failure->pending_handoff);
+    EXPECT_TRUE(after_failure->mapping.same_root(before->mapping));
+    EXPECT_EQ(after_failure->coverage, before->coverage);
     EXPECT_EQ(destination->get_view("x").value().to_string(), "inherited");
     ASSERT_TRUE(put(*destination, 2, "x", "child").ok());
     const auto status = parent->publish_split_memtable_view(generation, frontier, *destination, KeyRange::unbounded());
@@ -398,24 +404,24 @@ TEST_F(TreeCoreSplit, ChildWriterCanCompleteWhileInheritedCoverageIsPublishing)
     ASSERT_TRUE(parent->begin_split_memtable_view(&generation, &frontier).ok());
     std::promise<void> coverage;
     std::promise<void> resume;
-    auto               boundary     = coverage.get_future();
-    auto               resumed      = resume.get_future();
-    auto              &publisher    = TreeCoreAccess::get(*destination)->publisher();
-    size_t             publications = 0;
+    auto               boundary  = coverage.get_future();
+    auto               resumed   = resume.get_future();
+    auto              &publisher = TreeCoreAccess::get(*destination)->publisher();
     publisher.set_before_root_for_tests([&] {
-        if (++publications == 3) {
+        if (publisher.capture()->pending_handoff) {
             coverage.set_value();
             resumed.wait();
         }
     });
-    auto published = std::async(std::launch::async, [&] {
+    auto       published = std::async(std::launch::async, [&] {
         return parent->publish_split_memtable_view(generation, frontier, *destination, KeyRange::unbounded());
     });
-    boundary.wait();
-    const auto written = put(*destination, 2, "x", "concurrent-child");
+    const bool ready     = boundary.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    const auto written   = ready ? put(*destination, 2, "x", "concurrent-child") : Status::unavailable();
     resume.set_value();
     const auto status = published.get();
     publisher.set_before_root_for_tests({});
+    ASSERT_TRUE(ready);
     ASSERT_TRUE(written.ok()) << written.to_string();
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(destination->last_applied_slot(), 1U);
@@ -430,10 +436,9 @@ TEST_F(TreeCoreSplit, ParentPartialHandoffRemainsCapturedUntilItsNormalRetry)
 {
     auto destination = child();
     ASSERT_TRUE(put(*parent, 1, "x", "inherited").ok());
-    auto  &publisher    = TreeCoreAccess::get(*parent)->publisher();
-    size_t publications = 0;
+    auto &publisher = TreeCoreAccess::get(*parent)->publisher();
     publisher.set_before_root_for_tests([&] {
-        if (++publications == 5) {
+        if (publisher.capture()->pending_handoff) {
             throw std::bad_alloc();
         }
     });

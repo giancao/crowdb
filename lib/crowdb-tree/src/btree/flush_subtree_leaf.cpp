@@ -23,7 +23,7 @@ void FlushBatch::State::Subtree::prepare_builder()
     // This is a whole-operation result, not one bounded idle transaction.
     limits.max_changed_pages = std::numeric_limits<size_t>::max();
     builder                  = detail::reserved_unique<detail::MaintenanceBuilder>(
-        owner.metadata, owner.publisher.capture(), owner.coverage_record, limits, [this](uint64_t *output) {
+        owner.metadata, owner.captured, owner.coverage_record, limits, [this](uint64_t *output) {
             auto next = owner.next_pid.load(std::memory_order_relaxed);
             do {
                 if (next >= MappingView::kPageLimit) {
@@ -68,25 +68,17 @@ void FlushBatch::State::Subtree::leaf()
             owner.options.before_handoff_for_tests(pid);
         }
 #endif
-        const auto index = owner.next_range.fetch_add(1, std::memory_order_relaxed);
-        auto record      = detail::reserved_shared<InstallRecord>(owner.metadata,
-                                                                  InstallToken{.generation = owner.captured->generation,
-                                                                               .batch      = owner.report.batch_id,
-                                                                               .range      = index,
-                                                                               .sequence   = 0});
-        range            = detail::reserved_construct<Range>(owner.metadata, [&](Range *storage) {
+        range = detail::reserved_construct<Range>(owner.metadata, [&](Range *storage) {
             ::new (static_cast<void *>(storage))
-                Range{.index    = index,
+                Range{.index    = static_cast<size_t>(pid),
                       .page_id  = pid,
                       .bounds   = bounds,
                       .expected = expected,
-                      .record   = std::move(record),
                       .runs     = OverlayStorage{OverlayAllocator(owner.metadata)},
                       .installs =
                           detail::ReservedVector<std::shared_ptr<InstallRecord>>{
                               detail::ReservationAllocator<std::shared_ptr<InstallRecord>>(owner.metadata)},
-                      .next_key        = {},
-                      .next_install_at = owner.options.install_run_window};
+                      .next_key = {}};
         });
     }
     if (!handed_off) {
@@ -99,9 +91,10 @@ void FlushBatch::State::Subtree::leaf()
         return;
     }
     prepare_builder();
+    const auto &input = range && range->prepared_page ? range->prepared_page : expected;
     if (!loaded_leaf) {
-        loaded_leaf = detail::reserved_shared<PageState>(
-            builder->options.metadata, *(range ? range->expected : expected)->leaf, builder->options.metadata);
+        loaded_leaf =
+            detail::reserved_shared<PageState>(builder->options.metadata, *input->leaf, builder->options.metadata);
     }
     while (next_base < loaded_leaf->bases.size()) {
         auto &base = loaded_leaf->bases[next_base];
@@ -116,7 +109,6 @@ void FlushBatch::State::Subtree::leaf()
         request_load();
         return;
     }
-    prepare_builder();
     auto limits        = builder->options.pages;
     limits.max_sources = std::max(limits.max_sources, loaded_leaf->bases.size() + loaded_leaf->overlays.size());
     if (!layout) {
@@ -141,8 +133,7 @@ void FlushBatch::State::Subtree::leaf()
     }
     output.pids.clear();
     output.separators.clear();
-    result =
-        detail::build_flush_leaf_outputs(*builder, pid, range ? range->expected : expected, layout->layout(), &output);
+    result = detail::build_flush_leaf_outputs(*builder, pid, input, layout->layout(), &output);
     if (split_metrics) {
         (void)split_metrics->finish(result.ok() ? TreeOutcome::Success : TreeOutcome::Error, tree_metrics_now_ns());
         if (result.ok()) {

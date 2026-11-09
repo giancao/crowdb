@@ -18,7 +18,7 @@ struct MergePairMetrics::Retired
         std::array<Index::node_type, 4> index;
     };
 
-    Retired(const std::shared_ptr<detail::AllocationReservation> &metadata, std::shared_ptr<const void> resource)
+    Retired(const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<const void> resource)
         : resource_owner(std::move(resource)),
           nodes(decltype(nodes)::allocator_type(metadata))
     {
@@ -40,9 +40,8 @@ MergePairMetrics::MergePairMetrics(std::pmr::memory_resource *resource) : pairs_
 {
 }
 
-MergePairMetrics::Prepared::Prepared(MergePairMetrics                                     &owner,
-                                     const std::shared_ptr<detail::AllocationReservation> &metadata,
-                                     std::shared_ptr<const void>                           resource_owner)
+MergePairMetrics::Prepared::Prepared(MergePairMetrics &owner, const std::shared_ptr<AllocationBudget> &metadata,
+                                     std::shared_ptr<const void> resource_owner)
     : owner_(owner),
       removed_(decltype(removed_)::allocator_type(metadata)),
       endpoints_(decltype(endpoints_)::allocator_type(metadata)),

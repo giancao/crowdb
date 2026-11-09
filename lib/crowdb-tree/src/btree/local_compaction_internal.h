@@ -10,6 +10,7 @@ namespace crowdb::tree
 struct LocalCompactionOperation::State : std::enable_shared_from_this<State>
 {
     enum class Phase : uint8_t { kBegin, kRetireAnchor, kSelected, kCheckpoint, kCleaned, kDone };
+    enum class ReclaimStep : uint8_t { kBegin, kPublication, kCollected, kCache };
 
     struct Receiver
     {
@@ -36,6 +37,7 @@ struct LocalCompactionOperation::State : std::enable_shared_from_this<State>
     static void backend_run(void *context) noexcept;
     void        pump();
     void        backend_step();
+    void        await_retirements() noexcept;
     void        checkpoint();
     void        child_done(Status status) noexcept;
     void        finish(Status status) noexcept;
@@ -62,10 +64,11 @@ struct LocalCompactionOperation::State : std::enable_shared_from_this<State>
     std::atomic<bool>                                      stopped{false};
     std::atomic<bool>                                      started{false};
     std::atomic<bool>                                      callback_ready{false};
-    Phase                                                  phase     = Phase::kBegin;
-    size_t                                                 rotations = 0;
-    bool                                                   gate_held = false;
-    detail::CallbackComplete                               complete  = nullptr;
-    void                                                  *context   = nullptr;
+    Phase                                                  phase        = Phase::kBegin;
+    ReclaimStep                                            reclaim_step = ReclaimStep::kBegin;
+    size_t                                                 rotations    = 0;
+    bool                                                   gate_held    = false;
+    detail::CallbackComplete                               complete     = nullptr;
+    void                                                  *context      = nullptr;
 };
 } // namespace crowdb::tree

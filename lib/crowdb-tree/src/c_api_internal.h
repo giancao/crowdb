@@ -17,12 +17,12 @@
 
 struct PageStoreBundle
 {
-    std::unique_ptr<crowdb::tree::PageStore> store;
 #ifdef CROWDB_HAVE_LIBURING
-    // Declare uring before async_store so reverse destruction order releases
-    // the non-owning async wrapper before its reactor.
-    std::unique_ptr<crowdb::common::DiskIOUring> uring;
+    // The wrapper and store release before the reactor. An external release
+    // driver can retain the reactor independently of both.
+    std::shared_ptr<crowdb::common::DiskIOUring> uring;
 #endif
+    std::unique_ptr<crowdb::tree::PageStore>      store;
     std::unique_ptr<crowdb::tree::AsyncPageStore> async_store;
     crowdb::tree::AsyncPageStore                 *async_store_view = nullptr;
     std::string                                   backend_label;
@@ -38,20 +38,23 @@ namespace crowdb::tree
 {
 class Crowdbtree;
 struct Config;
+struct CoreScanOptions;
 } // namespace crowdb::tree
 struct ct_runtime;
 struct ct_tree_runtime_options;
 crowdb::tree::Crowdbtree *c_api_tree(ct_tree *tree) noexcept;
 crowdb::tree::PageStore  *c_api_page_store(ct_tree *tree) noexcept;
+PageStoreBundle          *c_api_backend_bundle(ct_tree *tree) noexcept;
+struct ct_backend_release_service;
+ct_status c_api_bind_backend_release(PageStoreBundle *bundle, bool start_block_reactor, void (*wake)(void *),
+                                     void (*drop)(void *), void *context, ct_backend_release_service **out);
+#ifdef CROWDB_HAVE_LIBURING
+std::shared_ptr<crowdb::common::DiskIOUring> c_api_create_block_reactor();
+#endif
 struct CompletionSignal;
 std::shared_ptr<CompletionSignal> c_api_completion_signal(ct_tree *tree) noexcept;
 void                              c_api_notify_completion(const std::shared_ptr<CompletionSignal> &signal) noexcept;
-// Backend-specific entry points supply their implementation so ordinary open
-// keeps no link-time dependency on an optional migration backend.
-using CApiMigration = crowdb::tree::Status (*)(const crowdb::tree::Config &, uint64_t,
-                                               std::unique_ptr<crowdb::tree::Crowdbtree> *);
-ct_status ct_migrate_configured(const ct_options *opt, ct_runtime *runtime, const ct_tree_runtime_options *binding,
-                                uint64_t generation, CApiMigration migrate, ct_tree **out);
+ct_status c_api_scan_options(const ct_scan_options_v2 *options, crowdb::tree::CoreScanOptions *out) noexcept;
 ct_status ct_open_configured(const ct_options *options, ct_runtime *runtime, const ct_tree_runtime_options *binding,
                              ct_tree **out);
 

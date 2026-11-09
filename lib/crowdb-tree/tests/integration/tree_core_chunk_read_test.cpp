@@ -22,7 +22,7 @@ TestContents seed(TestCoreChunk &test)
         batch.ops.push_back({.key = key, .kind = OpKind::kPut, .value = value});
     }
     EXPECT_TRUE(test.tree->apply(1, batch).ok());
-    const auto status = test.tree->snapshot();
+    const auto status = test.tree->flush_with_persistent();
     EXPECT_TRUE(status.ok()) << status.to_string();
     return expected;
 }
@@ -103,7 +103,7 @@ TEST(TreeCoreChunkRead, OverlayTombstonesAndOldSnapshotKeepDifferentFixedViewsAf
     EXPECT_FALSE(test.tree->tree_summary().exact);
     check_scan(*test.tree, expected, false);
     check_scan(*test.tree, expected, true);
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     test.tree.reset();
     for (const auto &[key, value] : previous) {
         std::string actual;

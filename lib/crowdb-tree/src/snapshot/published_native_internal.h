@@ -15,7 +15,7 @@ struct PublishedNativeCursor::State
         }
     }
 
-    std::shared_ptr<PublishedSnapshotContext>      snapshot;
+    std::shared_ptr<PublishedReadViewContext>      snapshot;
     std::shared_ptr<detail::AllocationReservation> metadata;
     std::shared_ptr<SnapshotPageLoader>            loader;
     std::shared_ptr<CapturedFrameStream>           stream;

@@ -32,8 +32,8 @@ class CapturedLayoutPlanner
 {
   public:
     CapturedLayoutPlanner(uint64_t next_page_id, uint64_t backend_id, CapturedWriteLimits limits, size_t max_segments,
-                          std::shared_ptr<const CapturedDurablePages>    inherited,
-                          std::shared_ptr<detail::AllocationReservation> metadata);
+                          std::shared_ptr<const CapturedDurablePages> inherited,
+                          std::shared_ptr<AllocationBudget>           metadata);
     Status accept(CapturedFrameResult::Plan page);
     Status step();
     Status finish();
@@ -64,5 +64,6 @@ class CapturedLayoutPlanner
     uint64_t                                                                pid_       = kInvalidPageId;
     uint64_t                                                                remaining_ = 0;
     CapturedWritePlan                                                       plan_;
+    size_t                                                                  chain_steps_ = 0;
 };
 } // namespace crowdb::tree

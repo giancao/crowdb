@@ -55,17 +55,4 @@ size_t chunk_backing_allocation_bound() noexcept
            ChunkPhysicalRegistry::pack_allocation_bound();
 }
 
-Status read_chunk_backing(const ChunkPackBacking &backing, std::span<uint8_t> output,
-                          const std::shared_ptr<AllocationBudget> &budget)
-{
-    return backing.read != nullptr ? backing.read(backing, output, budget)
-                                   : Status::corruption("immutable pack has no read capability");
-}
-
-Status write_chunk_backing(ChunkPackBacking &backing, std::span<const uint8_t> input,
-                           const std::shared_ptr<AllocationBudget> &budget)
-{
-    return backing.write != nullptr ? backing.write(backing, input, budget)
-                                    : Status::invalid_argument("immutable pack has no write capability");
-}
 } // namespace crowdb::tree

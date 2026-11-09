@@ -19,8 +19,8 @@ bool same_base(const BaseRef &captured, const BaseRef &current)
 }
 
 Status leaf_rebase(const PageState &captured, const PageState &current, BaseRef base, const FinalPageSummary *summary,
-                   uint64_t coverage, const std::shared_ptr<detail::AllocationReservation> &metadata,
-                   PublishedPage &replacement, size_t max_sources)
+                   uint64_t coverage, const std::shared_ptr<AllocationBudget> &metadata, PublishedPage &replacement,
+                   size_t max_sources)
 {
     if (captured.route_generation != current.route_generation || captured.range.lower != current.range.lower ||
         captured.range.upper != current.range.upper || captured.right_sibling != current.right_sibling ||
@@ -90,7 +90,7 @@ Status leaf_rebase(const PageState &captured, const PageState &current, BaseRef 
 
 Status build_writeback_rebase(const std::shared_ptr<const PublishedPage> &captured,
                               const std::shared_ptr<const PublishedPage> &current, const DurableCapturedFrame &written,
-                              uint64_t coverage, const std::shared_ptr<detail::AllocationReservation> &metadata,
+                              uint64_t coverage, const std::shared_ptr<AllocationBudget> &metadata,
                               std::shared_ptr<const PublishedPage> *out, size_t max_sources, uint64_t gc_floor)
 try {
     if (!captured || !current || out == nullptr || *out || !written.backing || !written.backing->reloadable() ||

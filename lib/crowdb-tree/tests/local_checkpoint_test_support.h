@@ -8,24 +8,26 @@
 #include "snapshot/local_checkpoint.h"
 
 #include <atomic>
+#include <functional>
 
 namespace crowdb::tree::test_write
 {
 class TestCheckpointStore final : public AsyncPageStore
 {
   public:
-    std::shared_ptr<PageStore> device;
-    std::vector<std::string>   events;
-    size_t                     defer_at        = 0;
-    size_t                     fail_at         = 0;
-    size_t                     throw_at        = 0;
-    size_t                     inline_throw_at = 0;
-    AsyncCompletion            pending;
-    std::atomic<bool>          deferred{false};
-    uint64_t                   address = 0;
-    const uint8_t             *input   = nullptr;
-    size_t                     bytes   = 0;
-    bool                       barrier = false;
+    std::shared_ptr<PageStore>                                       device;
+    std::function<bool(PageAddr, void *, size_t, AsyncCompletion &)> defer_read;
+    std::vector<std::string>                                         events;
+    size_t                                                           defer_at        = 0;
+    size_t                                                           fail_at         = 0;
+    size_t                                                           throw_at        = 0;
+    size_t                                                           inline_throw_at = 0;
+    AsyncCompletion                                                  pending;
+    std::atomic<bool>                                                deferred{false};
+    uint64_t                                                         address = 0;
+    const uint8_t                                                   *input   = nullptr;
+    size_t                                                           bytes   = 0;
+    bool                                                             barrier = false;
 
     [[nodiscard]] bool write_completion_is_reloadable() const noexcept override
     {
@@ -34,6 +36,9 @@ class TestCheckpointStore final : public AsyncPageStore
 
     uint64_t submit_read(PageAddr at, void *out, size_t size, AsyncCompletion callback) override
     {
+        if (defer_read && defer_read(at, out, size, callback)) {
+            return 0;
+        }
         auto *block = dynamic_cast<BlockPageStore *>(device.get());
         callback.complete(block != nullptr ? block->read_at(at, static_cast<uint8_t *>(out), size, callback.allocations)
                                            : device->read_at(at, static_cast<uint8_t *>(out), size));

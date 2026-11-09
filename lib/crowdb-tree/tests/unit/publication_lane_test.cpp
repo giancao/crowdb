@@ -19,12 +19,12 @@ std::shared_ptr<PublicationRequest> request(uint64_t sequence)
     return value;
 }
 
-TEST(PublicationLane, PrepaidWindowProgressesWhenOrdinaryQueueIsFullAndReturnsBeforeCallback)
+TEST(PublicationLane, AcceptedWorkProgressesBeyondTheOrdinaryQueueCapacity)
 {
     test_read::LoadCredits           credits;
     PublicationCoordinator           publisher(2);
     std::shared_ptr<PublicationLane> lane;
-    ASSERT_TRUE(publisher.prepare_lane(2, credits.credits.reservation(), &lane).ok());
+    ASSERT_TRUE(publisher.prepare_lane(credits.credits.reservation(), &lane).ok());
     std::latch entered(1);
     std::latch release(1);
     auto       blocker = request(1);
@@ -57,23 +57,30 @@ TEST(PublicationLane, PrepaidWindowProgressesWhenOrdinaryQueueIsFullAndReturnsBe
     };
     EXPECT_TRUE(publisher.try_submit(first, lane));
     EXPECT_TRUE(publisher.try_submit(second, lane));
-    EXPECT_FALSE(publisher.try_submit(request(8), lane));
+    for (uint64_t sequence = 8; sequence < 136; ++sequence) {
+        auto extra     = request(sequence);
+        extra->on_done = [&](auto result) {
+            EXPECT_TRUE(result.status.ok());
+            completed.fetch_add(1);
+        };
+        EXPECT_TRUE(publisher.try_submit(extra, lane));
+        EXPECT_FALSE(publisher.try_submit(extra, lane));
+    }
     release.count_down();
     worker.join();
-    EXPECT_EQ(completed.load(), 3U);
+    EXPECT_EQ(completed.load(), 131U);
     EXPECT_TRUE(publisher.idle());
 }
 
-TEST(PublicationLane, WindowIsFixedUniqueAndBoundToItsPublisher)
+TEST(PublicationLane, OwnershipIsUniqueAndBoundToItsPublisher)
 {
     test_read::LoadCredits           credits;
     PublicationCoordinator           publisher(2);
     PublicationCoordinator           other(2);
     std::shared_ptr<PublicationLane> lane;
     std::shared_ptr<PublicationLane> duplicate;
-    EXPECT_EQ(publisher.prepare_lane(3, credits.credits.reservation(), &lane).code(), Code::kInvalidArgument);
-    ASSERT_TRUE(publisher.prepare_lane(2, credits.credits.reservation(), &lane).ok());
-    EXPECT_EQ(publisher.prepare_lane(1, credits.credits.reservation(), &duplicate).code(), Code::kUnavailable);
+    ASSERT_TRUE(publisher.prepare_lane(credits.credits.reservation(), &lane).ok());
+    EXPECT_EQ(publisher.prepare_lane(credits.credits.reservation(), &duplicate).code(), Code::kUnavailable);
     EXPECT_FALSE(other.try_submit(request(1), lane));
     publisher.close();
     EXPECT_FALSE(publisher.try_submit(request(2), lane));

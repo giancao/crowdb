@@ -49,16 +49,6 @@ Status reserve_generation(const std::shared_ptr<TreeRuntimeBinding> &binding, co
     return Status::Ok();
 }
 
-FlushBatchOptions flush_options(const Config &config, const TreeRuntimeBinding &binding)
-{
-    FlushBatchOptions batch;
-    batch.parallelism =
-        std::max<size_t>(1, std::min(binding.cpu()->worker_count(), binding.options().limits.io_operations));
-    const auto max_key = config.max_key_size != 0 ? config.max_key_size : config.frame_bytes / 2;
-    batch.run_limits   = {
-        .max_entries = 128, .max_key_bytes = std::max<size_t>(256 * 1024, max_key), .key_block_bytes = 1024};
-    return batch;
-}
 } // namespace
 
 Status TreeGenerationLease::prepare(TreeCore &owner, std::shared_ptr<const PublishedTreeState> candidate,
@@ -107,19 +97,17 @@ try {
         if (empty_candidate) {
             next->coverage = candidate->coverage;
         }
-        next->generation  = current->generation + 1;
-        prepared.coverage = next->coverage;
-        prepared.frontier = split != nullptr && split->inherited ? inherited_range.frontier : next->coverage;
-        SourceWriteOptions writers{.account = owner.binding()->account()};
-        writers.max_key_size =
-            owner.config().max_key_size != 0 ? owner.config().max_key_size : owner.config().frame_bytes / 2;
-        prepared.sources = detail::reserved_unique<SourceAdmission>(
+        next->generation   = current->generation + 1;
+        prepared.coverage  = next->coverage;
+        prepared.frontier  = split != nullptr && split->inherited ? inherited_range.frontier : next->coverage;
+        const auto writers = owner.state_->source_write_options();
+        prepared.sources   = detail::reserved_unique<SourceAdmission>(
             prepared.source_lifecycle, next->coverage, next->generation, writers, prepared.source_lifecycle);
         prepared.flush = detail::reserved_unique<FlushController>(
             prepared.flush_lifecycle, *owner.state_->publisher, *owner.binding()->cpu(), *prepared.sources,
             owner.state_->frontier->contiguous(), owner.binding()->lane(),
-            flush_options(owner.config(), *owner.binding()), FlushBatch::Maintenance{}, prepared.flush_lifecycle,
-            owner.state_->apply_progress);
+            owner.state_->flush_batch_options(writers.max_key_size), FlushBatch::Maintenance{},
+            prepared.flush_lifecycle, owner.state_->apply_progress);
         std::shared_ptr<PublishedSources> inherited;
         if (split != nullptr && split->inherited) {
             inherited         = detail::reserved_shared<PublishedSources>(prepared.metadata, prepared.metadata);

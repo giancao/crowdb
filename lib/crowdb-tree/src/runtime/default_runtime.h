@@ -10,5 +10,7 @@ struct Config;
 
 // Standalone entry points share one process-owned host. An explicitly injected
 // host retains its own limits and shutdown authority.
-Status configure_default_runtime(Config *config);
+// Asynchronous callers pass a flag to observe a competing cold initialization
+// without waiting or constructing a second set of workers.
+Status configure_default_runtime(Config *config, bool *initializing = nullptr);
 } // namespace crowdb::tree

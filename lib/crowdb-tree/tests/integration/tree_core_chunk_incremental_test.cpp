@@ -12,7 +12,7 @@ TEST(TreeCoreChunkIncremental, UnchangedCheckpointHasZeroWritesAndSameSequenceAf
     ASSERT_TRUE(test.put(1, std::string(20000, 'v')).ok());
     test.store->request_wal_offset(4096);
     uint64_t sequence = 0;
-    ASSERT_TRUE(test.tree->snapshot(nullptr, &sequence).ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent(nullptr, &sequence).ok());
     const auto writes = test.backend.transport->writes;
     const auto begins = test.backend.catalog->begin_calls;
     for (int iteration = 0; iteration < 2; ++iteration) {
@@ -21,7 +21,7 @@ TEST(TreeCoreChunkIncremental, UnchangedCheckpointHasZeroWritesAndSameSequenceAf
             ASSERT_TRUE(test.open().ok());
         }
         uint64_t   next   = 0;
-        const auto status = test.tree->snapshot(nullptr, &next);
+        const auto status = test.tree->flush_with_persistent(nullptr, &next);
         ASSERT_TRUE(status.ok()) << status.to_string();
         EXPECT_EQ(next, sequence);
         EXPECT_EQ(test.backend.transport->writes, writes);
@@ -30,7 +30,7 @@ TEST(TreeCoreChunkIncremental, UnchangedCheckpointHasZeroWritesAndSameSequenceAf
         EXPECT_EQ(test.tree->get_view("key").value().to_string(), std::string(20000, 'v'));
     }
     test.store->request_wal_offset(8192);
-    ASSERT_TRUE(test.tree->snapshot(nullptr, &sequence).ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent(nullptr, &sequence).ok());
     EXPECT_EQ(sequence, 2U);
     EXPECT_EQ(test.backend.transport->writes, writes);
     EXPECT_EQ(test.store->durable_wal_offset(), 8192U);
@@ -43,7 +43,7 @@ TEST(TreeCoreChunkIncremental, OneLeafChangeReusesOtherIndexPacksAndOldReader)
     ASSERT_TRUE(test.open().ok());
     const std::string large(600000, 'v');
     ASSERT_TRUE(test.put(1, large).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     auto held = test.tree->get_view("key");
     ASSERT_TRUE(held.found());
     ChunkRootManifest prior(test.backend.credits.credits.reservation());
@@ -51,7 +51,7 @@ TEST(TreeCoreChunkIncremental, OneLeafChangeReusesOtherIndexPacksAndOldReader)
     ASSERT_GT(prior.indexes.size(), 1U);
     const auto allocations = test.backend.transport->ids.size();
     ASSERT_TRUE(test.tree->apply(2, Batch{.ops = {{.key = "other", .kind = OpKind::kPut, .value = "small"}}}).ok());
-    const auto status = test.tree->snapshot();
+    const auto status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     ChunkRootManifest current(test.backend.credits.credits.reservation());
     ASSERT_TRUE(decode_chunk_root(test.backend.catalog->committed_manifest, 19, 2, &current).ok());
@@ -69,7 +69,7 @@ TEST(TreeCoreChunkIncremental, OneLeafChangeReusesOtherIndexPacksAndOldReader)
     EXPECT_EQ(test.tree->get_view("key").value().to_string(), large);
     EXPECT_EQ(test.tree->get_view("other").value().to_string(), "small");
     const auto writes = test.backend.transport->writes;
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     EXPECT_EQ(test.backend.transport->writes, writes);
     EXPECT_EQ(held.value().to_string(), large);
 }

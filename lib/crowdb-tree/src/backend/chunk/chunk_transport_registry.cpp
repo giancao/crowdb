@@ -4,8 +4,8 @@
 #include "btree/retired_shared.h"
 #include "chunk_physical_registry.h"
 #include "chunk_transport.h"
+#include "host_completion.h"
 
-#include <cassert>
 #include <map>
 
 namespace crowdb::tree::detail
@@ -38,13 +38,13 @@ struct RegistryPoolState : std::enable_shared_from_this<RegistryPoolState>
 
     struct Request : RetirementNode
     {
-        std::shared_ptr<RegistryPoolState>     state;
-        std::shared_ptr<Request>               queued_owner;
-        std::shared_ptr<AllocationBudget>      budget;
-        std::shared_ptr<ChunkPhysicalRegistry> result;
-        uint64_t                               tree = 0;
-        Status                                 status;
-        std::atomic<bool>                      done{false};
+        std::shared_ptr<RegistryPoolState>      state;
+        std::shared_ptr<Request>                queued_owner;
+        std::shared_ptr<AllocationBudget>       budget;
+        std::shared_ptr<RetirementQueue>        host;
+        std::shared_ptr<ChunkPhysicalRegistry> *out  = nullptr;
+        uint64_t                                tree = 0;
+        ChunkTransportCompletion                complete;
     };
 
     explicit RegistryPoolState(std::shared_ptr<RetirementQueue> executor) : queue(std::move(executor))
@@ -61,55 +61,51 @@ struct RegistryPoolState : std::enable_shared_from_this<RegistryPoolState>
 
     static bool dispatch(RetirementNode *node) noexcept
     {
-        auto request = std::move(static_cast<Request *>(node)->queued_owner);
+        auto   request = std::move(static_cast<Request *>(node)->queued_owner);
+        Status status;
         try {
             auto     &self = *request->state;
-            auto      host = request->budget->retirement_queue();
-            const Key key{.host = host.get(), .tree = request->tree};
+            const Key key{.host = request->host.get(), .tree = request->tree};
             auto      found = self.entries.find(key);
             if (found == self.entries.end()) {
                 std::shared_ptr<ChunkPhysicalRegistry> registry;
-                request->status = ChunkPhysicalRegistry::create(request->budget, &registry);
-                if (request->status.ok()) {
+                status = ChunkPhysicalRegistry::create(request->budget, &registry);
+                if (status.ok()) {
                     BudgetMemoryResource::Scope credit(self.memory, request->budget);
-                    found = self.entries.emplace(key, Entry{.host = std::move(host), .registry = std::move(registry)})
+                    found = self.entries
+                                .emplace(key, Entry{.host = std::move(request->host), .registry = std::move(registry)})
                                 .first;
                 }
             }
-            if (request->status.ok()) {
-                request->result = found->second.registry;
+            if (status.ok()) {
+                *request->out = found->second.registry;
             }
         }
         catch (const std::bad_alloc &) {
-            request->status = Status::resource_exhausted();
+            status = Status::resource_exhausted();
         }
         catch (...) {
-            request->status = Status::internal_error();
+            status = Status::internal_error();
         }
         request->state.reset();
-        request->done.store(true, std::memory_order_release);
-        request->done.notify_all();
+        request->complete.complete(std::move(status));
         return true;
     }
 
-    Status acquire(uint64_t tree, const std::shared_ptr<AllocationBudget> &metadata,
-                   std::shared_ptr<ChunkPhysicalRegistry> *out)
+    void submit(uint64_t tree, const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<RetirementQueue> host,
+                std::shared_ptr<ChunkPhysicalRegistry> *out, ChunkTransportCompletion complete)
     {
         auto request               = std::allocate_shared<Request>(MetadataAllocator<Request>(metadata));
         request->state             = shared_from_this();
         request->queued_owner      = request;
         request->budget            = metadata;
+        request->host              = std::move(host);
         request->retirement_budget = metadata;
         request->tree              = tree;
+        request->out               = out;
+        request->complete          = std::move(complete);
         request->dispose           = &dispatch;
         queue->retire(request.get());
-        while (!request->done.load(std::memory_order_acquire)) {
-            request->done.wait(false, std::memory_order_acquire);
-        }
-        if (request->status.ok()) {
-            *out = std::move(request->result);
-        }
-        return request->status;
     }
 
     std::shared_ptr<RetirementQueue> queue;
@@ -138,16 +134,20 @@ ChunkTransport::~ChunkTransport()
     ChunkRegistryPool::destroy(registry_pool_.load(std::memory_order_relaxed));
 }
 
-Status ChunkTransport::physical_registry(uint64_t tree, const std::shared_ptr<AllocationBudget> &metadata,
-                                         std::shared_ptr<ChunkPhysicalRegistry> *out)
+Status ChunkTransport::submit_physical_registry(uint64_t tree, const std::shared_ptr<AllocationBudget> &metadata,
+                                                std::shared_ptr<ChunkPhysicalRegistry> *out,
+                                                ChunkTransportCompletion                complete) noexcept
 try {
-    if (tree == 0 || !metadata || !metadata->retirement_queue() || out == nullptr || *out) {
+    if (tree == 0 || !metadata || out == nullptr || *out || complete.complete_fn == nullptr) {
+        return Status::invalid_argument();
+    }
+    auto host = metadata->retirement_queue();
+    if (!host) {
         return Status::invalid_argument();
     }
     auto *pool = registry_pool_.load(std::memory_order_acquire);
     if (pool == nullptr) {
-        auto state =
-            retired_shared<RegistryPoolState>(metadata, metadata->retirement_queue(), metadata->retirement_queue());
+        auto                                 state = retired_shared<RegistryPoolState>(metadata, host, host);
         MetadataAllocator<ChunkRegistryPool> allocator(metadata);
         auto                                *prepared = allocator.allocate(1);
         std::construct_at(prepared, ChunkRegistryPool{.metadata = metadata, .state = std::move(state)});
@@ -159,9 +159,37 @@ try {
             ChunkRegistryPool::destroy(prepared);
         }
     }
-    return pool->state->acquire(tree, metadata, out);
+    pool->state->submit(tree, metadata, std::move(host), out, std::move(complete));
+    return Status::Ok();
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted();
+}
+catch (...) {
+    return Status::internal_error();
+}
+
+Status ChunkTransport::physical_registry(uint64_t tree, const std::shared_ptr<AllocationBudget> &metadata,
+                                         std::shared_ptr<ChunkPhysicalRegistry> *out)
+{
+    struct OpenResult
+    {
+        HostCompletion done;
+        Status         status;
+    } result;
+
+    auto status = submit_physical_registry(tree, metadata, out,
+                                           {.complete_fn =
+                                                [](void *context, Status status) noexcept {
+                                                    auto &result  = *static_cast<OpenResult *>(context);
+                                                    result.status = std::move(status);
+                                                    result.done.signal();
+                                                },
+                                            .context = &result});
+    if (!status.ok()) {
+        return status;
+    }
+    result.done.wait();
+    return result.status;
 }
 } // namespace crowdb::tree::detail

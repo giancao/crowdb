@@ -12,7 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
-#include <unordered_map>
+#include <vector>
 
 namespace crowdb::tree
 {
@@ -34,15 +34,71 @@ struct MemPageStore::Data
 {
     static constexpr size_t kPageBytes = MemPageStore::kBackingPageBytes;
     using Page                         = std::array<uint8_t, kPageBytes>;
-    std::unordered_map<uint64_t, std::unique_ptr<Page>> pages;
-    uint64_t                                            bytes = 0;
+
+    struct Node
+    {
+        std::array<std::atomic<void *>, 256> children{};
+    };
+
+    Node                  root;
+    std::atomic<uint64_t> bytes{0};
+    std::atomic<size_t>   pages{0};
+
+    ~Data()
+    {
+        destroy(root, 40);
+    }
+
+    static void destroy(Node &node, unsigned shift)
+    {
+        for (const auto &slot : node.children) {
+            auto *child = slot.load(std::memory_order_relaxed);
+            if (child == nullptr) {
+                continue;
+            }
+            if (shift == 0) {
+                delete static_cast<Page *>(child);
+            }
+            else {
+                auto *next = static_cast<Node *>(child);
+                destroy(*next, shift - 8);
+                delete next;
+            }
+        }
+    }
+
+    std::atomic<void *> *slot(uint64_t index, bool create)
+    {
+        if (index >> 48 != 0) {
+            return nullptr;
+        }
+        auto *node = &root;
+        for (unsigned shift = 40; shift != 0; shift -= 8) {
+            auto &entry = node->children[(index >> shift) & 255];
+            auto *child = entry.load(std::memory_order_acquire);
+            if (child == nullptr && create) {
+                auto fresh = std::make_unique<Node>();
+                if (entry.compare_exchange_strong(child, fresh.get(), std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
+                    child = fresh.release();
+                }
+            }
+            if (child == nullptr) {
+                return nullptr;
+            }
+            node = static_cast<Node *>(child);
+        }
+        return &node->children[index & 255];
+    }
 
     void prepare(uint64_t off, size_t len)
     {
-        std::unordered_map<uint64_t, std::unique_ptr<Page>> prepared;
-        const auto                                          last = (off + len - 1) / kPageBytes;
+        using Prepared = std::pair<std::atomic<void *> *, std::unique_ptr<Page>>;
+        std::vector<Prepared> prepared;
+        const auto            last = (off + len - 1) / kPageBytes;
         for (auto index = off / kPageBytes; index <= last; ++index) {
-            if (!pages.contains(index)) {
+            auto *entry = slot(index, true);
+            if (entry->load(std::memory_order_acquire) == nullptr) {
 #ifdef CROWDB_TREE_TEST_UTIL
                 if (new_pages_before_failure) {
                     if (*new_pages_before_failure == 0) {
@@ -51,22 +107,18 @@ struct MemPageStore::Data
                     --*new_pages_before_failure;
                 }
 #endif
-                prepared.emplace(index, std::make_unique<Page>());
+                prepared.emplace_back(entry, std::make_unique<Page>());
             }
         }
-        if (!prepared.empty()) {
-            if (prepared.size() > pages.max_size() - pages.size()) {
-                throw std::bad_alloc();
+        // Prepare the complete write before publishing any new data page.
+        // The caller's range owner excludes GC until this I/O completes.
+        for (auto &[entry, page] : prepared) {
+            void *empty = nullptr;
+            if (entry->compare_exchange_strong(empty, page.get(), std::memory_order_release,
+                                               std::memory_order_relaxed)) {
+                [[maybe_unused]] auto *published = page.release();
+                pages.fetch_add(1, std::memory_order_relaxed);
             }
-            // Reserve the index before transferring nodes. Failure releases
-            // every new data page while leaving the stored bytes unchanged.
-            const auto required = pages.size() + prepared.size();
-            if (pages.empty() || required > pages.bucket_count()) {
-                const auto grown =
-                    pages.bucket_count() <= pages.max_size() / 2 ? 2 * pages.bucket_count() : pages.max_size();
-                pages.reserve(std::max(required, grown));
-            }
-            pages.merge(prepared);
         }
     }
 
@@ -75,25 +127,30 @@ struct MemPageStore::Data
         while (len != 0) {
             const auto offset = static_cast<size_t>(off % kPageBytes);
             const auto count  = std::min(len, kPageBytes - offset);
-            std::memcpy(pages.at(off / kPageBytes)->data() + offset, buf, count);
+            auto      *page   = static_cast<Page *>(slot(off / kPageBytes, false)->load(std::memory_order_acquire));
+            std::memcpy(page->data() + offset, buf, count);
             off += count;
             buf += count;
             len -= count;
         }
-        bytes = std::max(bytes, off);
+        auto known = bytes.load(std::memory_order_relaxed);
+        while (known < off &&
+               !bytes.compare_exchange_weak(known, off, std::memory_order_release, std::memory_order_relaxed)) {
+        }
     }
 
-    void read(uint64_t off, uint8_t *buf, size_t len) const
+    void read(uint64_t off, uint8_t *buf, size_t len)
     {
         while (len != 0) {
-            const auto offset = static_cast<size_t>(off % kPageBytes);
-            const auto count  = std::min(len, kPageBytes - offset);
-            const auto page   = pages.find(off / kPageBytes);
-            if (page == pages.end()) {
+            const auto  offset = static_cast<size_t>(off % kPageBytes);
+            const auto  count  = std::min(len, kPageBytes - offset);
+            auto       *entry  = slot(off / kPageBytes, false);
+            const auto *page = entry != nullptr ? static_cast<Page *>(entry->load(std::memory_order_acquire)) : nullptr;
+            if (page == nullptr) {
                 std::memset(buf, 0, count);
             }
             else {
-                std::memcpy(buf, page->second->data() + offset, count);
+                std::memcpy(buf, page->data() + offset, count);
             }
             off += count;
             buf += count;
@@ -116,7 +173,6 @@ try {
     if (buf == nullptr || off > std::numeric_limits<uint64_t>::max() - len) {
         return Status::invalid_argument("memory write has a null input or overflowing range");
     }
-    std::scoped_lock lk(mu_);
     // Grow only the written pages. Existing data never moves, and sparse holes
     // do not become physical allocations during checkpoint address growth.
     data_->prepare(off, len);
@@ -129,8 +185,8 @@ catch (const std::bad_alloc &) {
 
 Status MemPageStore::read_at(uint64_t off, uint8_t *buf, size_t len) const
 {
-    std::scoped_lock lk(mu_);
-    if (off > data_->bytes || len > data_->bytes - off) {
+    const auto end = data_->bytes.load(std::memory_order_acquire);
+    if (off > end || len > end - off) {
         return Status::io_error("MemPageStore: read past end");
     }
     if (len != 0 && buf == nullptr) {
@@ -142,20 +198,28 @@ Status MemPageStore::read_at(uint64_t off, uint8_t *buf, size_t len) const
 
 uint64_t MemPageStore::size() const
 {
-    std::scoped_lock lk(mu_);
-    return data_->bytes;
+    return data_->bytes.load(std::memory_order_acquire);
 }
 
 size_t MemPageStore::resident_bytes() const
 {
-    std::scoped_lock lk(mu_);
-    return data_->pages.size() * Data::kPageBytes;
+    return data_->pages.load(std::memory_order_relaxed) * Data::kPageBytes;
 }
 
 bool MemPageStore::release_backing_page(uint64_t index)
 {
-    std::scoped_lock lk(mu_);
-    return data_->pages.erase(index) != 0;
+    auto *entry = data_->slot(index, false);
+    if (entry == nullptr) {
+        return false;
+    }
+    auto *page = static_cast<Data::Page *>(entry->exchange(nullptr, std::memory_order_acq_rel));
+    if (page == nullptr) {
+        return false;
+    }
+    // The exclusive whole-page free-range lease excludes all byte users.
+    delete page;
+    data_->pages.fetch_sub(1, std::memory_order_relaxed);
+    return true;
 }
 
 } // namespace crowdb::tree

@@ -80,6 +80,9 @@ fn validate(args: &PaxosKvArgs) -> Result<(), String> {
     if args.require_snapshot && (!matches!(args.operation, Operation::Write) || args.value_size < 16384) {
         return Err("snapshot sentinel requires a write workload with values >=16KiB".into());
     }
+    if args.reuse_dataset && !matches!(args.operation, Operation::Write) {
+        return Err("--reuse-dataset requires a write workload".into());
+    }
     Ok(())
 }
 
@@ -89,8 +92,14 @@ async fn execute(args: Arc<PaxosKvArgs>) -> Result<Value, String> {
     deployment::validate_budget(&args, &containers)?;
     let (client, topology) = client::connect(&args).await?;
     let client = Arc::new(client);
-    eprintln!("bench paxos-kv: checking deterministic dataset before timing");
-    prepare_dataset(client.clone(), args.clone(), &containers).await?;
+    let dataset_policy = if args.reuse_dataset {
+        eprintln!("bench paxos-kv: reusing the verified deterministic dataset");
+        "bounded deterministic overwrite dataset; reused prefill and full verification after load"
+    } else {
+        eprintln!("bench paxos-kv: checking deterministic dataset before timing");
+        prepare_dataset(client.clone(), args.clone(), &containers).await?;
+        "bounded deterministic overwrite dataset; preparation and full verification outside timing"
+    };
     if matches!(args.operation, Operation::Prepare) {
         return Ok(json!({"passed":true,"operation":"prepare","keys":args.key_space}));
     }
@@ -173,7 +182,7 @@ async fn execute(args: Arc<PaxosKvArgs>) -> Result<Value, String> {
         "containers":if args.server_pids.is_empty() {json!(evidence)} else {json!([])},
         "processes":if args.server_pids.is_empty() {json!([])} else {json!(evidence)},"initial_topology":topology,"measurement_resources":metrics,
         "load_before":before,"load_after":after,"sentinel":sentinel,"verification":verification,
-        "dataset_policy":"bounded deterministic overwrite dataset; preparation and full verification outside timing",
+        "dataset_policy":dataset_policy,
         "host_cpu":std::fs::read_to_string("/proc/cpuinfo").ok().and_then(|s|s.lines().find(|l|l.starts_with("model name")).map(str::to_owned))}),
     )
 }

@@ -7,7 +7,7 @@
 
 namespace crowdb::tree
 {
-RecoveredStateOperation::State::State(std::shared_ptr<detail::AllocationReservation> credit)
+RecoveredStateOperation::State::State(std::shared_ptr<AllocationBudget> credit)
     : metadata(std::move(credit)),
       path(detail::ReservationAllocator<Path>(metadata)),
       reached(std::less<>{}, detail::ReservationAllocator<uint64_t>(metadata))
@@ -44,8 +44,8 @@ Status RecoveredStateOperation::create(std::shared_ptr<const CapturedDurablePage
                                        std::shared_ptr<PageLoader>                 loader,
                                        std::shared_ptr<detail::FlushRuntime>       runtime,
                                        std::shared_ptr<detail::FlushRuntime::Lane> lane, RecoveredStateLimits limits,
-                                       std::shared_ptr<detail::AllocationReservation> metadata,
-                                       std::shared_ptr<RecoveredStateOperation>      *out)
+                                       std::shared_ptr<AllocationBudget>         metadata,
+                                       std::shared_ptr<RecoveredStateOperation> *out)
 {
     auto status = create_readable(captured, std::move(loader), std::move(runtime), std::move(lane), limits,
                                   std::move(metadata), out);
@@ -61,17 +61,16 @@ Status RecoveredStateOperation::create(std::shared_ptr<const CapturedDurablePage
     return status;
 }
 
-Status RecoveredStateOperation::create_readable(std::shared_ptr<const ReadablePageCatalog>     captured,
-                                                std::shared_ptr<PageLoader>                    loader,
-                                                std::shared_ptr<detail::FlushRuntime>          runtime,
-                                                std::shared_ptr<detail::FlushRuntime::Lane>    lane,
-                                                RecoveredStateLimits                           limits,
-                                                std::shared_ptr<detail::AllocationReservation> metadata,
-                                                std::shared_ptr<RecoveredStateOperation>      *out)
+Status RecoveredStateOperation::create_readable(std::shared_ptr<const ReadablePageCatalog>  captured,
+                                                std::shared_ptr<PageLoader>                 loader,
+                                                std::shared_ptr<detail::FlushRuntime>       runtime,
+                                                std::shared_ptr<detail::FlushRuntime::Lane> lane,
+                                                RecoveredStateLimits limits, std::shared_ptr<AllocationBudget> metadata,
+                                                std::shared_ptr<RecoveredStateOperation> *out)
 {
     if (!captured || !loader || !runtime || !lane || out == nullptr || limits.max_pages == 0 || limits.max_depth == 0 ||
         limits.max_depth > 64 || limits.max_children == 0 || limits.max_children > 4096 ||
-        limits.max_leaf_entries == 0 || limits.max_step_entries == 0 || limits.max_dependency_steps == 0 ||
+        limits.max_leaf_entries == 0 || limits.max_step_entries == 0 ||
         captured->next_page_id > MappingView::kPageLimit) {
         return Status::invalid_argument();
     }

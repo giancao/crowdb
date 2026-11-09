@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Phase 2: exercise the async
-// C API surface (ct_get_async/ct_flush_async/ct_snapshot_async,
+// C API surface (ct_get_async/ct_flush_async/ct_flush_with_persistent_async,
 // ct_future_poll/ct_future_free, ct_reactor_eventfd) end to end, not just
 // the underlying Crowdbtree::*_async methods -- these are the four cases
 // called out for this file.
@@ -11,10 +11,8 @@
 // force the demand-load ("slow path") that ct_get_async's retry loop exists
 // for. On a build with liburing (CROWDB_HAVE_LIBURING), ct_open wires a
 // real Reactor + BlockAsyncPageStore, so the slow path genuinely completes
-// off the Reactor thread; without liburing (or for an in-memory tree) it
-// falls back to completing synchronously -- every assertion
-// below is written to hold either way (poll-until-done with a bounded
-// retry), except where a test specifically distinguishes the two.
+// off the Reactor thread. Linux block tests require a usable io_uring.
+// Poll until done with a bounded retry.
 #include "crowdb-tree/c_api.h"
 #include "test_tmp.h"
 
@@ -147,7 +145,7 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
         ASSERT_EQ(put_flush(t, i + 1, make_key(i), "val" + std::to_string(i)), 0);
     }
     uint64_t durable = 0;
-    ASSERT_EQ(ct_snapshot(t, &durable), 0);
+    ASSERT_EQ(ct_flush_with_persistent(t, &durable), 0);
     EXPECT_EQ(durable, 20U);
 
     const auto warm_key   = make_key(5);
@@ -213,7 +211,7 @@ TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
     for (int i = 0; i < 20; ++i) {
         ASSERT_EQ(put_flush(t, i + 1, make_key(i), "val" + std::to_string(i)), 0);
     }
-    ASSERT_EQ(ct_snapshot(t, nullptr), 0);
+    ASSERT_EQ(ct_flush_with_persistent(t, nullptr), 0);
     ct_evict_clean_leaves(t, 0);
 
     std::string k = make_key(5);
@@ -252,7 +250,7 @@ TEST(AsyncFlushSnapshot, FlushAndSnapshotCompleteWithTheirPublishedFrontier)
     ct_status fst = poll_until_done(ff, nullptr, nullptr, nullptr);
     EXPECT_EQ(fst, 0);
 
-    ct_future *sf = ct_snapshot_async(t);
+    ct_future *sf = ct_flush_with_persistent_async(t);
     ASSERT_NE(sf, nullptr);
     uint64_t  slot = 0;
     ct_status sst  = poll_until_done(sf, nullptr, &slot, nullptr);
@@ -296,7 +294,7 @@ TEST(AsyncSnapshot, BlockBackendAsyncSnapshotRoundTrip)
 
     // Async snapshot — on liburing builds this chains submit_write → ... →
     // submit_fsync → anchor write → submit_fsync → commit, all via io_uring.
-    ct_future *sf = ct_snapshot_async(t);
+    ct_future *sf = ct_flush_with_persistent_async(t);
     ASSERT_NE(sf, nullptr);
     uint64_t  slot = 0;
     ct_status sst  = poll_until_done(sf, nullptr, &slot, nullptr);

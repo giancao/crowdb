@@ -36,7 +36,8 @@ impl Partition {
             ));
         }
         let (manifest, applied) = self.tree.checkpoint_state()?;
-        self.retain_generation_pin(plan.transition_id, self.tree.root_manifest_generation()?)?;
+        self.retain_generation_pin(plan.transition_id, self.tree.root_manifest_generation()?)
+            .await?;
         let frontier = super::SplitSourceFrontier {
             parent_id: plan.parent_id,
             parent_epoch: plan.parent_epoch,

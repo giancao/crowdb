@@ -17,34 +17,42 @@ struct SnapshotBackendOwner
     std::shared_ptr<TreeRuntimeBinding> binding;
     std::shared_ptr<LocalBackendDomain> domain;
     std::shared_ptr<const void>         backend;
+    std::shared_ptr<AsyncPageStore>     scheduled;
 };
 } // namespace
 
-struct PublishedSnapshotContext::State
+struct PublishedReadViewContext::State : std::enable_shared_from_this<State>
 {
-    ~State()
+    static void reads_drained(void *context, Status /*status*/) noexcept
     {
-        if (lifetime) {
-            lifetime->close_and_drain();
-            lifetime.reset();
+        auto &self = *static_cast<State *>(context);
+        self.lane->close_async({.context = &self, .complete_fn = &cpu_drained, .owner = self.weak_from_this().lock()});
+    }
+
+    static void cpu_drained(void *context, Status /*status*/) noexcept
+    {
+        auto &self = *static_cast<State *>(context);
+        if (self.backend_lane) {
+            self.backend_lane->close_async(
+                {.context = &self, .complete_fn = &backend_drained, .owner = self.weak_from_this().lock()});
         }
-        // A terminal callback may precede its CPU job's final owner release.
-        // Snapshot contexts are host-owned, so the binding outlives that tail.
-        if (lane) {
-            lane->drain();
+        else {
+            backend_drained(context, Status::Ok());
         }
-        if (backend_lane) {
-            backend_lane->drain();
-        }
+    }
+
+    static void backend_drained(void *context, Status /*status*/) noexcept
+    {
+        auto &self = *static_cast<State *>(context);
+        self.close_complete(self.close_context);
     }
 
     std::shared_ptr<detail::AllocationReservation> metadata;
     std::shared_ptr<const PublishedTreeState>      view;
     std::shared_ptr<TreeRuntimeBinding>            binding;
     std::shared_ptr<detail::FlushRuntime::Lane>    lane;
-    std::shared_ptr<SnapshotBackendOwner>          owner;
     std::shared_ptr<detail::FlushRuntime::Lane>    backend_lane;
-    std::shared_ptr<AsyncPageStore>                scheduled;
+    std::shared_ptr<SnapshotBackendOwner>          owner;
     detail::ReservedUnique<TreeOperationLifetime>  lifetime;
     std::weak_ptr<TreeCore>                        core;
     std::shared_ptr<TreeWorkMetrics>               work_metrics;
@@ -53,7 +61,33 @@ struct PublishedSnapshotContext::State
     PublishedReadLimits                            reads;
     PageKeyRange                                   range;
     bool                                           detached = false;
+    std::atomic_flag                               closing  = ATOMIC_FLAG_INIT;
+    void (*close_complete)(void *)                          = nullptr;
+    void *close_context                                     = nullptr;
 };
+
+Status PublishedReadViewContext::close_async(void (*complete)(void *), void *context) const noexcept
+{
+    auto state = state_;
+    if (complete == nullptr) {
+        return Status::invalid_argument();
+    }
+    if (!state->lifetime) {
+        return Status::not_supported();
+    }
+    if (state->closing.test_and_set(std::memory_order_acq_rel)) {
+        return Status::unavailable();
+    }
+    state->close_complete = complete;
+    state->close_context  = context;
+    state->lifetime->close_async({.context = state.get(), .complete_fn = &State::reads_drained, .owner = state});
+    return Status::Ok();
+}
+
+bool PublishedReadViewContext::closed() const noexcept
+{
+    return state_->lifetime && state_->lifetime->closed();
+}
 
 SnapshotReadWindow::~SnapshotReadWindow()
 {
@@ -84,37 +118,36 @@ void SnapshotReadWindow::seal() noexcept
     if (budget.io) {
         budget.io->seal();
     }
-    if (!budget.account) {
-        if (auto reserved = budget.reservation()) {
-            reserved->seal();
-        }
+    if (auto reserved = budget.reservation()) {
+        reserved->seal();
     }
 }
 
-size_t PublishedSnapshotContext::allocation_bound() noexcept
+size_t PublishedReadViewContext::allocation_bound() noexcept
 {
     using namespace detail;
-    return shared_allocation_bound<State>() + shared_allocation_bound<PublishedSnapshotContext>() +
+    return shared_allocation_bound<State>() + shared_allocation_bound<PublishedReadViewContext>() +
            shared_allocation_bound<AllocationReservation>() + shared_allocation_bound<PublishedTreeState>() +
            PublishedSources::allocation_bound() + shared_allocation_bound<FlushRuntime::Lane>() +
            shared_allocation_bound<SnapshotBackendOwner>() + sizeof(TreeOperationLifetime) +
            TreeOperationLifetime::allocation_bound() + TreeOperationLifetime::ticket_allocation_bound();
 }
 
-size_t PublishedSnapshotContext::window_control_bound() noexcept
+size_t PublishedReadViewContext::window_control_bound() noexcept
 {
     return (2 * detail::shared_allocation_bound<detail::AllocationReservation>()) +
            TreeOperationLifetime::ticket_allocation_bound();
 }
 
-Status PublishedSnapshotContext::capture(const std::shared_ptr<TreeCore>           &core,
-                                         std::shared_ptr<PublishedSnapshotContext> *out)
+Status PublishedReadViewContext::capture(const std::shared_ptr<TreeCore>           &core,
+                                         std::shared_ptr<PublishedReadViewContext> *out)
 {
-    return core ? core->capture_snapshot(out) : Status::invalid_argument("snapshot capture requires an open Core");
+    return core ? core->capture_read_only_view(out)
+                : Status::invalid_argument("snapshot capture requires an open Core");
 }
 
-Status PublishedSnapshotContext::capture_admitted(const std::shared_ptr<TreeCore>           &core,
-                                                  std::shared_ptr<PublishedSnapshotContext> *out,
+Status PublishedReadViewContext::capture_admitted(const std::shared_ptr<TreeCore>           &core,
+                                                  std::shared_ptr<PublishedReadViewContext> *out,
                                                   std::shared_ptr<const PublishedTreeState>  captured)
 try {
     using namespace detail;
@@ -123,7 +156,7 @@ try {
     }
     auto binding = core->binding();
     auto bound   = AllocationBound(allocation_bound())
-                       .add(ScheduledPageStore::allocation_bound(binding->options().limits.io_operations))
+                       .add(ScheduledPageStore::allocation_bound())
                        .add(shared_allocation_bound<FlushRuntime::Lane>())
                        .add_product(2, OwnedKey::allocation_overhead() + 1)
                        .add(core->config().key_range.start() ? core->config().key_range.start()->size() : 0)
@@ -156,13 +189,13 @@ try {
     if (!captured) {
         captured = core->publisher().capture_complete();
     }
-    auto view                  = reserved_shared<PublishedTreeState>(metadata, *captured);
-    auto sources               = reserved_shared<PublishedSources>(metadata, metadata);
-    sources->floor             = view->coverage;
-    view->sources              = std::move(sources);
-    state->view                = std::move(view);
-    state->loads               = core->load_limits();
-    state->loads.max_inflight  = 1;
+    auto view      = reserved_shared<PublishedTreeState>(metadata, *captured);
+    auto sources   = reserved_shared<PublishedSources>(metadata, metadata);
+    sources->floor = view->coverage;
+    view->sources  = std::move(sources);
+    state->view    = std::move(view);
+    state->loads   = core->load_limits();
+
     state->reads               = core->read_limits();
     state->reads.max_memtables = 1;
     state->backend             = core->config().async_page_store;
@@ -179,20 +212,22 @@ try {
             state->backend_lane =
                 reserved_shared<FlushRuntime::Lane>(metadata, state->binding->options().backend_queue_limit);
             status = ScheduledPageStore::create(core->config().page_store, state->backend, core->config().backend_owner,
-                                                state->binding, metadata, state->backend_lane, &state->scheduled);
+                                                state->binding, metadata, state->backend_lane, &state->owner->scheduled,
+                                                state->binding->view_backend_progress());
             if (!status.ok()) {
                 return status;
             }
-            state->backend = state->scheduled.get();
+            // The ticket aliases this store. Keep the wrapper in the ticket's
+            // backend owner so dropping the view cannot invalidate a window.
+            state->backend = state->owner->scheduled.get();
         }
-        state->lifetime = reserved_unique<TreeOperationLifetime>(metadata, state->binding->options().cpu_queue_limit,
-                                                                 metadata, state->owner);
+        state->lifetime = reserved_unique<TreeOperationLifetime>(metadata, metadata, state->owner);
     }
     else {
         state->core = core;
     }
-    *out = reserved_construct<PublishedSnapshotContext>(metadata, [&](auto *storage) {
-        ::new (static_cast<void *>(storage)) PublishedSnapshotContext(std::move(state));
+    *out = reserved_construct<PublishedReadViewContext>(metadata, [&](auto *storage) {
+        ::new (static_cast<void *>(storage)) PublishedReadViewContext(std::move(state));
     });
     metadata->seal();
     return Status::Ok();
@@ -201,7 +236,7 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot context allocation failed");
 }
 
-Status PublishedSnapshotContext::prepare_window(size_t bytes, SnapshotReadWindow *out) const
+Status PublishedReadViewContext::prepare_window(size_t bytes, SnapshotReadWindow *out) const
 try {
     using namespace detail;
     if (out == nullptr || out->host_core || out->budget.bytes || out->loader || out->ticket) {
@@ -212,13 +247,12 @@ try {
         return Status::resource_exhausted("snapshot window bound overflow");
     }
     auto credit = ResourceBudget::try_reserve(state_->binding->account(), BudgetClass::kRouting, *bound);
-    auto io     = ResourceBudget::try_reserve(state_->binding->account(), BudgetClass::kIo, 1);
-    if (!credit || !io) {
+    if (!credit) {
         return Status::resource_exhausted("snapshot read window reserve unavailable");
     }
     SnapshotReadWindow window;
-    window.budget.bytes        = AllocationReservation::create(std::move(*credit));
-    window.budget.io           = reserved_shared<AllocationReservation>(window.budget.reservation(), std::move(*io));
+    window.budget.bytes = AllocationReservation::create(std::move(*credit));
+
     window.budget.work_metrics = state_->work_metrics;
     window.budget.cause        = TreeWorkCause::Snapshot;
     return finish_window(std::move(window), out);
@@ -227,7 +261,7 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot read window allocation failed");
 }
 
-Status PublishedSnapshotContext::prepare_window(SnapshotReadWindow *out) const
+Status PublishedReadViewContext::prepare_window(SnapshotReadWindow *out) const
 try {
     using namespace detail;
     if (out == nullptr || out->host_core || out->budget.bytes || out->loader || out->ticket) {
@@ -235,16 +269,18 @@ try {
     }
     SnapshotReadWindow window;
     window.budget.bytes        = state_->reads.metadata;
-    window.budget.account      = state_->binding->account();
     window.budget.work_metrics = state_->work_metrics;
-    window.budget.cause        = TreeWorkCause::Snapshot;
+    if (state_->detached) {
+        window.budget.cpu_progress = state_->binding->view_cpu_progress();
+    }
+    window.budget.cause = TreeWorkCause::Snapshot;
     return finish_window(std::move(window), out);
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot read window allocation failed");
 }
 
-Status PublishedSnapshotContext::finish_window(SnapshotReadWindow window, SnapshotReadWindow *out) const
+Status PublishedReadViewContext::finish_window(SnapshotReadWindow window, SnapshotReadWindow *out) const
 try {
     using namespace detail;
     Status          status;
@@ -275,27 +311,27 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot read window allocation failed");
 }
 
-const std::shared_ptr<const PublishedTreeState> &PublishedSnapshotContext::view() const noexcept
+const std::shared_ptr<const PublishedTreeState> &PublishedReadViewContext::view() const noexcept
 {
     return state_->view;
 }
 
-const std::shared_ptr<TreeRuntimeBinding> &PublishedSnapshotContext::binding() const noexcept
+const std::shared_ptr<TreeRuntimeBinding> &PublishedReadViewContext::binding() const noexcept
 {
     return state_->binding;
 }
 
-const std::shared_ptr<detail::FlushRuntime::Lane> &PublishedSnapshotContext::lane() const noexcept
+const std::shared_ptr<detail::FlushRuntime::Lane> &PublishedReadViewContext::lane() const noexcept
 {
     return state_->lane;
 }
 
-PageLoadLimits PublishedSnapshotContext::load_limits() const noexcept
+PageLoadLimits PublishedReadViewContext::load_limits() const noexcept
 {
     return state_->loads;
 }
 
-PublishedReadLimits PublishedSnapshotContext::read_limits() const noexcept
+PublishedReadLimits PublishedReadViewContext::read_limits() const noexcept
 {
     auto       limits          = state_->reads;
     const auto shape           = state_->view->mapping.copy_bounds();
@@ -303,12 +339,12 @@ PublishedReadLimits PublishedSnapshotContext::read_limits() const noexcept
     return limits;
 }
 
-const PageKeyRange &PublishedSnapshotContext::range() const noexcept
+const PageKeyRange &PublishedReadViewContext::range() const noexcept
 {
     return state_->range;
 }
 
-bool PublishedSnapshotContext::detached() const noexcept
+bool PublishedReadViewContext::detached() const noexcept
 {
     return state_->detached;
 }

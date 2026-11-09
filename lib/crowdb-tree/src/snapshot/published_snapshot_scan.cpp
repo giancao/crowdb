@@ -1,174 +1,114 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/allocation_account.h"
-#include "btree/allocation_bound.h"
-#include "btree/read_value_bound.h"
-#include "btree/scan_output.h"
-#include "btree/tree_core.h"
-#include "snapshot/operation_wait.h"
+#include "btree/tree_core_scan_internal.h"
+#include "host_completion.h"
 #include "snapshot/published_snapshot.h"
-#include "snapshot/published_snapshot_budget.h"
-
-#include <algorithm>
-#include <chrono>
-#include <utility>
 
 namespace crowdb::tree
 {
 namespace
 {
-PageKeyRange scan_range(CoreScanOptions options, const PageKeyRange &domain,
-                        const std::shared_ptr<AllocationBudget> &credit)
+Status prepare_view_scan(const PublishedReadViewContext &view, CoreScanOptions options,
+                         std::shared_ptr<core_read_detail::CoreScan> *out, std::shared_ptr<TreeCore> *host_core)
 {
-    PageKeyRange range;
-    if (!options.prefix.empty()) {
-        range.lower = OwnedKey(options.prefix, credit);
-        KeyArenaStorage upper(options.prefix.data(), options.prefix.size(), detail::ReservationAllocator<char>(credit));
-        while (!upper.empty() && static_cast<uint8_t>(upper.back()) == 255) {
-            upper.pop_back();
-        }
-        if (!upper.empty()) {
-            upper.back() = static_cast<char>(static_cast<uint8_t>(upper.back()) + 1);
-            range.upper  = OwnedKey(Slice(upper.data(), upper.size()), credit);
-        }
+    if (options.strict_byte_budget && options.byte_budget == 0) {
+        return Status::invalid_argument("read-only view scan requires a byte budget");
     }
-    if (!options.begin.empty() && (!range.lower || options.begin > Slice(*range.lower))) {
-        range.lower = OwnedKey(options.begin, credit);
+    auto limits = view.read_limits();
+    auto status = core_read_detail::scan_limits(options, &limits);
+    if (!status.ok()) {
+        return status;
     }
-    if (!options.end.empty() && (!range.upper || options.end < Slice(*range.upper))) {
-        range.upper = OwnedKey(options.end, credit);
+    const auto root = view.view()->mapping.get(view.view()->root_page_id);
+    if (!root || root->level >= limits.max_route_depth) {
+        return Status::corruption("read-only view scan has no bounded root");
     }
+    limits.max_route_depth = root->level + 1ULL;
+    SnapshotReadWindow window;
+    status = view.prepare_window(&window);
+    if (!status.ok()) {
+        return status;
+    }
+    if (host_core != nullptr) {
+        *host_core = std::move(window.host_core);
+    }
+    limits.metadata = window.budget.bytes;
+    core_read_detail::ReadPreparation ready;
+    ready.credit       = std::move(window.budget.bytes);
+    ready.ticket       = std::move(window.ticket);
+    ready.binding      = view.binding();
+    ready.view         = view.view();
+    ready.loader       = std::move(window.loader);
+    ready.limits       = std::move(limits);
+    auto        range  = core_read_detail::scan_range(options, ready.credit);
+    const auto &domain = view.range();
     if (domain.lower && (!range.lower || *domain.lower > *range.lower)) {
         range.lower = domain.lower;
     }
     if (domain.upper && (!range.upper || *domain.upper < *range.upper)) {
         range.upper = domain.upper;
     }
-    return range;
-}
-
-bool expired(uint64_t deadline)
-{
-    return deadline != 0 && std::cmp_greater_equal(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                       std::chrono::system_clock::now().time_since_epoch())
-                                                       .count(),
-                                                   deadline);
-}
-
-Status next_scan(const std::shared_ptr<PublishedScan> &scan)
-{
-    detail::SnapshotWaitCompletion completion;
-    auto operation = stdexec::connect(scan->next_sender(), detail::SnapshotWaitReceiver{.completion = &completion});
-    stdexec::start(operation);
-    completion.done.wait();
-    return completion.status.ok() ? scan->result().status : completion.status;
-}
-
-Status pack_window(const PublishedScanResult &result, CoreScanOptions options, size_t bytes_limit,
-                   size_t normal_capacity, size_t value_limit, ScanPackedBuf *packed, size_t *count, size_t *bytes,
-                   bool *truncated)
-{
-    for (const auto &entry : result.entries) {
-        const Slice key(entry.key);
-        const Slice value = entry.cell.value;
-        if (key.size() > UINT32_MAX || value.size() > UINT32_MAX || value.size() > value_limit) {
-            return Status::resource_exhausted("snapshot scan entry exceeds configured limits");
-        }
-        const auto size    = key.size() + value.size();
-        const bool exceeds = size > bytes_limit - std::min(*bytes, bytes_limit);
-        if (*count >= options.limit || (exceeds && *count != 0) || expired(options.deadline_ms)) {
-            *truncated = true;
-            return Status::Ok();
-        }
-        if (exceeds && options.strict_byte_budget) {
-            *truncated = true;
-            return Status::Ok();
-        }
-        detail::reserve_scan_output(*packed, size, normal_capacity);
-        packed->pack_u32(static_cast<uint32_t>(key.size()));
-        packed->append(key);
-        packed->pack_u64(entry.cell.slot);
-        packed->push_back(entry.cell.tombstone() ? 1 : 0);
-        packed->pack_u32(static_cast<uint32_t>(value.size()));
-        packed->append(value);
-        ++*count;
-        *bytes += size;
+    status = core_read_detail::prepare_scan(options, std::move(ready), std::move(range),
+                                            view.load_limits().max_value_bytes, out);
+    if (status.ok()) {
+        (*out)->lane     = view.lane();
+        (*out)->progress = view.binding()->view_cpu_progress();
     }
-    *truncated = !result.done && (result.byte_limit_reached || *count >= options.limit || *bytes >= bytes_limit);
-    return Status::Ok();
+    return status;
 }
 } // namespace
 
-Status PublishedSnapshotContext::scan(CoreScanOptions options, ScanPackedBuf *out, size_t *count, bool *truncated) const
+Status PublishedReadViewContext::scan_async(CoreScanOptions options, ScanComplete complete) const
 try {
-    if (out == nullptr || count == nullptr || truncated == nullptr ||
-        (options.strict_byte_budget && options.byte_budget == 0)) {
-        return Status::invalid_argument("snapshot scan requires bounded output");
+    if (!complete) {
+        return Status::invalid_argument("read-only view scan needs a completion");
     }
-    *out        = {};
-    *count      = 0;
-    *truncated  = false;
-    auto limits = read_limits();
-    for (const auto key : {options.prefix, options.start, options.end, options.begin}) {
-        if (key.size() > limits.max_key_bytes) {
-            return Status::invalid_argument("snapshot scan boundary exceeds key limit");
-        }
+    if (!detached() || closed()) {
+        return Status::unavailable("read-only view is closed or borrows its backend");
     }
-    const auto root = view()->mapping.get(view()->root_page_id);
-    if (!root || root->level >= limits.max_route_depth) {
-        return Status::corruption("snapshot scan has no bounded root");
-    }
-    using detail::AllocationBound;
-    const auto loads        = load_limits();
-    options.limit           = options.limit == 0 ? SIZE_MAX : options.limit;
-    limits.max_route_depth  = root->level + 1ULL;
-    const auto byte_limit   = options.byte_budget == 0 ? SIZE_MAX : options.byte_budget;
-    limits.max_result_bytes = std::min(byte_limit, limits.max_result_bytes);
-    // The public limit bounds the whole packed result. Each read still uses a
-    // fixed work window, with at most one zero-byte empty-key result.
-    const auto byte_count = AllocationBound(limits.max_result_bytes).add(1).value().value_or(SIZE_MAX);
-    limits.max_entries    = std::max<size_t>(1, std::min({options.limit, limits.max_entries, byte_count}));
-    SnapshotReadWindow window;
-    auto               status = prepare_window(&window);
-    if (!status.ok()) {
-        return status;
-    }
-    limits.metadata = window.budget.bytes;
-    PublishedScanOptions selection{.start_inclusive       = options.start_inclusive,
-                                   .keys_only             = options.keys_only,
-                                   .include_tombstones    = options.include_tombstones,
-                                   .allow_oversized_first = !options.strict_byte_budget,
-                                   .byte_budget           = byte_limit};
-    if (options.has_start_bound || !options.start.empty()) {
-        selection.start = OwnedKey(options.start, limits.metadata);
-    }
-    std::shared_ptr<PublishedScan> scan;
-    status = PublishedScan::create(view(), window.loader, scan_range(options, range(), limits.metadata),
-                                   options.reverse, limits, &scan, std::move(selection));
-    ScanPackedBuf packed(window.budget.bytes);
-    size_t        bytes = 0;
-    while (status.ok()) {
-        if (expired(options.deadline_ms)) {
-            *truncated = true;
-            break;
-        }
-        status = next_scan(scan);
-        if (!status.ok()) {
-            break;
-        }
-        status = pack_window(scan->result(), options, byte_limit, 0, loads.max_value_bytes, &packed, count, &bytes,
-                             truncated);
-        if (scan->result().done || *truncated) {
-            break;
-        }
-    }
+    std::shared_ptr<core_read_detail::CoreScan> operation;
+    auto                                        status = prepare_view_scan(*this, options, &operation, nullptr);
     if (status.ok()) {
-        *out = std::move(packed);
+        operation->complete = std::move(complete);
+        operation->owner    = operation;
+        operation->schedule();
     }
-    window.seal();
     return status;
 }
 catch (const std::bad_alloc &) {
-    return Status::resource_exhausted("snapshot scan allocation failed");
+    return Status::resource_exhausted("read-only view scan allocation failed");
+}
+
+Status PublishedReadViewContext::scan(CoreScanOptions options, ScanPackedBuf *out, size_t *count, bool *truncated) const
+try {
+    if (out == nullptr || count == nullptr || truncated == nullptr) {
+        return Status::invalid_argument("read-only view scan needs output");
+    }
+    *out       = {};
+    *count     = 0;
+    *truncated = false;
+    std::shared_ptr<TreeCore>                   host_core;
+    std::shared_ptr<core_read_detail::CoreScan> operation;
+    auto                                        status = prepare_view_scan(*this, options, &operation, &host_core);
+    if (!status.ok()) {
+        return status;
+    }
+    detail::HostCompletion done;
+    operation->complete = [&](Status outcome, ScanPackedBuf packed, size_t entries, bool more) {
+        status = std::move(outcome);
+        if (status.ok()) {
+            *out       = std::move(packed);
+            *count     = entries;
+            *truncated = more;
+        }
+        done.signal();
+    };
+    operation->owner = operation;
+    core_read_detail::CoreScan::step(operation.get());
+    done.wait();
+    return status;
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted("read-only view scan allocation failed");
 }
 } // namespace crowdb::tree

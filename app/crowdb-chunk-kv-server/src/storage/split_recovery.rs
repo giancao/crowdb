@@ -10,7 +10,7 @@ use crowdb_chunk_stream::StreamRegistry;
 use crowdb_protocol::chunk_kv::{
     ChunkKvRangeCatalogEntry, ChunkKvRangeCatalogPartitionState, SplitTransition,
 };
-use crowdb_tree_ffi::ChunkPageStoreOptions;
+use crowdb_tree_ffi::ChunkRuntimeOptions;
 
 impl ChunkKvStorage {
     pub(super) async fn resume_split_handoff(
@@ -55,14 +55,11 @@ impl ChunkKvStorage {
             .map_err(|error| storage_plan_error(&error.to_string()))?;
         let (page_store, catalog) = self
             .open_durable_tree(
-                ChunkPageStoreOptions {
+                ChunkRuntimeOptions {
                     tree_id: transition.child.artifact.tree_id,
                     owner_epoch: transition.child.owner_epoch,
                     open_generation: proof.base_root_manifest_generation,
-                    pack_bytes: 0,
                     iu_size: 0,
-                    max_concurrent_packs: 0,
-                    materialization_bytes_per_pass: 0,
                     mirror_copies: 0,
                     max_chunk_bytes: 0,
                 },

@@ -73,7 +73,9 @@ struct ChunkTransportCompletion
 {
     void (*complete_fn)(void *context, Status status) = nullptr;
     bool (*stop_requested_fn)(void *context)          = nullptr;
-    void *context                                     = nullptr;
+    void                             *context         = nullptr;
+    std::shared_ptr<const void>       owner           = nullptr;
+    std::shared_ptr<AllocationBudget> allocations     = nullptr;
 
     void complete(Status status) const
     {
@@ -94,16 +96,15 @@ class ChunkTransport
 {
   public:
     virtual ~ChunkTransport();
-    // Host open only. Registry identity is stable across writer incarnations
-    // for this transport, retirement domain and logical Tree ID.
+    // Registry identity is stable across writer incarnations for this
+    // transport, retirement domain and logical Tree ID. Submission errors do
+    // not call complete. The accepted request retains the output owner.
+    Status submit_physical_registry(uint64_t tree, const std::shared_ptr<AllocationBudget> &metadata,
+                                    std::shared_ptr<ChunkPhysicalRegistry> *out,
+                                    ChunkTransportCompletion                complete) noexcept;
+    // Synchronous compatibility entry for an external host.
     Status physical_registry(uint64_t tree, const std::shared_ptr<AllocationBudget> &metadata,
                              std::shared_ptr<ChunkPhysicalRegistry> *out);
-
-    virtual Status allocate_mirror_chunk(uint64_t logical_capacity, uint64_t owner_epoch, ChunkId *chunk_id,
-                                         PagePurpose purpose) = 0;
-    // The ordered pack planner prepares capacity before submitting mirror I/O.
-    // Allocation capacity is a ceiling; RPC-backed chunks grow in small strips.
-    virtual Status ensure_capacity(ChunkId chunk_id, uint64_t required_bytes);
 
     // Fixed identity is durably protected before this call. An unknown result
     // never authorizes generating another identity or releasing that protection.
@@ -118,6 +119,12 @@ class ChunkTransport
         return Status::not_supported();
     }
 
+    virtual void submit_allocate_fixed_chunk(ChunkId id, uint64_t capacity, uint64_t epoch, PagePurpose purpose,
+                                             ChunkTransportCompletion completion)
+    {
+        completion.complete(allocate_fixed_chunk(id, capacity, epoch, purpose));
+    }
+
     [[nodiscard]] virtual Status verify_fixed_read_fence(ChunkId /*unused*/, uint32_t /*unused*/,
                                                          ChunkIoContext /*unused*/) const
     {
@@ -130,10 +137,28 @@ class ChunkTransport
         return Status::not_supported();
     }
 
+    virtual void submit_write_fixed_mirror(ChunkId id, uint32_t mirror, uint64_t offset, const uint8_t *data,
+                                           size_t length, ChunkIoContext context, ChunkTransportCompletion completion)
+    {
+        completion.complete(write_fixed_mirror(id, mirror, offset, data, length, context));
+    }
+
     virtual Status read_fixed_mirror(ChunkId /*unused*/, uint32_t /*unused*/, uint64_t /*unused*/, uint8_t * /*unused*/,
                                      size_t /*unused*/, ChunkIoContext /*unused*/) const
     {
         return Status::not_supported();
+    }
+
+    virtual void submit_verify_fixed_read_fence(ChunkId id, uint32_t mirrors, ChunkIoContext context,
+                                                ChunkTransportCompletion completion) const
+    {
+        completion.complete(verify_fixed_read_fence(id, mirrors, context));
+    }
+
+    virtual void submit_read_fixed_mirror(ChunkId id, uint32_t mirror, uint64_t offset, uint8_t *data, size_t length,
+                                          ChunkIoContext context, ChunkTransportCompletion completion) const
+    {
+        completion.complete(read_fixed_mirror(id, mirror, offset, data, length, context));
     }
 
     // Called only after the creator's fixed request ages are excluded. A
@@ -158,15 +183,53 @@ class ChunkTransport
         return Status::not_supported();
     }
 
-    virtual Status write_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, const uint8_t *data,
-                                size_t length) = 0;
-    virtual void   submit_write_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, const uint8_t *data,
-                                       size_t length, ChunkTransportCompletion completion);
-    virtual Status advance_write(ChunkId chunk_id, uint64_t expected_bytes, uint64_t acknowledged_bytes) = 0;
-    virtual Status read_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, uint8_t *data,
-                               size_t length) const                                                      = 0;
-    virtual Status query_chunk(ChunkId chunk_id, ChunkLayout *layout) const                              = 0;
-    virtual Status seal_chunk(ChunkId chunk_id, uint64_t owner_epoch, uint64_t acknowledged_bytes)       = 0;
+    virtual void submit_drain_fixed_chunk(ChunkId id, ChunkTransportCompletion completion) const
+    {
+        completion.complete(drain_fixed_chunk(id));
+    }
+
+    virtual void submit_inspect_fixed_allocation(ChunkId id, uint64_t epoch, ChunkAllocationIdentity *out,
+                                                 ChunkTransportCompletion completion) const
+    {
+        completion.complete(inspect_fixed_allocation(id, epoch, out));
+    }
+
+    virtual void submit_delete_chunk(ChunkId id, ChunkTransportCompletion completion)
+    {
+        completion.complete(delete_chunk(id));
+    }
+
+    virtual void submit_advance_write(ChunkId id, uint64_t expected, uint64_t acknowledged,
+                                      ChunkTransportCompletion completion)
+    {
+        completion.complete(advance_write(id, expected, acknowledged));
+    }
+
+    virtual void submit_seal_chunk(ChunkId id, uint64_t epoch, uint64_t acknowledged,
+                                   ChunkTransportCompletion completion)
+    {
+        completion.complete(seal_chunk(id, epoch, acknowledged));
+    }
+
+    virtual Status advance_write(ChunkId /*unused*/, uint64_t /*unused*/, uint64_t /*unused*/)
+    {
+        return Status::not_supported();
+    }
+
+    virtual Status query_chunk(ChunkId /*unused*/, ChunkLayout * /*unused*/) const
+    {
+        return Status::not_supported();
+    }
+
+    virtual void submit_query_chunk(ChunkId id, ChunkLayout *out, ChunkTransportCompletion completion) const
+    {
+        completion.complete(query_chunk(id, out));
+    }
+
+    virtual Status seal_chunk(ChunkId /*unused*/, uint64_t /*unused*/, uint64_t /*unused*/)
+    {
+        return Status::not_supported();
+    }
 
   private:
     std::atomic<ChunkRegistryPool *> registry_pool_{nullptr};
@@ -179,12 +242,10 @@ class MemoryChunkTransport final : public ChunkTransport
 {
   public:
     Status allocate_mirror_chunk(uint64_t logical_capacity, uint64_t owner_epoch, ChunkId *chunk_id,
-                                 PagePurpose purpose) override;
-    Status write_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, const uint8_t *data,
-                        size_t length) override;
+                                 PagePurpose purpose);
+    Status write_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, const uint8_t *data, size_t length);
     Status advance_write(ChunkId chunk_id, uint64_t expected_bytes, uint64_t acknowledged_bytes) override;
-    Status read_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, uint8_t *data,
-                       size_t length) const override;
+    Status read_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, uint8_t *data, size_t length) const;
     Status query_chunk(ChunkId chunk_id, ChunkLayout *layout) const override;
     Status seal_chunk(ChunkId chunk_id, uint64_t owner_epoch, uint64_t acknowledged_bytes) override;
 

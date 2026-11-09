@@ -9,9 +9,9 @@
 
 namespace crowdb::tree::snapshot
 {
-TEST(SnapshotMetadataCodec, SegmentMatchesExistingFormatsWithoutTouchingPadding)
+TEST(SnapshotMetadataCodec, SegmentMatchesLocalFormatWithoutTouchingPadding)
 {
-    for (const auto word : {slot_word::pack_unloaded(9, 2), slot_word::pack_page_ref(17, 3)}) {
+    for (const auto word : {slot_word::pack_unloaded(9, 2), slot_word::pack_unloaded(17, 3)}) {
         const SegmentImageHeader    header{.seg_idx = 4, .generation = 9, .slot_count = 4, .live_count = 1};
         const std::vector<uint64_t> words{slot_word::kEmpty, word, 0, 0};
         std::vector<uint8_t>        expected;

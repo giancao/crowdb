@@ -64,7 +64,7 @@ TEST(Gc, SnapshotFoldingBelowWatermarkPreservesTombstone)
     ASSERT_TRUE(t.apply(2, del_one("a")).ok());
     ASSERT_TRUE(t.flush().ok());
     // gc_watermark() defaults to 0; the tombstone at slot 2 is not yet eligible.
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     // The tombstone survives: get returns false (tombstone filters the read),
     // but the leaf still contains the tombstone cell.
     std::string v;
@@ -75,7 +75,7 @@ TEST(Gc, SnapshotFoldingBelowWatermarkPreservesTombstone)
     // This second snapshot must fold the tombstone (it's now eligible).
     t.set_gc_watermark(2, 2);
     auto before = RuntimeTreeAccess_for_tests::root(t);
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     // The leaf was rebuilt (eligible tombstone folded).
     EXPECT_NE(RuntimeTreeAccess_for_tests::root(t), before);
     EXPECT_FALSE(t.get(Slice("a"), &slot, &v));
@@ -101,13 +101,13 @@ TEST(Gc, SnapshotFoldsEligibleTombstoneInCleanLeaf)
     // clean LeafBase with no BatchDelta chain on top.
     ASSERT_TRUE(t.apply(5, del_one("k1")).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     ASSERT_FALSE(has_overlay(t));
 
     // Advance the watermark past the delete's slot, then snapshot to fold.
     t.set_gc_watermark(5, 5);
     auto before = RuntimeTreeAccess_for_tests::root(t);
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     // The leaf was rebuilt (eligible tombstone folded).
     EXPECT_NE(RuntimeTreeAccess_for_tests::root(t), before);
     ASSERT_FALSE(has_overlay(t));
@@ -138,12 +138,12 @@ TEST(Gc, SnapshotFoldingReclaimsTombstoneAfterOpen)
     }
     ASSERT_TRUE(t->apply(5, del_one("k1")).ok());
     ASSERT_TRUE(t->flush().ok());
-    ASSERT_TRUE(t->snapshot().ok());
+    ASSERT_TRUE(t->flush_with_persistent().ok());
     ASSERT_FALSE(has_overlay(*t));
     auto before = RuntimeTreeAccess_for_tests::root(*t);
 
     t->set_gc_watermark(5, 5);
-    ASSERT_TRUE(t->snapshot().ok());
+    ASSERT_TRUE(t->flush_with_persistent().ok());
 
     EXPECT_NE(RuntimeTreeAccess_for_tests::root(*t), before) << "snapshot folding never swept the stale tombstone";
 
@@ -162,7 +162,7 @@ TEST(Gc, CompactSparseBlocksNoOpOnMemStore)
     Crowdbtree t(opt);
     ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
 
     MergeGcStats stats;
     const auto   status = t.compact_sparse_blocks(&stats);
@@ -187,9 +187,9 @@ TEST(Gc, NormalSnapshotDoesNotRelocateSparseBlocks)
     Crowdbtree t(opt);
     ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
 
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     EXPECT_EQ(t.stats().snapshot_pages_written, 0U);
 }
 
@@ -218,7 +218,7 @@ TEST(Gc, CompactSparseBlocksProtectsAnchorBlock)
             ASSERT_TRUE(t.apply(i + 1, put_one("k" + std::to_string(i), "v")).ok());
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
         // Delete most keys to make blocks sparse.
         for (int i = 0; i < 50; ++i) {
             if (i % 10 != 0) {
@@ -226,7 +226,7 @@ TEST(Gc, CompactSparseBlocksProtectsAnchorBlock)
             }
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
         // Run compaction — must not touch block 0 (anchor).
         MergeGcStats stats;
         local->gc_active.store(false);
@@ -289,7 +289,7 @@ TEST(Gc, CompactSparseBlocksRespectsByteBudget)
     }
     const auto flush_1 = t.flush();
     ASSERT_TRUE(flush_1.ok()) << flush_1.to_string();
-    const auto snapshot_1 = t.snapshot();
+    const auto snapshot_1 = t.flush_with_persistent();
     ASSERT_TRUE(snapshot_1.ok()) << snapshot_1.to_string();
     ASSERT_GE(local->ledger->stats().address_high_water, 3 * blk)
         << "fixture must populate multiple complete non-anchor blocks";
@@ -303,11 +303,11 @@ TEST(Gc, CompactSparseBlocksRespectsByteBudget)
     }
     const auto flush_2 = t.flush();
     ASSERT_TRUE(flush_2.ok()) << flush_2.to_string();
-    const auto snapshot_2 = t.snapshot();
+    const auto snapshot_2 = t.flush_with_persistent();
     ASSERT_TRUE(snapshot_2.ok()) << snapshot_2.to_string();
     // Both recovery anchors must describe the deleted-key view before the
     // superseded checkpoint's extents can become sparse GC candidates.
-    const auto retired_anchor = t.snapshot();
+    const auto retired_anchor = t.flush_with_persistent();
     ASSERT_TRUE(retired_anchor.ok()) << retired_anchor.to_string();
 
     MergeGcStats stats;
@@ -358,7 +358,7 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
     }
     const auto flush_1 = t.flush();
     ASSERT_TRUE(flush_1.ok()) << flush_1.to_string();
-    const auto snapshot_1 = t.snapshot();
+    const auto snapshot_1 = t.flush_with_persistent();
     ASSERT_TRUE(snapshot_1.ok()) << snapshot_1.to_string();
 
     // Delete most keys to create sparse blocks.
@@ -370,11 +370,11 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
     }
     const auto flush_2 = t.flush();
     ASSERT_TRUE(flush_2.ok()) << flush_2.to_string();
-    const auto snapshot_2 = t.snapshot();
+    const auto snapshot_2 = t.flush_with_persistent();
     ASSERT_TRUE(snapshot_2.ok()) << snapshot_2.to_string();
     // Both recovery anchors must describe the deleted-key view before the
     // superseded checkpoint's extents can become sparse GC candidates.
-    const auto retired_anchor = t.snapshot();
+    const auto retired_anchor = t.flush_with_persistent();
     ASSERT_TRUE(retired_anchor.ok()) << retired_anchor.to_string();
 
     // Run compaction.
@@ -390,7 +390,7 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
     ASSERT_TRUE(t.apply(slot, put_one("after-compaction", "still-writable")).ok());
     const auto flush_3 = t.flush();
     ASSERT_TRUE(flush_3.ok()) << flush_3.to_string();
-    const auto snapshot_3 = t.snapshot();
+    const auto snapshot_3 = t.flush_with_persistent();
     ASSERT_TRUE(snapshot_3.ok()) << snapshot_3.to_string();
 
     // All surviving keys must be readable after compaction.

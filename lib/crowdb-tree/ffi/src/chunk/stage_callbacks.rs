@@ -14,7 +14,7 @@ fn external(id: StageId) -> sys::ct_chunk_stage_id {
         operation_low: id.operation_low,
     }
 }
-fn internal(id: sys::ct_chunk_stage_id) -> StageId {
+pub(super) fn internal(id: sys::ct_chunk_stage_id) -> StageId {
     StageId {
         owner_epoch: id.owner_epoch,
         operation_high: id.operation_high,
@@ -57,6 +57,44 @@ impl ChunkRootCatalog {
             )
         })
     }
+    pub async fn compare_stage_async(
+        &self,
+        tree_id: u64,
+        owner_epoch: u64,
+        expected: Option<&StageRecord>,
+        next: Option<&StageRecord>,
+    ) -> Result<(), CtError> {
+        let expected = expected.map(StageRecord::encode).transpose()?.unwrap_or_default();
+        let next = next.map(StageRecord::encode).transpose()?.unwrap_or_default();
+        let receiver = {
+            let (sender, receiver) = tokio::sync::oneshot::channel::<i32>();
+            let context = Box::into_raw(Box::new(sender)).cast::<c_void>();
+            unsafe extern "C" fn completed(context: *mut c_void, status: i32) {
+                let sender = Box::from_raw(context.cast::<tokio::sync::oneshot::Sender<i32>>());
+                let _ = sender.send(status);
+            }
+            let status = unsafe {
+                sys::ct_root_catalog_stage_compare_async_v1(
+                    self.ptr.as_ptr(),
+                    tree_id,
+                    owner_epoch,
+                    expected.as_ptr(),
+                    expected.len(),
+                    next.as_ptr(),
+                    next.len(),
+                    completed,
+                    context,
+                )
+            };
+            if status != 0 {
+                unsafe { drop(Box::from_raw(context.cast::<tokio::sync::oneshot::Sender<i32>>())) };
+                check(status)?;
+            }
+            receiver
+        };
+        check(receiver.await.map_err(|_| CtError::Unavailable)?)
+    }
+
     pub fn list_stages(
         &self,
         tree_id: u64,
@@ -113,7 +151,7 @@ unsafe fn output(bytes: Vec<u8>, out: *mut *const u8, length: *mut usize) -> i32
     *out = Box::into_raw(bytes).cast::<u8>();
     0
 }
-unsafe fn optional(data: *const u8, length: usize) -> Result<Option<StageRecord>, CtError> {
+pub(super) unsafe fn optional(data: *const u8, length: usize) -> Result<Option<StageRecord>, CtError> {
     if length == 0 {
         return Ok(None);
     }

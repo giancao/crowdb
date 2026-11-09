@@ -96,9 +96,8 @@ class FlushController
     // Omitting the sequence captures it here for standalone callers. Existing
     // repair work is returned unchanged; only a completed operation permits a
     // new capture. The supplied maintenance callback owns its reclaim admission.
-    [[nodiscard]] Status prepare(std::shared_ptr<detail::AllocationReservation> metadata,
-                                 std::shared_ptr<FlushOperation>               *out,
-                                 std::optional<uint64_t>                        expected_commit_seq = {});
+    [[nodiscard]] Status prepare(std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<FlushOperation> *out,
+                                 std::optional<uint64_t> expected_commit_seq = {});
     // Derive the complete handoff bound from source admission caps and the
     // immutable mapping, acquire all progress partitions, then prepare their
     // loader/maintenance consumers. Rejection leaves sources open.
@@ -115,14 +114,15 @@ class FlushController
     // awaits operation terminals and releases writers before draining and
     // destroying the shared runtime, source admission or publisher.
     void close() noexcept;
-    // Host teardown after prepare callers have joined. Running/late callbacks
-    // retain their own state; the controller must not retain backend tickets
-    // while the host waits for those tickets to drain.
+    // Teardown requests discard through the existing preparation owner without
+    // waiting. An active preparer consumes the request when leaving. Running
+    // operations retain their own state; the controller must not retain backend
+    // tickets while the host awaits their drain.
     void release_pending() noexcept;
 
   private:
     struct State;
-    Status prepare_impl(std::shared_ptr<detail::AllocationReservation> metadata, std::shared_ptr<FlushOperation> *out,
+    Status prepare_impl(std::shared_ptr<AllocationBudget> metadata, std::shared_ptr<FlushOperation> *out,
                         std::optional<uint64_t> expected_commit_seq, const FlushPreparationOptions *preparation,
                         const FlushReservePlan *plan = nullptr, detail::FlushCredits *credits = nullptr,
                         bool *blocked = nullptr);

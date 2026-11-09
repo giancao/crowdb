@@ -200,7 +200,22 @@ class DiskIOUring
     void submit_read_owned(int fd, void *buf, size_t len, off_t offset, IOCompletion complete);
     void submit_write_owned(int fd, const void *buf, size_t len, off_t offset, IOCompletion complete);
     void submit_fsync_owned(int fd, bool data_only, IOCompletion complete);
+    // Paths and stat output are borrowed through completion, as are I/O buffers.
+    void submit_open_owned(const char *path, int flags, mode_t mode, IOCompletion complete);
+    void submit_stat_owned(int fd, struct statx *output, IOCompletion complete);
+    void submit_unlink_owned(const char *path, IOCompletion complete);
+    // The caller excludes new submissions. An active fd is rejected with EBUSY;
+    // an accepted close clears its registration before the kernel can reuse it.
+    void submit_close_owned(int fd, IOCompletion complete);
+    // Zero transfers completion ownership. A negative result leaves the fd
+    // with the caller and does not call complete.
+    int                         try_submit_close_owned(int fd, IOCompletion complete);
     [[nodiscard]] static size_t owned_submission_allocation_bytes() noexcept;
+
+    // Single host call after ingress is sealed and accepted I/O is drained.
+    // Completion observes all poll loops and their I/O callback tails exited.
+    // The external owner then destroys the reactor and reaps thread handles.
+    void stop_after_drain(IOCompletion complete) noexcept;
 
     // Returns one eventfd per pipeline, for the Rust FFI to register with
     // tokio::io::AsyncFd. Each eventfd becomes readable after the poll
@@ -222,6 +237,8 @@ class DiskIOUring
         uint64_t                 queued_nanos{0};
         uint64_t                 published_nanos{0};
         uint8_t                  opcode{0};
+        struct io_uring_sqe      command{};
+        bool                     observed_full{false};
     };
 
     // fd_table entry: pipeline index + in-flight counter.
@@ -252,6 +269,9 @@ class DiskIOUring
 
         // Batched submission flag.
         std::atomic<bool> pending_submit{false};
+
+        std::atomic<CallbackEntry *> owned_incoming{nullptr};
+        CallbackEntry               *owned_pending{nullptr}; // poll owner only
 
         // Deferred-delete list (poll-thread-only).
         CallbackEntry *free_list{nullptr};
@@ -293,6 +313,10 @@ class DiskIOUring
                              void (*prepare)(const void *, struct io_uring_sqe *));
     void        submit_owned(int fd, void *buffer, size_t length, off_t offset, uint8_t opcode, bool data_only,
                              IOCompletion complete);
+    void        submit_owned_command(int fd, const struct io_uring_sqe &command, IOCompletion complete);
+    int         try_submit_owned_command(int fd, const struct io_uring_sqe &command, IOCompletion &complete);
+    void        enqueue_owned(Pipeline &pipeline, CallbackEntry *entry);
+    void        submit_pending_owned(Pipeline &pipeline);
     static void complete_entry(CallbackEntry *entry, int result);
     static void delete_entry(CallbackEntry *entry) noexcept;
 
@@ -310,6 +334,7 @@ class DiskIOUring
     // Wake a sleeping poll thread through its private eventfd. Pipeline
     // eventfds are reserved for external completion consumers.
     static void wake_poll_thread(PollThread &pt);
+    void        stop_pollers() noexcept;
 
     // Publish the idle-to-pending transition and wake the owning poll thread.
     void mark_pending(Pipeline &p);
@@ -327,6 +352,8 @@ class DiskIOUring
     // Pipelines and poll threads (unique_ptr because atomics are non-movable).
     std::vector<std::unique_ptr<Pipeline>>   pipelines_;
     std::vector<std::unique_ptr<PollThread>> poll_threads_;
+    std::atomic<size_t>                      pollers_remaining_{0};
+    IOCompletion                             pollers_stopped_;
     bool                                     valid_{false};
 };
 

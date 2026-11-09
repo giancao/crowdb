@@ -16,6 +16,35 @@ using namespace detail::test_allocation_account;
 constexpr size_t kCapacity = 1U << 20;
 constexpr size_t kIoBytes  = static_cast<size_t>(AllocationKind::kIo);
 
+TEST(BlockAccountGrant, AcceptedIoUsesActualMemoryWithoutOpeningOrdinaryBackendGrowth)
+{
+    tree_test::TempDir              directory("block_ongoing_");
+    std::unique_ptr<BlockPageStore> store;
+    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 3, 4, 65536, 4096, &store).ok());
+    ResourceBudget    host(limits(kCapacity), 1);
+    auto              account = host.make_account(limits(kCapacity));
+    BackendOpenBudget adopted;
+    ASSERT_TRUE(bind_block_account(store.get(), account, 1, &adopted).ok());
+    std::shared_ptr<AllocationBudget> ongoing;
+    ASSERT_TRUE(ongoing_backend_operation(store.get(), &ongoing).ok());
+    auto           occupied = use_remaining_memory(account, block_allocation_budget(*store));
+    const uint8_t  value    = 73;
+    const uint64_t offset   = (65536ULL * 1000) + 17;
+    EXPECT_EQ(store->write_at(offset, &value, 1).code(), Code::kResourceExhausted);
+    ASSERT_TRUE(store->write_at(offset, &value, 1, ongoing).ok());
+    EXPECT_TRUE(ResourceBudget::memory_exhausted(account));
+    EXPECT_EQ(store->write_at(offset + 65536, &value, 1).code(), Code::kResourceExhausted);
+    uint8_t actual = 0;
+    ASSERT_TRUE(store->read_at(offset, &actual, 1, ongoing).ok());
+    EXPECT_EQ(actual, value);
+    EXPECT_EQ(account->snapshot().physical[kIoBytes], 0U);
+    occupied.reset();
+    store.reset();
+    ongoing.reset();
+    EXPECT_EQ(host.snapshot().allocated[kRouting], 0U);
+    EXPECT_EQ(account->snapshot().physical[kMetadata], 0U);
+}
+
 TEST(BlockAccountGrant, SparseGrowthAndBounceUsePrepaidCapacityAtTheHardLimit)
 {
     tree_test::TempDir              directory("block_grant_");

@@ -193,6 +193,24 @@ async fn lost_prepare_reply_resumes_the_exact_durable_owner_without_storage_crea
 }
 
 #[tokio::test]
+async fn system_cleanup_releases_the_store_under_its_existing_operation_guard() {
+    use system_bootstrap::{identity, TestSystemBootstrap};
+
+    let node = TestSystemBootstrap::start().await;
+    let bootstrap = identity();
+    let init = serde_json::json!({"replica_id":1,"start_election":false,"bootstrap":bootstrap});
+    assert_eq!(node.request("/system/init", &init).await, StatusCode::CREATED);
+    assert!(node.registry.get_store(0).is_some());
+
+    let cleanup = serde_json::json!({"bootstrap":bootstrap,"confirm_delete_system_store":true});
+    assert_eq!(node.request("/system/cleanup", &cleanup).await, StatusCode::OK);
+    assert!(node.registry.get_store(0).is_none());
+    assert!(!node.ownership().exists());
+    assert!(!node.registry.config.data_root.join("store0").exists());
+    assert_eq!(node.request("/system/cleanup", &cleanup).await, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn wiring_a_fresh_multireplica_group_requires_an_elected_leader() {
     let fixture = TestGroupCreation::start(false).await;
     fixture.create(&request(), StatusCode::CREATED).await;

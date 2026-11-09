@@ -13,13 +13,17 @@ Status ChunkRootCommit::dependencies()
             dependency_ = 0;
             continue;
         }
-        if (root_.dependency_entries == max_dependency_steps_) {
-            return fail(Status::resource_exhausted());
+        if (root_.dependency_entries == UINT64_MAX) {
+            return fail(Status::corruption("Chunk checkpoint dependency count overflow"));
         }
         if (chain_pid_ == kInvalidPageId) {
             const auto &reference = (*frame.stored_overflow)[dependency_];
             chain_pid_            = reference.head;
             chain_bytes_          = reference.bytes;
+            chain_steps_          = 0;
+        }
+        if (++chain_steps_ > pages_->frames.size()) {
+            return fail(Status::corruption("overflow dependency cycle"));
         }
         const auto found = pages_->frames.find(chain_pid_);
         if (found == pages_->frames.end() || found->second.type != page_type::kOverflowFrame ||

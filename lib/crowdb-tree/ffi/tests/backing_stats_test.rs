@@ -3,8 +3,8 @@
 use crowdb_tree_ffi::{Config, Crowdbtree, PageStore, TreeRuntime};
 use std::sync::Arc;
 
-#[test]
-fn collector_observes_local_backing_after_tree_close_without_pinning_storage() {
+#[tokio::test(flavor = "current_thread")]
+async fn collector_observes_local_backing_after_tree_close_without_pinning_storage() {
     let runtime = Arc::new(TreeRuntime::new(Default::default()).unwrap());
     let mut config = Config {
         runtime: Some(runtime.clone()),
@@ -15,8 +15,8 @@ fn collector_observes_local_backing_after_tree_close_without_pinning_storage() {
     };
     let tree = Crowdbtree::open(&config).unwrap();
     tree.apply_put(1, b"key", &vec![b'v'; 9000]).unwrap();
-    let (sequence, coverage) = tree.snapshot_info().unwrap();
-    let snapshot = tree.immutable_snapshot(sequence, coverage).unwrap();
+    let (sequence, coverage) = tree.flush_with_persistent_info().unwrap();
+    let snapshot = tree.read_only_view(sequence, coverage).unwrap();
     let collector = tree.work_metrics_collector().unwrap();
     let before = tree.backing_stats().unwrap();
     assert_ne!(before.scope_id, 0);
@@ -26,7 +26,7 @@ fn collector_observes_local_backing_after_tree_close_without_pinning_storage() {
     let retained = collector.backing_stats().unwrap();
     assert_eq!(retained.scope_id, before.scope_id);
     assert!(retained.allocated_bytes > 0);
-    assert_eq!(snapshot.get(b"key").unwrap().unwrap().1, vec![b'v'; 9000]);
+    assert_eq!(snapshot.get(b"key").await.unwrap().unwrap().1, vec![b'v'; 9000]);
     drop(snapshot);
     runtime.drain_cpu();
     assert_eq!(collector.backing_stats().unwrap().allocated_bytes, 0);

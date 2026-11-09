@@ -4,6 +4,7 @@
 #include "backend/chunk/chunk_pin_release.h"
 #include "common/test_stage_catalog.h"
 
+#include <functional>
 #include <map>
 
 namespace crowdb::tree::test_chunk
@@ -40,6 +41,7 @@ class TestRootCatalog : public detail::TestStageCatalog, public detail::ChunkPro
     bool                                                                fail_commit           = false;
     bool                                                                fail_query            = false;
     bool                                                                delete_before_acquire = false;
+    std::function<bool(AsyncCompletion)>                                after_root_load_async;
 
     detail::ChunkProtectionCatalog *protection() noexcept override
     {
@@ -64,16 +66,17 @@ class TestRootCatalog : public detail::TestStageCatalog, public detail::ChunkPro
 
     [[nodiscard]] std::shared_ptr<TestRootCatalog> next_owner() const
     {
-        auto next                = std::make_shared<TestRootCatalog>(storage_budget_);
-        next->queue              = queue;
-        next->records            = records;
-        next->candidate          = candidate;
-        next->manifest           = manifest;
-        next->committed_manifest = committed_manifest;
-        next->retained_roots     = retained_roots;
-        next->current_generation = current_generation;
-        next->checksum           = checksum;
-        next->expected_checksum  = expected_checksum;
+        auto next                   = std::make_shared<TestRootCatalog>(storage_budget_);
+        next->queue                 = queue;
+        next->records               = records;
+        next->candidate             = candidate;
+        next->manifest              = manifest;
+        next->committed_manifest    = committed_manifest;
+        next->retained_roots        = retained_roots;
+        next->current_generation    = current_generation;
+        next->checksum              = checksum;
+        next->expected_checksum     = expected_checksum;
+        next->after_root_load_async = after_root_load_async;
         return next;
     }
 
@@ -98,6 +101,16 @@ class TestRootCatalog : public detail::TestStageCatalog, public detail::ChunkPro
         }
         out->assign(committed_manifest.begin(), committed_manifest.end());
         return Status::Ok();
+    }
+
+    void submit_load_root_owned(uint64_t tree, uint64_t generation, detail::ChunkRootBytes *out,
+                                AsyncCompletion complete) const override
+    {
+        auto status = load_root_owned(tree, generation, out);
+        if (status.ok() && after_root_load_async && after_root_load_async(complete)) {
+            return;
+        }
+        complete.complete(std::move(status));
     }
 
     Status load_stage(uint64_t /*unused*/, detail::ChunkStageId id,

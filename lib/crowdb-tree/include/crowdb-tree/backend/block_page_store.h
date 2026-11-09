@@ -20,15 +20,22 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <mutex>
+#include <span>
 #include <string>
 #include <vector>
+
+namespace crowdb::common
+{
+class DiskIOUring;
+}
 
 namespace crowdb::tree
 {
 
 class BlockDirectory;
+class BlockAsyncPageStore;
 class BackendReleaseService;
+struct AsyncCompletion;
 
 namespace detail
 {
@@ -92,15 +99,8 @@ class MemoryMedium : public BlockPageStoreMedium
     Status                 fsync() override;
     [[nodiscard]] uint64_t size() const override;
 
-    // Direct access to the underlying buffer (for content verification tests).
-    [[nodiscard]] const std::vector<uint8_t> &data() const
-    {
-        return data_;
-    }
-
   private:
-    mutable std::mutex   mu_;
-    std::vector<uint8_t> data_;
+    MemPageStore data_;
 };
 
 // File medium: wraps a single fd with pwrite/pread/fdatasync/lseek.
@@ -142,6 +142,10 @@ class FileMedium : public BlockPageStoreMedium
     void                   acknowledge_sync(uint64_t generation) noexcept;
 
   private:
+    friend class BlockDirectory;
+    static Status allocate_owned(const std::shared_ptr<AllocationBudget> &budget, std::shared_ptr<FileMedium> *out,
+                                 const std::shared_ptr<BackendReleaseService> &release);
+
     explicit FileMedium(int fd) : fd_(fd)
     {
     }
@@ -192,6 +196,18 @@ class BlockPageStore : public PageStore
     // opens them all.
     static Status open_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
                               uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
+
+    // Allocate the directory owner without opening files. The host can bind
+    // its release driver before asynchronous startup admits any fd owners.
+    static Status prepare_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
+                                 uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
+#ifdef CROWDB_HAVE_LIBURING
+    static Status open_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
+                              uint32_t iu_size, common::DiskIOUring &uring, std::unique_ptr<BlockPageStore> *out);
+    // The unpublished store and reactor must outlive completion. Basenames
+    // are consumed during submission. Only matching extent files are opened.
+    Status submit_open_blocks(std::span<const std::string> names, common::DiskIOUring &uring, AsyncCompletion done);
+#endif
 
     // Open an in-memory store (MemoryMedium, iu_size=1). Replaces MemPageStore.
     static Status open_mem(uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
@@ -247,6 +263,11 @@ class BlockPageStore : public PageStore
     // Also marks the covered extents as dirty. Call before fd_for_offset()
     // in the async write path so the fd exists.
     Status ensure_extents(uint64_t off, size_t len, const std::shared_ptr<AllocationBudget> &budget = {});
+#ifdef CROWDB_HAVE_LIBURING
+    // Prepare one missing extent for a write. Existing and concurrent opens
+    // return the same directory incarnation through completion.
+    void submit_ensure_block(uint32_t block_idx, common::DiskIOUring &uring, AsyncCompletion done);
+#endif
 
     // Returns fds of all dirty, non-deleted extents (array-of-blocks) or the
     // single medium's fd (single-file mode), for async fsync via DiskIOUring.
@@ -272,6 +293,11 @@ class BlockPageStore : public PageStore
 
   private:
     friend struct detail::BlockAccountAccess;
+    friend class BlockDirectory;
+    friend class BlockAsyncPageStore;
+#ifdef CROWDB_HAVE_LIBURING
+    void submit_delete_block(uint32_t block_idx, common::DiskIOUring &uring, AsyncCompletion done);
+#endif
     BlockPageStore(std::shared_ptr<detail::AllocationAccount> allocations, std::shared_ptr<BlockPageStoreMedium> medium,
                    uint32_t iu_size, bool is_block_device, std::shared_ptr<BackendReleaseService> release = {});
     BlockPageStore(std::shared_ptr<detail::AllocationAccount> allocations, const std::string &dir, uint32_t store_id,

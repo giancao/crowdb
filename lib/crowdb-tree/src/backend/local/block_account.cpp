@@ -29,6 +29,16 @@ struct BlockAccountAccess
         return status;
     }
 
+    static Status create_ongoing(const BlockPageStore &store, std::shared_ptr<AllocationBudget> *out)
+    {
+        std::shared_ptr<BackendAllocationGrant> grant;
+        auto status = BackendAllocationGrant::create_ongoing(store.allocations_, &grant);
+        if (status.ok()) {
+            *out = std::move(grant);
+        }
+        return status;
+    }
+
     static std::shared_ptr<AllocationBudget> selected(const BlockPageStore                    &store,
                                                       const std::shared_ptr<AllocationBudget> &budget)
     {
@@ -74,6 +84,15 @@ std::shared_ptr<AllocationBudget> block_allocation_budget(const BlockPageStore  
     return BlockAccountAccess::selected(store, budget);
 }
 
+Status ongoing_backend_operation(PageStore *store, std::shared_ptr<AllocationBudget> *out)
+{
+    if (out == nullptr || *out) {
+        return Status::invalid_argument();
+    }
+    auto *block = dynamic_cast<BlockPageStore *>(store);
+    return block != nullptr ? BlockAccountAccess::create_ongoing(*block, out) : Status::Ok();
+}
+
 bool valid_block_budget(const BlockPageStore &store, const std::shared_ptr<AllocationBudget> &budget) noexcept
 {
     return BlockAccountAccess::valid(store, budget);
@@ -105,8 +124,16 @@ std::optional<size_t> BlockAccountAccess::operation_bound(const BlockPageStore  
     auto window = AllocationBound(limits.max_io_bytes).add_product(2, unit);
 #ifdef CROWDB_HAVE_LIBURING
     if (limits.asynchronous) {
-        window = AllocationBound();
-        window.add(block_io_allocation_bound(limits.max_io_bytes, *parts));
+        window                   = AllocationBound();
+        const bool opens_extents = *new_extents != 0;
+        window.add(block_io_allocation_bound(limits.max_io_bytes, *parts, opens_extents));
+        if (opens_extents) {
+            const auto open = BlockDirectory::open_allocation_bound(store.dir_.size() + 65);
+            if (!open) {
+                return {};
+            }
+            bound.add_product(*new_extents, *open);
+        }
         if (limits.barriers) {
             const auto targets = AllocationBound(store.blocks_ ? store.blocks_->count() : 1).add(*new_extents).value();
             window.add(targets ? block_sync_allocation_bound(*targets) : std::nullopt);

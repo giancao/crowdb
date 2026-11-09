@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <thread>
 
 namespace crowdb::tree
 {
@@ -25,6 +26,11 @@ struct TestReplayCompletion
         result.status = signal == detail::CallbackSignal::kStopped ? Status::unavailable() : std::move(status);
         result.done.store(true, std::memory_order_release);
         result.done.notify_all();
+    }
+
+    static void close(void *context, Status status) noexcept
+    {
+        complete(context, detail::CallbackSignal::kValue, std::move(status));
     }
 
     void wait() const
@@ -220,9 +226,12 @@ TEST_F(TreeCoreReplay, PersistentFlushReleasesGapPayloadUnderFullOrdinaryCpuAndS
         EXPECT_FALSE(detail::ResourceBudget::try_register(core->binding()->account(), category));
     }
     ASSERT_FALSE(slots.empty());
-    const std::string value(256 * 1024, 'v');
-    ASSERT_TRUE(apply(1, "a", value).ok());
-    ASSERT_TRUE(apply(2, "b", value).ok());
+    // Only the third write should need a persistent flush to admit its payload.
+    const std::string initial_value(192 * 1024, 'v');
+    const std::string pressure_value(320 * 1024, 'p');
+    ASSERT_TRUE(apply(1, "a", initial_value).ok());
+    ASSERT_TRUE(apply(2, "b", initial_value).ok());
+    ASSERT_EQ(core->durable_coverage(), 0U);
     auto runtime = core->binding()->cpu();
     auto other   = std::make_shared<detail::FlushRuntime::Lane>(1024);
     std::vector<std::shared_ptr<detail::FlushRuntime::Progress>> occupied;
@@ -236,17 +245,22 @@ TEST_F(TreeCoreReplay, PersistentFlushReleasesGapPayloadUnderFullOrdinaryCpuAndS
         occupied.push_back(std::move(slot));
     }
     ASSERT_FALSE(occupied.empty());
-    ASSERT_TRUE(apply(3, "c", value).ok());
+    const auto status = apply(3, "c", pressure_value);
+    ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(core->contiguous_slot(), 3U);
     EXPECT_EQ(core->local_backend()->checkpoints->durable_coverage(), 2U);
     EXPECT_GT(core->publisher().work_metrics()->counters.snapshot()[static_cast<size_t>(
                   TreeWorkCause::CachePressure)][static_cast<size_t>(TreeWorkCounter::WriteOperations)],
               0U);
     occupied.clear();
-    for (const auto *key : {"a", "b", "c"}) {
+    for (const auto &[key, expected] : std::array{
+             std::pair{"a", &initial_value },
+             std::pair{"b", &initial_value },
+             std::pair{"c", &pressure_value}
+    }) {
         GetView result;
         ASSERT_TRUE(core->get(key, &result).ok());
-        EXPECT_EQ(result.value().to_string(), value);
+        EXPECT_EQ(result.value().to_string(), *expected);
     }
 }
 
@@ -320,6 +334,86 @@ TEST_F(TreeCoreReplay, ReplacementRejectsAnArmedProposalUntilItsOwnerCompletes)
     ASSERT_TRUE(completed.status.ok());
     core->binding()->lane()->drain();
     ASSERT_TRUE(core->clear().ok());
+}
+
+TEST_F(TreeCoreReplay, ClosePreservesAcceptedReplayThenJoinsTheRemainingReadTicket)
+{
+    std::shared_ptr<TreeApplyOperation> replay;
+    std::shared_ptr<TreeApplyOperation> later;
+    ASSERT_TRUE(prepare(1, "accepted", "value", &replay).ok());
+    ASSERT_TRUE(prepare(2, "later", "value", &later).ok());
+    TestReplayCompletion later_completed;
+    later->start(2, &TestReplayCompletion::complete, &later_completed);
+    later.reset();
+    core->binding()->lane()->drain();
+    EXPECT_FALSE(later_completed.done.load(std::memory_order_acquire));
+    std::shared_ptr<TreeOperationLifetime::Ticket> read;
+    ASSERT_TRUE(core->operation_lifetime().acquire(core->binding()->lifecycle_budget(), &read).ok());
+    std::atomic<bool> closed{false};
+    std::jthread      closer([&] {
+        core->close_and_drain();
+        closed.store(true, std::memory_order_release);
+    });
+    while (!core->closed()) {
+        std::this_thread::yield();
+    }
+    EXPECT_FALSE(closed.load(std::memory_order_acquire));
+    std::shared_ptr<TreeApplyOperation> rejected;
+    EXPECT_EQ(prepare(3, "rejected", "value", &rejected).code(), Code::kUnavailable);
+
+    TestReplayCompletion completed;
+    replay->start(1, &TestReplayCompletion::complete, &completed);
+    replay.reset();
+    completed.wait();
+    EXPECT_TRUE(completed.status.ok()) << completed.status.to_string();
+    later_completed.wait();
+    EXPECT_TRUE(later_completed.status.ok()) << later_completed.status.to_string();
+    EXPECT_FALSE(closed.load(std::memory_order_acquire));
+    read.reset();
+    closer.join();
+    EXPECT_TRUE(closed.load(std::memory_order_acquire));
+    EXPECT_EQ(core->contiguous_slot(), 2U);
+}
+
+TEST_F(TreeCoreReplay, CloseCompletesReplayWaitingForAnUnacceptedSlot)
+{
+    std::shared_ptr<TreeApplyOperation> later;
+    ASSERT_TRUE(prepare(2, "later", "value", &later).ok());
+    TestReplayCompletion replay;
+    later->start(2, &TestReplayCompletion::complete, &replay);
+    later.reset();
+    core->binding()->lane()->drain();
+    EXPECT_FALSE(replay.done.load(std::memory_order_acquire));
+
+    TestReplayCompletion closed;
+    ASSERT_TRUE(core->close_async({.context = &closed, .complete_fn = &TestReplayCompletion::close}));
+    replay.wait();
+    closed.wait();
+    EXPECT_EQ(replay.status.code(), Code::kUnavailable);
+    EXPECT_TRUE(closed.status.ok());
+    EXPECT_EQ(core->contiguous_slot(), 0U);
+}
+
+TEST_F(TreeCoreReplay, DroppingUnstartedPredecessorReleasesReplayDuringClose)
+{
+    std::shared_ptr<TreeApplyOperation> predecessor;
+    std::shared_ptr<TreeApplyOperation> later;
+    ASSERT_TRUE(prepare(1, "predecessor", "value", &predecessor).ok());
+    ASSERT_TRUE(prepare(2, "later", "value", &later).ok());
+    TestReplayCompletion replay;
+    later->start(2, &TestReplayCompletion::complete, &replay);
+    later.reset();
+
+    TestReplayCompletion closed;
+    ASSERT_TRUE(core->close_async({.context = &closed, .complete_fn = &TestReplayCompletion::close}));
+    core->binding()->lane()->drain();
+    EXPECT_FALSE(replay.done.load(std::memory_order_acquire));
+    predecessor.reset();
+
+    replay.wait();
+    closed.wait();
+    EXPECT_EQ(replay.status.code(), Code::kUnavailable);
+    EXPECT_TRUE(closed.status.ok());
 }
 } // namespace
 } // namespace crowdb::tree

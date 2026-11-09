@@ -34,7 +34,6 @@ mod authority;
 mod drain;
 mod group;
 use assignments::{local_partition_for_entry, partition_matches_entry};
-mod legacy_retirement;
 mod load_sampling;
 mod maintenance;
 mod observation;

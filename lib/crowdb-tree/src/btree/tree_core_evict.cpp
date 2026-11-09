@@ -2,11 +2,23 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/allocation_bound.h"
 #include "btree/tree_core_internal.h"
+#include "crowdb-common/log.h"
+#include "host_completion.h"
 
 namespace crowdb::tree
 {
 namespace
 {
+void complete_eviction(const std::function<void(size_t)> &complete, size_t count) noexcept
+{
+    try {
+        complete(count);
+    }
+    catch (...) {
+        CRB_LOG_ERROR("clean eviction receiver threw after completion");
+    }
+}
+
 bool evictable(const PublishedPage &page, PageCacheKind kind)
 {
     if (page.metrics.dirty) {
@@ -42,8 +54,8 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
     bool                                            counting  = true;
     bool                                            waiting   = false;
     bool                                            installed = false;
+    bool                                            trimming  = false;
     std::atomic<bool>                               ready{false};
-    std::atomic<bool>                               done{false};
     std::shared_ptr<const PublishedTreeState>       view;
     std::shared_ptr<TreeOperationLifetime::Ticket>  ticket;
     std::shared_ptr<detail::AllocationReservation>  controls;
@@ -51,6 +63,7 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
     std::shared_ptr<detail::FlushRuntime::Progress> progress;
     std::shared_ptr<PublicationRequest>             request;
     std::shared_ptr<CleanEviction>                  trim_owner;
+    std::function<void(size_t)>                     complete;
     PageCacheTrim                                   trim;
 
     ~CleanEviction()
@@ -71,7 +84,7 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
     static void run(void *context) noexcept
     {
         auto &self = *static_cast<CleanEviction *>(context);
-        if (self.done.load(std::memory_order_acquire)) {
+        if (self.trimming) {
             return;
         }
         try {
@@ -84,6 +97,7 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
 
     void trim_cache() noexcept
     {
+        trimming = true;
         request.reset();
         if (publication_credit) {
             publication_credit->seal();
@@ -95,9 +109,8 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
         trim.context         = this;
         trim.complete        = [](void *context, size_t count) noexcept {
             auto self = std::move(static_cast<CleanEviction *>(context)->trim_owner);
-            self->evicted += count;
-            self->done.store(true, std::memory_order_release);
-            self->done.notify_one();
+            auto done = std::move(self->complete);
+            complete_eviction(done, self->evicted + count);
         };
         trim_owner = weak_from_this().lock();
         core->cache()->trim(trim);
@@ -209,11 +222,18 @@ struct CleanEviction : std::enable_shared_from_this<CleanEviction>
 };
 } // namespace
 
-size_t TreeCore::evict_clean_pages(PageCacheKind kind, size_t max_resident)
+Status TreeCore::evict_clean_pages_async(PageCacheKind kind, size_t max_resident, std::function<void(size_t)> complete)
 try {
+    if (!complete) {
+        return Status::invalid_argument();
+    }
     State::Ingress ingress(*state_);
-    if (ingress.owner == nullptr || max_resident == SIZE_MAX) {
-        return 0;
+    if (ingress.owner == nullptr) {
+        return Status::unavailable();
+    }
+    if (max_resident == SIZE_MAX) {
+        complete_eviction(complete, 0);
+        return Status::Ok();
     }
     using namespace detail;
     const auto bound = AllocationBound(shared_allocation_bound<CleanEviction>())
@@ -224,7 +244,7 @@ try {
     auto       credit =
         bound ? ResourceBudget::try_reserve(binding()->account(), BudgetClass::kReclaim, *bound) : std::nullopt;
     if (!credit) {
-        return 0;
+        return Status::resource_exhausted();
     }
     auto metadata       = AllocationReservation::create(std::move(*credit));
     auto operation      = reserved_shared<CleanEviction>(metadata);
@@ -233,20 +253,33 @@ try {
     operation->kind     = kind;
     operation->limit    = max_resident;
     operation->view     = capture();
-    if (!operation_lifetime().acquire(metadata, &operation->ticket).ok() ||
-        !binding()
-             ->cpu()
-             ->reserve_progress(binding()->lane(), &CleanEviction::run, operation.get(), metadata, &operation->progress)
-             .ok()) {
-        return 0;
+    auto status         = operation_lifetime().acquire(metadata, &operation->ticket);
+    if (status.ok()) {
+        status = binding()->cpu()->reserve_progress(binding()->lane(), &CleanEviction::run, operation.get(), metadata,
+                                                    &operation->progress);
     }
+    if (!status.ok()) {
+        return status;
+    }
+    operation->complete = std::move(complete);
     operation->wake();
-    while (!operation->done.load(std::memory_order_acquire)) {
-        operation->done.wait(false, std::memory_order_acquire);
-    }
-    return operation->evicted;
+    return Status::Ok();
 }
 catch (const std::bad_alloc &) {
-    return 0;
+    return Status::resource_exhausted();
+}
+
+size_t TreeCore::evict_clean_pages(PageCacheKind kind, size_t max_resident)
+{
+    detail::HostCompletion done;
+    size_t                 evicted = 0;
+    auto                   status  = evict_clean_pages_async(kind, max_resident, [&](size_t count) noexcept {
+        evicted = count;
+        done.signal();
+    });
+    if (status.ok()) {
+        done.wait();
+    }
+    return evicted;
 }
 } // namespace crowdb::tree

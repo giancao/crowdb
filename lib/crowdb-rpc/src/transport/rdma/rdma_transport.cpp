@@ -153,25 +153,33 @@ RdmaTransport::~RdmaTransport()
     context_ = nullptr;
 }
 
-bool RdmaTransport::adopt_cm_context(struct ibv_context *context)
+RdmaTransport::CmContext RdmaTransport::adopt_cm_context(struct ibv_context *context, bool wait_for_owner)
 {
-    if (context == nullptr)
-        return false;
-    std::scoped_lock lock(cm_mu_);
-    if (context_ == context)
-        return ready();
+    if (context == nullptr) {
+        return CmContext::kFailed;
+    }
+    std::unique_lock lock(cm_mu_, std::defer_lock);
+    if (wait_for_owner) {
+        lock.lock();
+    }
+    else if (!lock.try_lock()) {
+        return CmContext::kBusy;
+    }
+    if (context_ == context) {
+        return ready() ? CmContext::kReady : CmContext::kFailed;
+    }
 
     // A transport uses one device context for its CQ pool and registered
     // arenas. Do not replace live QPs/registrations when another HCA appears.
     if (context_ != nullptr)
-        return false;
+        return CmContext::kFailed;
     if (local_capability_.device != ibv_get_device_name(context->device))
-        return false;
+        return CmContext::kFailed;
     auto device = RdmaDevice::retain(context, memory_stats_);
     if (device == nullptr)
-        return false;
+        return CmContext::kFailed;
     if (!create_completion_queues(context)) {
-        return false;
+        return CmContext::kFailed;
     }
     context_     = context;
     device_      = std::move(device);
@@ -182,11 +190,11 @@ bool RdmaTransport::adopt_cm_context(struct ibv_context *context)
         send_pool_.reset();
         source_pool_.reset();
         capability_available_.store(false, std::memory_order_release);
-        return false;
+        return CmContext::kFailed;
     }
     producer_pool_.store(source_pool_.get(), std::memory_order_release);
     register_events(event_engine_);
-    return ready();
+    return ready() ? CmContext::kReady : CmContext::kFailed;
 }
 
 std::unique_ptr<RdmaBufferPool> RdmaTransport::make_pool(uint64_t bytes, uint32_t buffers)
@@ -296,6 +304,15 @@ void RdmaTransport::shutdown()
     while ((repost_state_->users.load(std::memory_order_acquire) & ~RepostState::STOPPED) != 0)
         std::this_thread::yield();
     stop();
+    retire_passive_accepts_at_shutdown();
+    if (cm_retirement_.event != nullptr) {
+        rdma_ack_cm_event(cm_retirement_.event);
+    }
+    cm_retirement_    = {};
+    cm_retry_pending_ = false;
+    if (cm_event_registered_.exchange(false, std::memory_order_acq_rel) && event_engine_ != nullptr) {
+        event_engine_->remove_external_fd(cm_event_fd());
+    }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.shutdown_drain_ms);
     while (true) {
         bool pending_sends = false;

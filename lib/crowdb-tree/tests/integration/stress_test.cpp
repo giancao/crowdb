@@ -55,7 +55,7 @@ TEST(Stress, ConcurrentDemandLoadAfterRecovery)
             ASSERT_TRUE(t.apply(i + 1, Batch{{{.key = make_key(i), .kind = OpKind::kPut, .value = val}}}).ok());
             ASSERT_TRUE(t.flush().ok());
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     }
 
     std::unique_ptr<Crowdbtree> t2;

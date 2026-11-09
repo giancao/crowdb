@@ -31,7 +31,7 @@ struct OverflowBackingSet
     using Entry = std::pair<const uint64_t, OverflowBackingPage>;
     using Pages = std::map<uint64_t, OverflowBackingPage, std::less<>, detail::ReservationAllocator<Entry>>;
 
-    explicit OverflowBackingSet(const std::shared_ptr<detail::AllocationReservation> &metadata)
+    explicit OverflowBackingSet(const std::shared_ptr<AllocationBudget> &metadata)
         : pages(std::less<>{}, detail::ReservationAllocator<Entry>(metadata))
     {
     }

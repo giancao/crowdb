@@ -21,9 +21,6 @@ bool EpochManager::retire_backend_step() noexcept
     if (lifetime_->pending == nullptr) {
         lifetime_->pending = deferred_.exchange(nullptr, std::memory_order_relaxed);
     }
-    if (lifetime_->collected == nullptr) {
-        lifetime_->collected = std::exchange(collected_, nullptr);
-    }
     if (!retired_.empty()) {
         lifetime_->retired = std::move(retired_);
     }

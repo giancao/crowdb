@@ -40,7 +40,7 @@ struct ChunkIndexReference
 
 struct ChunkRootManifest
 {
-    explicit ChunkRootManifest(const std::shared_ptr<detail::AllocationReservation> &budget)
+    explicit ChunkRootManifest(const std::shared_ptr<AllocationBudget> &budget)
         : indexes(detail::ReservationAllocator<ChunkIndexReference>(budget))
     {
     }

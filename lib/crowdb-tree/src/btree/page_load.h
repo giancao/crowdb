@@ -33,7 +33,7 @@ class PageLoader
 
 struct PageLoadLimits
 {
-    size_t max_inflight        = 32;
+
     size_t max_blob_bytes      = 1024 * 1024;
     size_t max_frame_bytes     = 1024 * 1024;
     size_t max_value_bytes     = 64 * 1024 * 1024;
@@ -51,13 +51,12 @@ struct PageLoadLimits
 // directly; it never waits for a second host reservation while holding it.
 struct PageLoadBudget
 {
-    std::shared_ptr<AllocationBudget>                bytes;
-    std::shared_ptr<detail::AllocationReservation>   io           = nullptr;
-    std::shared_ptr<detail::ResourceBudget::Account> account      = nullptr;
-    std::shared_ptr<TreeWorkMetrics>                 work_metrics = nullptr;
-    std::shared_ptr<AllocationBudget>                backend      = nullptr;
-    std::shared_ptr<ApplyDispatcher>                 cpu_progress = nullptr;
-    TreeWorkCause                                    cause        = TreeWorkCause::Other;
+    std::shared_ptr<AllocationBudget>              bytes;
+    std::shared_ptr<detail::AllocationReservation> io           = nullptr;
+    std::shared_ptr<TreeWorkMetrics>               work_metrics = nullptr;
+    std::shared_ptr<AllocationBudget>              backend      = nullptr;
+    std::shared_ptr<ApplyDispatcher>               cpu_progress = nullptr;
+    TreeWorkCause                                  cause        = TreeWorkCause::Other;
 
     [[nodiscard]] std::shared_ptr<detail::AllocationReservation> reservation() const noexcept
     {

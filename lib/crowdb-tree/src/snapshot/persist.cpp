@@ -1,6 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "btree/tree_core.h"
+#include "btree/tree_core_access.h"
 #include "btree/tree_options.h"
 #include "crowdb-common/log.h"
 #include "crowdb-tree/backend/page_store.h"
@@ -19,10 +19,8 @@ try {
         status = TreeCore::open(options, &core);
     }
     if (status.ok()) {
-        auto tree = std::unique_ptr<Crowdbtree>(new Crowdbtree(options, std::move(core)));
-        tree->init_metrics("s." + std::to_string(options.store_id) + ".g." + std::to_string(options.group_id) + ".tree",
-                           options.backend_label);
-        CRB_LOG_INFO("[{}] open: frame_bytes={}", tree->name_, options.frame_bytes);
+        std::unique_ptr<Crowdbtree> tree;
+        TreeCoreAccess::finish_open(core, &tree);
         *out = std::move(tree);
     }
     return status;
@@ -34,7 +32,17 @@ catch (const std::exception &error) {
     return Status::internal_error(error.what());
 }
 
-Status Crowdbtree::snapshot(uint64_t *out_last_applied, uint64_t *out_snapshot_seq)
+void TreeCoreAccess::finish_open(const std::shared_ptr<TreeCore> &core, std::unique_ptr<Crowdbtree> *out)
+{
+    const auto &options = core->config();
+    out->reset(new Crowdbtree(options, core));
+    auto &tree = **out;
+    tree.init_metrics("s." + std::to_string(options.store_id) + ".g." + std::to_string(options.group_id) + ".tree",
+                      options.backend_label);
+    CRB_LOG_INFO("[{}] open: frame_bytes={}", tree.name_, options.frame_bytes);
+}
+
+Status Crowdbtree::flush_with_persistent(uint64_t *out_last_applied, uint64_t *out_persistent_sequence)
 {
     uint64_t applied  = 0;
     uint64_t sequence = 0;
@@ -43,15 +51,15 @@ Status Crowdbtree::snapshot(uint64_t *out_last_applied, uint64_t *out_snapshot_s
         if (out_last_applied != nullptr) {
             *out_last_applied = applied;
         }
-        if (out_snapshot_seq != nullptr) {
-            *out_snapshot_seq = sequence;
+        if (out_persistent_sequence != nullptr) {
+            *out_persistent_sequence = sequence;
         }
-        CRB_LOG_INFO("[{}] snapshot committed: slot={} sequence={}", name_, applied, sequence);
+        CRB_LOG_INFO("[{}] flush with persistent committed: slot={} sequence={}", name_, applied, sequence);
     }
     return status;
 }
 
-void Crowdbtree::snapshot_async(std::function<void(Status, uint64_t)> on_done)
+void Crowdbtree::flush_with_persistent_async(std::function<void(Status, uint64_t)> on_done)
 {
     core_->checkpoint_async(std::move(on_done));
 }

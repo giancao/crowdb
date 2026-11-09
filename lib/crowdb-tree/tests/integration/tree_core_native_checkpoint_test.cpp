@@ -43,7 +43,7 @@ TEST(TreeCoreNativeCheckpoint, ImportedResidentOverflowBecomesDurableAndReopens)
     ASSERT_TRUE(retained.found());
     uint64_t coverage = 0;
     uint64_t sequence = 0;
-    status            = tree->snapshot(&coverage, &sequence);
+    status            = tree->flush_with_persistent(&coverage, &sequence);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(coverage, 7U);
     EXPECT_EQ(sequence, 1U);
@@ -62,7 +62,7 @@ TEST(TreeCoreNativeCheckpoint, ImportedResidentOverflowBecomesDurableAndReopens)
     tree.reset();
     status = Crowdbtree::open(config, &tree);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    EXPECT_EQ(tree->durable_snapshot_last_applied_slot(), 7U);
+    EXPECT_EQ(tree->durable_coverage(), 7U);
     EXPECT_EQ(tree->get_view("key").value().to_string(), value);
     EXPECT_EQ(retained.value().to_string(), value);
     ASSERT_TRUE(tree->put("after", "value").ok());
@@ -100,7 +100,7 @@ TEST(TreeCoreNativeCheckpoint, SharedResidentChainIsWrittenOnceWithoutPinningThe
     auto                     *core = TreeCoreAccess::get(*tree);
     std::weak_ptr<const void> raw_owner =
         core->capture()->mapping.get(1)->leaf->bases.front().backing->overflow->pages.at(3).backing->owner;
-    status = tree->snapshot();
+    status = tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     const auto first  = core->capture()->mapping.get(1)->leaf->bases.front().backing;
     const auto second = core->capture()->mapping.get(2)->leaf->bases.front().backing;

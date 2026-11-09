@@ -27,6 +27,7 @@ struct SharedPageCache::State : std::enable_shared_from_this<SharedPageCache::St
     struct Request
     {
         std::atomic<bool>                 occupied{false};
+        std::atomic<uint64_t>             completion{0};
         Command                           command;
         Request                          *next     = nullptr;
         PageLoadPriority                  priority = PageLoadPriority::Read;
@@ -83,10 +84,10 @@ struct SharedPageCache::State : std::enable_shared_from_this<SharedPageCache::St
     void       enqueue(Command *command) noexcept;
     void       wake() noexcept;
     void       drain() noexcept;
-    void       process(Request *request, bool queued = false);
-    void       pend(Request *request) noexcept;
+    void       process(Request *request);
     void       loaded(Entry *entry);
     void       start(Entry *entry, Request *request);
+    void       uncached(Request *request);
     void       complete(Entry *entry, uint64_t identity, Status status, std::shared_ptr<const LeafBase> leaf,
                         std::shared_ptr<const InnerPageState> inner) noexcept;
     void       deliver(Request *request, const Status &status, std::shared_ptr<const LeafBase> leaf = {},
@@ -98,7 +99,6 @@ struct SharedPageCache::State : std::enable_shared_from_this<SharedPageCache::St
     void       evict_ready() noexcept;
     size_t     trim_ready(PageCacheKind kind, size_t max_pages) noexcept;
     void       drain_trims() noexcept;
-    void       resume_pending();
 
     const PageCacheLimits                     limits;
     const std::shared_ptr<PageCacheResidency> residency;
@@ -113,10 +113,6 @@ struct SharedPageCache::State : std::enable_shared_from_this<SharedPageCache::St
     std::atomic<bool>                         publication_claimed{false};
     uint64_t                                  clock         = 0;
     uint64_t                                  next_identity = 1;
-    std::array<Request *, 2>                  pending{};
-    std::array<Request *, 2>                  pending_tail{};
-    size_t                                    read_burst       = 0;
-    bool                                      resume_requested = false;
     std::atomic<uint64_t>                     hits{0}, misses{0}, joined{0}, evictions{0}, rejected{0};
     std::atomic<uint64_t>                     ordinary_waiters{0};
     std::atomic<uint64_t> inflight{0}, waiters{0}, reserved_waiters{0}, resident_pages{0}, resident_bytes{0};

@@ -54,7 +54,7 @@ struct ReadablePageFrames::Segment
     }
 };
 
-ReadablePageFrames::ReadablePageFrames(std::shared_ptr<detail::AllocationReservation> metadata)
+ReadablePageFrames::ReadablePageFrames(std::shared_ptr<AllocationBudget> metadata)
     : segments_(&resource_),
       metadata_(std::move(metadata))
 {
@@ -75,7 +75,7 @@ ReadablePageFrames &ReadablePageFrames::operator=(const ReadablePageFrames &sour
     return *this;
 }
 
-void ReadablePageFrames::budget(std::shared_ptr<detail::AllocationReservation> metadata)
+void ReadablePageFrames::budget(std::shared_ptr<AllocationBudget> metadata)
 {
     metadata_ = std::move(metadata);
 }

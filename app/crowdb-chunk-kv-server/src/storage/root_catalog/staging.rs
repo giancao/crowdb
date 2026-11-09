@@ -11,12 +11,13 @@ use crowdb_tree_ffi::CtError;
 use super::{catalog_key, decode_authority, KvRootCatalogStore};
 
 impl KvRootCatalogStore {
-    pub(super) fn stage_load(&self, tree_id: u64, id: StageId) -> Result<Option<StageRecord>, CtError> {
+    pub(super) async fn stage_load(&self, tree_id: u64, id: StageId) -> Result<Option<StageRecord>, CtError> {
         if tree_id != self.tree_id || id.owner_epoch == 0 {
             return Err(CtError::InvalidArgument);
         }
         let value = self
-            .wait(self.get(&stage_key(tree_id, id)))
+            .get(&stage_key(tree_id, id))
+            .await
             .map_err(|_| CtError::Unavailable)?;
         value
             .map(|(bytes, _)| {
@@ -29,7 +30,7 @@ impl KvRootCatalogStore {
             .transpose()
     }
 
-    pub(super) fn stage_compare(
+    pub(super) async fn stage_compare(
         &self,
         tree_id: u64,
         owner_epoch: u64,
@@ -56,14 +57,15 @@ impl KvRootCatalogStore {
             {
                 return Err(CtError::Unavailable);
             }
-            self.wait(self.require_completed_recovery())?;
+            self.require_completed_recovery().await?;
         }
         if record.id.owner_epoch == owner_epoch {
-            self.wait(self.authorize_staging())?;
+            self.authorize_staging().await?;
         } else {
-            self.wait(self.authorize_publication())?;
+            self.authorize_publication().await?;
         }
-        self.wait(self.stage_compare_authorized(owner_epoch, record.id, expected, next))
+        self.stage_compare_authorized(owner_epoch, record.id, expected, next)
+            .await
     }
 
     async fn stage_compare_authorized(
@@ -133,7 +135,7 @@ impl KvRootCatalogStore {
         .await
     }
 
-    pub(super) fn stage_list(
+    pub(super) async fn stage_list(
         &self,
         tree_id: u64,
         after: Option<StageId>,
@@ -145,7 +147,8 @@ impl KvRootCatalogStore {
         let prefix = stage_prefix(tree_id);
         let start = after.map(|id| stage_key(tree_id, id)).unwrap_or_default();
         let result = self
-            .wait(self.kv.scan(
+            .kv
+            .scan(
                 self.store_id,
                 self.group_id,
                 &prefix,
@@ -156,7 +159,8 @@ impl KvRootCatalogStore {
                 None,
                 false,
                 None,
-            ))
+            )
+            .await
             .map_err(|_| CtError::Unavailable)?;
         if result.timed_out {
             return Err(CtError::Unavailable);

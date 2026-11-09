@@ -8,8 +8,10 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <future>
 #include <latch>
 #include <thread>
+#include <vector>
 
 namespace crowdb::tree::detail
 {
@@ -91,15 +93,22 @@ TEST(RetirementQueue, LastOwnerSchedulesBoundedChainDisposalAndKeepsExactStorage
         EXPECT_EQ(destroyed.load(), 0U);
         EXPECT_LT(budget->physical.load(), before); // independent shared control was freed
         EXPECT_GT(budget->physical.load(), 10000 * sizeof(RetiredObject<Chain>));
+        std::promise<Code> closed;
+        auto               result = closed.get_future();
+        queue->close_async({.context = &closed, .complete_fn = [](void *context, Status status) noexcept {
+                                static_cast<std::promise<Code> *>(context)->set_value(status.code());
+                            }});
+        EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
         gate.release.count_down();
         lane->drain();
+        ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(result.get(), Code::kOk);
         EXPECT_EQ(destroyed.load(), 10000U);
         const auto work = queue->snapshot();
         EXPECT_EQ(work.enqueued, 10000U);
         EXPECT_EQ(work.freed, 10000U);
         EXPECT_GT(work.cpu_steps, 1U);
         EXPECT_LE(work.max_step_nodes, RetirementQueue::kNodesPerStep);
-        queue->close_and_drain();
     }
     EXPECT_EQ(budget->physical.load(), 0U);
     EXPECT_EQ(budget->claimed.load(), 0U);
@@ -126,6 +135,44 @@ TEST(RetirementQueue, LateExternalOwnerFreesAfterExecutorDestructionWithoutRecur
     chain.reset();
     EXPECT_EQ(destroyed.load(), 50000U);
     EXPECT_EQ(budget->physical.load(), 0U);
+    EXPECT_EQ(budget->claimed.load(), 0U);
+}
+
+TEST(RetirementQueue, AsyncCloseHandsRacingAndLateReleasesToTheExistingFallback)
+{
+    auto                   budget = std::make_shared<TestBudget>();
+    std::atomic<size_t>    destroyed{0};
+    std::shared_ptr<Chain> late;
+    {
+        FlushRuntime                     runtime(1, 1, budget);
+        auto                             lane = std::make_shared<FlushRuntime::Lane>(1);
+        std::shared_ptr<RetirementQueue> queue;
+        ASSERT_TRUE(RetirementQueue::create(runtime, lane, budget, &queue).ok());
+        late = retired_shared<Chain>(budget, queue, nullptr, &destroyed);
+        std::vector<std::shared_ptr<Chain>> released;
+        released.reserve(4096);
+        for (size_t i = 0; i < 4096; ++i) {
+            released.push_back(retired_shared<Chain>(budget, queue, nullptr, &destroyed));
+        }
+        std::latch         start{1};
+        std::jthread       producer([&] {
+            start.wait();
+            released.clear();
+        });
+        std::promise<Code> closed;
+        auto               result = closed.get_future();
+        start.count_down();
+        queue->close_async({.context = &closed, .complete_fn = [](void *context, Status status) noexcept {
+                                static_cast<std::promise<Code> *>(context)->set_value(status.code());
+                            }});
+        producer.join();
+        ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(result.get(), Code::kOk);
+        runtime.drain();
+        EXPECT_EQ(destroyed.load(), 4096U);
+    }
+    late.reset();
+    EXPECT_EQ(destroyed.load(), 4097U);
     EXPECT_EQ(budget->claimed.load(), 0U);
 }
 

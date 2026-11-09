@@ -56,7 +56,7 @@ size_t RetirementQueue::allocation_bound() noexcept
 RetirementQueue::~RetirementQueue()
 {
     // Binding teardown closes the registration while its executor is alive.
-    assert(!progress_ || state_.load(std::memory_order_acquire) == 2);
+    assert(!progress_ || state_.load(std::memory_order_acquire) == kClosed);
     assert(incoming_.load(std::memory_order_relaxed) == nullptr);
 }
 
@@ -73,12 +73,12 @@ void RetirementQueue::retire(RetirementNode *node) noexcept
     auto *head = incoming_.load(std::memory_order_relaxed);
     do {
         node->next = head;
-    } while (!incoming_.compare_exchange_weak(head, node, std::memory_order_release, std::memory_order_relaxed));
+    } while (!incoming_.compare_exchange_weak(head, node, std::memory_order_acq_rel, std::memory_order_relaxed));
     const auto state = state_.load(std::memory_order_acquire);
-    if (state == 0) {
+    if (state == kOpen) {
         progress_->request(keep);
     }
-    else if (state == 2) {
+    else if (state == kClosed) {
         drain_host();
     }
 }
@@ -146,8 +146,16 @@ void RetirementQueue::run(void *context) noexcept
     auto &queue = *static_cast<RetirementQueue *>(context);
     queue.cpu_steps_.fetch_add(1, std::memory_order_relaxed);
     (void)queue.step(kNodesPerStep);
-    if (queue.pending() && queue.state_.load(std::memory_order_acquire) == 0) {
-        queue.progress_->request(queue.weak_from_this().lock());
+    const auto state = queue.state_.load(std::memory_order_acquire);
+    if (queue.pending()) {
+        if (state == kOpen || state == kDraining) {
+            queue.progress_->request(queue.weak_from_this().lock());
+        }
+    }
+    else if (state == kDraining) {
+        queue.state_.store(kClosing, std::memory_order_release);
+        queue.progress_->stop_async(
+            {.context = &queue, .complete_fn = &RetirementQueue::stopped, .owner = queue.weak_from_this().lock()});
     }
 }
 
@@ -190,14 +198,41 @@ void RetirementQueue::drain_host() noexcept
 
 void RetirementQueue::close_and_drain() noexcept
 {
-    unsigned expected = 0;
-    if (!state_.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
-        assert(expected == 2 && "retirement close belongs to one host boundary");
+    auto expected = kOpen;
+    if (!state_.compare_exchange_strong(expected, kClosing, std::memory_order_acq_rel)) {
+        assert(expected == kClosed && "retirement close belongs to one host boundary");
         return;
     }
     progress_->close_and_drain();
     drain_host();
-    state_.store(2, std::memory_order_release);
+    publish_closed();
+}
+
+void RetirementQueue::close_async(AsyncCompletion complete) noexcept
+{
+    on_drained_                          = std::move(complete);
+    auto                        expected = kOpen;
+    [[maybe_unused]] const auto armed = state_.compare_exchange_strong(expected, kDraining, std::memory_order_acq_rel);
+    assert(armed && "retirement close belongs to one host boundary");
+    progress_->request(weak_from_this().lock());
+}
+
+void RetirementQueue::stopped(void *context, Status status) noexcept
+{
+    auto &queue = *static_cast<RetirementQueue *>(context);
+    queue.publish_closed();
+    auto done = std::move(queue.on_drained_);
+    done.complete(std::move(status));
+}
+
+void RetirementQueue::publish_closed() noexcept
+{
+    state_.store(kClosed, std::memory_order_release);
+    // Publish the fallback in the same modification order as new nodes. A
+    // later producer acquires it, and this last drain sees earlier arrivals.
+    auto *head = incoming_.load(std::memory_order_relaxed);
+    while (!incoming_.compare_exchange_weak(head, head, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+    }
     drain_host();
 }
 

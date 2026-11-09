@@ -8,13 +8,12 @@ namespace crowdb::tree
 {
 struct LocalRecoveryLimits
 {
-    bool   accept_legacy_chunk_refs = false;
-    size_t max_segments             = 1U << 16;
-    size_t max_frames               = 1024 * 1024;
-    size_t max_blob_bytes           = 1024 * 1024;
-    size_t max_frame_bytes          = 1024 * 1024;
-    size_t max_overflow_references  = 1024 * 1024;
-    size_t max_dependency_steps     = 1024 * 1024;
+    size_t max_segments            = 1U << 16;
+    size_t max_frames              = 1024 * 1024;
+    size_t max_blob_bytes          = 1024 * 1024;
+    size_t max_frame_bytes         = 1024 * 1024;
+    size_t max_overflow_references = 1024 * 1024;
+    size_t max_dependency_steps    = 1024 * 1024;
 };
 
 struct LocalRecoveryResult
@@ -40,12 +39,9 @@ class LocalRecoveryOperation
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, ExtentLedgerLimits domain,
                          LocalRecoveryLimits limits, PageLoadBudget budget,
                          std::shared_ptr<LocalRecoveryOperation> *out);
-    // Valid only when the exclusive domain is shorter than the first anchor
-    // slot. The normal recovery still validates and initializes that domain.
-    [[nodiscard]] static std::optional<size_t> empty_allocation_bound(LocalRecoveryLimits limits, uint32_t iu) noexcept;
-    [[nodiscard]] detail::CallbackSender       sender() noexcept;
-    [[nodiscard]] const LocalRecoveryResult   &result() const noexcept;
-    void                                       request_stop() noexcept;
+    [[nodiscard]] detail::CallbackSender     sender() noexcept;
+    [[nodiscard]] const LocalRecoveryResult &result() const noexcept;
+    void                                     request_stop() noexcept;
 
   private:
     explicit LocalRecoveryOperation(std::shared_ptr<State> state);

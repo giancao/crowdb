@@ -49,8 +49,7 @@ TEST(CapturedWrite, RealBlockReopenReloadsPrimaryAndOverflowThroughItsCapturedMa
     ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 1, 3, 4096, 4096, &file).ok());
     store       = std::make_shared<BlockAsyncPageStore>(file.get(), &uring);
     auto loader = std::make_shared<AsyncStorePageLoader>(
-        store, test.runtime, test.lane,
-        PageLoadLimits{.max_inflight = 1, .max_blob_bytes = 4096, .max_frame_bytes = 512},
+        store, test.runtime, test.lane, PageLoadLimits{.max_blob_bytes = 4096, .max_frame_bytes = 512},
         [pages](uint64_t pid, std::shared_ptr<const BackingRef> *out) {
             auto frame = pages->frames.find(pid);
             if (frame == pages->frames.end()) {

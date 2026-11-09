@@ -98,16 +98,17 @@ impl RoutedDiskWriter {
     }
 
     /// Produce opaque retained routes for the native tree page store.
-    pub fn storage_routes(&self) -> Result<NativeDiskIoRoutes> {
-        self.client.native_routes().map_err(map_topology_error)
+    pub async fn storage_routes(&self) -> Result<NativeDiskIoRoutes> {
+        self.client.native_routes().await.map_err(map_topology_error)
     }
 
-    pub fn storage_route_resolver(
+    pub async fn storage_route_resolver(
         &self,
         timeout_ms: u64,
     ) -> Result<Arc<crowdb_diskio_client::NativeDiskRouteResolver>> {
         self.client
             .native_route_resolver(std::time::Duration::from_millis(timeout_ms))
+            .await
             .map_err(map_topology_error)
     }
 

@@ -5,7 +5,7 @@
 use super::{ChunkKvStorage, KvRootCatalogStore, StorageRuntimeError};
 use crowdb_chunk_kv::Partition;
 use crowdb_paxos_kv_client::StreamProcessAuthority;
-use crowdb_tree_ffi::{ChunkPageStoreOptions, ChunkRootCatalog, CtError, PageStore};
+use crowdb_tree_ffi::{ChunkRootCatalog, ChunkRuntimeOptions, CtError, PageStore};
 use std::sync::Arc;
 
 impl ChunkKvStorage {
@@ -57,7 +57,7 @@ impl ChunkKvStorage {
 
     pub(super) async fn open_durable_tree(
         &self,
-        options: ChunkPageStoreOptions,
+        options: ChunkRuntimeOptions,
         metadata_group_id: u64,
     ) -> Result<(Arc<PageStore>, Arc<KvRootCatalogStore>), StorageRuntimeError> {
         let catalog = KvRootCatalogStore::claim(
@@ -93,14 +93,11 @@ impl ChunkKvStorage {
             .tail_overlay
             .as_ref()
             .map_or(0, |overlay| overlay.base_root_manifest_generation);
-        let options = ChunkPageStoreOptions {
+        let options = ChunkRuntimeOptions {
             tree_id: entry.artifact.tree_id,
             owner_epoch: entry.owner_epoch,
             open_generation,
-            pack_bytes: 0,
             iu_size: 0,
-            max_concurrent_packs: 0,
-            materialization_bytes_per_pass: 0,
             mirror_copies: 0,
             max_chunk_bytes: 0,
         };

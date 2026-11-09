@@ -78,12 +78,12 @@ class ReadablePageFrames
     using value_type     = std::pair<const uint64_t, DurableCapturedFrame>;
     using iterator       = Position<false>;
     using const_iterator = Position<true>;
-    explicit ReadablePageFrames(std::shared_ptr<detail::AllocationReservation> metadata = {});
+    explicit ReadablePageFrames(std::shared_ptr<AllocationBudget> metadata = {});
     ~ReadablePageFrames();
     ReadablePageFrames(const ReadablePageFrames &source);
     ReadablePageFrames &operator=(const ReadablePageFrames &source);
     void                inherit(const ReadablePageFrames &source);
-    void                budget(std::shared_ptr<detail::AllocationReservation> metadata);
+    void                budget(std::shared_ptr<AllocationBudget> metadata);
     [[nodiscard]] bool  same_segment(const ReadablePageFrames &other, uint64_t segment) const noexcept;
     [[nodiscard]] std::pair<size_t, size_t> primary_counts(uint64_t segment) const;
     void                                    refresh_counts();
@@ -181,15 +181,15 @@ class ReadablePageFrames
     [[nodiscard]] static size_t segment_allocation_bound() noexcept;
 
   private:
-    Segment                                       &mutable_segment(uint64_t segment);
-    value_type                                    &entry(uint64_t pid);
-    [[nodiscard]] const value_type                &entry(uint64_t pid) const;
-    [[nodiscard]] uint64_t                         next(uint64_t pid) const;
-    [[nodiscard]] uint64_t                         lower(uint64_t pid) const;
-    [[nodiscard]] TreeSummary                      segment_shape(uint64_t segment) const;
-    detail::BudgetMemoryResource                   resource_;
-    Segments                                       segments_;
-    std::shared_ptr<detail::AllocationReservation> metadata_;
-    size_t                                         size_ = 0;
+    Segment                          &mutable_segment(uint64_t segment);
+    value_type                       &entry(uint64_t pid);
+    [[nodiscard]] const value_type   &entry(uint64_t pid) const;
+    [[nodiscard]] uint64_t            next(uint64_t pid) const;
+    [[nodiscard]] uint64_t            lower(uint64_t pid) const;
+    [[nodiscard]] TreeSummary         segment_shape(uint64_t segment) const;
+    detail::BudgetMemoryResource      resource_;
+    Segments                          segments_;
+    std::shared_ptr<AllocationBudget> metadata_;
+    size_t                            size_ = 0;
 };
 } // namespace crowdb::tree

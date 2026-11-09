@@ -6,8 +6,8 @@
 
 namespace crowdb::tree
 {
-WritebackMetrics::WritebackMetrics(std::shared_ptr<TreeWorkMetrics>                      metrics,
-                                   const std::shared_ptr<detail::AllocationReservation> &metadata, size_t max_pages)
+WritebackMetrics::WritebackMetrics(std::shared_ptr<TreeWorkMetrics>         metrics,
+                                   const std::shared_ptr<AllocationBudget> &metadata, size_t max_pages)
     : metrics_(std::move(metrics)),
       pending_(std::less<>{}, detail::ReservationAllocator<Entry>(metadata)),
       max_pages_(max_pages)

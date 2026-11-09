@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/memory_budget.h"
 #include "crowdb-tree/resource_usage.h"
 #include "stdexec_adapter.h"
@@ -64,6 +65,9 @@ class ResourceBudget
         }
 
         void drain_retirements() const noexcept;
+        // One registration at a time, serialized by the requesting owner.
+        // Completes at quiescence without fencing future retirement work.
+        void when_retirements_drained(AsyncCompletion complete) const noexcept;
         // Bootstrap only, before this account or its binding is published.
         void set_work_metrics(const std::shared_ptr<TreeWorkMetrics> &metrics) noexcept;
 
@@ -77,7 +81,7 @@ class ResourceBudget
 #ifdef CROWDB_TREE_TEST_UTIL
         [[nodiscard]] size_t retirements_pending_for_tests() const noexcept
         {
-            return retirement_pending_.load(std::memory_order_acquire);
+            return retirement_pending_.load(std::memory_order_acquire) & ~kRetirementNotify;
         }
 #endif
 
@@ -87,11 +91,16 @@ class ResourceBudget
         friend class ResourceBudget;
         friend struct State;
         explicit Account(std::shared_ptr<State> state, Limits limits);
+        static constexpr size_t                   kRetirementNotify = size_t{1} << ((sizeof(size_t) * 8) - 1);
+        void                                      start_retirement() noexcept;
+        void                                      finish_retirement() const noexcept;
+        void                                      complete_retirement_drain() const noexcept;
         std::shared_ptr<State>                    state_;
         std::weak_ptr<RetirementQueue>            retirement_;
         std::weak_ptr<TreeWorkMetrics>            retirement_metrics_;
         std::weak_ptr<TreeResourceMetrics>        resource_metrics_;
         mutable std::atomic<size_t>               retirement_pending_{0};
+        mutable AsyncCompletion                   on_retirements_drained_;
         Limits                                    limits_;
         size_t                                    memory_limit_ = 0;
         std::atomic<size_t>                       memory_allocated_{0};
@@ -254,9 +263,10 @@ class ResourceBudget
 
   private:
     friend class AllocationAccount;
-    static bool claim_allocation(const std::shared_ptr<Account> &account, BudgetClass category, size_t bytes) noexcept;
-    static void release_allocation(const std::shared_ptr<Account> &account, BudgetClass category,
-                                   size_t bytes) noexcept;
+    static bool        claim_allocation(const std::shared_ptr<Account> &account, BudgetClass category, size_t bytes,
+                                        bool ongoing = false) noexcept;
+    static void        release_allocation(const std::shared_ptr<Account> &account, BudgetClass category,
+                                          size_t bytes) noexcept;
     static const void *allocation_domain(const std::shared_ptr<Account> &account) noexcept;
     static bool
     transfer_allocation(const std::shared_ptr<Account> &from, const std::shared_ptr<Account> &to, BudgetClass category,

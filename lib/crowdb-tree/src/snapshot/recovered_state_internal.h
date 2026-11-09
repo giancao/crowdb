@@ -36,6 +36,7 @@ struct RecoveredStateOperation::State : std::enable_shared_from_this<State>
         size_t                                dependency  = 0;
         uint64_t                              chain_pid   = kInvalidPageId;
         uint64_t                              chain_bytes = 0;
+        uint64_t                              chain_steps = 0;
         Phase                                 phase       = Phase::Load;
     };
 
@@ -53,7 +54,7 @@ struct RecoveredStateOperation::State : std::enable_shared_from_this<State>
     };
 
     using Pids = std::set<uint64_t, std::less<>, detail::ReservationAllocator<uint64_t>>;
-    explicit State(std::shared_ptr<detail::AllocationReservation> credit);
+    explicit State(std::shared_ptr<AllocationBudget> credit);
     void        start(detail::CallbackComplete callback, void *argument) noexcept;
     void        wake() noexcept;
     static void run(void *context) noexcept;
@@ -70,7 +71,7 @@ struct RecoveredStateOperation::State : std::enable_shared_from_this<State>
     void        verify_reachable();
     void        finish(Status status) noexcept;
 
-    std::shared_ptr<detail::AllocationReservation>  metadata;
+    std::shared_ptr<AllocationBudget>               metadata;
     std::shared_ptr<const ReadablePageCatalog>      captured;
     std::shared_ptr<PageLoader>                     loader;
     std::shared_ptr<detail::FlushRuntime>           runtime;
@@ -86,7 +87,6 @@ struct RecoveredStateOperation::State : std::enable_shared_from_this<State>
     bool                                            have_leaf        = false;
     bool                                            initialized      = false;
     bool                                            require_durable  = false;
-    size_t                                          dependency_steps = 0;
     std::atomic<uint8_t>                            lifecycle{0};
     std::atomic<bool>                               stopped{false};
     detail::CallbackComplete                        complete = nullptr;

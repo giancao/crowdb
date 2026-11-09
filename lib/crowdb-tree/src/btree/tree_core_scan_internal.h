@@ -6,7 +6,7 @@
 
 namespace crowdb::tree::core_read_detail
 {
-struct CoreScan : std::enable_shared_from_this<CoreScan>
+struct CoreScan
 {
     struct Receiver
     {
@@ -30,27 +30,33 @@ struct CoreScan : std::enable_shared_from_this<CoreScan>
     };
 
     using Operation = detail::CallbackSender::Operation<Receiver>;
-    ReadPreparation                                  prepared;
-    std::shared_ptr<PublishedScan>                   read;
-    std::shared_ptr<Operation>                       operation;
-    std::shared_ptr<detail::FlushRuntime::Progress>  progress;
-    std::shared_ptr<CoreScan>                        owner;
-    std::function<void(Status, ScanPackedBuf, bool)> complete;
-    ScanPackedBuf                                    packed;
-    size_t                                           count           = 0;
-    size_t                                           bytes           = 0;
-    size_t                                           limit           = 0;
-    size_t                                           byte_limit      = 0;
-    size_t                                           normal_capacity = 0;
-    size_t                                           value_limit     = 0;
-    uint64_t                                         deadline_ms     = 0;
-    bool                                             strict          = false;
+    ReadPreparation                             prepared;
+    std::shared_ptr<PublishedScan>              read;
+    std::shared_ptr<Operation>                  operation;
+    std::shared_ptr<ApplyDispatcher>            progress;
+    std::shared_ptr<detail::FlushRuntime::Lane> lane;
+    std::shared_ptr<CoreScan>                   owner;
+    ScanComplete                                complete;
+    ScanPackedBuf                               packed;
+    size_t                                      count       = 0;
+    size_t                                      bytes       = 0;
+    size_t                                      limit       = 0;
+    size_t                                      byte_limit  = 0;
+    size_t                                      value_limit = 0;
+    uint64_t                                    deadline_ms = 0;
+    bool                                        strict      = false;
+    ApplyDispatcher::Node                       cpu_node{&CoreScan::step, this};
 
     void               finish(Status status, bool truncated) noexcept;
+    void               schedule() noexcept;
     void               window() noexcept;
     static void        step(void *context) noexcept;
     [[nodiscard]] bool expired() const noexcept;
 };
 
-Status prepare_scan(TreeCore &core, CoreScanOptions options, std::shared_ptr<CoreScan> *out);
+Status       prepare_scan(TreeCore &core, CoreScanOptions options, std::shared_ptr<CoreScan> *out);
+Status       scan_limits(CoreScanOptions options, PublishedReadLimits *limits);
+PageKeyRange scan_range(CoreScanOptions options, const std::shared_ptr<AllocationBudget> &credit);
+Status       prepare_scan(CoreScanOptions options, ReadPreparation ready, PageKeyRange range, size_t value_limit,
+                          std::shared_ptr<CoreScan> *out);
 } // namespace crowdb::tree::core_read_detail

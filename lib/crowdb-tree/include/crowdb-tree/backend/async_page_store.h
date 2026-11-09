@@ -122,6 +122,11 @@ class BlockAsyncPageStore : public AsyncPageStore
     uint64_t submit_write(PageAddr addr, const void *buf, size_t len, AsyncCompletion on_complete) override;
     Status   submit_fsync(AsyncCompletion on_complete) override;
     void     cancel(uint64_t op_id) override;
+    // Startup holds the exclusive backend domain through completion. The
+    // output is borrowed and is assigned only when every extent was probed.
+    Status submit_size(uint64_t *size, AsyncCompletion on_complete);
+    // Caller holds an exclusive free-range lease through completion.
+    void submit_delete_block(uint32_t block_idx, AsyncCompletion on_complete);
 
   private:
     BlockPageStore                *store_;

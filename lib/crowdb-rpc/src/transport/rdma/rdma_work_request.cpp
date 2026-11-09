@@ -8,6 +8,8 @@
 
 #ifdef CROWDB_RPC_HAVE_RDMA
 
+#    include <algorithm>
+
 namespace crowdb::rpc
 {
 
@@ -119,34 +121,39 @@ void RdmaTransport::cancel_work(Connection *connection)
 {
     // Called only after the affected QPs are destroyed and device access has
     // stopped. Missing/uncertain completions must still release their owners.
-    for (const auto &queue : completion_queues_) {
-        while (queue->polling.test_and_set(std::memory_order_acquire))
+    const auto  *pools = connection == nullptr ? nullptr : pools_for(connection);
+    const size_t first = pools == nullptr ? 0 : pools->cq_index;
+    const size_t end =
+        connection == nullptr ? completion_queues_.size() : std::min(first + 1, completion_queues_.size());
+    for (size_t cq_index = first; cq_index < end; ++cq_index) {
+        while (!try_cancel_queue_work(*completion_queues_[cq_index], connection)) {
             std::this_thread::yield();
-        retire_sends(*queue, connection);
-        cancel_deferred(*queue, connection);
-        for (uint32_t index = 0; index < config_.cq_depth; ++index) {
-            auto          &work  = queue->work_requests[index];
-            const uint64_t token = work.token.load(std::memory_order_acquire);
-            if (token == 0 || token == WORK_RESERVED ||
-                (connection != nullptr && work.connection_identity.load(std::memory_order_acquire) != connection))
-                continue;
-            ibv_wc completion{};
-            completion.wr_id  = token;
-            completion.status = IBV_WC_WR_FLUSH_ERR;
-            dispatch_completion(completion);
         }
-        queue->polling.clear(std::memory_order_release);
     }
 }
 
-void RdmaTransport::close_after_drain(Connection *connection)
+bool RdmaTransport::try_cancel_queue_work(CompletionQueue &queue, Connection *connection)
 {
-    // A disconnect notification can race CQ readiness. Publish completions
-    // already acknowledged by the NIC before failing the remaining requests.
-    const auto    *pools = pools_for(connection);
-    const uint32_t index = pools == nullptr ? 0 : pools->cq_index;
-    (void)drain_queue(index, config_.cq_depth, true);
-    connection->close();
+    if (queue.polling.test_and_set(std::memory_order_acquire)) {
+        return false;
+    }
+    auto release = [](std::atomic_flag *polling) { polling->clear(std::memory_order_release); };
+    const std::unique_ptr<std::atomic_flag, decltype(release)> owner(&queue.polling, release);
+    retire_sends(queue, connection);
+    cancel_deferred(queue, connection);
+    for (uint32_t index = 0; index < config_.cq_depth; ++index) {
+        auto          &work  = queue.work_requests[index];
+        const uint64_t token = work.token.load(std::memory_order_acquire);
+        if (token == 0 || token == WORK_RESERVED ||
+            (connection != nullptr && work.connection_identity.load(std::memory_order_acquire) != connection)) {
+            continue;
+        }
+        ibv_wc completion{};
+        completion.wr_id  = token;
+        completion.status = IBV_WC_WR_FLUSH_ERR;
+        dispatch_completion(completion);
+    }
+    return true;
 }
 
 } // namespace crowdb::rpc

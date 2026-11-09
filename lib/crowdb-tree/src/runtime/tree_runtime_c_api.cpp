@@ -12,12 +12,49 @@
 
 struct ct_runtime
 {
+    struct ShutdownCallback
+    {
+        static void deliver(void *argument, crowdb::tree::Status status) noexcept
+        {
+            auto &callback = *static_cast<ShutdownCallback *>(argument);
+            callback.complete(callback.context, static_cast<int32_t>(status.code()));
+        }
+
+        std::atomic_flag started          = ATOMIC_FLAG_INIT;
+        void (*complete)(void *, int32_t) = nullptr;
+        void *context                     = nullptr;
+    };
+
     std::shared_ptr<crowdb::tree::TreeRuntime> owner;
+    ShutdownCallback                           drain{};
+    ShutdownCallback                           stop{};
 };
 
 namespace
 {
 using namespace crowdb::tree;
+
+using ShutdownStage = Status (TreeRuntime::*)(AsyncCompletion) noexcept;
+
+int32_t submit_runtime_shutdown(ct_runtime *runtime, ct_runtime::ShutdownCallback ct_runtime::*slot,
+                                ShutdownStage stage, void (*complete)(void *, int32_t), void *context) noexcept
+{
+    if (runtime == nullptr || complete == nullptr) {
+        return static_cast<int32_t>(Code::kInvalidArgument);
+    }
+    auto &callback = runtime->*slot;
+    if (callback.started.test_and_set(std::memory_order_acq_rel)) {
+        return static_cast<int32_t>(Code::kUnavailable);
+    }
+    callback.complete = complete;
+    callback.context  = context;
+    const auto status =
+        ((*runtime->owner).*stage)({.context = &callback, .complete_fn = &ct_runtime::ShutdownCallback::deliver});
+    if (!status.ok()) {
+        callback.started.clear(std::memory_order_release);
+    }
+    return static_cast<int32_t>(status.code());
+}
 
 TreeResourceLimits from_c(ct_resource_limits limits) noexcept
 {
@@ -194,7 +231,7 @@ try {
     }
     MetadataAllocator<ct_runtime> allocator(TreeRuntimeAccess::lifecycle(*owner));
     auto                         *handle = allocator.allocate(1);
-    ::new (static_cast<void *>(handle)) ct_runtime{std::move(owner)};
+    ::new (static_cast<void *>(handle)) ct_runtime{.owner = std::move(owner)};
     *out = handle;
     return 0;
 }
@@ -217,6 +254,16 @@ void ct_runtime_drain_cpu(ct_runtime *runtime)
     if (runtime != nullptr) {
         runtime->owner->drain_cpu();
     }
+}
+
+int32_t ct_runtime_drain_async(ct_runtime *runtime, void (*complete)(void *, int32_t), void *context)
+{
+    return submit_runtime_shutdown(runtime, &ct_runtime::drain, &TreeRuntime::drain_async, complete, context);
+}
+
+int32_t ct_runtime_stop_workers_async(ct_runtime *runtime, void (*complete)(void *, int32_t), void *context)
+{
+    return submit_runtime_shutdown(runtime, &ct_runtime::stop, &TreeRuntime::stop_workers_async, complete, context);
 }
 
 void ct_runtime_free(ct_runtime *runtime)
@@ -242,7 +289,8 @@ Status runtime_host_allocation_budget(ct_runtime *runtime, std::shared_ptr<Alloc
     return Status::Ok();
 }
 
-Status configure_tree_runtime(ct_runtime *runtime, const ct_tree_runtime_options *options, Config *out) noexcept
+Status configure_tree_runtime(ct_runtime *runtime, const ct_tree_runtime_options *options, Config *out,
+                              bool *initializing) noexcept
 try {
     if (out == nullptr) {
         return Status::invalid_argument();
@@ -261,7 +309,7 @@ try {
     if (runtime != nullptr) {
         configured.runtime = runtime->owner;
     }
-    auto status = configure_default_runtime(&configured);
+    auto status = configure_default_runtime(&configured, initializing);
     if (!status.ok()) {
         return status;
     }

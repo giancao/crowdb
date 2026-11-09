@@ -7,9 +7,8 @@
 
 namespace crowdb::tree
 {
-// One prepaid CPU registration per Tree serves all accepted applies. A ready
-// operation carries its queue node, so a wakeup neither allocates nor consumes
-// another ordinary runtime queue slot while waiting for handoff progress.
+// A shared CPU registration runs ready operations. Each operation carries
+// its queue node, so a wakeup needs neither an allocation nor its own slot.
 class ApplyDispatcher : public std::enable_shared_from_this<ApplyDispatcher>
 {
   public:
@@ -35,13 +34,14 @@ class ApplyDispatcher : public std::enable_shared_from_this<ApplyDispatcher>
         void                       *context_;
     };
 
-    static Status               create(std::shared_ptr<detail::FlushRuntime>       runtime,
-                                       std::shared_ptr<detail::FlushRuntime::Lane> lane, size_t steps_per_turn,
-                                       const std::shared_ptr<detail::AllocationReservation> &metadata,
-                                       std::shared_ptr<ApplyDispatcher>                     *out);
+    static Status create(std::shared_ptr<detail::FlushRuntime>       runtime,
+                         std::shared_ptr<detail::FlushRuntime::Lane> lane, size_t steps_per_turn,
+                         const std::shared_ptr<AllocationBudget> &metadata, std::shared_ptr<ApplyDispatcher> *out);
     [[nodiscard]] static size_t allocation_bound() noexcept;
 
     void request(Node &node, std::shared_ptr<const void> owner) noexcept;
+    // Called after external request producers have joined.
+    void close_async(AsyncCompletion complete) noexcept;
     // Host-only, after accepted apply owners and their wakeup producers join.
     void close_and_drain() noexcept;
 

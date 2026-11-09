@@ -29,8 +29,6 @@ struct CapturedWriteLimits
 {
     CapturedFrameLimits frames{};
     PageWriteLimits     write{};
-    size_t              max_frames           = 1024 * 1024;
-    size_t              max_dependency_steps = 1024 * 1024;
 };
 
 struct CapturedWriteResult
@@ -52,11 +50,6 @@ class CapturedWriteOperation
     struct State;
 
   public:
-    // Sink controls and retained descriptors only. Add the stream, loader and
-    // one PageWriteOperation window separately. Counts come from layout preflight.
-    [[nodiscard]] static std::optional<size_t> allocation_bound(CapturedWriteLimits limits, size_t frame_count_upper,
-                                                                size_t dependency_entries,
-                                                                size_t reference_heads) noexcept;
     static Status create(std::shared_ptr<const PublishedTreeState> captured, std::shared_ptr<PageLoader> loader,
                          std::shared_ptr<AsyncPageStore> store, std::shared_ptr<detail::FlushRuntime> runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, CapturedWriteLimits limits,

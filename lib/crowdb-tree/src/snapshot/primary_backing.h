@@ -32,13 +32,14 @@ struct PrimaryReuseOutput
     detail::ReservedVector<ReusedOverflowDependency> dependencies;
 };
 
-std::shared_ptr<const PrimaryBackingMetadata>
-make_primary_backing(const DurableCapturedFrame &frame, const PageState &page, uint64_t coverage, uint64_t gc_floor,
-                     const std::shared_ptr<detail::AllocationReservation> &metadata);
+std::shared_ptr<const PrimaryBackingMetadata> make_primary_backing(const DurableCapturedFrame &frame,
+                                                                   const PageState &page, uint64_t coverage,
+                                                                   uint64_t                                 gc_floor,
+                                                                   const std::shared_ptr<AllocationBudget> &metadata);
 
 std::shared_ptr<const PrimaryBackingMetadata>
 make_inner_primary_backing(const DurableCapturedFrame &frame, const PublishedPage &page, uint64_t coverage,
-                           uint64_t gc_floor, const std::shared_ptr<detail::AllocationReservation> &metadata);
+                           uint64_t gc_floor, const std::shared_ptr<AllocationBudget> &metadata);
 
 bool can_reuse_inner_primary(const PublishedPage &page, uint64_t pid, const InnerEncodeFences &fences, uint64_t backend,
                              uint32_t frame_bytes) noexcept;

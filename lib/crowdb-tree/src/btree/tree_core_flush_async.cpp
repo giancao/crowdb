@@ -185,18 +185,11 @@ void TreeCore::flush_async(std::function<void(Status)> complete)
     Status                     status;
     try {
         State::Ingress admission(*state_);
-        constexpr auto bytes = detail::shared_allocation_bound<FlushCall>() +
-                               detail::shared_allocation_bound<detail::AllocationReservation>();
-        auto reserved = detail::ResourceBudget::try_reserve(binding()->account(), detail::BudgetClass::kHandoff,
-                                                            bytes + TreeOperationLifetime::ticket_allocation_bound());
         if (admission.owner == nullptr) {
             status = Status::unavailable("Tree ingress closed");
         }
-        else if (!reserved) {
-            status = Status::unavailable("Tree flush callback credit unavailable");
-        }
         else {
-            auto credit = detail::AllocationReservation::create(std::move(*reserved));
+            const auto                                    &credit = state_->work_allocations;
             std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
             status = state_->lifetime->acquire(credit, &ticket);
             if (status.ok()) {
@@ -206,7 +199,6 @@ void TreeCore::flush_async(std::function<void(Status)> complete)
                                                           std::move(preparation), state_->apply_dispatcher,
                                                           state_->apply_progress);
                 call->callback.swap(complete);
-                credit->seal();
             }
         }
     }

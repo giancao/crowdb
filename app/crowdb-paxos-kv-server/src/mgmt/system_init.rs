@@ -86,9 +86,6 @@ pub(super) async fn system_init(
     State(state): State<RegistryArc>,
     req: Option<Json<SystemInitRequest>>,
 ) -> Result<(StatusCode, Json<SystemInitResponse>), (StatusCode, Json<ErrorResponse>)> {
-    const SYSTEM_STORE_ID: u64 = 0;
-    const SYSTEM_GROUP_ID: u64 = 0;
-
     let req = req.map_or(
         SystemInitRequest {
             replica_id: 1,
@@ -98,8 +95,19 @@ pub(super) async fn system_init(
         |Json(r)| r,
     );
 
-    let _execution = super::system_bootstrap::begin(&state)?;
-    super::system_bootstrap::accept(&state, req.replica_id, req.bootstrap.as_ref())?;
+    super::system_bootstrap::begin(&state)?
+        .run(init_owned(state, req))
+        .await
+}
+
+async fn init_owned(
+    state: RegistryArc,
+    req: SystemInitRequest,
+) -> Result<(StatusCode, Json<SystemInitResponse>), (StatusCode, Json<ErrorResponse>)> {
+    const SYSTEM_STORE_ID: u64 = 0;
+    const SYSTEM_GROUP_ID: u64 = 0;
+
+    super::system_bootstrap::accept(&state, req.replica_id, req.bootstrap.as_ref()).await?;
 
     let store = super::system_store::ensure(&state).await?;
 

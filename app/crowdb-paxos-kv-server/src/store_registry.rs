@@ -23,21 +23,10 @@ fn parse_wal_backend(s: &str) -> std::io::Result<IoBackend> {
     }
 }
 
-/// Parse the `--kv-backend` CLI value (`clap`'s `value_parser` already
-/// restricts it to `["file", "block", "mem-block"]`) into the FFI's
-/// [`CrowdbTreeBackend`].
-#[must_use]
-pub(crate) fn parse_crowtree_backend(s: &str) -> CrowdbTreeBackend {
-    match s {
-        "block" => CrowdbTreeBackend::Block,
-        "mem-block" => CrowdbTreeBackend::MemBlock,
-        _ => CrowdbTreeBackend::File,
-    }
-}
-
 pub struct PaxosKvStoreRegistry {
     stores: ArcSwap<HashMap<u64, Arc<PxKvStore>>>,
     pub(crate) bootstrap_executing: std::sync::atomic::AtomicBool,
+    pub(crate) bootstrap_idle: tokio::sync::Notify,
     /// Unified cluster configuration (all sub-configs + flags + paths).
     pub config: PaxosKvConfig,
     /// Parsed WAL I/O backend (derived from `config.wal_backend`).
@@ -63,6 +52,23 @@ impl Default for PaxosKvStoreRegistry {
 }
 
 impl PaxosKvStoreRegistry {
+    /// After stopping management ingress, waits for the accepted directory
+    /// mutation to finish, including work that outlived its HTTP waiter.
+    pub async fn wait_management_idle(&self) {
+        loop {
+            let idle = self.bootstrap_idle.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
+            if !self
+                .bootstrap_executing
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            idle.await;
+        }
+    }
+
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::with_config(PaxosKvConfig::default())
@@ -75,18 +81,27 @@ impl PaxosKvStoreRegistry {
     /// should use [`Self::try_with_config`] to return an actionable error.
     #[must_use]
     pub fn with_config(config: PaxosKvConfig) -> Self {
-        Self::try_with_config(config).expect("default WAL backend must initialize")
+        Self::try_with_config(config).expect("server storage backends must initialize")
     }
 
-    /// Construct a registry and validate the explicitly selected WAL backend.
+    /// Construct a registry with the selected Tree and WAL backends.
     ///
     /// # Errors
-    /// Returns an actionable initialization error when `uring` was explicitly
-    /// selected but liburing or the running kernel cannot create a ring.
+    /// Returns an error for unsupported Tree settings or a backend initialization failure.
     pub fn try_with_config(config: PaxosKvConfig) -> std::io::Result<Self> {
         config
             .validate_tree_config()
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        let crowtree_backend = match config.crowtree_backend.as_str() {
+            "block" => CrowdbTreeBackend::Block,
+            "mem-block" => CrowdbTreeBackend::MemBlock,
+            backend => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unsupported Paxos-KV Tree backend '{backend}'; expected block or mem-block"),
+                ));
+            }
+        };
         let tree_runtime = Arc::new(
             crowdb_tree_ffi::TreeRuntime::new(config.tree_runtime.runtime_options())
                 .map_err(|error| std::io::Error::other(format!("requested Tree runtime: {error}")))?,
@@ -97,11 +112,11 @@ impl PaxosKvStoreRegistry {
                 format!("requested WAL backend '{}': {error}", config.wal_backend),
             )
         })?);
-        let crowtree_backend = parse_crowtree_backend(&config.crowtree_backend);
         let rpc_workers = config.server.rpc_workers;
         Ok(Self {
             stores: ArcSwap::from_pointee(HashMap::new()),
             bootstrap_executing: std::sync::atomic::AtomicBool::new(false),
+            bootstrap_idle: tokio::sync::Notify::new(),
             wal_backend,
             crowtree_backend,
             tree_runtime,

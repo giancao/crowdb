@@ -71,7 +71,10 @@ impl TestSystemBootstrap {
         let status = response.status();
         let bytes = response.bytes().await.unwrap();
         assert!(
-            matches!(status, StatusCode::OK | StatusCode::CONFLICT),
+            matches!(
+                status,
+                StatusCode::OK | StatusCode::CREATED | StatusCode::CONFLICT
+            ),
             "{path}: {status}: {}",
             String::from_utf8_lossy(&bytes)
         );

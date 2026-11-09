@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 #include "backend/chunk/chunk_backing.h"
+#include "backend/chunk/chunk_write_queue.h"
 #include "backend/local/scheduled_page_store.h"
 #include "common/test_chunk_stage_backend.h"
 #include "load_budget_test_support.h"
@@ -120,7 +121,7 @@ struct TestChunkBackend
         EXPECT_TRUE(TreeRuntime::create(options, &runtime).ok());
         EXPECT_TRUE(TreeRuntimeBinding::create(runtime, {}, &binding).ok());
         EXPECT_TRUE(ScheduledPageStore::create(&empty_device, nullptr, {}, binding, binding->lifecycle_budget(),
-                                               binding->backend_lane(), &scheduled)
+                                               binding->backend_lane(), &scheduled, {}, &ChunkWriteQueue::create)
                         .ok());
     }
 

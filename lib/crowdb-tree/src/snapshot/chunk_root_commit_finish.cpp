@@ -29,6 +29,11 @@ Status ChunkRootCommit::query()
 {
     std::optional<detail::ChunkCandidateStatus> current;
     auto status = domain_->catalog->protection()->load_candidate(domain_->tree, candidate_, &current);
+    return query_loaded(std::move(status), current);
+}
+
+Status ChunkRootCommit::query_loaded(Status status, const std::optional<detail::ChunkCandidateStatus> &current)
+{
     if (!status.ok()) {
         return finish(std::move(status), true);
     }

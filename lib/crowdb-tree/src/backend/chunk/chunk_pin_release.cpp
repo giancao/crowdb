@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
-#include "chunk_page_store.h"
 #include "chunk_pin_release_internal.h"
+#include "chunk_root_catalog.h"
 
 #include <cassert>
 
@@ -45,6 +45,7 @@ ChunkPinReleaseQueue::~ChunkPinReleaseQueue()
 {
     assert((state_.load(std::memory_order_relaxed) & ~kClosed) == 0);
     assert(incoming_.load(std::memory_order_relaxed) == nullptr);
+    assert(replies_.load(std::memory_order_relaxed) == nullptr);
     assert(active_ == nullptr && retry_ == nullptr);
 }
 
@@ -147,12 +148,44 @@ void ChunkPinReleaseQueue::finish(ChunkPinReleaseNode *node) noexcept
     wake_(context_);
 }
 
+void ChunkPinReleaseQueue::completed(void *context, Status status) noexcept
+{
+    auto *node      = static_cast<ChunkPinReleaseNode *>(context);
+    auto  queue     = node->queue;
+    node->succeeded = status.ok();
+    auto *head      = queue->replies_.load(std::memory_order_relaxed);
+    do {
+        node->next = head;
+    } while (!queue->replies_.compare_exchange_weak(head, node, std::memory_order_release, std::memory_order_relaxed));
+    queue->wake_(queue->context_);
+}
+
+void ChunkPinReleaseQueue::collect(Step &result) noexcept
+{
+    auto *node = replies_.exchange(nullptr, std::memory_order_acq_rel);
+    while (node != nullptr) {
+        auto *next = node->next;
+        if (node->succeeded) {
+            pending_.fetch_sub(1, std::memory_order_relaxed);
+            ++result.completed;
+            finish(node);
+        }
+        else {
+            node->next = retry_;
+            retry_     = node;
+            ++result.failed;
+        }
+        node = next;
+    }
+}
+
 ChunkPinReleaseQueue::Step ChunkPinReleaseQueue::pump(size_t limit) noexcept
 {
     if (consumer_.test_and_set(std::memory_order_acquire)) {
         return {.completed = 0, .failed = 0, .more = true};
     }
     Step result{.completed = 0, .failed = 0, .more = false};
+    collect(result);
     // Keep one finite arrival snapshot across steps. Failed operations wait in
     // a separate batch, so they never repeatedly hide untouched older nodes.
     if (active_ == nullptr) {
@@ -170,29 +203,25 @@ ChunkPinReleaseQueue::Step ChunkPinReleaseQueue::pump(size_t limit) noexcept
         }
     }
     for (size_t visited = 0; visited < limit && active_ != nullptr; ++visited) {
-        auto *node  = active_;
-        active_     = node->next;
-        auto status = Status::internal_error();
+        auto *node = active_;
+        active_    = node->next;
         try {
-            auto *catalog = node->catalog->protection();
-            status        = node->writer ? catalog->writer_quiesced(node->tree, node->stage.owner_epoch)
-                                         : catalog->change_pin(node->tree, node->stage, node->pin, false);
+            auto                 *catalog = node->catalog->protection();
+            const AsyncCompletion complete{.context = node, .complete_fn = &completed, .allocations = node->budget};
+            if (node->writer) {
+                catalog->submit_writer_quiesced(node->tree, node->stage.owner_epoch, complete);
+            }
+            else {
+                catalog->submit_change_pin(node->tree, node->stage, node->pin, false, complete);
+            }
         }
         catch (...) {
-            status = Status::internal_error();
-        }
-        if (status.ok()) {
-            pending_.fetch_sub(1, std::memory_order_relaxed);
-            ++result.completed;
-            finish(node);
-        }
-        else {
-            node->next = retry_;
-            retry_     = node;
-            ++result.failed;
+            completed(node, Status::internal_error());
         }
     }
-    result.more = active_ != nullptr || retry_ != nullptr || incoming_.load(std::memory_order_acquire) != nullptr;
+    collect(result);
+    result.more = active_ != nullptr || retry_ != nullptr || incoming_.load(std::memory_order_acquire) != nullptr ||
+                  replies_.load(std::memory_order_acquire) != nullptr;
     consumer_.clear(std::memory_order_release);
     return result;
 }

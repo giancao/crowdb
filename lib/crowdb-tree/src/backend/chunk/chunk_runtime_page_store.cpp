@@ -35,6 +35,11 @@ PageStore::RuntimeFactory ChunkRuntimePageStore::runtime_factory() const noexcep
     return &TreeCore::open_chunk;
 }
 
+PageStore::RuntimeAsyncFactory ChunkRuntimePageStore::runtime_async_factory() const noexcept
+{
+    return &TreeCore::open_chunk_async;
+}
+
 bool ChunkRuntimePageStore::supported() const noexcept
 {
     return options_.tree != 0 && options_.owner_epoch != 0 && std::has_single_bit(options_.iu_size) &&
@@ -44,6 +49,19 @@ bool ChunkRuntimePageStore::supported() const noexcept
            transport_ && transport_->fixed_staging_supported();
 }
 
+Status ChunkRuntimePageStore::submit_registry(const std::shared_ptr<AllocationBudget> &budget,
+                                              ChunkTransportCompletion                 complete)
+{
+    if (physical_registry_) {
+        if (!physical_registry_->uses_queue(budget->retirement_queue().get())) {
+            return Status::invalid_argument("Chunk PageStore belongs to another host retirement domain");
+        }
+        complete.complete(Status::Ok());
+        return Status::Ok();
+    }
+    return transport_->submit_physical_registry(options_.tree, budget, &physical_registry_, std::move(complete));
+}
+
 Status ChunkRuntimePageStore::make_domain(uint64_t identity, const std::shared_ptr<AllocationBudget> &budget,
                                           std::shared_ptr<const ChunkBackingDomain> *out) const
 try {
@@ -51,17 +69,8 @@ try {
         return Status::not_supported("Chunk runtime needs fixed packs, protection "
                                      "authority and a host release service");
     }
-    if (!budget || identity == 0 || out == nullptr || *out) {
+    if (!budget || !physical_registry_ || identity == 0 || out == nullptr || *out) {
         return Status::invalid_argument();
-    }
-    if (!physical_registry_) {
-        auto status = transport_->physical_registry(options_.tree, budget, &physical_registry_);
-        if (!status.ok()) {
-            return status;
-        }
-    }
-    else if (!physical_registry_->uses_queue(budget->retirement_queue().get())) {
-        return Status::invalid_argument("Chunk PageStore belongs to another host retirement domain");
     }
     auto domain               = std::allocate_shared<ChunkBackingDomain>(MetadataAllocator<ChunkBackingDomain>(budget));
     domain->backend_id        = identity;

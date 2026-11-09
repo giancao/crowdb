@@ -38,6 +38,9 @@ class SourceRotation : public std::enable_shared_from_this<SourceRotation>
     void                   resume_capacity() noexcept;
     void                   wait(uint64_t sequence) noexcept;
     void                   drain() noexcept;
+    // Final drain after request producers are fenced. Registration and
+    // completion are serialized by the existing dispatcher.
+    void drain_async(AsyncCompletion complete) noexcept;
     // Fence only unaccepted soft maintenance; accepted flushes still finish.
     void stop() noexcept;
     void restart() noexcept;
@@ -79,6 +82,8 @@ class SourceRotation : public std::enable_shared_from_this<SourceRotation>
     using Connected = stdexec::connect_result_t<FlushReportSender, Receiver>;
     bool        eligible(const SourceCatalog &catalog) const noexcept;
     static void run(void *context) noexcept;
+    static void run_drain(void *context) noexcept;
+    void        complete_drain() noexcept;
     void        schedule() noexcept;
     void        step();
     static void paused(void *context) noexcept;
@@ -116,6 +121,9 @@ class SourceRotation : public std::enable_shared_from_this<SourceRotation>
     std::shared_ptr<const SourceCatalog>           paused_catalog_;
     std::shared_ptr<SourceRotation>                paused_owner_;
     ApplyDispatcher::Node                          node_;
+    ApplyDispatcher::Node                          drain_node_{&SourceRotation::run_drain, this};
+    AsyncCompletion                                on_drained_;
+    bool                                           drain_pending_ = false;
     std::atomic<uint64_t>                          requested_{0};
     std::atomic<uint64_t>                          completed_{0};
     uint64_t                                       target_ = 0;

@@ -63,10 +63,24 @@ class TestCollectorCatalog final : public TestStageCatalog, public ChunkProtecti
         return Status::not_supported();
     }
 
-    Status list_candidates(uint64_t /*tree*/, std::optional<ChunkStageId> /*after*/, uint32_t /*limit*/,
-                           std::vector<ChunkCandidateStatus> * /*out*/) const override
+    Status list_candidates(uint64_t /*tree*/, std::optional<ChunkStageId> after, uint32_t limit,
+                           std::vector<ChunkCandidateStatus> *out) const override
     {
-        return Status::not_supported();
+        out->clear();
+        if (limit != 0 && candidate && (!after || candidate->id > *after)) {
+            out->push_back(*candidate);
+        }
+        return Status::Ok();
+    }
+
+    Status list_stages(uint64_t /*tree*/, std::optional<ChunkStageId> after, uint32_t limit,
+                       std::vector<ChunkStageRecord> *out) const override
+    {
+        out->clear();
+        if (limit != 0 && record && (!after || record->id > *after)) {
+            out->push_back(*record);
+        }
+        return Status::Ok();
     }
 
     Status load_candidate(uint64_t /*tree*/, ChunkStageId id, std::optional<ChunkCandidateStatus> *out) const override

@@ -94,19 +94,16 @@ impl PxRpcService {
                     return;
                 }
             };
-            let export_group = Arc::clone(&group);
             let export_started = std::time::Instant::now();
-            let exporter = match tokio::task::spawn_blocking(move || {
-                export_group
-                    .local_replica()
-                    .learner
-                    .engine()
-                    .snapshot_export_begin(chunk_bytes)
-            })
-            .await
+            let exporter = match group
+                .local_replica()
+                .learner
+                .engine()
+                .snapshot_export_begin(chunk_bytes)
+                .await
             {
-                Ok(Ok(exporter)) => exporter,
-                Ok(Err(error)) => {
+                Ok(exporter) => exporter,
+                Err(error) => {
                     submit_snapshot_begin(
                         &server,
                         conn_handle,
@@ -114,20 +111,6 @@ impl PxRpcService {
                         create_nano,
                         FBKvRetCode::Internal,
                         Some(&error),
-                        None,
-                        group_id,
-                    );
-                    return;
-                }
-                Err(error) => {
-                    let message = format!("snapshot export task failed: {error}");
-                    submit_snapshot_begin(
-                        &server,
-                        conn_handle,
-                        req_id,
-                        create_nano,
-                        FBKvRetCode::Internal,
-                        Some(&message),
                         None,
                         group_id,
                     );

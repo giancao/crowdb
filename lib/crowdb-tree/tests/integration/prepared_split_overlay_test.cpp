@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "btree/apply_dispatcher.h"
 #include "btree/prepared_split_overlay.h"
 #include "btree/tree_core_access.h"
 
@@ -96,7 +97,14 @@ TEST_F(PreparedSplit, ContinuousParentRotationAndFlushCannotLoseThePreparedTail)
     ASSERT_TRUE(put(*parent, 9, "late", "parent").ok());
     ASSERT_TRUE(put(*child, 9, "late", "child").ok());
     EXPECT_EQ(child->get_view("late").value().to_string(), "child");
-    status = parent->publish_split_memtable_view(installed.generation, 8, *child, KeyRange::unbounded());
+    auto published = std::make_shared<std::promise<Status>>();
+    auto completed = published->get_future();
+    status         = TreeCoreAccess::get(*parent)->publish_installed_split_view_async(
+        installed.generation, 8, *TreeCoreAccess::get(*child), KeyRange::unbounded(),
+        [published](Status status) { published->set_value(std::move(status)); });
+    ASSERT_TRUE(status.ok()) << status.to_string();
+    ASSERT_EQ(completed.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    status = completed.get();
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_TRUE(child->clear_split_memtable_overlay(*parent).ok());
     ASSERT_TRUE(parent->release_split_memtable_view(installed.generation).ok());
@@ -141,6 +149,46 @@ TEST_F(PreparedSplit, InstallDoesNotWaitForCpuAndIsIdempotentOnlyForItsExactFron
     EXPECT_EQ(token->committed_frontier(), 1U);
     EXPECT_TRUE(token->try_install(1, &installed).ok());
     EXPECT_FALSE(token->try_install(2, &installed).ok());
+    EXPECT_EQ(child->get_view("tail").value().to_string(), "one");
+}
+
+TEST_F(PreparedSplit, AsyncPreparationLetsTheOnlyWorkerProgressWhileTheChildDrains)
+{
+    ASSERT_TRUE(arm().ok());
+    auto                                          *core    = TreeCoreAccess::get(*child);
+    auto                                           binding = core->binding();
+    std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
+    ASSERT_TRUE(core->operation_lifetime().acquire(binding->lifecycle_budget(), &ticket).ok());
+
+    auto complete = std::make_shared<std::promise<Status>>();
+    auto done     = complete->get_future();
+    ASSERT_TRUE(token
+                    ->prepare_async(0, {.context = complete.get(),
+                                        .complete_fn =
+                                            [](void *raw, Status status) {
+                                                static_cast<std::promise<Status> *>(raw)->set_value(std::move(status));
+                                            },
+                                        .owner = complete})
+                    .ok());
+
+    struct Probe
+    {
+        std::promise<void>    completed;
+        ApplyDispatcher::Node node{[](void *raw) noexcept { static_cast<Probe *>(raw)->completed.set_value(); }, this};
+    };
+
+    auto probe      = std::make_shared<Probe>();
+    auto progressed = probe->completed.get_future();
+    core->cpu_progress()->request(probe->node, probe);
+    EXPECT_EQ(progressed.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    ticket.reset();
+    ASSERT_EQ(done.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    ASSERT_TRUE(done.get().ok());
+    ASSERT_TRUE(put(*parent, 1, "tail", "one").ok());
+    InstalledSplitOverlay installed;
+    ASSERT_TRUE(token->try_install(1, &installed).ok());
+    EXPECT_EQ(installed.frontier, 1U);
     EXPECT_EQ(child->get_view("tail").value().to_string(), "one");
 }
 

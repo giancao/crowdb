@@ -9,6 +9,7 @@
 #    include <gtest/gtest.h>
 
 #    include <chrono>
+#    include <future>
 #    include <thread>
 
 using namespace crowdb::rpc;
@@ -179,6 +180,59 @@ TEST_F(RdmaCompletionTest, WorkTablesAndPollingOwnershipAreIndependentPerCq)
     EXPECT_TRUE(connection->is_open());
     EXPECT_TRUE(other->is_open());
     EXPECT_EQ(other->user_data, &user_marker);
+}
+
+TEST_F(RdmaCompletionTest, ConnectionRetirementIgnoresBusyUnrelatedCq)
+{
+    auto same_cq  = std::make_shared<Connection>(2, "same-cq", &slots);
+    auto other_cq = std::make_shared<Connection>(3, "other-cq", &slots);
+    (void)TestRdmaTransport::bind_cq(connection, 1);
+    (void)TestRdmaTransport::bind_cq(same_cq, 1);
+    const auto retiring  = send();
+    const auto sibling   = send(same_cq);
+    const auto unrelated = send(other_cq);
+    ASSERT_NE(retiring, 0U);
+    ASSERT_NE(sibling, 0U);
+    ASSERT_NE(unrelated, 0U);
+    connection->close();
+
+    TestRdmaTransport::set_cq_polling(transport, true, 0);
+    auto retirement = std::async(std::launch::async, [&] { TestRdmaTransport::cancel(transport, connection.get()); });
+    EXPECT_EQ(retirement.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    TestRdmaTransport::set_cq_polling(transport, false, 0);
+    retirement.get();
+
+    EXPECT_FALSE(TestRdmaTransport::pending(transport, retiring));
+    EXPECT_TRUE(TestRdmaTransport::pending(transport, sibling));
+    EXPECT_TRUE(TestRdmaTransport::pending(transport, unrelated));
+}
+
+TEST_F(RdmaCompletionTest, PrivateQpRetirementYieldsForPostingAndCqOwners)
+{
+    (void)TestRdmaTransport::bind_cq(connection, 1);
+    rdma_cm_id id{};
+    const auto token = send();
+    ASSERT_NE(token, 0U);
+    auto retire = [&] { return TestRdmaTransport::try_retire_qp(transport, connection.get(), id); };
+
+    auto posting     = TestRdmaTransport::hold_posting(connection.get());
+    auto during_post = std::async(std::launch::async, retire);
+    EXPECT_EQ(during_post.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    posting.reset();
+    EXPECT_FALSE(during_post.get());
+    EXPECT_TRUE(TestRdmaTransport::pending(transport, token));
+
+    TestRdmaTransport::set_cq_polling(transport, true, 1);
+    auto during_cq = std::async(std::launch::async, retire);
+    EXPECT_EQ(during_cq.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    TestRdmaTransport::set_cq_polling(transport, false, 1);
+    EXPECT_FALSE(during_cq.get());
+    EXPECT_TRUE(TestRdmaTransport::pending(transport, token));
+
+    EXPECT_TRUE(retire());
+    EXPECT_FALSE(TestRdmaTransport::pending(transport, token));
+    EXPECT_TRUE(retire());
+    EXPECT_EQ(transport.stats().shutdown_flushes.load(), 1U);
 }
 
 TEST_F(RdmaCompletionTest, WorkRetainsConnectionUntilCompletion)
@@ -505,6 +559,12 @@ TEST_F(RdmaCompletionTest, PollAfterArmingClosesNotificationRace)
 
 TEST_F(RdmaCompletionTest, CmDisconnectPublishesAlreadyCompletedResponseBeforeFailingRequests)
 {
+    // NOLINTNEXTLINE(bugprone-invalid-enum-default-initialization)
+    rdma_cm_id id{};
+    (void)TestRdmaTransport::bind_cq(connection, 0);
+    // Hold the posting gate so retirement never reaches rdma_destroy_id
+    // with this synthetic provider handle.
+    auto posting  = TestRdmaTransport::hold_posting(connection.get());
     bool received = false;
     connection->set_on_frame([&received](Frame *frame, Connection *) {
         received = true;
@@ -522,9 +582,27 @@ TEST_F(RdmaCompletionTest, CmDisconnectPublishesAlreadyCompletedResponseBeforeFa
     completion.byte_len   = HEADER_SIZE;
     queue.ready.push_back(completion);
     TestRdmaTransport::set_cq(transport, &queue.cq);
-    TestRdmaTransport::disconnect(transport, connection.get());
+
+    auto advance = [&] { return TestRdmaTransport::advance_cm_retirement(transport, connection, id); };
+    TestRdmaTransport::set_cq_polling(transport, true);
+    auto       during_cq = std::async(std::launch::async, advance);
+    const auto cq_result = during_cq.wait_for(std::chrono::seconds(2));
+    TestRdmaTransport::set_cq_polling(transport, false);
+    EXPECT_EQ(cq_result, std::future_status::ready);
+    EXPECT_FALSE(during_cq.get());
+    EXPECT_FALSE(received);
+    EXPECT_TRUE(connection->is_open());
+
+    auto       during_post = std::async(std::launch::async, advance);
+    const auto post_result = during_post.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(post_result, std::future_status::ready);
+    if (post_result != std::future_status::ready) {
+        posting.reset();
+    }
+    EXPECT_FALSE(during_post.get());
     EXPECT_TRUE(received);
     EXPECT_FALSE(connection->is_open());
+    TestRdmaTransport::clear_cm_retirement(transport);
 }
 
 TEST_F(RdmaCompletionTest, BoundedCqBatchContinuesThroughEpollUntilDrained)

@@ -64,8 +64,7 @@ ChunkRootIdentity ChunkBackendState::next_identity(const PublishedTreeState &vie
             .wal_replay_offset = facade->requested_wal_offset()};
 }
 
-PageWriteOperation::ReserveExtent
-ChunkBackendState::reserve(const std::shared_ptr<detail::AllocationReservation> &metadata) const
+PageWriteOperation::ReserveExtent ChunkBackendState::reserve(const std::shared_ptr<AllocationBudget> &metadata) const
 {
     return [domain = domain, ids = ids, metadata,
             capacity = facade->options().max_chunk_bytes](uint64_t bytes, PageWriteOperation::ExtentComplete complete) {

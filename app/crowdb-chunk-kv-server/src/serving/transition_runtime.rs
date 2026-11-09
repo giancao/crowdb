@@ -139,13 +139,15 @@ impl TransitionProcessor {
                 && machine.transition().phase == TransferPhase::Aborted)
         {
             self.executor
-                .release_transfer_generation_pin(machine.transition())?;
+                .release_transfer_generation_pin(machine.transition())
+                .await?;
         }
         if machine.transition().target.instance_id == self.instance_id
             && machine.transition().phase == TransferPhase::Aborted
         {
             self.executor
-                .discard_prepared_transfer_target(machine.transition())?;
+                .discard_prepared_transfer_target(machine.transition())
+                .await?;
         }
         Ok(())
     }
@@ -185,10 +187,14 @@ impl TransitionProcessor {
                 .await?;
         }
         if machine.transition().phase == SplitPhase::CatalogCommitted {
-            self.executor.release_split_generation_pin(machine.transition())?;
+            self.executor
+                .release_split_generation_pin(machine.transition())
+                .await?;
         }
         if machine.transition().phase == SplitPhase::Aborted {
-            self.executor.release_split_generation_pin(machine.transition())?;
+            self.executor
+                .release_split_generation_pin(machine.transition())
+                .await?;
             self.executor.abort_split(machine.transition(), revision).await?;
         }
         Ok(())

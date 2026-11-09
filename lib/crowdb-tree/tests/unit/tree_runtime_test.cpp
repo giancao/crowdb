@@ -7,6 +7,9 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <future>
+#include <latch>
 #include <limits>
 #include <stdexcept>
 
@@ -142,6 +145,67 @@ TEST(TreeRuntime, BindingRetainsHostAfterCallerDropsItsReference)
     EXPECT_EQ(completed.load(), 1U);
     binding.reset();
     EXPECT_TRUE(weak.expired());
+}
+
+TEST(TreeRuntime, AsyncShutdownJoinsTheLastBindingAndBackendCallbackTail)
+{
+    using namespace std::chrono_literals;
+
+    struct Gate
+    {
+        std::promise<void> entered;
+        std::latch         resume{1};
+    } job, tail;
+
+    std::shared_ptr<TreeRuntime> runtime;
+    ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &runtime).ok());
+    std::shared_ptr<TreeRuntimeBinding> binding;
+    ASSERT_TRUE(TreeRuntimeBinding::create(runtime, {}, &binding).ok());
+    auto backend = binding->backend_cpu();
+    auto lane    = std::make_shared<detail::FlushRuntime::Lane>(1);
+    ASSERT_TRUE(backend
+                    ->try_submit(
+                        lane,
+                        [](void *context) noexcept {
+                            auto &gate = *static_cast<Gate *>(context);
+                            gate.entered.set_value();
+                            gate.resume.wait();
+                        },
+                        &job)
+                    .ok());
+    EXPECT_EQ(job.entered.get_future().wait_for(5s), std::future_status::ready);
+    lane->close_async({.context = &tail, .complete_fn = [](void *context, Status /*status*/) noexcept {
+                           auto &gate = *static_cast<Gate *>(context);
+                           gate.entered.set_value();
+                           gate.resume.wait();
+                       }});
+    job.resume.count_down();
+    EXPECT_EQ(tail.entered.get_future().wait_for(5s), std::future_status::ready);
+
+    const auto complete = [](void *context, Status status) noexcept {
+        static_cast<std::promise<Code> *>(context)->set_value(status.code());
+    };
+    std::promise<Code> drained;
+    auto               drained_result = drained.get_future();
+    EXPECT_TRUE(runtime->drain_async({.context = &drained, .complete_fn = complete}).ok());
+    EXPECT_EQ(drained_result.wait_for(0ms), std::future_status::timeout);
+    EXPECT_EQ(runtime->stop_workers_async({.context = &drained, .complete_fn = complete}).code(), Code::kUnavailable);
+    std::shared_ptr<TreeRuntimeBinding> rejected;
+    EXPECT_EQ(TreeRuntimeBinding::create(runtime, {}, &rejected).code(), Code::kUnavailable);
+    binding.reset();
+    EXPECT_EQ(runtime->snapshot().bindings, 0U);
+    EXPECT_EQ(drained_result.wait_for(20ms), std::future_status::timeout);
+    tail.resume.count_down();
+    ASSERT_EQ(drained_result.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(drained_result.get(), Code::kOk);
+
+    std::promise<Code> exited;
+    auto               exited_result = exited.get_future();
+    ASSERT_TRUE(runtime->stop_workers_async({.context = &exited, .complete_fn = complete}).ok());
+    ASSERT_EQ(exited_result.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(exited_result.get(), Code::kOk);
+    EXPECT_EQ(runtime->snapshot().inflight, 0U);
+    EXPECT_EQ(runtime->snapshot().queued, 0U);
 }
 
 TEST(TreeRuntime, InvalidAndUnfundedRuntimeStorageAreRejectedBeforePoolConstruction)

@@ -118,26 +118,129 @@ pub trait StageProtectionCatalog: Send + Sync {
         Err(CtError::NotSupported)
     }
 
-    fn load_manifest_candidate(&self, tree_id: u64, id: StageId) -> Result<Option<CandidateStatus>, CtError>;
+    fn load_manifest_candidate(
+        &self,
+        _tree_id: u64,
+        _id: StageId,
+    ) -> Result<Option<CandidateStatus>, CtError> {
+        Err(CtError::NotSupported)
+    }
     fn list_manifest_candidates(
         &self,
-        tree_id: u64,
-        after: Option<StageId>,
-        limit: u32,
-    ) -> Result<Vec<CandidateStatus>, CtError>;
-    fn begin_manifest_candidate(&self, tree_id: u64, candidate: &ManifestCandidate) -> Result<(), CtError>;
+        _tree_id: u64,
+        _after: Option<StageId>,
+        _limit: u32,
+    ) -> Result<Vec<CandidateStatus>, CtError> {
+        Err(CtError::NotSupported)
+    }
+    fn begin_manifest_candidate(&self, _tree_id: u64, _candidate: &ManifestCandidate) -> Result<(), CtError> {
+        Err(CtError::NotSupported)
+    }
     fn prepare_manifest_references(
         &self,
-        tree_id: u64,
+        _tree_id: u64,
+        _id: StageId,
+        _window: u64,
+        _references: &[StageId],
+    ) -> Result<(), CtError> {
+        Err(CtError::NotSupported)
+    }
+    fn commit_manifest_candidate(&self, _tree_id: u64, _id: StageId) -> Result<(), CtError> {
+        Err(CtError::NotSupported)
+    }
+    fn abort_manifest_candidate(&self, _tree_id: u64, _id: StageId) -> Result<(), CtError> {
+        Err(CtError::NotSupported)
+    }
+    /// Release one previously prepared window after abort or root reclamation.
+    fn release_manifest_references(&self, _tree_id: u64, _id: StageId, _window: u64) -> Result<(), CtError> {
+        Err(CtError::NotSupported)
+    }
+    fn pin_stage(&self, _tree_id: u64, _stage: StageId, _pin: StageId) -> Result<(), CtError> {
+        Err(CtError::NotSupported)
+    }
+    /// A fenced owner may release its own pin; it may never acquire a new one.
+    fn unpin_stage(&self, _tree_id: u64, _stage: StageId, _pin: StageId) -> Result<(), CtError> {
+        Err(CtError::NotSupported)
+    }
+
+    fn recover_manifest_candidate_async<'a>(
+        &'a self,
+        tree: u64,
+        id: StageId,
+    ) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.recover_manifest_candidate(tree, id) })
+    }
+    fn writer_quiesced_async<'a>(&'a self, tree: u64, epoch: u64) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.writer_quiesced(tree, epoch) })
+    }
+    fn prune_stage_pins_async<'a>(
+        &'a self,
+        tree: u64,
+        stage: StageId,
+        after: Option<StageId>,
+        limit: u32,
+    ) -> super::CatalogFuture<'a, PinPruneProgress> {
+        Box::pin(async move { self.prune_stage_pins(tree, stage, after, limit) })
+    }
+    fn load_manifest_candidate_async<'a>(
+        &'a self,
+        tree: u64,
+        id: StageId,
+    ) -> super::CatalogFuture<'a, Option<CandidateStatus>> {
+        Box::pin(async move { self.load_manifest_candidate(tree, id) })
+    }
+    fn list_manifest_candidates_async<'a>(
+        &'a self,
+        tree: u64,
+        after: Option<StageId>,
+        limit: u32,
+    ) -> super::CatalogFuture<'a, Vec<CandidateStatus>> {
+        Box::pin(async move { self.list_manifest_candidates(tree, after, limit) })
+    }
+    fn begin_manifest_candidate_async<'a>(
+        &'a self,
+        tree: u64,
+        candidate: &'a ManifestCandidate,
+    ) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.begin_manifest_candidate(tree, candidate) })
+    }
+    fn prepare_manifest_references_async<'a>(
+        &'a self,
+        tree: u64,
         id: StageId,
         window: u64,
-        references: &[StageId],
-    ) -> Result<(), CtError>;
-    fn commit_manifest_candidate(&self, tree_id: u64, id: StageId) -> Result<(), CtError>;
-    fn abort_manifest_candidate(&self, tree_id: u64, id: StageId) -> Result<(), CtError>;
-    /// Release one previously prepared window after abort or root reclamation.
-    fn release_manifest_references(&self, tree_id: u64, id: StageId, window: u64) -> Result<(), CtError>;
-    fn pin_stage(&self, tree_id: u64, stage: StageId, pin: StageId) -> Result<(), CtError>;
-    /// A fenced owner may release its own pin; it may never acquire a new one.
-    fn unpin_stage(&self, tree_id: u64, stage: StageId, pin: StageId) -> Result<(), CtError>;
+        refs: &'a [StageId],
+    ) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.prepare_manifest_references(tree, id, window, refs) })
+    }
+    fn commit_manifest_candidate_async<'a>(&'a self, tree: u64, id: StageId) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.commit_manifest_candidate(tree, id) })
+    }
+    fn abort_manifest_candidate_async<'a>(&'a self, tree: u64, id: StageId) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.abort_manifest_candidate(tree, id) })
+    }
+    fn release_manifest_references_async<'a>(
+        &'a self,
+        tree: u64,
+        id: StageId,
+        window: u64,
+    ) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.release_manifest_references(tree, id, window) })
+    }
+    fn pin_stage_async<'a>(
+        &'a self,
+        tree: u64,
+        stage: StageId,
+        pin: StageId,
+    ) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.pin_stage(tree, stage, pin) })
+    }
+    fn unpin_stage_async<'a>(
+        &'a self,
+        tree: u64,
+        stage: StageId,
+        pin: StageId,
+    ) -> super::CatalogFuture<'a, ()> {
+        Box::pin(async move { self.unpin_stage(tree, stage, pin) })
+    }
 }

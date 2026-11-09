@@ -19,7 +19,6 @@ struct PageCacheLimits
     // Zero selects 75% of the high watermark. A frame larger than the low
     // watermark may remain alone if it fits the high watermark.
     size_t low_resident_bytes = 0;
-    size_t max_read_burst     = 8;
 };
 
 struct PageCacheSnapshot
@@ -100,6 +99,7 @@ class SharedPageCache
     void close() noexcept;
     // Close admission and detach residency progress; the caller separately
     // drains accepted load/I/O owners before destroying its backend.
+    void close_async(AsyncCompletion complete) noexcept;
     void close_and_drain() noexcept;
 
   private:

@@ -11,23 +11,26 @@
 
 namespace crowdb::tree
 {
-struct ChunkPackBacking;
+class ChunkWriteQueue;
 
-// Dispatches blocking storage preparation and synchronous backends away from
-// Tree CPU workers. Queue slots, operation controls and outstanding callbacks
-// are bounded; an uncertain submission retains the caller's buffer owner.
+// Dispatches backend work through the shared runtime. Suspended async I/O
+// retains its buffer owner without holding a worker or an in-flight permit;
+// operation controls are charged to the admitted work's actual allocations.
 class ScheduledPageStore final : public AsyncPageStore, public std::enable_shared_from_this<ScheduledPageStore>
 {
     struct State;
     struct Job;
 
   public:
-    static std::optional<size_t> allocation_bound(size_t operations) noexcept;
-    static Status      create(PageStore *sync, AsyncPageStore *async, std::shared_ptr<const void> backend_owner,
-                              std::shared_ptr<TreeRuntimeBinding>                   binding,
-                              const std::shared_ptr<detail::AllocationReservation> &metadata,
-                              std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<AsyncPageStore> *out);
-    [[nodiscard]] bool write_completion_is_reloadable() const noexcept override;
+    using MakeChunkWrites = std::shared_ptr<ChunkWriteQueue> (*)(const std::shared_ptr<AllocationBudget> &);
+
+    static std::optional<size_t> allocation_bound() noexcept;
+    static Status create(PageStore *sync, AsyncPageStore *async, std::shared_ptr<const void> backend_owner,
+                         std::shared_ptr<TreeRuntimeBinding>                   binding,
+                         const std::shared_ptr<detail::AllocationReservation> &metadata,
+                         std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<AsyncPageStore> *out,
+                         std::shared_ptr<ApplyDispatcher> fallback = {}, MakeChunkWrites make_chunk_writes = nullptr);
+    [[nodiscard]] bool       write_completion_is_reloadable() const noexcept override;
     [[nodiscard]] PageStore *synchronous_store() const noexcept;
     [[nodiscard]] bool       uses_async_transport() const noexcept;
     [[nodiscard]] size_t     allocation_workers() const noexcept;
@@ -41,8 +44,9 @@ class ScheduledPageStore final : public AsyncPageStore, public std::enable_share
     // boundary as file I/O; it never executes on the submitting CPU worker.
     Status submit_step(detail::InlineFunction<Status()> step, AsyncCompletion complete, size_t read_bytes = 0,
                        size_t write_bytes = 0);
-    void   submit_chunk(std::shared_ptr<ChunkPackBacking> backing, std::span<const uint8_t> input,
-                        AsyncCompletion complete);
+    Status submit_async_step(detail::InlineFunction<void(AsyncCompletion)> step, AsyncCompletion complete,
+                             size_t read_bytes = 0, size_t write_bytes = 0);
+    [[nodiscard]] ChunkWriteQueue *chunk_writes() const noexcept;
 
   private:
     explicit ScheduledPageStore(std::shared_ptr<State> state) : state_(std::move(state))
@@ -51,7 +55,7 @@ class ScheduledPageStore final : public AsyncPageStore, public std::enable_share
 
     Status submit(PageAddr address, void *read, const void *write, size_t length, PagePurpose purpose,
                   AsyncCompletion complete, detail::InlineFunction<Status()> step = {}, size_t read_bytes = 0,
-                  size_t write_bytes = 0);
+                  size_t write_bytes = 0, detail::InlineFunction<void(AsyncCompletion)> async_step = {});
     std::shared_ptr<State> state_;
 };
 } // namespace crowdb::tree

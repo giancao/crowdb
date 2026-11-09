@@ -67,7 +67,7 @@ TEST(TreePointReadBound, ColdKnownAndUnknownSummariesBothUseActualAllocation)
     ASSERT_TRUE(status.ok()) << status.to_string();
     const std::string large(20000, 'v');
     ASSERT_TRUE(tree->put("key", large).ok());
-    status = tree->snapshot();
+    status = tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     auto *core = TreeCoreAccess::get(*tree);
     auto  view = core->capture();
@@ -84,7 +84,8 @@ TEST(TreePointReadBound, ColdKnownAndUnknownSummariesBothUseActualAllocation)
     core_read_detail::ReadPreparation prepared;
     status = core_read_detail::prepare(*core, std::move(unknown), core->read_limits(), &prepared);
     EXPECT_TRUE(status.ok()) << status.to_string();
-    EXPECT_EQ(prepared.credit, core->read_limits().metadata);
+    EXPECT_EQ(prepared.credit, core->accepted_allocations());
+    EXPECT_EQ(prepared.limits.metadata, prepared.credit);
 }
 } // namespace
 } // namespace crowdb::tree

@@ -180,6 +180,32 @@ TEST(SourceRotationReport, ReadFailureRetainsRepairWithoutRetryingItsOwnProgress
     }
 }
 
+TEST(SourceRotationReport, FinalDrainSuspendsUntilAcceptedColdReadCompletes)
+{
+    std::atomic<bool> drained{false};
+    TestSoftFlush     tree(true);
+    tree.store->deferred = true;
+    tree.configure();
+    tree.write("a", 1);
+    ASSERT_NE(tree.rotation->request(), 0U);
+    tree.runtime->drain();
+    ASSERT_EQ(tree.store->pending.size(), 1U);
+
+    tree.rotation->drain_async({.context = &drained, .complete_fn = [](void *context, Status status) noexcept {
+                                    EXPECT_TRUE(status.ok());
+                                    static_cast<std::atomic<bool> *>(context)->store(true, std::memory_order_release);
+                                }});
+    // The only worker can run the drain registration and return while the
+    // accepted read remains suspended.
+    tree.runtime->drain();
+    EXPECT_FALSE(drained.load(std::memory_order_acquire));
+    tree.store->deferred = false;
+    tree.store->finish(Status::Ok());
+    tree.runtime->drain();
+    EXPECT_TRUE(drained.load(std::memory_order_acquire));
+    EXPECT_EQ(tree.publisher.capture()->coverage, 1U);
+}
+
 TEST(SourceRotationReport, MaintenanceFailureKeepsCoverageWithoutRepeatingHandoff)
 {
     TestSoftFlush tree;

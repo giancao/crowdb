@@ -64,7 +64,7 @@ try {
     if (!status.ok()) {
         return status;
     }
-    status = destination->snapshot();
+    status = destination->flush_with_persistent();
     if (!status.ok()) {
         return status;
     }

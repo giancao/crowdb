@@ -85,7 +85,7 @@ struct TestPipelineStore : MemPageStore, AsyncPageStore
     {
     }
 
-    bool write_completion_is_reloadable() const noexcept override
+    [[nodiscard]] bool write_completion_is_reloadable() const noexcept override
     {
         return true;
     }
@@ -108,7 +108,7 @@ TEST(PersistentFlushPipeline, FinalPageWritesWhileAnUnrelatedSubtreeStillWaitsAt
 {
     Config             config;
     TreeRuntimeOptions host;
-    host.workers = 4;
+    host.workers = 1;
     ASSERT_TRUE(TreeRuntime::create(host, &config.runtime).ok());
     auto store                         = std::make_shared<TestPipelineStore>();
     config.page_store                  = store.get();
@@ -162,16 +162,40 @@ TEST(PersistentFlushPipeline, FinalPageWritesWhileAnUnrelatedSubtreeStillWaitsAt
     const auto blocked    = entered.try_acquire_for(std::chrono::seconds(10));
     const auto written    = store->written.try_acquire_for(std::chrono::seconds(10));
     const auto waiting    = checkpoint.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout;
+    const auto during     = core->capture();
+    EXPECT_EQ(during->coverage, before->coverage);
+    EXPECT_TRUE(during->mapping.same_root(before->mapping));
+    EXPECT_EQ(core->durable_coverage(), 1U);
+    auto       reads       = std::async(std::launch::async, [&] {
+        GetView value;
+        EXPECT_TRUE(core->get("0000", &value).ok());
+        EXPECT_EQ(value.value().to_string(), std::string(32, 'a'));
+        EXPECT_TRUE(core->get("0199", &value).ok());
+        EXPECT_EQ(value.value().to_string(), std::string(32, 'b'));
+        std::vector<scan_entry> entries;
+        bool                    truncated = false;
+        CoreScanOptions         options;
+        options.limit = 1;
+        EXPECT_TRUE(core->scan(options, &entries, &truncated).ok());
+        EXPECT_EQ(entries.size(), 1U);
+        if (!entries.empty()) {
+            EXPECT_EQ(entries.front().key, "0000");
+            EXPECT_EQ(entries.front().value, std::string(32, 'a'));
+        }
+    });
+    const auto reads_ready = reads.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
     if (resume) {
         resume();
         resume = {};
     }
+    reads.get();
     const auto status = checkpoint.get();
     core->binding()->drain();
     core->set_flush_handoff_wait_for_tests({});
     EXPECT_TRUE(blocked);
     EXPECT_TRUE(written);
     EXPECT_TRUE(waiting);
+    EXPECT_TRUE(reads_ready);
     EXPECT_GT(store->writes.load(), writes);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(core->durable_coverage(), 2U);
@@ -186,8 +210,10 @@ TEST(PersistentFlushPipeline, AColdReadDoesNotBlockOtherReadsOrReadyPageWrites)
 {
     Config             config;
     TreeRuntimeOptions host;
-    host.workers         = 4;
-    host.backend_workers = 1;
+    host.workers                                = 1;
+    host.backend_workers                        = 1;
+    host.limits.io_operations                   = 1;
+    config.runtime_binding.limits.io_operations = 1;
     ASSERT_TRUE(TreeRuntime::create(host, &config.runtime).ok());
     auto store                         = std::make_shared<TestPipelineStore>();
     config.page_store                  = store.get();
@@ -198,7 +224,7 @@ TEST(PersistentFlushPipeline, AColdReadDoesNotBlockOtherReadsOrReadyPageWrites)
     config.max_inline_value            = 32;
     config.inner_max_keys              = 4;
     config.inner_merge_keys            = 1;
-    config.execution.flush_parallelism = 4;
+    config.execution.flush_parallelism = 1;
     std::shared_ptr<TreeCore> core;
     {
         const auto status = TreeCore::open(config, &core);

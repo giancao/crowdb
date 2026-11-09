@@ -141,15 +141,15 @@ impl Partition {
                 self.config.metadata_reclaim_records_per_pass,
             )
             .await?;
-        let tree_bytes = self.tree.reclaim_before(checkpoint.root_manifest_generation)?;
-        let orphan_bytes = self.tree.reclaim_orphans()?;
-        self.metrics
-            .reclaim(journal_bytes, metadata_records, tree_bytes, orphan_bytes);
+        let tree_bytes = self
+            .tree
+            .reclaim_before(checkpoint.root_manifest_generation)
+            .await?;
+        self.metrics.reclaim(journal_bytes, metadata_records, tree_bytes);
         Ok(CheckpointReclaim {
             journal_bytes,
             metadata_records,
             tree_bytes,
-            orphan_bytes,
         })
     }
 
@@ -162,12 +162,20 @@ impl Partition {
         ownership_epoch: u64,
         transition_id: TransitionId,
     ) -> Result<Checkpoint> {
-        let _maintenance = self.split_transition.lock().await;
+        let maintenance = self.split_transition.clone().lock_owned().await;
         self.ensure_reclaim_allowed(ownership_epoch)?;
         let checkpoint = self.create_checkpoint().await?;
-        self.retain_generation_pin(transition_id, checkpoint.root_manifest_generation)?;
-        self.metadata_reclaim.store(None);
-        Ok(checkpoint)
+        let partition = self.clone();
+        tokio::spawn(async move {
+            let _maintenance = maintenance;
+            partition
+                .persist_generation_pin(transition_id, checkpoint.root_manifest_generation)
+                .await?;
+            partition.metadata_reclaim.store(None);
+            Ok(checkpoint)
+        })
+        .await
+        .map_err(|error| ChunkKvError::Internal(format!("checkpoint pin task failed: {error}")))?
     }
 
     pub(super) fn ensure_reclaim_allowed(&self, ownership_epoch: u64) -> Result<()> {
@@ -189,7 +197,22 @@ impl Partition {
     ///
     /// Returns a storage error when the generation is absent or conflicts
     /// with the transition's existing pin.
-    pub(super) fn retain_generation_pin(&self, transition_id: TransitionId, generation: u64) -> Result<()> {
+    pub(super) async fn retain_generation_pin(
+        &self,
+        transition_id: TransitionId,
+        generation: u64,
+    ) -> Result<()> {
+        let maintenance = self.split_transition.clone().lock_owned().await;
+        let partition = self.clone();
+        tokio::spawn(async move {
+            let _maintenance = maintenance;
+            partition.persist_generation_pin(transition_id, generation).await
+        })
+        .await
+        .map_err(|error| ChunkKvError::Internal(format!("generation pin task failed: {error}")))?
+    }
+
+    async fn persist_generation_pin(&self, transition_id: TransitionId, generation: u64) -> Result<()> {
         let current = self.checkpoint_pin_generation.load(Ordering::Acquire);
         if current != 0
             && (current != generation
@@ -200,7 +223,7 @@ impl Partition {
                 "another transition already pins the partition checkpoint lineage".into(),
             ));
         }
-        self.tree.pin_generation(transition_id, generation)?;
+        self.tree.pin_generation(transition_id, generation).await?;
         self.checkpoint_pin_transition_high
             .store(transition_id.high, Ordering::Relaxed);
         self.checkpoint_pin_transition_low
@@ -216,13 +239,20 @@ impl Partition {
     /// # Errors
     ///
     /// Returns a storage error when durable pin deletion cannot complete.
-    pub fn release_generation_pin(&self, transition_id: TransitionId) -> Result<()> {
-        self.tree.unpin_generation(transition_id)?;
-        if self.checkpoint_pin_transition_high.load(Ordering::Acquire) == transition_id.high
-            && self.checkpoint_pin_transition_low.load(Ordering::Acquire) == transition_id.low
-        {
-            self.checkpoint_pin_generation.store(0, Ordering::Release);
-        }
-        Ok(())
+    pub async fn release_generation_pin(&self, transition_id: TransitionId) -> Result<()> {
+        let maintenance = self.split_transition.clone().lock_owned().await;
+        let partition = self.clone();
+        tokio::spawn(async move {
+            let _maintenance = maintenance;
+            partition.tree.unpin_generation(transition_id).await?;
+            if partition.checkpoint_pin_transition_high.load(Ordering::Acquire) == transition_id.high
+                && partition.checkpoint_pin_transition_low.load(Ordering::Acquire) == transition_id.low
+            {
+                partition.checkpoint_pin_generation.store(0, Ordering::Release);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| ChunkKvError::Internal(format!("generation unpin task failed: {error}")))?
     }
 }

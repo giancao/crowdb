@@ -18,7 +18,7 @@ Status ChunkRootRecovery::dependencies()
             overflow_.reset();
             continue;
         }
-        if (steps_ == root_.dependency_entries || steps_ == limits_.max_dependency_steps) {
+        if (steps_ == root_.dependency_entries) {
             return Status::corruption();
         }
         if (!overflow_) {
@@ -35,6 +35,10 @@ Status ChunkRootRecovery::dependencies()
             const auto &ref = (*leaf.stored_overflow)[reference_];
             pid_            = ref.head;
             remaining_      = ref.bytes;
+            chain_steps_    = 0;
+        }
+        if (++chain_steps_ > pages_->frames.size()) {
+            return Status::corruption("overflow dependency cycle");
         }
         const auto found = pages_->frames.find(pid_);
         if (found == pages_->frames.end()) {

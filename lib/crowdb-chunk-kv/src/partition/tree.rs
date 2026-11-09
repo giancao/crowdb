@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use std::any::Any;
+use std::sync::Arc;
 
 mod snapshot;
 mod split_overlay;
@@ -16,6 +17,14 @@ use crate::{ChunkKvError, MutationOperation, Result, ScanEntry, ValueRevision};
 pub trait PartitionTree: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn tree_id(&self) -> u64;
+    /// Close after the host has released all other serving owners.
+    async fn close_hosted(self: Arc<Self>) -> Result<()> {
+        Ok(())
+    }
+    /// Close a departing writer only if no other owner still serves it.
+    async fn close_if_last(self: Arc<Self>) -> Result<()> {
+        Ok(())
+    }
     async fn get(&self, key: &[u8]) -> Result<Option<ValueRevision>>;
     async fn scan_forward(
         &self,
@@ -59,7 +68,7 @@ pub trait PartitionTree: Send + Sync {
         Ok(())
     }
     async fn checkpoint(&self, wal_replay_offset: u64) -> Result<(u64, u64)>;
-    async fn checkpoint_snapshot(
+    async fn flush_with_persistent_view(
         &self,
         wal_replay_offset: u64,
     ) -> Result<(u64, u64, std::sync::Arc<dyn PartitionTree>)>;
@@ -77,11 +86,6 @@ pub trait PartitionTree: Send + Sync {
             "partition tree does not support split frontier advancement".into(),
         ))
     }
-    async fn begin_split_memtable_view(&self) -> Result<(u64, u64)> {
-        Err(ChunkKvError::InvalidRequest(
-            "partition tree does not support split memtable views".into(),
-        ))
-    }
     /// Prepare a private replayed destination while the parent keeps serving.
     ///
     /// # Errors
@@ -93,15 +97,6 @@ pub trait PartitionTree: Send + Sync {
     ) -> Result<(std::sync::Arc<dyn PreparedSplitOverlay>, u64)> {
         Err(ChunkKvError::InvalidRequest(
             "partition tree does not support prepared split overlays".into(),
-        ))
-    }
-    async fn install_split_memtable_overlay(
-        &self,
-        _source: &dyn PartitionTree,
-        _journal_frontier: u64,
-    ) -> Result<()> {
-        Err(ChunkKvError::InvalidRequest(
-            "partition tree does not support split memtable overlays".into(),
         ))
     }
     async fn clear_split_memtable_overlay(&self, _source: &dyn PartitionTree) -> Result<()> {
@@ -160,7 +155,7 @@ pub trait PartitionTree: Send + Sync {
     ///
     /// # Errors
     /// Returns a changed observation, invalid path, or storage read failure.
-    fn inspect_page(
+    async fn inspect_page(
         &self,
         _path: &[u32],
         _version: Option<u64>,
@@ -193,20 +188,12 @@ pub trait PartitionTree: Send + Sync {
         Ok(None)
     }
 
-    /// Returns legacy mutable page-store counters, or `None` for another backend.
-    /// Runtime implementations reject this obsolete schema.
-    ///
-    /// # Errors
-    /// Returns a typed storage error when the schema is unsupported.
-    fn chunk_stats(&self) -> Result<Option<crowdb_tree_ffi::ChunkPageStoreStats>> {
-        Ok(None)
-    }
     /// Reclaims generations older than a published retention watermark.
     ///
     /// # Errors
     ///
     /// Returns a storage maintenance error.
-    fn reclaim_before(&self, _generation: u64) -> Result<u64> {
+    async fn reclaim_before(&self, _generation: u64) -> Result<u64> {
         Ok(0)
     }
     /// Persists a transition-scoped reference to one exact root generation.
@@ -215,7 +202,7 @@ pub trait PartitionTree: Send + Sync {
     ///
     /// Returns a storage error when the generation is absent or conflicts
     /// with an existing transition pin.
-    fn pin_generation(&self, _transition: crate::TransitionId, _generation: u64) -> Result<()> {
+    async fn pin_generation(&self, _transition: crate::TransitionId, _generation: u64) -> Result<()> {
         Ok(())
     }
     /// Removes a transition-scoped root-generation reference idempotently.
@@ -223,16 +210,8 @@ pub trait PartitionTree: Send + Sync {
     /// # Errors
     ///
     /// Returns a storage error when durable pin deletion cannot complete.
-    fn unpin_generation(&self, _transition: crate::TransitionId) -> Result<()> {
+    async fn unpin_generation(&self, _transition: crate::TransitionId) -> Result<()> {
         Ok(())
-    }
-    /// Reclaims objects abandoned before manifest publication.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage maintenance error.
-    fn reclaim_orphans(&self) -> Result<u64> {
-        Ok(0)
     }
     /// Continue one finite physical tree-storage collection pass, without
     /// advancing root or WAL retention. Non-staged backends have no work here.
@@ -293,6 +272,40 @@ impl CrowdbPartitionTree {
             })
             .map_err(map_tree_read_error)
     }
+
+    pub(super) async fn open_async(tree_id: u64, config: crowdb_tree_ffi::Config) -> Result<Self> {
+        if tree_id == 0 {
+            return Err(ChunkKvError::InvalidRequest(
+                "tree identity must be nonzero".into(),
+            ));
+        }
+        let tree = crowdb_tree_ffi::Crowdbtree::open_async(&config)
+            .await
+            .map_err(map_tree_read_error)?;
+        Ok(Self {
+            tree_id,
+            tree: Arc::new(tree),
+            config: Some(config),
+        })
+    }
+
+    async fn close_native(self: Arc<Self>, require_last: bool) -> Result<()> {
+        let tree_id = self.tree_id;
+        let tree = Arc::into_inner(self).and_then(|partition| Arc::into_inner(partition.tree));
+        let Some(tree) = tree else {
+            return if require_last {
+                Err(ChunkKvError::MaintenanceDegraded(format!(
+                    "Tree {tree_id} still has a serving owner"
+                )))
+            } else {
+                Ok(())
+            };
+        };
+        let close = tree
+            .begin_close()
+            .map_err(|(error, _tree)| map_tree_read_error(error))?;
+        close.wait().await.map_err(map_tree_read_error)
+    }
 }
 
 #[async_trait]
@@ -302,6 +315,12 @@ impl PartitionTree for CrowdbPartitionTree {
     }
     fn tree_id(&self) -> u64 {
         self.tree_id
+    }
+    async fn close_hosted(self: Arc<Self>) -> Result<()> {
+        self.close_native(true).await
+    }
+    async fn close_if_last(self: Arc<Self>) -> Result<()> {
+        self.close_native(false).await
     }
 
     async fn get(&self, key: &[u8]) -> Result<Option<ValueRevision>> {
@@ -452,15 +471,18 @@ impl PartitionTree for CrowdbPartitionTree {
     }
 
     async fn apply(&self, mutation_seq: u64, operation: &MutationOperation) -> Result<()> {
-        let tree = self.tree.clone();
-        let operation = operation.clone();
-        let result = tokio::task::spawn_blocking(move || match operation.successful_value() {
-            Some(value) => tree.apply_put(mutation_seq, operation.key(), value),
-            None => tree.apply_delete(mutation_seq, operation.key()),
-        })
-        .await
-        .map_err(|error| ChunkKvError::Internal(format!("tree apply task failed: {error}")))?;
-        result.map_err(map_tree_apply_error)
+        let key = bytes::Bytes::copy_from_slice(operation.key());
+        let operation = match operation.successful_value() {
+            Some(value) => crowdb_tree_ffi::ExtOp::Put {
+                key,
+                value: bytes::Bytes::copy_from_slice(value),
+            },
+            None => crowdb_tree_ffi::ExtOp::Delete { key },
+        };
+        self.tree
+            .apply_replay(mutation_seq, vec![operation])
+            .await
+            .map_err(map_tree_apply_error)
     }
 
     async fn advance_noop(&self, mutation_seq: u64) -> Result<()> {
@@ -469,15 +491,10 @@ impl PartitionTree for CrowdbPartitionTree {
     }
 
     async fn drain_replay(&self) -> Result<()> {
-        let tree = std::sync::Arc::clone(&self.tree);
-        let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            let writer = crowdb_tree_ffi::AsyncCrowdbtree::from_shared(tree);
-            runtime.block_on(writer.flush())
-        })
-        .await
-        .map_err(|error| ChunkKvError::TreeUnavailable(error.to_string()))?
-        .map_err(map_tree_apply_error)
+        crowdb_tree_ffi::AsyncCrowdbtree::from_shared(std::sync::Arc::clone(&self.tree))
+            .flush()
+            .await
+            .map_err(map_tree_apply_error)
     }
 
     async fn checkpoint(&self, wal_replay_offset: u64) -> Result<(u64, u64)> {
@@ -486,18 +503,12 @@ impl PartitionTree for CrowdbPartitionTree {
                 .set_wal_replay_offset(wal_replay_offset)
                 .map_err(map_tree_read_error)?;
         }
-        let tree = std::sync::Arc::clone(&self.tree);
-        let runtime = tokio::runtime::Handle::current();
-        let (generation, applied_seq) = tokio::task::spawn_blocking(move || {
-            runtime.block_on(async {
-                let writer = crowdb_tree_ffi::AsyncCrowdbtree::from_shared(tree.clone());
-                writer.flush().await?;
-                writer.snapshot().await?;
-                tree.snapshot_state()
-            })
-        })
+        let writer = crowdb_tree_ffi::AsyncCrowdbtree::from_shared(std::sync::Arc::clone(&self.tree));
+        let (generation, applied_seq) = async {
+            writer.flush_with_persistent().await?;
+            self.tree.durable_state()
+        }
         .await
-        .map_err(|error| ChunkKvError::MaintenanceDegraded(error.to_string()))?
         .map_err(|error| match error {
             crowdb_tree_ffi::CtError::Corruption => ChunkKvError::TreeCorruption(error.to_string()),
             _ => ChunkKvError::MaintenanceDegraded(error.to_string()),
@@ -508,15 +519,14 @@ impl PartitionTree for CrowdbPartitionTree {
         Ok((generation, applied_seq))
     }
 
-    async fn checkpoint_snapshot(
+    async fn flush_with_persistent_view(
         &self,
         wal_replay_offset: u64,
     ) -> Result<(u64, u64, std::sync::Arc<dyn PartitionTree>)> {
         let (generation, applied_seq) = self.checkpoint(wal_replay_offset).await?;
-        let tree = self.tree.clone();
-        let snapshot = tokio::task::spawn_blocking(move || tree.immutable_snapshot(generation, applied_seq))
-            .await
-            .map_err(|error| ChunkKvError::MaintenanceDegraded(error.to_string()))?
+        let snapshot = self
+            .tree
+            .read_only_view(generation, applied_seq)
             .map_err(map_tree_read_error)?;
         Ok((
             generation,
@@ -547,20 +557,17 @@ impl PartitionTree for CrowdbPartitionTree {
             start: range.start.clone(),
             end: range.end.clone(),
         };
-        let source = std::sync::Arc::clone(&self.tree);
-        let (tree, stats, config) = tokio::task::spawn_blocking(move || {
-            source
-                .rebuild_range(&config)
-                .map(|(tree, stats)| (tree, stats, config))
-        })
-        .await
-        .map_err(|error| ChunkKvError::TreeUnavailable(error.to_string()))?
-        .map_err(map_tree_read_error)?;
+        let retained_config = config.clone();
+        let (tree, stats) = self
+            .tree
+            .rebuild_bounded_range_async(&config)
+            .await
+            .map_err(map_tree_read_error)?;
         Ok((
             std::sync::Arc::new(Self {
                 tree_id,
                 tree: std::sync::Arc::new(tree),
-                config: Some(config),
+                config: Some(retained_config),
             }),
             stats,
         ))
@@ -571,14 +578,6 @@ impl PartitionTree for CrowdbPartitionTree {
         Ok(())
     }
 
-    async fn begin_split_memtable_view(&self) -> Result<(u64, u64)> {
-        let tree = std::sync::Arc::clone(&self.tree);
-        tokio::task::spawn_blocking(move || tree.begin_split_memtable_view())
-            .await
-            .map_err(|error| ChunkKvError::MaintenanceDegraded(error.to_string()))?
-            .map_err(map_tree_read_error)
-    }
-
     async fn arm_split_overlay(
         &self,
         destination: &dyn PartitionTree,
@@ -587,7 +586,6 @@ impl PartitionTree for CrowdbPartitionTree {
         let destination = destination.as_any().downcast_ref::<Self>().ok_or_else(|| {
             ChunkKvError::InvalidRequest("split preparation destination is not a native tree".into())
         })?;
-        let source = self.tree.clone();
         let destination = destination.tree.clone();
         let limits = crowdb_tree_ffi::SplitOverlayLimits {
             max_records: u64::try_from(limits.max_records).map_err(|_| {
@@ -595,9 +593,10 @@ impl PartitionTree for CrowdbPartitionTree {
             })?,
             max_bytes: limits.max_bytes,
         };
-        let prepared = tokio::task::spawn_blocking(move || source.arm_split_overlay(destination, limits))
+        let prepared = self
+            .tree
+            .arm_split_overlay_async(destination, limits)
             .await
-            .map_err(|error| ChunkKvError::MaintenanceDegraded(error.to_string()))?
             .map_err(map_tree_read_error)?;
         let start = prepared.start_frontier();
         Ok((
@@ -606,24 +605,6 @@ impl PartitionTree for CrowdbPartitionTree {
             ))),
             start,
         ))
-    }
-
-    async fn install_split_memtable_overlay(
-        &self,
-        source: &dyn PartitionTree,
-        journal_frontier: u64,
-    ) -> Result<()> {
-        let source = source.as_any().downcast_ref::<Self>().ok_or_else(|| {
-            ChunkKvError::InvalidRequest("split overlay source is not a native tree".into())
-        })?;
-        let destination = std::sync::Arc::clone(&self.tree);
-        let source = std::sync::Arc::clone(&source.tree);
-        tokio::task::spawn_blocking(move || {
-            destination.install_split_memtable_overlay(&source, journal_frontier)
-        })
-        .await
-        .map_err(|error| ChunkKvError::MaintenanceDegraded(error.to_string()))?
-        .map_err(map_tree_read_error)
     }
 
     async fn clear_split_memtable_overlay(&self, source: &dyn PartitionTree) -> Result<()> {
@@ -650,14 +631,17 @@ impl PartitionTree for CrowdbPartitionTree {
             start: range.start.clone(),
             end: range.end.clone(),
         };
-        let source = std::sync::Arc::clone(&self.tree);
-        let destination = std::sync::Arc::clone(&destination.tree);
-        tokio::task::spawn_blocking(move || {
-            source.publish_split_memtable_view(generation, journal_frontier, &destination, &range)
-        })
-        .await
-        .map_err(|error| ChunkKvError::MaintenanceDegraded(error.to_string()))?
-        .map_err(map_tree_read_error)
+        if self
+            .tree
+            .publish_installed_split_view_async(generation, journal_frontier, &destination.tree, &range)
+            .await
+            .map_err(map_tree_read_error)?
+        {
+            return Ok(());
+        }
+        Err(ChunkKvError::SplitRetry(
+            "installed split source prefix is absent".into(),
+        ))
     }
 
     async fn release_split_memtable_view(&self, generation: u64) -> Result<()> {
@@ -693,13 +677,14 @@ impl PartitionTree for CrowdbPartitionTree {
         Some(self.tree.tree_summary())
     }
 
-    fn inspect_page(
+    async fn inspect_page(
         &self,
         path: &[u32],
         version: Option<u64>,
     ) -> Result<crowdb_tree_ffi::page::PageInspection> {
         self.tree
-            .inspect_page(path, version)
+            .inspect_page_async(path, version)
+            .await
             .map_err(|error| match error {
                 crowdb_tree_ffi::CtError::Unavailable => ChunkKvError::RequestConflict,
                 crowdb_tree_ffi::CtError::InvalidArgument => {
@@ -711,7 +696,7 @@ impl PartitionTree for CrowdbPartitionTree {
     }
 
     fn checkpoint_state(&self) -> Result<(u64, u64)> {
-        match self.tree.snapshot_state() {
+        match self.tree.durable_state() {
             Err(error @ crowdb_tree_ffi::CtError::NotFound) => {
                 if let Some(store) = self
                     .config
@@ -740,18 +725,6 @@ impl PartitionTree for CrowdbPartitionTree {
             )
     }
 
-    fn chunk_stats(&self) -> Result<Option<crowdb_tree_ffi::ChunkPageStoreStats>> {
-        if self
-            .config
-            .as_ref()
-            .and_then(|config| config.page_store.as_ref())
-            .is_some_and(|store| store.is_chunk_backed())
-        {
-            return Err(map_tree_read_error(crowdb_tree_ffi::CtError::NotSupported));
-        }
-        Ok(None)
-    }
-
     fn backing_stats(&self) -> Result<Option<crowdb_tree_ffi::BackingStatsSnapshot>> {
         self.config
             .as_ref()
@@ -770,44 +743,34 @@ impl PartitionTree for CrowdbPartitionTree {
         self.tree.approximate_split_key().map_err(map_tree_read_error)
     }
 
-    fn reclaim_before(&self, generation: u64) -> Result<u64> {
-        Ok(self
-            .config
-            .as_ref()
-            .and_then(|config| config.page_store.as_ref())
-            .map_or(0, |store| {
-                store.reclaim_chunk_generations_before(self.tree_id, generation)
-            }))
+    async fn reclaim_before(&self, generation: u64) -> Result<u64> {
+        let Some(store) = self.config.as_ref().and_then(|config| config.page_store.as_ref()) else {
+            return Ok(0);
+        };
+        store
+            .reclaim_chunk_generations_before_async(self.tree_id, generation)
+            .await
+            .map_err(map_tree_read_error)
     }
 
-    fn pin_generation(&self, transition: crate::TransitionId, generation: u64) -> Result<()> {
-        self.config
-            .as_ref()
-            .and_then(|config| config.page_store.as_ref())
-            .map_or(Ok(()), |store| {
-                store
-                    .pin_chunk_generation(self.tree_id, transition.high, transition.low, generation)
-                    .map_err(map_tree_read_error)
-            })
+    async fn pin_generation(&self, transition: crate::TransitionId, generation: u64) -> Result<()> {
+        let Some(store) = self.config.as_ref().and_then(|config| config.page_store.as_ref()) else {
+            return Ok(());
+        };
+        store
+            .pin_chunk_generation_async(self.tree_id, transition.high, transition.low, generation)
+            .await
+            .map_err(map_tree_read_error)
     }
 
-    fn unpin_generation(&self, transition: crate::TransitionId) -> Result<()> {
-        self.config
-            .as_ref()
-            .and_then(|config| config.page_store.as_ref())
-            .map_or(Ok(()), |store| {
-                store
-                    .unpin_chunk_generation(self.tree_id, transition.high, transition.low)
-                    .map_err(map_tree_read_error)
-            })
-    }
-
-    fn reclaim_orphans(&self) -> Result<u64> {
-        Ok(self
-            .config
-            .as_ref()
-            .and_then(|config| config.page_store.as_ref())
-            .map_or(0, |store| store.reclaim_chunk_orphans()))
+    async fn unpin_generation(&self, transition: crate::TransitionId) -> Result<()> {
+        let Some(store) = self.config.as_ref().and_then(|config| config.page_store.as_ref()) else {
+            return Ok(());
+        };
+        store
+            .unpin_chunk_generation_async(self.tree_id, transition.high, transition.low)
+            .await
+            .map_err(map_tree_read_error)
     }
 
     fn materialize_ownership(&self) -> Result<(u64, bool)> {

@@ -8,6 +8,8 @@ use std::ffi::CString;
 use std::ptr;
 use std::sync::Arc;
 
+mod native_connect;
+
 /// An RPC server. Accepts connections and dispatches to handlers.
 pub struct RpcServer {
     handle: sys::crowdb_rpc_server_t,
@@ -190,13 +192,7 @@ impl RpcServer {
     pub fn connect(&self, addr: &str, port: i32) -> Result<Connection, RpcError> {
         let c_addr = CString::new(addr).map_err(|_| RpcError::InvalidArg)?;
         let handle = unsafe { sys::crowdb_rpc_connect(self.handle, c_addr.as_ptr(), port) };
-        if handle.is_null() {
-            Err(RpcError::ConnectionError)
-        } else {
-            Ok(Connection {
-                inner: Arc::new(ConnectionInner { handle, owned: true }),
-            })
-        }
+        Connection::from_owned(handle)
     }
 
     /// Register the built-in echo handler for the given msg_type. The
@@ -403,6 +399,15 @@ impl std::fmt::Debug for Connection {
 }
 
 impl Connection {
+    fn from_owned(handle: sys::crowdb_rpc_conn_t) -> Result<Self, RpcError> {
+        if handle.is_null() {
+            return Err(RpcError::ConnectionError);
+        }
+        Ok(Self {
+            inner: Arc::new(ConnectionInner { handle, owned: true }),
+        })
+    }
+
     pub fn handle(&self) -> sys::crowdb_rpc_conn_t {
         self.inner.handle
     }

@@ -2,13 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 #include "btree/allocation_reservation.h"
-#include "chunk_page_store.h"
+#include "chunk_root_catalog.h"
 
 #include <span>
 
 namespace crowdb::tree
 {
 class ChunkPhysicalRegistry;
+class ScheduledPageStore;
 struct ChunkPhysicalPack;
 } // namespace crowdb::tree
 
@@ -37,8 +38,8 @@ struct ChunkPackWindow
     std::vector<uint8_t, BudgetAllocator<uint8_t, AllocationBudget, AllocationKind::kIo>> bytes;
 };
 
-// Blocking finite backend steps. Call only on the host's bounded backend lane;
-// no Tree CPU task may wait for catalog or transport completion.
+// Fixed pack framing and its durable staging protocol. Async submissions retain
+// inputs through their one terminal completion; mirrors join before publication.
 class ChunkFixedPackStore
 {
   public:
@@ -63,12 +64,21 @@ class ChunkFixedPackStore
                       const std::shared_ptr<AllocationBudget> &budget,
                       std::shared_ptr<ChunkPhysicalPack>      *physical        = nullptr,
                       const std::shared_ptr<AllocationBudget> &physical_budget = {});
+    void   submit_write_many(ChunkStageId operation, ChunkId fixed, PagePurpose purpose, std::span<const Write> inputs,
+                             const std::shared_ptr<AllocationBudget> &budget, AsyncCompletion completion,
+                             std::shared_ptr<ChunkPhysicalPack>      *physical        = nullptr,
+                             const std::shared_ptr<AllocationBudget> &physical_budget = {});
+    void   submit_read_into(const ChunkFixedPackRef &ref, const std::shared_ptr<AllocationBudget> &budget,
+                            std::span<uint8_t> output, AsyncCompletion completion,
+                            std::shared_ptr<ScheduledPageStore> cpu = {}) const;
     Status read(const ChunkFixedPackRef &ref, const std::shared_ptr<AllocationBudget> &budget,
                 std::shared_ptr<const ChunkPackWindow> *out) const;
     [[nodiscard]] Status read_into(const ChunkFixedPackRef &ref, const std::shared_ptr<AllocationBudget> &budget,
                                    std::span<uint8_t> output) const;
 
   private:
+    struct AsyncWrite;
+    struct AsyncRead;
     uint64_t                               tree_;
     uint64_t                               epoch_;
     uint32_t                               mirrors_;

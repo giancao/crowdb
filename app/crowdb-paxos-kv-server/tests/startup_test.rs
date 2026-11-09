@@ -17,6 +17,7 @@ use crowdb_paxos_kv_server::recovery::restore::{load_local_groups, LocalGroup};
 use crowdb_paxos_kv_server::recovery::startup::{create_group_with_wal, store_wal_root};
 use crowdb_paxos_kv_server::store_registry::PaxosKvStoreRegistry;
 
+#[cfg(target_os = "linux")]
 #[path = "startup_test/reclamation.rs"]
 mod reclamation;
 
@@ -51,7 +52,7 @@ async fn incomplete_group_creation_retains_replica_identity_before_wal_is_discov
         PxLocalReplicaRole::Leader,
         &config,
         Arc::new(IoBackend::detect()),
-        CrowdbTreeBackend::File,
+        CrowdbTreeBackend::MemBlock,
     )
     .await;
     assert!(result.is_err());
@@ -90,7 +91,7 @@ async fn restore_rejects_corrupt_node_config_instead_of_using_cli_replica() {
         PxLocalReplicaRole::Follower,
         &config,
         backend,
-        CrowdbTreeBackend::File,
+        CrowdbTreeBackend::MemBlock,
     )
     .await
     .unwrap();
@@ -133,7 +134,7 @@ async fn startup_passes_wal_segment_tuning_to_the_group_writer() {
         PxLocalReplicaRole::Follower,
         &config,
         Arc::new(IoBackend::detect()),
-        CrowdbTreeBackend::File,
+        CrowdbTreeBackend::MemBlock,
     )
     .await
     .unwrap();
@@ -230,7 +231,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowdbTreeBackend::File,
+        CrowdbTreeBackend::MemBlock,
     )
     .await
     .unwrap();
@@ -268,17 +269,11 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
     }));
 }
 
-/// Durable crowdb-tree engine end-to-end: a group backed by a durable
-/// `CrowdbTreeEngine` file survives a simulated process restart (drop the
-/// group, then call `create_group_with_wal` again against the same
-/// `wal_root`/`data_root`) with its KV state intact -- via full WAL replay
-/// into a fresh `CrowdbTreeEngine::open` at the same file
-/// (`PxLocalReplica::restore_from_replay_with_engine`), not by any
-/// resume-from-last-applied-slot shortcut (not implemented; see /// #20's note on why that needs separate, careful frontier-seeding work).
-/// Parameterized over [`CrowdbTreeBackend`] so the same
-/// scenario covers both the explicit file backend and the raw `O_DIRECT`
-/// block-device backend.
-async fn crowdb_tree_engine_persists_across_restart(crowtree_backend: CrowdbTreeBackend) {
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn create_group_with_wal_crowdb_tree_block_backend_persists_across_restart() {
+    use crowdb_paxos_kv::kv::CrowdbTreeEngine;
+
     let temp = crowdb_test_harness::test_dirs::tempdir_in_test_data("startup");
     let wal_root = temp.path().join("wal-root");
     let config_root = temp.path().join("conf-root");
@@ -301,20 +296,14 @@ async fn crowdb_tree_engine_persists_across_restart(crowtree_backend: CrowdbTree
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        crowtree_backend,
+        CrowdbTreeBackend::Block,
     )
     .await
     .unwrap();
 
-    // The durable crowdb-tree file was created under data_root, not left at the
-    // default in-memory (no file) path.
     let ct_path =
         crowdb_paxos_kv_server::recovery::startup::store_crowdb_tree_path(&data_root, store_id, group_id);
-    assert!(
-        ct_path.exists(),
-        "expected a durable crowdb-tree file at {}",
-        ct_path.display()
-    );
+    assert!(ct_path.is_dir(), "expected a Block Tree at {}", ct_path.display());
 
     group.local_replica().become_leader();
     group.stamp_proposing_term(group.local_replica().current_term());
@@ -335,10 +324,20 @@ async fn crowdb_tree_engine_persists_across_restart(crowtree_backend: CrowdbTree
         Some(b"ct-value".to_vec())
     );
 
-    // Simulate a process restart: drop the group (closes the crowdb-tree file
-    // handle via `Crowdbtree`'s `Drop`), then rebuild from the same WAL +
-    // crowdb-tree file.
+    let tree = group
+        .local_replica()
+        .learner
+        .engine()
+        .as_any()
+        .downcast_ref::<CrowdbTreeEngine>()
+        .unwrap()
+        .handle();
+    let close = tree.close_result().unwrap();
+    let release = tree.backend_release_service().unwrap();
+    drop(tree);
     drop(group);
+    close.wait().await.unwrap();
+    release.shutdown().await;
 
     let restarted = create_group_with_wal(
         store_id,
@@ -347,7 +346,7 @@ async fn crowdb_tree_engine_persists_across_restart(crowtree_backend: CrowdbTree
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        crowtree_backend,
+        CrowdbTreeBackend::Block,
     )
     .await
     .unwrap();
@@ -362,16 +361,4 @@ async fn crowdb_tree_engine_persists_across_restart(crowtree_backend: CrowdbTree
         Some(b"ct-value".to_vec()),
         "crowdb-tree-backed KV state must survive a simulated restart"
     );
-}
-
-#[tokio::test]
-async fn create_group_with_wal_crowdb_tree_engine_persists_across_restart() {
-    crowdb_tree_engine_persists_across_restart(CrowdbTreeBackend::File).await;
-}
-
-/// : same scenario, through `BlockPageStore` (`O_DIRECT`)
-/// instead of the default `FilePageStore`.
-#[tokio::test]
-async fn create_group_with_wal_crowdb_tree_block_backend_persists_across_restart() {
-    crowdb_tree_engine_persists_across_restart(CrowdbTreeBackend::Block).await;
 }

@@ -118,7 +118,7 @@ struct CheckpointOperation::State : std::enable_shared_from_this<State>
     CheckpointOptions                               options;
     size_t                                          max_layout_depth = 64;
     PageLoadBudget                                  budget;
-    std::shared_ptr<detail::AllocationReservation>  finish_metadata;
+    std::shared_ptr<AllocationBudget>               finish_metadata;
     std::shared_ptr<PageLoader>                     loader;
     std::optional<ApplyProgress::Request>           handoff_wait;
     uint64_t                                        handoff_observed = 0;
@@ -133,7 +133,7 @@ struct CheckpointOperation::State : std::enable_shared_from_this<State>
     PrepareWork                                     prepare_work;
     PrepareCleanup                                  prepare_cleanup;
     std::shared_ptr<const void>                     work_owner;
-    std::shared_ptr<detail::AllocationReservation>  control_metadata;
+    std::shared_ptr<AllocationBudget>               control_metadata;
     std::shared_ptr<CapturedFrameStream>            planning_stream;
     detail::ReservedUnique<CapturedLayoutPlanner>   planner;
     CapturedWritePlan                               plan;

@@ -73,6 +73,23 @@ fn request_clones_keep_one_owner_bundle_until_the_last_release() {
 }
 
 #[test]
+fn unpublished_transport_is_destroyed_by_the_route_retirement_worker() {
+    struct Transport(mpsc::Sender<Option<String>>);
+
+    impl Drop for Transport {
+        fn drop(&mut self) {
+            let _ = self.0.send(std::thread::current().name().map(str::to_owned));
+        }
+    }
+
+    let (released, completed) = mpsc::channel();
+    OwnedClientRoute::retire_transport(Transport(released));
+    let worker = completed.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(worker.as_deref(), Some("rpc-route-retire"));
+    assert!(OwnedClientRoute::drain_retired_for_tests(Duration::from_secs(3)));
+}
+
+#[test]
 fn cascading_retirement_drains_and_a_stalled_destructor_keeps_backlog_visible() {
     let (released_tx, released_rx) = mpsc::channel();
     let (entered_tx, entered_rx) = mpsc::channel();

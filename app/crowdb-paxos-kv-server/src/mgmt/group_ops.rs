@@ -9,6 +9,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::{debug, info, info_span, Instrument};
 use utoipa::ToSchema;
 
@@ -206,8 +207,17 @@ pub(super) async fn add_group(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Reuse the existing node-local initialization exclusion for ordinary
     // creation too; duplicate runners may submit the same sealed operation.
-    let _execution = super::system_bootstrap::begin(&state)?;
-    if sid == 0 && req.group_id == 0 && super::system_bootstrap::has_owner(&state)? {
+    super::system_bootstrap::begin(&state)?
+        .run(add_group_owned(state, sid, req))
+        .await
+}
+
+async fn add_group_owned(
+    state: RegistryArc,
+    sid: u64,
+    req: AddGroupRequest,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    if sid == 0 && req.group_id == 0 && super::system_bootstrap::has_owner(&state).await? {
         return Err(err_json(
             StatusCode::CONFLICT,
             "reserved system group must use identified system initialization",
@@ -344,18 +354,17 @@ pub(super) async fn join_group_via_snapshot(
     Path((sid, gid)): Path<(u64, u64)>,
     Json(req): Json<JoinGroupRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let _execution = if sid == 0 && gid == 0 {
-        Some(super::system_bootstrap::begin(&state)?)
-    } else {
-        None
-    };
-    if sid == 0 && gid == 0 && super::system_bootstrap::has_owner(&state)? {
-        return Err(err_json(
-            StatusCode::CONFLICT,
-            "reserved system group must use identified system join",
-        ));
-    }
-    join_snapshot(State(state), Path((sid, gid)), Json(req)).await
+    super::system_bootstrap::begin(&state)?
+        .run(async move {
+            if sid == 0 && gid == 0 && super::system_bootstrap::has_owner(&state).await? {
+                return Err(err_json(
+                    StatusCode::CONFLICT,
+                    "reserved system group must use identified system join",
+                ));
+            }
+            join_snapshot(State(state), Path((sid, gid)), Json(req)).await
+        })
+        .await
 }
 
 pub(super) async fn join_snapshot(
@@ -463,7 +472,8 @@ pub(super) async fn join_snapshot(
         ),
         responses(
             (status = 200, description = "Group removed"),
-            (status = 404, description = "Store or group not found", body = ErrorResponse)
+            (status = 404, description = "Store or group not found", body = ErrorResponse),
+            (status = 503, description = "Removal is waiting for accepted work or resource release", body = ErrorResponse)
         )
     )]
 pub(super) async fn remove_group(
@@ -471,13 +481,12 @@ pub(super) async fn remove_group(
     Path((sid, gid)): Path<(u64, u64)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let _execution = super::system_bootstrap::begin(&state)?;
+    let execution = super::system_bootstrap::begin(&state)?;
     let store = state
         .get_store(sid)
         .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
 
-    let membership_guard = store.membership_guard(gid);
-    let _membership_guard = membership_guard.lock().await;
+    let membership = store.membership_guard(gid).lock_owned().await;
     // Load the group only after serializing membership changes. Otherwise a
     // request that waited behind a prior mutation could retain an old Arc and
     // then remove or overwrite the newly published topology.
@@ -499,46 +508,36 @@ pub(super) async fn remove_group(
     }
     info!(s = sid, g = gid, "removing PxGroup via management API");
     super::runtime_shutdown::before_group_removal(&state, &group).await?;
-    super::group_creation::retire(&state, sid, gid)?;
-    if !store.remove_group(gid) {
-        return Err(err_json(
-            StatusCode::NOT_FOUND,
-            format!("group {gid} not found in store {sid}"),
-        ));
-    }
-
-    // Delete the engine dir for this group.
-    let engine_dir = crate::recovery::startup::store_crowdb_tree_path(&state.config.data_root, sid, gid);
-    if let Err(e) = tokio::fs::remove_dir_all(&engine_dir).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(s = sid, g = gid, error = %e, "failed to delete engine dir; continuing");
+    let closing = super::runtime_shutdown::tree_close(&group);
+    let timeout = Duration::from_millis(state.config.server.shutdown_timeout_ms);
+    super::runtime_shutdown::finish_removal(timeout, format!("remove store {sid} group {gid}"), async move {
+        let (_execution, _membership) = (execution, membership);
+        super::group_creation::retire(&state, sid, gid).await?;
+        if !store.remove_group(gid) {
+            return Err(err_json(
+                StatusCode::NOT_FOUND,
+                format!("group {gid} not found in store {sid}"),
+            ));
         }
-    }
+        drop(group);
+        super::runtime_shutdown::wait_tree_close(closing).await?;
+        remove_wal_and_engine_dirs(&state, sid, gid).await?;
 
-    // Delete the WAL group dir.
-    let wal_group_dir =
-        crate::recovery::startup::store_wal_root(&state.config.wal_root, sid).join(format!("group{gid}"));
-    if let Err(e) = tokio::fs::remove_dir_all(&wal_group_dir).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(s = sid, g = gid, error = %e, "failed to delete WAL group dir; continuing");
-        }
-    }
+        let node_config_store =
+            crowdb_paxos_kv::cluster::node_config::NodeConfigStore::new(&state.config.config_root);
+        node_config_store.remove_group(sid, gid).await.map_err(|error| {
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to update node config: {error}"),
+            )
+        })?;
 
-    // Update node-config.json so the group does not resurrect on restart.
-    let node_config_store =
-        crowdb_paxos_kv::cluster::node_config::NodeConfigStore::new(&state.config.config_root);
-    if let Err(e) = node_config_store.remove_group(sid, gid).await {
-        tracing::warn!(s = sid, g = gid, error = %e, "failed to update node_config; continuing");
-    }
+        super::group_creation::finish_removal(&state, sid, gid).await?;
 
-    super::group_creation::finish_removal(&state, sid, gid)?;
-
-    info!(
-        s = sid,
-        g = gid,
-        "PxGroup removed via management API (dirs deleted + node_config updated)"
-    );
-    Ok(StatusCode::OK)
+        info!(s = sid, g = gid, "PxGroup removed via management API");
+        Ok(StatusCode::OK)
+    })
+    .await
 }
 
 #[utoipa::path(
@@ -787,24 +786,20 @@ pub(super) type WipeResult = crowdb_protocol::mgmt::WipeResult;
     responses(
         (status = 200, description = "User data wiped on this node", body = WipeResult),
         (status = 404, description = "Store or group not found", body = ErrorResponse),
-        (status = 503, description = "WAL failed — wipe not safe, redeploy", body = ErrorResponse)
+        (status = 503, description = "WAL failed or wipe is waiting for accepted work or resource release", body = ErrorResponse)
     )
 )]
 pub(super) async fn wipe_user_data(
     State(state): State<RegistryArc>,
     Path((sid, gid)): Path<(u64, u64)>,
 ) -> Result<Json<WipeResult>, (StatusCode, Json<ErrorResponse>)> {
+    let execution = super::system_bootstrap::begin(&state)?;
     let store = state
         .get_store(sid)
         .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
+    let membership = store.membership_guard(gid).lock_owned().await;
 
-    // Extract replica_id + do step-down + WAL check in a scoped block so
-    // the strong `Arc<PxGroup>` is dropped BEFORE remove_group. Without
-    // this, `group` stays alive until function return, keeping the old
-    // WalEngine + MemBlockDevice in memory even after remove_group +
-    // malloc_trim — RSS grows monotonically across bench sub-tests until
-    // OOM.
-    let replica_id = {
+    let (replica_id, closing) = {
         let group = store.get_group(gid).ok_or_else(|| {
             err_json(
                 StatusCode::NOT_FOUND,
@@ -846,29 +841,31 @@ pub(super) async fn wipe_user_data(
             stepped_down = step.accepted,
             "wipe-user-data: step-down before wipe"
         );
-        rid
-    }; // group Arc dropped here
+        (rid, super::runtime_shutdown::tree_close(&group))
+    };
+    let timeout = Duration::from_millis(state.config.server.shutdown_timeout_ms);
+    super::runtime_shutdown::finish_removal(timeout, format!("wipe store {sid} group {gid}"), async move {
+        let (_execution, _membership) = (execution, membership);
+        if !store.remove_group(gid) {
+            return Err(err_json(
+                StatusCode::NOT_FOUND,
+                format!("group {gid} not found in store {sid}"),
+            ));
+        }
+        super::runtime_shutdown::wait_tree_close(closing).await?;
+        remove_wal_and_engine_dirs(&state, sid, gid).await?;
+        recreate_wiped_group(&state, &store, sid, gid, replica_id).await
+    })
+    .await
+}
 
-    // Remove the old group from the store BEFORE creating the new one.
-    // This cancels the old group's tenure (election driver, maintenance
-    // loop, fetchgap driver all observe the cancel and exit) and drops
-    // the store's strong Arc<PxGroup>. Combined with the scoped drop
-    // above, the old group's Arc refcount reaches zero (assuming no
-    // in-flight tasks hold strong clones — they observe cancel within
-    // one RPC timeout) and the old WalEngine + MemBlockDevice + engine
-    // are freed. Doing this BEFORE create_group_with_wal_on_runtime ensures the old
-    // group's memory is released even if WAL replay is slow.
-    store.remove_group(gid);
-
-    // Wipe the WAL segments for this group. Must go through IoBackend,
-    // not tokio::fs::remove_dir_all: the mem-block backend stores
-    // segments in-memory (BTreeMap<PathBuf, Vec<u8>>), and
-    // tokio::fs::remove_dir_all is a no-op on it. Without this, the old
-    // WAL segments persist and create_group_with_wal_on_runtime replays them,
-    // causing multi-second stalls and preventing the wipe from actually
-    // wiping anything.
-    wipe_wal_and_engine_dirs(&state, sid, gid).await?;
-
+async fn recreate_wiped_group(
+    state: &RegistryArc,
+    store: &crowdb_paxos_kv::cluster::PxKvStore,
+    sid: u64,
+    gid: u64,
+    replica_id: u64,
+) -> Result<Json<WipeResult>, (StatusCode, Json<ErrorResponse>)> {
     // Recreate the group with a fresh WAL + engine. `create_group_with_wal_on_runtime`
     // replays the now-empty WAL (→ slot 0), creates fresh WalEngine +
     // engine, and `maybe_apply_persisted_config` restores the remote
@@ -910,18 +907,6 @@ pub(super) async fn wipe_user_data(
     // are preserved.
     store.add_group(new_group);
 
-    // Yield + short sleep to let the old group's detached tasks (bulk
-    // phase1, election driver) observe tenure_cancel and drop their
-    // strong Arc clones before malloc_trim.
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    // glibc malloc retains freed pages in per-thread arenas instead of
-    // returning them to the OS. malloc_trim(0) forces glibc to munmap
-    // freeable pages, releasing RSS. No-op on non-glibc allocators.
-    #[cfg(target_os = "linux")]
-    malloc_trim_zero();
-
     info!(
         s = sid,
         g = gid,
@@ -936,9 +921,8 @@ pub(super) async fn wipe_user_data(
 
 /// Delete the WAL segment dir (via `IoBackend` so the mem-block backend
 /// is covered) and the crowdb-tree engine dir for `(sid, gid)`. `NotFound`
-/// is tolerated (fresh group never wrote). Extracted from `wipe_user_data`
-/// to keep that handler under the clippy line limit.
-async fn wipe_wal_and_engine_dirs(
+/// is tolerated (fresh group never wrote).
+async fn remove_wal_and_engine_dirs(
     state: &RegistryArc,
     sid: u64,
     gid: u64,
@@ -962,29 +946,5 @@ async fn wipe_wal_and_engine_dirs(
             ));
         }
     }
-    info!(
-        s = sid,
-        g = gid,
-        "wipe-user-data: deleted WAL + engine dirs, recreating group"
-    );
     Ok(())
-}
-
-/// Force glibc malloc to return freed pages to the OS (munmap). Called
-/// after `wipe_user_data` drops the old group's WAL + engine, which can
-/// free gigabytes of `Vec<u8>` from the mem-block backend. Without this,
-/// glibc retains the freed pages in per-thread arenas and RSS grows
-/// monotonically across bench sub-tests until OOM.
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-fn malloc_trim_zero() {
-    extern "C" {
-        fn malloc_trim(pad: usize) -> std::ffi::c_int;
-    }
-    // Safety: malloc_trim(0) is always safe to call — it asks glibc to
-    // return freeable pages above the top of the heap to the OS. It
-    // cannot cause UB; the worst case is a no-op on non-glibc allocators.
-    unsafe {
-        malloc_trim(0);
-    }
 }

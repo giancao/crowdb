@@ -19,9 +19,9 @@ try {
     if (!root || !page || !page->leaf) {
         return Status::unavailable("checkpoint split target changed");
     }
-    auto loads         = core->load_limits();
-    loads.max_inflight = loads.max_overflow_pages = 1;
-    const auto workers                            = core->binding()->cpu()->worker_count();
+    auto loads               = core->load_limits();
+    loads.max_overflow_pages = 1;
+    const auto workers       = core->binding()->cpu()->worker_count();
     const auto control_bytes =
         PageSplitOperation::control_allocation_bound() + shared_allocation_bound<AllocationReservation>();
     const auto routing = AllocationBound()

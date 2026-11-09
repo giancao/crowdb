@@ -138,7 +138,7 @@ TEST(Persist, LazyRecoveryDemandLoadsOnAccess)
             oracle[make_key(i)] = "val" + std::to_string(i);
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     }
 
     std::unique_ptr<Crowdbtree> t2;
@@ -174,7 +174,7 @@ TEST(Persist, CheckpointThenReopenRestoresKeys)
         }
         ASSERT_TRUE(t.flush().ok());
         uint64_t durable = 0;
-        ASSERT_TRUE(t.snapshot(&durable).ok());
+        ASSERT_TRUE(t.flush_with_persistent(&durable).ok());
         EXPECT_EQ(durable, 50U);
     }
 
@@ -199,7 +199,7 @@ TEST(Persist, TreeSummaryTracksPublishedRootAndRejectsUnknownAsZero)
     ASSERT_TRUE(t.apply(1, put_one("a", "one")).ok());
     ASSERT_TRUE(t.apply(2, put_one("b", "two")).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     const auto summary = t.tree_summary();
     EXPECT_TRUE(summary.exact);
     EXPECT_EQ(summary.live_kv, 2U);
@@ -213,8 +213,8 @@ TEST(Persist, TreeSummaryTracksPublishedRootAndRejectsUnknownAsZero)
     EXPECT_FALSE(changed.exact);
     EXPECT_EQ(changed.live_kv, 1U);
     EXPECT_EQ(changed.covered_slot, 3U);
-    EXPECT_EQ(t.durable_snapshot_last_applied_slot(), 2U);
-    ASSERT_TRUE(t.snapshot().ok());
+    EXPECT_EQ(t.durable_coverage(), 2U);
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     EXPECT_EQ(t.tree_summary().live_kv, 1U);
 }
 
@@ -230,7 +230,7 @@ TEST(Persist, TreeSummaryAggregatesPersistedInnerPages)
         ASSERT_TRUE(t.apply(slot, put_one(make_key(static_cast<int>(slot)), "value")).ok());
     }
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     const auto summary = t.tree_summary();
     EXPECT_TRUE(summary.exact);
     EXPECT_EQ(summary.live_kv, 80U);
@@ -306,12 +306,12 @@ TEST(Persist, ClearThenSnapshotReopenIsEmpty)
         }
         ASSERT_TRUE(t.flush().ok());
         uint64_t durable = 0;
-        ASSERT_TRUE(t.snapshot(&durable).ok());
+        ASSERT_TRUE(t.flush_with_persistent(&durable).ok());
         EXPECT_EQ(durable, 20U);
 
         ASSERT_TRUE(t.clear().ok());
         durable = 123; // sentinel; snapshot() on an empty tree must overwrite it with 0
-        ASSERT_TRUE(t.snapshot(&durable).ok());
+        ASSERT_TRUE(t.flush_with_persistent(&durable).ok());
         EXPECT_EQ(durable, 0U);
     }
 
@@ -342,7 +342,7 @@ TEST(Persist, MultiLevelTreeSurvivesAndComparesEqual)
             ASSERT_TRUE(t.flush().ok());
         }
         ASSERT_GT(t.height(), 1);
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
         before = t.snapshot_view();
     }
 
@@ -365,7 +365,7 @@ TEST(Persist, ReapplyOldSlotsIsNoOp)
         ASSERT_TRUE(t.apply(5, put_one("a", "A5")).ok());
         t.force_advance_slot(5);
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
     }
     std::unique_ptr<Crowdbtree> t2;
     ASSERT_TRUE(Crowdbtree::open(opt, &t2).ok());
@@ -406,11 +406,11 @@ TEST(Persist, CorruptNewestSuperblockFallsBackToPrevious)
         Crowdbtree t(opt);
         ASSERT_TRUE(t.apply(1, put_one("a", "first")).ok());
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok()); // seq 1 -> slot 0
+        ASSERT_TRUE(t.flush_with_persistent().ok()); // seq 1 -> slot 0
 
         ASSERT_TRUE(t.apply(2, put_one("a", "second")).ok());
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok()); // seq 2 -> slot kSbBytes
+        ASSERT_TRUE(t.flush_with_persistent().ok()); // seq 2 -> slot kSbBytes
     }
     // Corrupt the newest superblock slot (seq 2 lives at the second slot).
     std::vector<uint8_t> garbage(kSbBytes, 0xab);
@@ -459,7 +459,7 @@ TEST(Persist, FileBackendRoundTrip)
             }
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
     }
 
     // Reopen in a brand-new store + engine.
@@ -527,7 +527,7 @@ TEST(Persist, BlockDeviceBackendRoundTrip)
             }
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
     }
 
     // Reopen in a brand-new store + engine.
@@ -569,7 +569,7 @@ TEST(Persist, WriteMutexNotHeldDuringSnapshotIo)
     ASSERT_TRUE(t.flush().ok());
 
     std::thread snap_thread([&] {
-        Status s = t.snapshot(nullptr);
+        Status s = t.flush_with_persistent(nullptr);
         EXPECT_TRUE(s.ok()) << s.to_string();
     });
     store.wait_until_blocked(); // snapshot()'s I/O phase is now parked
@@ -589,8 +589,7 @@ TEST(Persist, WriteMutexNotHeldDuringSnapshotIo)
     const auto flushed = following.get();
     EXPECT_TRUE(flushed.ok()) << flushed.to_string();
     EXPECT_EQ(t.last_applied_slot(), 2U) << "snapshot completion must not regress concurrent flush coverage";
-    EXPECT_EQ(t.durable_snapshot_last_applied_slot(), 1U)
-        << "durable snapshot frontier remains the prepared snapshot frontier";
+    EXPECT_EQ(t.durable_coverage(), 1U) << "durable snapshot frontier remains the prepared snapshot frontier";
 }
 
 // Task 6: Array-of-blocks BlockPageStore integration test. Snapshot with
@@ -631,7 +630,7 @@ TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
             }
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
         // Verify multiple blocks were created
         EXPECT_GE(store->num_extents(), 2U);
     }
@@ -679,7 +678,7 @@ TEST(Persist, ArrayOfBlocksDumpVerification)
         ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
         ASSERT_TRUE(t.apply(2, put_one("b", "2")).ok());
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
     }
 
     // Verify block 0 exists and dump contains anchor data
@@ -721,7 +720,7 @@ TEST(Persist, BlockCompactionSparseBlockDeleted)
             }
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
         EXPECT_GE(store->num_extents(), 3U);
     }
 
@@ -752,7 +751,7 @@ TEST(Persist, BlockCompactionSparseBlockDeleted)
         // Snapshot multiple times — each snapshot relocates dirty pages
         // away from sparse blocks and eventually drains them.
         for (int snap = 0; snap < 4; ++snap) {
-            ASSERT_TRUE(t->snapshot().ok()) << "snapshot " << snap << " failed";
+            ASSERT_TRUE(t->flush_with_persistent().ok()) << "snapshot " << snap << " failed";
         }
 
         // Verify remaining data is intact
@@ -808,7 +807,7 @@ TEST(Persist, BlockCompactionGapFiltering)
             ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "v" + std::to_string(i))).ok());
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
         size_t extents_before = store->num_extents();
         EXPECT_GE(extents_before, 2U);
 
@@ -822,7 +821,7 @@ TEST(Persist, BlockCompactionGapFiltering)
         ASSERT_TRUE(t.flush().ok());
         // Tombstone folding now happens during snapshot preparation (R129);
         // no standalone GC sweep is needed.
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
 
         // Write new keys — they should go to dense blocks or new blocks,
         // not reuse gaps in sparse blocks
@@ -831,7 +830,7 @@ TEST(Persist, BlockCompactionGapFiltering)
             ASSERT_TRUE(t.apply(slot, put_one("new" + std::to_string(i), "nv" + std::to_string(i))).ok());
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
 
         // Verify data integrity for surviving keys
         for (int i = 0; i < 200; i += 20) {
@@ -865,7 +864,7 @@ TEST(Persist, BlockCompactionSingleMediumUnaffected)
     ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
     ASSERT_TRUE(t.apply(2, put_one("b", "2")).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
 
     // Verify data
     std::string v;
@@ -904,7 +903,7 @@ TEST(Persist, SnapshotFoldingSyncDeletionParity)
             oracle[k] = v;
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
 
         // Delete every third key.
         for (int i = 0; i < 100; i += 3) {
@@ -918,7 +917,7 @@ TEST(Persist, SnapshotFoldingSyncDeletionParity)
         // only delta-chain folding happens; the tombstones at higher slots
         // are not yet eligible for GC-floor folding).
         t.set_gc_watermark(slot, slot);
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
 
         // Verify in-memory state matches oracle.
         for (const auto &[k, v] : oracle) {
@@ -992,7 +991,7 @@ TEST(Persist, CompactSparseBlocksRestartSafety)
             ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "v" + std::to_string(i))).ok());
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
 
         // Delete most keys to create sparse blocks.
         for (int i = 0; i < 200; ++i) {
@@ -1004,11 +1003,11 @@ TEST(Persist, CompactSparseBlocksRestartSafety)
         ASSERT_TRUE(t.flush().ok());
         // Keep the GC floor fixed so unrelated clean leaves reuse their old
         // extents; advancing it would rewrite every page into a dense suffix.
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
 
         // Rotate both durable anchors before selecting sparse extents, and
         // leave this fixture's only compaction to the explicit call below.
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
         local->gc_active.store(false);
         MergeGcStats stats;
         // A pass scans at most eight blocks, including fully free blocks
@@ -1076,7 +1075,7 @@ void prepare_sparse_compaction(const std::string &path, const std::set<std::stri
         ASSERT_TRUE(t.apply(++slot, put_one(make_key(i), "v" + std::to_string(i))).ok());
     }
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     for (int i = 0; i < 200; ++i) {
         if (!kept_keys.contains(make_key(i))) {
             ASSERT_TRUE(t.apply(++slot, del_one(make_key(i))).ok());
@@ -1085,9 +1084,9 @@ void prepare_sparse_compaction(const std::string &path, const std::set<std::stri
     ASSERT_TRUE(t.flush().ok());
     // Keep clean old leaves in their original blocks and rotate both
     // anchors; automatic GC must not consume the intended candidate.
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
     ASSERT_TRUE(t.apply(++slot, Batch{}).ok());
-    ASSERT_TRUE(t.snapshot().ok());
+    ASSERT_TRUE(t.flush_with_persistent().ok());
 }
 
 void remove_free_compaction_blocks(TreeCore &core, BlockPageStore &store)
@@ -1247,7 +1246,7 @@ TEST(Persist, LeafInnerCountSurvivesSnapshotOpen)
             ASSERT_TRUE(t.flush().ok());
         }
         ASSERT_GT(t.height(), 1);
-        ASSERT_TRUE(t.snapshot().ok());
+        ASSERT_TRUE(t.flush_with_persistent().ok());
         expected_leaves = t.leaf_count_atomic();
         expected_inners = t.inner_count_atomic();
         ASSERT_GT(expected_leaves, 1U);

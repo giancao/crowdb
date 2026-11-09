@@ -399,6 +399,7 @@ pub async fn snapshot_export_import_round_trip(source: &dyn KVEngine, target: &d
 
     let mut exporter = source
         .snapshot_export_begin(17)
+        .await
         .expect("snapshot export session should begin");
     let metadata = exporter.metadata();
     assert_eq!(
@@ -411,7 +412,7 @@ pub async fn snapshot_export_import_round_trip(source: &dyn KVEngine, target: &d
         .expect("snapshot import session should begin");
     let mut offset = 0_u64;
     loop {
-        let chunk = exporter.read(offset).expect("snapshot chunk should read");
+        let chunk = exporter.read(offset).await.expect("snapshot chunk should read");
         assert_eq!(chunk.offset, offset);
         assert!(chunk.bytes.len() <= metadata.chunk_bytes);
         importer.feed(&chunk.bytes).expect("snapshot chunk should feed");
@@ -421,7 +422,7 @@ pub async fn snapshot_export_import_round_trip(source: &dyn KVEngine, target: &d
         }
     }
     assert_eq!(offset, metadata.total_bytes);
-    let import_at_slot = importer.finish().expect("snapshot import should finish");
+    let import_at_slot = importer.finish().await.expect("snapshot import should finish");
     assert_eq!(
         import_at_slot, metadata.at_slot,
         "import must report the same at_slot as export"

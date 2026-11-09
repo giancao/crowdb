@@ -131,7 +131,7 @@ TEST(PublishedNative, RecoveredOverflowRemainsReadableAfterOwnedBackendTreeClose
     ASSERT_TRUE(test.open().ok());
     const std::string value(12000, 'c');
     ASSERT_TRUE(test.put(1, "a", value).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     test.tree.reset();
     ASSERT_TRUE(test.open().ok());
     std::unique_ptr<NativeFrameIterator> iterator;
@@ -162,7 +162,7 @@ TEST(PublishedNative, RawBackendIdleCursorDoesNotBlockCloseAndKeepsReturnedBytes
     TestNativeExport test(false);
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, "a", std::string(12000, 'r')).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     std::unique_ptr<NativeFrameIterator> iterator;
     auto                                 status = test.tree->open_native_frame_iterator(nullptr, &iterator);
     ASSERT_TRUE(status.ok()) << status.to_string();
@@ -207,7 +207,7 @@ TEST(PublishedNative, CorruptColdOverflowCannotBeReportedAsCompleteOutput)
     TestNativeExport test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, "a", std::string(12000, 'x')).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     auto      *core = TreeCoreAccess::get(*test.tree);
     const auto view = core->capture();
     const auto page = view->mapping.get(view->root_page_id);

@@ -44,7 +44,9 @@ Status validate_snapshot_publication(const PublicationTransaction &transaction, 
     default:
         return Status::invalid_argument("snapshot publication requires one typed logical effect");
     }
-    if (transaction.snapshot_metadata && transaction.snapshot_metadata->category() != detail::BudgetClass::kRouting) {
+    const auto snapshot_credit =
+        std::dynamic_pointer_cast<detail::AllocationReservation>(transaction.snapshot_metadata);
+    if (snapshot_credit && snapshot_credit->category() != detail::BudgetClass::kRouting) {
         return Status::invalid_argument("snapshot selection requires Routing metadata credit");
     }
     if (!transaction.checkpoint || !transaction.checkpoint->baseline) {
@@ -72,8 +74,7 @@ Status validate_snapshot_publication(const PublicationTransaction &transaction, 
     return Status::Ok();
 }
 
-void initialize_snapshot_changes(PublishedTreeState                                   &state,
-                                 const std::shared_ptr<detail::AllocationReservation> &metadata)
+void initialize_snapshot_changes(PublishedTreeState &state, const std::shared_ptr<AllocationBudget> &metadata)
 {
     state.snapshot_changes               = {};
     state.snapshot_changes_since_capture = {};

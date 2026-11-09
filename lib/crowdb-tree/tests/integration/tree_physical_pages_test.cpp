@@ -83,7 +83,7 @@ TEST(TreePhysicalPages, ChunkFramingAndRecoveryAcceptAnExceptionalTreePage)
     ASSERT_TRUE(test.open().ok());
     const std::string key(90000, 'k');
     ASSERT_TRUE(test.tree->apply(1, Batch{.ops = {{.key = key, .kind = OpKind::kPut, .value = "value"}}}).ok());
-    const auto status = test.tree->snapshot();
+    const auto status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     test.tree.reset();
     const auto reopened = test.open();
@@ -92,7 +92,7 @@ TEST(TreePhysicalPages, ChunkFramingAndRecoveryAcceptAnExceptionalTreePage)
     ASSERT_TRUE(value.found());
     EXPECT_EQ(value.value().to_string(), "value");
     uint64_t sequence = 0;
-    ASSERT_TRUE(test.tree->snapshot(nullptr, &sequence).ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent(nullptr, &sequence).ok());
     EXPECT_EQ(sequence, 1U);
 }
 

@@ -71,7 +71,7 @@ TEST(ExplicitFlush, SafeAcrossOpenRecovery)
         ASSERT_TRUE(Crowdbtree::open(opt, &t).ok());
         ASSERT_TRUE(t->apply(1, put_one("k", "v")).ok());
         ASSERT_TRUE(t->flush().ok());
-        ASSERT_TRUE(t->snapshot(nullptr).ok());
+        ASSERT_TRUE(t->flush_with_persistent(nullptr).ok());
     }
 
     for (int i = 0; i < 20; ++i) {

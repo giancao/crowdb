@@ -38,41 +38,34 @@ impl Drop for SamplingJob {
 // Field order also keeps completion last if queued work is dropped before entry.
 struct SamplingWork {
     partitions: Arc<HashMap<Id128, Partition>>,
-    runtime: tokio::runtime::Handle,
     completion: SamplingJob,
 }
 
 impl SamplingWork {
-    fn run(self, limit: usize) {
+    async fn run(self, limit: usize) {
         // Declared first and completed last, including during unwinding.
         let completion = self.completion;
-        let runtime_handle = self.runtime;
         let owned_partitions = self.partitions;
-        runtime_handle.block_on(async {
-            let mut observations = HashMap::new();
-            for (id, partition) in owned_partitions.iter() {
-                if completion.0.is_closed() {
-                    return;
+        let mut observations = HashMap::new();
+        for (id, partition) in owned_partitions.iter() {
+            if completion.0.is_closed() {
+                return;
+            }
+            let snapshot = partition.snapshot();
+            if snapshot.lifecycle != PartitionLifecycle::Serving {
+                continue;
+            }
+            match sample(partition, snapshot.ownership_epoch, limit).await {
+                Ok(samples) => {
+                    observations.insert(*id, (snapshot.ownership_epoch, samples));
                 }
-                let snapshot = partition.snapshot();
-                if snapshot.lifecycle != PartitionLifecycle::Serving {
-                    continue;
-                }
-                match sample(partition, snapshot.ownership_epoch, limit).await {
-                    Ok(samples) => {
-                        observations.insert(*id, (snapshot.ownership_epoch, samples));
-                    }
-                    Err(error) => warn!(partition_id_high = id.high, partition_id_low = id.low, %error,
+                Err(error) => warn!(partition_id_high = id.high, partition_id_low = id.low, %error,
                     "split observation failed; partition remains unsampled"),
-                }
             }
-            if !completion.0.is_closed() {
-                completion.0.cached.store(Arc::new(observations));
-            }
-        });
-        drop(owned_partitions);
-        drop(runtime_handle);
-        drop(completion);
+        }
+        if !completion.0.is_closed() {
+            completion.0.cached.store(Arc::new(observations));
+        }
     }
 }
 
@@ -120,15 +113,11 @@ impl LoadSampling {
             return;
         }
         let job = SamplingJob(Arc::clone(self));
-        let runtime = tokio::runtime::Handle::current();
-        // Native page reads may block on cold storage. One owned job per service
-        // isolates that delay and prevents repeated heartbeat ticks spawning work.
         let work = SamplingWork {
             partitions,
-            runtime,
             completion: job,
         };
-        tokio::task::spawn_blocking(move || work.run(limit));
+        tokio::spawn(work.run(limit));
     }
 }
 

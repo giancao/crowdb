@@ -121,7 +121,7 @@ TEST(PageLoad, DecodedLeafRetainsItsActualFrameChargeAfterLoaderAndReserveAreRel
     EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
 }
 
-TEST(PageLoad, IndependentIoCreditSurvivesLateFailureAndIsReusable)
+TEST(PageLoad, IndependentReadsIgnoreLegacyIoCreditsAndRetainBuffersUntilCompletion)
 {
     LoadCredits credits;
     auto        runtime = std::make_shared<detail::FlushRuntime>(1, 8);
@@ -137,18 +137,20 @@ TEST(PageLoad, IndependentIoCreditSurvivesLateFailureAndIsReusable)
         EXPECT_FALSE(leaf);
         ++failures;
     });
-    EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+    EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     auto second         = backing;
     auto second_backing = std::make_shared<BackingRef>(*backing.backing);
     ++second_backing->address;
     second.backing = std::move(second_backing);
     loader->load_leaf(second, [&](Status status, auto leaf) {
-        EXPECT_EQ(status.code(), Code::kResourceExhausted);
+        EXPECT_EQ(status.code(), Code::kIoError);
         EXPECT_FALSE(leaf);
         ++failures;
     });
-    EXPECT_EQ(store->reads, 1U);
+    EXPECT_EQ(store->reads, 2U);
+    EXPECT_EQ(failures, 0U);
     store->finish(Status::io_error("controlled transport failure"));
+    store->finish(Status::io_error("second transport failure"));
     EXPECT_EQ(failures, 2U);
     EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     size_t successes = 0;
@@ -160,7 +162,7 @@ TEST(PageLoad, IndependentIoCreditSurvivesLateFailureAndIsReusable)
     store->finish();
     runtime->drain();
     EXPECT_EQ(successes, 1U);
-    EXPECT_EQ(store->reads, 2U);
+    EXPECT_EQ(store->reads, 3U);
     loader.reset();
     credits.seal();
     EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
@@ -186,7 +188,7 @@ TEST(PageLoad, SealedDecodeCreditRetainsInflightBlobUntilTransportTerminal)
     loader.reset();
     credits.seal();
     EXPECT_GT(credits.budget.snapshot().allocated[LoadCredits::kBytes], backing.backing->length + 4095);
-    EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+    EXPECT_EQ(credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
     store->finish();
     runtime->drain();
     EXPECT_EQ(calls, 1U);
@@ -241,24 +243,26 @@ TEST(PageLoad, SlowReadLeavesSingleCpuWorkerAvailable)
     EXPECT_EQ(completed.load(), 1U);
 }
 
-TEST(PageLoad, InflightBudgetIsReleasedOnLateIoFailure)
+TEST(PageLoad, IndependentReadsStartBeforeLateIoFailures)
 {
     auto runtime                 = std::make_shared<detail::FlushRuntime>(1, 8);
     auto lane                    = std::make_shared<detail::FlushRuntime::Lane>(8);
     auto store                   = std::make_shared<TestAsyncStore>();
     store->deferred              = true;
     auto                 backing = test_backing(store);
-    AsyncStorePageLoader loader(store, runtime, lane, {.max_inflight = 1});
+    AsyncStorePageLoader loader(store, runtime, lane, {});
     std::vector<Code>    codes;
     auto complete = [&](Status status, std::shared_ptr<const LeafBase>) { codes.push_back(status.code()); };
     loader.load_leaf(backing, complete);
     loader.load_leaf(backing, complete);
-    EXPECT_EQ(codes, (std::vector<Code>{Code::kResourceExhausted}));
-    store->finish(Status::io_error("late failure"));
-    loader.load_leaf(backing, complete);
-    store->finish(Status::io_error("second failure"));
-    EXPECT_EQ(codes, (std::vector<Code>{Code::kResourceExhausted, Code::kIoError, Code::kIoError}));
+    EXPECT_TRUE(codes.empty());
     EXPECT_EQ(store->reads, 2U);
+    store->finish(Status::io_error("late failure"));
+    store->finish(Status::io_error("second failure"));
+    loader.load_leaf(backing, complete);
+    store->finish(Status::io_error("third failure"));
+    EXPECT_EQ(codes, (std::vector<Code>{Code::kIoError, Code::kIoError, Code::kIoError}));
+    EXPECT_EQ(store->reads, 3U);
 }
 
 TEST(PageLoad, CorruptionAndProvenSlotBoundsRejectLoadedFrames)

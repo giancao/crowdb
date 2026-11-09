@@ -28,7 +28,7 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
             return owners.empty();
         }
 
-        explicit Dependencies(const std::shared_ptr<detail::AllocationReservation> &metadata)
+        explicit Dependencies(const std::shared_ptr<AllocationBudget> &metadata)
             : owners(detail::ReservationAllocator<std::shared_ptr<const void>>(metadata))
         {
         }
@@ -47,7 +47,7 @@ struct CapturedWriteOperation::State : std::enable_shared_from_this<State>
     using ResidentSources =
         std::map<uint64_t, ResidentSource, std::less<>, detail::ReservationAllocator<ResidentEntry>>;
 
-    explicit State(const std::shared_ptr<detail::AllocationReservation> &metadata)
+    explicit State(const std::shared_ptr<AllocationBudget> &metadata)
         : resident_sources(std::less<>{}, detail::ReservationAllocator<ResidentEntry>(metadata))
     {
     }

@@ -67,9 +67,9 @@ TEST(ResourceUsage, VersionedHostAndTreeSnapshotsAreNonDraining)
     EXPECT_GE(host.resources[1].used, local.resources[1].used);
     EXPECT_GT(local.resources[6].used, 0U);
     EXPECT_GT(host.resources[8].limit, 0U);
-    EXPECT_EQ(local.resources[13].limit, local.resources[6].limit);
-    EXPECT_EQ(local.resources[14].limit, local.resources[6].limit);
-    EXPECT_EQ(local.resources[15].limit, local.resources[6].limit + 2);
+    EXPECT_EQ(local.resources[13].limit, 0U);
+    EXPECT_EQ(local.resources[14].limit, 0U);
+    EXPECT_EQ(local.resources[15].limit, 0U);
     EXPECT_EQ(local.resources[16].limit, 4096U);
     EXPECT_EQ(local.resources[17].limit, 1024U * 1024U);
     EXPECT_EQ(local.resources[18].limit, 1024U);

@@ -84,7 +84,7 @@ Status TreeCore::scan(CoreScanOptions options, std::vector<scan_entry> *out, boo
     ScanPackedBuf          result;
     scan_impl(
         options,
-        [&](Status outcome, ScanPackedBuf value, bool more) {
+        [&](Status outcome, ScanPackedBuf value, size_t /*entries*/, bool more) {
             status     = std::move(outcome);
             result     = std::move(value);
             *truncated = more;

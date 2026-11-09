@@ -14,8 +14,8 @@ namespace crowdb::tree
 class WritebackMetrics
 {
   public:
-    WritebackMetrics(std::shared_ptr<TreeWorkMetrics>                      metrics,
-                     const std::shared_ptr<detail::AllocationReservation> &metadata, size_t max_pages);
+    WritebackMetrics(std::shared_ptr<TreeWorkMetrics> metrics, const std::shared_ptr<AllocationBudget> &metadata,
+                     size_t max_pages);
     [[nodiscard]] static std::optional<size_t> allocation_bound(size_t pages) noexcept;
     [[nodiscard]] Status                       begin(uint64_t pid);
     void                                       finish(uint64_t pid, TreeOutcome outcome) noexcept;

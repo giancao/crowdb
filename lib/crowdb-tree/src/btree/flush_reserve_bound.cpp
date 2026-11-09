@@ -29,6 +29,10 @@ Status flush_reserve_bounds(PublicationCoordinator &publisher, const PublishedTr
     if (!root || root->level > batch.max_route_depth) {
         return Status::invalid_argument("automatic flush needs an initialized bounded routing tree");
     }
+    if (preparation.allocations) {
+        *out = {.maintenance_output_pages = preparation.maintenance.publication.pages.max_output_pages};
+        return Status::Ok();
+    }
     const auto &source_limits = sources.active_budget->options();
     const auto  per_source_entries =
         AllocationBound(source_limits.max_entries).add(source_limits.max_gap_entries).value();
@@ -113,17 +117,24 @@ Status flush_reserve_bounds(PublicationCoordinator &publisher, const PublishedTr
     }
     // Only captured inner pages can become cold cache entries during this
     // operation. Maintenance-created inner pages already own resident routes.
-    const auto routing =
-        AllocationBound()
-            .add(AsyncStorePageLoader::routing_reserve_bound(
-                preparation.loads, root->level, workers,
-                preparation.cache ? std::min<uint64_t>(preparation.cache->retained_page_limit(), view.stats.inner_pages)
-                                  : 0))
-            .add(AsyncStorePageLoader::primary_reserve_bound(preparation.loads, cold_depth, workers, *leaf_window))
-            .value();
-    const auto backend = backend_operation_bound(
-        preparation.store.get(),
-        {.max_io_bytes = preparation.loads.max_blob_bytes, .write_calls = 0, .workers = workers, .barriers = false});
+    const auto routing = preparation.allocations
+                           ? std::optional<size_t>{0}
+                           : AllocationBound()
+                                 .add(AsyncStorePageLoader::routing_reserve_bound(
+                                     preparation.loads, root->level, workers,
+                                     preparation.cache ? std::min<uint64_t>(preparation.cache->retained_page_limit(),
+                                                                            view.stats.inner_pages)
+                                                       : 0))
+                                 .add(AsyncStorePageLoader::primary_reserve_bound(preparation.loads, cold_depth,
+                                                                                  workers, *leaf_window))
+                                 .value();
+    const auto backend =
+        preparation.allocations
+            ? std::optional<size_t>{0}
+            : backend_operation_bound(preparation.store.get(), {.max_io_bytes = preparation.loads.max_blob_bytes,
+                                                                .write_calls  = 0,
+                                                                .workers      = workers,
+                                                                .barriers     = false});
     auto maintenance = preparation.maintenance;
     if (routing && backend) {
         const auto account       = sources.active_budget->options().account;

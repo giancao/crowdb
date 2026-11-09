@@ -99,12 +99,12 @@ TEST(IncrementalCheckpoint, SecondCheckpointWithoutChangesWritesNothing)
     std::map<std::string, std::string> oracle;
     fill(&t, 200, &oracle);
 
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     uint64_t first = t.last_snapshot_pages_written();
     EXPECT_GT(first, 1U); // a multi-page tree: everything was dirty
 
     // No mutations between snapshots -> nothing should be rewritten.
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     EXPECT_EQ(t.last_snapshot_pages_written(), 0U);
 }
 
@@ -121,7 +121,7 @@ TEST(IncrementalCheckpoint, SingleKeyEditRewritesOnlyItsPath)
     std::map<std::string, std::string> oracle;
     fill(&t, 200, &oracle);
 
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     uint64_t total = t.last_snapshot_pages_written();
     ASSERT_GT(total, 4U); // several leaves + inner level(s)
 
@@ -131,7 +131,7 @@ TEST(IncrementalCheckpoint, SingleKeyEditRewritesOnlyItsPath)
     t.force_advance_slot(slot);
     ASSERT_TRUE(t.flush().ok());
     oracle[key(7)] = "updated";
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     uint64_t rewritten = t.last_snapshot_pages_written();
     EXPECT_GE(rewritten, 1U);    // the touched leaf was folded + written
@@ -148,14 +148,14 @@ TEST(IncrementalCheckpoint, UnchangedCheckpointPreservesExactPageLocations)
     Crowdbtree                         tree(options);
     std::map<std::string, std::string> oracle;
     fill(&tree, 200, &oracle);
-    ASSERT_TRUE(tree.snapshot().ok());
+    ASSERT_TRUE(tree.flush_with_persistent().ok());
     const auto before = durable_locations(tree);
     ASSERT_GT(before.size(), 4U);
-    ASSERT_TRUE(tree.snapshot().ok());
+    ASSERT_TRUE(tree.flush_with_persistent().ok());
     EXPECT_EQ(durable_locations(tree), before);
     EXPECT_EQ(tree.last_snapshot_pages_written(), 0U);
     ASSERT_TRUE(tree.apply(tree.contiguous_slot() + 1, put_one(key(7), "updated")).ok());
-    ASSERT_TRUE(tree.snapshot().ok());
+    ASSERT_TRUE(tree.flush_with_persistent().ok());
     expect_untouched_locations(before, durable_locations(tree));
 }
 
@@ -173,7 +173,7 @@ TEST(IncrementalCheckpoint, LargeTreeEditPreservesUntouchedPhysicalPages)
     const auto before_splits = work->counters.snapshot()[static_cast<size_t>(TreeWorkCause::Checkpoint)]
                                                         [static_cast<size_t>(TreeWorkCounter::SplitOperations)];
     const auto started       = std::chrono::steady_clock::now();
-    const auto initial       = tree.snapshot();
+    const auto initial       = tree.flush_with_persistent();
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
     ASSERT_TRUE(initial.ok()) << initial.to_string();
@@ -186,7 +186,7 @@ TEST(IncrementalCheckpoint, LargeTreeEditPreservesUntouchedPhysicalPages)
     const auto before = durable_locations(tree);
     ASSERT_GT(before.size(), 1024U);
     ASSERT_TRUE(tree.apply(tree.contiguous_slot() + 1, put_one(key(7), "updated")).ok());
-    const auto updated = tree.snapshot();
+    const auto updated = tree.flush_with_persistent();
     ASSERT_TRUE(updated.ok()) << updated.to_string();
     expect_untouched_locations(before, durable_locations(tree));
     EXPECT_LT(tree.last_snapshot_pages_written(), before.size());
@@ -206,7 +206,7 @@ TEST(IncrementalCheckpoint, SpaceIsReusedAcrossManyCheckpoints)
     {
         Crowdbtree t(opt);
         fill(&t, 100, &oracle);
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
         // Rewrite the SAME small key set every round and snapshot. With durable-page
         // GC, freed extents from two snapshots ago are reused, so the file reaches a
@@ -221,7 +221,7 @@ TEST(IncrementalCheckpoint, SpaceIsReusedAcrossManyCheckpoints)
                 oracle[key(i)] = v;
                 ++slot;
             }
-            ASSERT_TRUE(t.snapshot(nullptr).ok());
+            ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
             if (round == 9) {
                 early = store.size();
             }
@@ -257,7 +257,7 @@ TEST(IncrementalCheckpoint, ReopenAfterIncrementalSeesAllValues)
     {
         Crowdbtree t(opt);
         fill(&t, 200, &oracle);
-        ASSERT_TRUE(t.snapshot(nullptr).ok()); // snapshot 1: full image
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // snapshot 1: full image
 
         // Mutate a spread of keys across different leaves, then snapshot again.
         uint64_t slot = 100000;
@@ -268,8 +268,8 @@ TEST(IncrementalCheckpoint, ReopenAfterIncrementalSeesAllValues)
             oracle[key(i)] = "v2_" + std::to_string(i);
             ++slot;
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());            // snapshot 2: incremental
-        EXPECT_LT(t.last_snapshot_pages_written(), 200U); // not a full rewrite
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // snapshot 2: incremental
+        EXPECT_LT(t.last_snapshot_pages_written(), 200U);   // not a full rewrite
     }
 
     // Reopen from the incremental snapshot: unchanged keys are read from the
@@ -299,21 +299,21 @@ TEST(IncrementalCheckpoint, SnapshotPagesTotalAccumulates)
     fill(&t, 200, &oracle);
 
     // First snapshot: all pages dirty.
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     uint64_t first_written = t.last_snapshot_pages_written();
     uint64_t first_total   = t.stats().snapshot_pages_total;
     EXPECT_GT(first_written, 1U);
     EXPECT_EQ(first_total, first_written);
 
     // Second snapshot with no changes: per-call stays 0, cumulative persists.
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     EXPECT_EQ(t.last_snapshot_pages_written(), 0U);
     EXPECT_EQ(t.stats().snapshot_pages_total, first_total);
 
     // Touch one key, flush, snapshot again: cumulative increases.
     ASSERT_TRUE(t.apply(t.contiguous_slot() + 1, put_one(key(7), "updated")).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     uint64_t third_written = t.last_snapshot_pages_written();
     EXPECT_GE(third_written, 1U);
     EXPECT_EQ(t.stats().snapshot_pages_total, first_total + third_written);

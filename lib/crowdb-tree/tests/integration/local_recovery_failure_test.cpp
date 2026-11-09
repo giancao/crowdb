@@ -21,7 +21,7 @@ TEST(LocalRecoveryFailure, CancellationDrainsAcceptedReadBeforeReleasingItsBuffe
         test.operation->request_stop();
         test.original.source.runtime->drain();
         EXPECT_EQ(done.stopped.load(), 0U);
-        EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+        EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
         test.store->finish();
         test.original.source.runtime->drain();
         EXPECT_EQ(done.stopped.load(), 1U);
@@ -53,7 +53,7 @@ TEST(LocalRecoveryFailure, UnknownAcceptanceRetainsWindowUntilLateDuplicateCallb
         test.operation.reset();
         test.credits.seal();
         EXPECT_GE(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 2U * 1024 * 1024);
-        EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 1U);
+        EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
         auto duplicate = test.store->pending;
         test.store->finish();
         duplicate.complete(Status::corruption());

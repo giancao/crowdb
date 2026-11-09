@@ -3,6 +3,7 @@
 #pragma once
 #include "btree/portable_import.h"
 #include "btree/tree_core.h"
+#include "crowdb-tree/snapshot/snapshot_io.h"
 
 namespace crowdb::tree
 {
@@ -16,6 +17,7 @@ class RuntimeSnapshotImport
     ~RuntimeSnapshotImport();
     Status feed(Slice bytes);
     Status finish(uint64_t *coverage);
+    Status finish_async(SnapshotImportComplete complete);
 
   private:
     enum class Part : uint8_t {
@@ -44,6 +46,7 @@ class RuntimeSnapshotImport
     void   completed_entry();
     void   expect_entry();
     Status fail(Status status);
+    Status prepare_finish(std::shared_ptr<TreeCore> *core);
 
     std::weak_ptr<TreeCore>                                   core_;
     std::shared_ptr<detail::AllocationReservation>            metadata_;

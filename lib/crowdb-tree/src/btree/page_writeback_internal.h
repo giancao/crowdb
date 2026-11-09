@@ -27,17 +27,17 @@ struct PageWriteOperation::State : std::enable_shared_from_this<State>
     void        submit_write();
     void        finish(Status status) noexcept;
 
-    ApplyDispatcher::Node                                     encode_node{&State::encode, this};
-    ApplyDispatcher::Node                                     write_node{&State::write, this};
-    PageWriteInput                                            input;
-    PageWriteLimits                                           limits;
-    PageLoadBudget                                            budget;
-    std::shared_ptr<detail::AllocationReservation>            chunk_credit;
-    std::shared_ptr<AsyncPageStore>                           store;
-    std::shared_ptr<detail::FlushRuntime>                     runtime;
-    std::shared_ptr<detail::FlushRuntime::Lane>               lane;
-    ReserveExtent                                             reserve;
-    AllocationLease                                           io_credit;
+    ApplyDispatcher::Node                       encode_node{&State::encode, this};
+    ApplyDispatcher::Node                       write_node{&State::write, this};
+    PageWriteInput                              input;
+    PageWriteLimits                             limits;
+    PageLoadBudget                              budget;
+    std::shared_ptr<AllocationBudget>           chunk_credit;
+    std::shared_ptr<AsyncPageStore>             store;
+    std::shared_ptr<detail::FlushRuntime>       runtime;
+    std::shared_ptr<detail::FlushRuntime::Lane> lane;
+    ReserveExtent                               reserve;
+
     ResourceObservation                                       io_resources;
     detail::ReservedVector<uint8_t, AllocationKind::kIo>      blob;
     detail::ReservedVector<uint8_t, AllocationKind::kScratch> scratch;

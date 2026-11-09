@@ -5,6 +5,7 @@
 #include "btree/flush_operation.h"
 #include "btree/page_cache.h"
 #include "btree/published_read.h"
+#include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/btree/tree.h"
 #include "runtime/tree_operation_lifetime.h"
 #include "runtime/tree_runtime_binding.h"
@@ -21,7 +22,6 @@ struct Preparation;
 namespace detail
 {
 class ChunkRuntimePageStore;
-class LegacyChunkReadStore;
 } // namespace detail
 struct LocalBackendState;
 class CheckpointBackend;
@@ -61,9 +61,11 @@ struct CoreScanOptions
     bool     strict_byte_budget = false;
 };
 
+using ScanComplete = std::function<void(Status, ScanPackedBuf, size_t, bool)>;
+
 // Stable owner across immutable publication/source generations. The public
 // facade retains it until accepted operations and all backend aliases drain.
-class PublishedSnapshotContext;
+class PublishedReadViewContext;
 
 class TreeCore : public std::enable_shared_from_this<TreeCore>
 {
@@ -71,9 +73,9 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
 
   public:
     static Status create(Config config, std::shared_ptr<TreeRuntimeBinding> binding, TreeCoreBootstrap bootstrap,
-                         std::shared_ptr<TreeCore> *out);
+                         std::shared_ptr<TreeCore> *out, bool async_bootstrap = false);
     static Status open(const Config &config, std::shared_ptr<TreeCore> *out);
-    static Status migrate_chunk(const Config &config, uint64_t expected_generation, std::shared_ptr<TreeCore> *out);
+    static Status open_local_async(const Config &config, PageStore::RuntimeOpenComplete complete);
     ~TreeCore();
     TreeCore(const TreeCore &)            = delete;
     TreeCore &operator=(const TreeCore &) = delete;
@@ -111,19 +113,26 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     Status                 release_split_view(uint64_t generation);
     Status                 publish_split_view(uint64_t generation, uint64_t journal_frontier, TreeCore &destination,
                                               const KeyRange &range);
-    Status                 install_portable(std::vector<leaf_entry> entries, uint64_t coverage);
-    Status                 prepare_import_credit(std::shared_ptr<detail::AllocationReservation> *out);
-    Status                 prepare_import_credit(size_t requested, std::shared_ptr<detail::AllocationReservation> *out);
-    Status                 install_readable(std::shared_ptr<const ReadablePageCatalog>            catalog,
-                                            const std::shared_ptr<detail::AllocationReservation> &credit);
-    Status                 install_native(std::vector<NativeFrame> frames, NativeStreamInfo info);
+    Status publish_installed_split_view_async(uint64_t generation, uint64_t journal_frontier, TreeCore &destination,
+                                              const KeyRange &range, std::function<void(Status)> complete);
+    Status install_portable(std::vector<leaf_entry> entries, uint64_t coverage);
+    Status prepare_import_credit(std::shared_ptr<detail::AllocationReservation> *out);
+    Status prepare_import_credit(size_t requested, std::shared_ptr<detail::AllocationReservation> *out);
+    Status install_readable(std::shared_ptr<const ReadablePageCatalog>            catalog,
+                            const std::shared_ptr<detail::AllocationReservation> &credit);
+    Status install_readable_async(std::shared_ptr<const ReadablePageCatalog>            catalog,
+                                  const std::shared_ptr<detail::AllocationReservation> &credit,
+                                  AsyncCompletion                                       complete);
+    Status install_native(std::vector<NativeFrame> frames, NativeStreamInfo info);
 #ifdef CROWDB_TREE_TEST_UTIL
     void set_before_generation_install_for_tests(std::function<void()> callback);
     void set_flush_handoff_wait_for_tests(std::function<bool(uint64_t, std::function<void()>)> callback);
 #endif
 
-    void   get_async(Slice key, std::function<void(Status, GetView)> complete);
-    void   scan_async(CoreScanOptions options, std::function<void(Status, ScanPackedBuf, bool)> complete);
+    void get_async(Slice key, std::function<void(Status, GetView)> complete);
+    void scan_async(CoreScanOptions options, ScanComplete complete);
+    using InspectComplete = std::function<void(Status, NativeFrame, uint64_t, uint64_t, uint32_t)>;
+    Status inspect_page_async(std::span<const uint32_t> path, uint64_t expected_version, InspectComplete complete);
     Status get(Slice key, GetView *out);
     Status scan(CoreScanOptions options, std::vector<scan_entry> *out, bool *truncated, ScanPackedBuf *packed = nullptr,
                 size_t *count = nullptr);
@@ -138,7 +147,7 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
                               std::shared_ptr<TreeOperationLifetime::Ticket> accepted);
     // Runs on the shared runtime; staged completion never advances WAL coverage.
     Status prepare_writeback(std::shared_ptr<CheckpointOperation> *out);
-    Status capture_snapshot(std::shared_ptr<PublishedSnapshotContext> *out);
+    Status capture_read_only_view(std::shared_ptr<PublishedReadViewContext> *out);
     Status acquire_snapshot_window(const std::shared_ptr<AllocationBudget>        &metadata,
                                    std::shared_ptr<TreeOperationLifetime::Ticket> *ticket, AsyncPageStore **backend);
     Status reserve_snapshot_ids(const PublishedTreeState &expected, uint64_t count,
@@ -146,13 +155,18 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     Status prepare_compaction(const LocalCompactionOptions &options, std::shared_ptr<LocalCompactionOperation> *out);
     Status compact_sparse_blocks(MergeGcStats *out);
     size_t evict_clean_pages(PageCacheKind kind, size_t max_resident);
+    Status evict_clean_pages_async(PageCacheKind kind, size_t max_resident, std::function<void(size_t)> complete);
     [[nodiscard]] uint64_t last_snapshot_pages_written() const noexcept;
     [[nodiscard]] uint64_t snapshot_pages_total() const noexcept;
     Status                 checkpoint(uint64_t *coverage = nullptr, uint64_t *sequence = nullptr);
     void                   checkpoint_async(std::function<void(Status, uint64_t)> complete);
 
     // This boundary is host-only, never called from an accepted callback.
+    // The facade gives up further access after an accepted consuming close.
+    // The caller retains the shared runtime and backend release driver.
+    [[nodiscard]] bool                                       close_async(AsyncCompletion complete) noexcept;
     void                                                     close_and_drain() noexcept;
+    void                                                     close_facade() noexcept;
     [[nodiscard]] bool                                       closed() const noexcept;
     [[nodiscard]] const Config                              &config() const noexcept;
     [[nodiscard]] const std::shared_ptr<TreeRuntimeBinding> &binding() const noexcept;
@@ -165,6 +179,7 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     [[nodiscard]] AsyncPageStore                            *async_backend() const noexcept;
     [[nodiscard]] PageLoadLimits                             load_limits() const noexcept;
     [[nodiscard]] PublishedReadLimits                        read_limits() const noexcept;
+    [[nodiscard]] const std::shared_ptr<AllocationBudget>   &accepted_allocations() const noexcept;
     [[nodiscard]] std::shared_ptr<const PublishedTreeState>  capture() const;
     [[nodiscard]] PublicationCoordinator                    &publisher() const noexcept;
     [[nodiscard]] TreeOperationLifetime                     &operation_lifetime() const noexcept;
@@ -186,12 +201,10 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     Status prepare_capacity_flush(FlushPreparationOptions                       *out,
                                   std::shared_ptr<TreeOperationLifetime::Ticket> accepted);
     void   get_impl(Slice key, std::function<void(Status, GetView)> complete, bool dispatch);
-    void   scan_impl(CoreScanOptions options, std::function<void(Status, ScanPackedBuf, bool)> complete, bool dispatch);
+    void   scan_impl(CoreScanOptions options, ScanComplete complete, bool dispatch);
     friend class detail::ChunkRuntimePageStore;
     static Status open_chunk(const Config &config, std::shared_ptr<TreeCore> *out);
-    static Status open_chunk_migration(const Config                                        &config,
-                                       const std::shared_ptr<detail::LegacyChunkReadStore> &legacy,
-                                       uint64_t snapshot_sequence, std::shared_ptr<TreeCore> *out);
+    static Status open_chunk_async(const Config &config, PageStore::RuntimeOpenComplete complete);
     friend class TreeApplyOperation;
     friend class TreeGenerationLease;
     friend class PreparedSplitOverlay;
@@ -202,8 +215,8 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     Status prepare_readable(std::shared_ptr<const ReadablePageCatalog>            catalog,
                             const std::shared_ptr<detail::AllocationReservation> &credit,
                             std::shared_ptr<const PublishedTreeState>            *out);
-    Status capture_snapshot(std::shared_ptr<const PublishedTreeState>  view,
-                            std::shared_ptr<PublishedSnapshotContext> *out);
+    Status capture_read_only_view(std::shared_ptr<const PublishedTreeState>  view,
+                                  std::shared_ptr<PublishedReadViewContext> *out);
     Status install_split_baseline(const SplitSourceSession &session, uint64_t identity, uint64_t end);
     // Caller holds both split gates and the source ingress.
     Status install_split_overlay_guarded(TreeCore &source, uint64_t journal_frontier);

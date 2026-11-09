@@ -75,7 +75,7 @@ fn sim_backend() -> Arc<IoBackend> {
     Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
 }
 
-/// A file-backed `CrowdbTreeEngine`: `persist_snapshot` (`Crowdbtree::snapshot`)
+/// A file-backed `CrowdbTreeEngine`: `persist_snapshot` (`Crowdbtree::flush_with_persistent`)
 /// requires a real `page_store` and fails (`invalid_argument: no
 /// page_store`) for the default in-memory (`path: None`) engine, so tests
 /// exercising it need a real durable backend.

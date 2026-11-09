@@ -79,12 +79,9 @@ pub struct Cli {
     #[arg(long, value_parser = ["default", "test", "e2e"])]
     pub election_profile: Option<String>,
 
-    /// Durable backend for the crowdb-tree engine. `block` (default) opens
-    /// `data_root`'s per-group directory with `BlockPageStore` (array-of-
-    /// blocks, `O_DIRECT`) for a real SSD/SCM deployment target; `file` is
-    /// the file-based page store (no alignment), intended for debugging and
-    /// focused tests; `mem-block` uses an in-memory block device.
-    #[arg(long, default_value = "block", value_parser = ["file", "block", "mem-block"])]
+    /// Tree storage backend. `block` (default) uses aligned direct I/O in the
+    /// per-group data directory. `mem-block` uses an in-memory block device.
+    #[arg(long, default_value = "block", value_parser = ["block", "mem-block"])]
     pub kv_backend: String,
 
     /// WAL storage backend. `file` uses durable `tokio::fs` I/O;

@@ -877,6 +877,7 @@ impl PxGroup {
                 .take()
                 .expect("importer is active")
                 .finish()
+                .await
                 .map_err(|error| format!("snapshot join: engine finish failed: {error}"))?;
             if at_slot != begin.at_slot {
                 if let Some(metrics) = self.snapshot_join_handles() {

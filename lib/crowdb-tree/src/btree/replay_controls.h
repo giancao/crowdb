@@ -23,6 +23,7 @@ class ReplayControls
         Lease(const Lease &)                                                                         = delete;
         Lease                                                              &operator=(const Lease &) = delete;
         [[nodiscard]] const std::shared_ptr<detail::AllocationReservation> &budget() const noexcept;
+        void                                                                clear_replay_slot() noexcept;
 
         [[nodiscard]] explicit operator bool() const noexcept
         {
@@ -41,11 +42,14 @@ class ReplayControls
 
     static Status       create(const std::shared_ptr<detail::ResourceBudget::Account> &account, size_t ordinary_slots,
                                size_t control_bytes, std::shared_ptr<ReplayControls> *out);
-    [[nodiscard]] Lease acquire(bool current_gap) noexcept;
+    [[nodiscard]] Lease acquire(uint64_t replay_slot, bool current_gap) noexcept;
+    void                stop_admission() noexcept;
+    [[nodiscard]] bool  can_wait_for(uint64_t missing_slot) const noexcept;
 
   private:
     explicit ReplayControls(std::shared_ptr<detail::AllocationReservation> metadata);
     std::shared_ptr<detail::AllocationReservation> metadata_;
     detail::ReservedVector<std::shared_ptr<Slot>>  slots_;
+    std::atomic<bool>                              admission_drained_{false};
 };
 } // namespace crowdb::tree

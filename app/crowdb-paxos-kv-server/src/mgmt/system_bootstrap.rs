@@ -3,9 +3,7 @@
 
 //! Durable system-store ownership, published before any store creation.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,6 +11,10 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, Json};
 use crowdb_protocol::mgmt::{SystemBootstrapIdentity, SystemPrepareRequest};
 use serde::{Deserialize, Serialize};
+use tokio::{
+    fs::{self, File, OpenOptions},
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
 use super::{err_json, ErrorResponse, RegistryArc};
 
@@ -31,9 +33,26 @@ struct AcceptedBootstrap {
 
 pub(super) struct BootstrapExecution(Arc<crate::store_registry::PaxosKvStoreRegistry>);
 
+impl BootstrapExecution {
+    /// The admitted operation owns the node directory until it completes,
+    /// even when the HTTP request drops its wait for the result.
+    pub(super) async fn run<T: Send + 'static>(
+        self,
+        operation: impl std::future::Future<Output = Result<T, ManagementError>> + Send + 'static,
+    ) -> Result<T, ManagementError> {
+        tokio::spawn(async move {
+            let _execution = self;
+            operation.await
+        })
+        .await
+        .map_err(|error| err_json(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    }
+}
+
 impl Drop for BootstrapExecution {
     fn drop(&mut self) {
         self.0.bootstrap_executing.store(false, Ordering::Release);
+        self.0.bootstrap_idle.notify_waiters();
     }
 }
 
@@ -44,7 +63,7 @@ pub(super) fn begin(state: &RegistryArc) -> Result<BootstrapExecution, Managemen
         .map_err(|_| {
             err_json(
                 StatusCode::CONFLICT,
-                "node group initialization is executing; retry the same operation",
+                "a node directory operation is executing, retry the same operation",
             )
         })?;
     Ok(BootstrapExecution(Arc::clone(&state.registry)))
@@ -54,31 +73,37 @@ pub(super) async fn prepare(
     State(state): State<RegistryArc>,
     Json(req): Json<SystemPrepareRequest>,
 ) -> Result<Json<SystemPrepareRequest>, ManagementError> {
-    let _execution = begin(&state)?;
-    accept(&state, req.replica_id, Some(&req.bootstrap))?;
-    Ok(Json(req))
+    begin(&state)?
+        .run(async move {
+            accept(&state, req.replica_id, Some(&req.bootstrap)).await?;
+            Ok(Json(req))
+        })
+        .await
 }
 
-pub(super) fn has_owner(state: &RegistryArc) -> Result<bool, ManagementError> {
-    match fs::symlink_metadata(state.config.config_root.join(OWNERSHIP_FILE)) {
+pub(super) async fn has_owner(state: &RegistryArc) -> Result<bool, ManagementError> {
+    match fs::symlink_metadata(state.config.config_root.join(OWNERSHIP_FILE)).await {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(storage_error(&error)),
     }
 }
 
-pub(super) fn accept(
+pub(super) async fn accept(
     state: &RegistryArc,
     replica_id: u64,
     identity: Option<&SystemBootstrapIdentity>,
 ) -> Result<(), ManagementError> {
     let root = &state.config.config_root;
     let path = root.join(OWNERSHIP_FILE);
-    if root.join(RETIRED_FILE).exists() {
+    if system_cleanup_pending(root)
+        .await
+        .map_err(|error| storage_error(&error))?
+    {
         return Err(err_json(StatusCode::CONFLICT, "system cleanup has not completed"));
     }
     let Some(identity) = identity else {
-        return if has_owner(state)? {
+        return if has_owner(state).await? {
             Err(err_json(
                 StatusCode::CONFLICT,
                 "system store belongs to an identified bootstrap operation",
@@ -88,16 +113,19 @@ pub(super) fn accept(
         };
     };
     validate(replica_id, identity)?;
-    if root
-        .join(format!("system-bootstrap-retired-{}.json", identity.operation_id))
-        .exists()
+    if fs::try_exists(root.join(format!("system-bootstrap-retired-{}.json", identity.operation_id)))
+        .await
+        .map_err(|error| storage_error(&error))?
     {
         return Err(err_json(
             StatusCode::CONFLICT,
             "bootstrap operation was explicitly retired",
         ));
     }
-    if root.join(RETIRED_FILE).exists() {
+    if system_cleanup_pending(root)
+        .await
+        .map_err(|error| storage_error(&error))?
+    {
         return Err(err_json(StatusCode::CONFLICT, "system cleanup has not completed"));
     }
     let accepted = AcceptedBootstrap {
@@ -105,8 +133,8 @@ pub(super) fn accept(
         replica_id,
         identity: identity.clone(),
     };
-    if has_owner(state)? {
-        return verify(&path, &accepted);
+    if has_owner(state).await? {
+        return verify(&path, &accepted).await;
     }
     if state.contains_store(0) {
         return Err(err_json(
@@ -114,34 +142,39 @@ pub(super) fn accept(
             "existing system store has no matching bootstrap ownership",
         ));
     }
-    fs::create_dir_all(root).map_err(|error| storage_error(&error))?;
+    fs::create_dir_all(root)
+        .await
+        .map_err(|error| storage_error(&error))?;
     let temporary = root.join(format!(
         ".system-bootstrap-{}-{}.tmp",
         std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
     ));
-    let result = (|| {
+    let result = async {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&temporary)
+            .await
             .map_err(|error| storage_error(&error))?;
         let bytes =
             serde_json::to_vec(&accepted).map_err(|error| storage_error(&std::io::Error::other(error)))?;
-        file.write_all(&bytes).map_err(|error| storage_error(&error))?;
-        file.sync_all().map_err(|error| storage_error(&error))?;
-        match fs::hard_link(&temporary, &path) {
+        file.write_all(&bytes)
+            .await
+            .map_err(|error| storage_error(&error))?;
+        file.flush().await.map_err(|error| storage_error(&error))?;
+        file.sync_all().await.map_err(|error| storage_error(&error))?;
+        match fs::hard_link(&temporary, &path).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(storage_error(&error)),
         }
-        File::open(root)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| storage_error(&error))?;
-        verify(&path, &accepted)
-    })();
-    let cleanup = fs::remove_file(&temporary);
+        sync_directory(root).await?;
+        verify(&path, &accepted).await
+    }
+    .await;
+    let cleanup = fs::remove_file(&temporary).await;
     if result.is_ok() {
         cleanup.map_err(|error| storage_error(&error))?;
     }
@@ -179,8 +212,10 @@ fn validate(replica_id: u64, identity: &SystemBootstrapIdentity) -> Result<(), M
     Ok(())
 }
 
-fn verify(path: &Path, expected: &AcceptedBootstrap) -> Result<(), ManagementError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| storage_error(&error))?;
+async fn verify(path: &Path, expected: &AcceptedBootstrap) -> Result<(), ManagementError> {
+    let metadata = fs::symlink_metadata(path)
+        .await
+        .map_err(|error| storage_error(&error))?;
     if !metadata.file_type().is_file()
         || metadata.len() > 4096
         || metadata.permissions().mode() & 0o777 != 0o600
@@ -192,9 +227,11 @@ fn verify(path: &Path, expected: &AcceptedBootstrap) -> Result<(), ManagementErr
     }
     let mut bytes = Vec::with_capacity(4096);
     File::open(path)
+        .await
         .map_err(|error| storage_error(&error))?
         .take(4097)
         .read_to_end(&mut bytes)
+        .await
         .map_err(|error| storage_error(&error))?;
     let actual: AcceptedBootstrap = serde_json::from_slice(&bytes)
         .map_err(|_| err_json(StatusCode::CONFLICT, "invalid durable system bootstrap ownership"))?;
@@ -205,6 +242,11 @@ fn verify(path: &Path, expected: &AcceptedBootstrap) -> Result<(), ManagementErr
         ));
     }
     Ok(())
+}
+
+async fn sync_directory(root: &Path) -> Result<(), ManagementError> {
+    let directory = File::open(root).await.map_err(|error| storage_error(&error))?;
+    directory.sync_all().await.map_err(|error| storage_error(&error))
 }
 
 fn storage_error(error: &std::io::Error) -> ManagementError {
@@ -219,8 +261,8 @@ pub(super) use cleanup::cleanup;
 
 /// # Errors
 /// Reports unreadable cleanup markers instead of restarting a retired system store.
-pub fn system_cleanup_pending(root: &Path) -> std::io::Result<bool> {
-    match fs::symlink_metadata(root.join(RETIRED_FILE)) {
+pub async fn system_cleanup_pending(root: &Path) -> std::io::Result<bool> {
+    match fs::symlink_metadata(root.join(RETIRED_FILE)).await {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),

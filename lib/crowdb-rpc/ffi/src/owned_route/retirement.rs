@@ -22,8 +22,13 @@ unsafe extern "C" {
 static WORKER: OnceLock<Retirement> = OnceLock::new();
 
 struct Task {
-    owners: RouteOwners,
+    owners: Owners,
     queued_at: Instant,
+}
+
+enum Owners {
+    Route(RouteOwners),
+    Transport(Box<dyn Send>),
 }
 
 struct State {
@@ -57,7 +62,10 @@ fn worker() -> &'static Retirement {
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     for task in receiver {
-                        drop(task.owners);
+                        match task.owners {
+                            Owners::Route(route) => drop(route),
+                            Owners::Transport(transport) => drop(transport),
+                        }
                         worker_state
                             .latency
                             .observe(task.queued_at.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
@@ -90,13 +98,32 @@ pub(super) fn register_owner() {
 }
 
 pub(super) fn retire(owners: RouteOwners) {
+    enqueue(Owners::Route(owners), mark_pending());
+}
+
+pub(super) fn retire_transport(transport: impl Send + 'static) {
+    finish_transport_retirement(transport, begin_transport_retirement());
+}
+
+pub(crate) fn begin_transport_retirement() -> Instant {
+    register_owner();
+    mark_pending()
+}
+
+pub(crate) fn finish_transport_retirement(transport: impl Send + 'static, queued_at: Instant) {
+    enqueue(Owners::Transport(Box::new(transport)), queued_at);
+}
+
+fn mark_pending() -> Instant {
     let worker = worker();
     worker.state.pending.fetch_add(1, Ordering::AcqRel);
     worker.state.pending_metric.inc();
-    if let Err(undelivered) = worker.sender.send(Task {
-        owners,
-        queued_at: Instant::now(),
-    }) {
+    Instant::now()
+}
+
+fn enqueue(owners: Owners, queued_at: Instant) {
+    let worker = worker();
+    if let Err(undelivered) = worker.sender.send(Task { owners, queued_at }) {
         // A dead receiver must never drop these owners on the enqueueing RPC
         // thread. Retain them until abort instead of recreating a self-join.
         std::mem::forget(undelivered);

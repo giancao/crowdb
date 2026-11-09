@@ -2,8 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
+#include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/memory_budget.h"
 
+#include <atomic>
 #include <exec/detail/pool_resource.hpp>
 #include <memory_resource>
 
@@ -21,6 +23,8 @@ class PoolStorage final : public std::pmr::memory_resource
 
     [[nodiscard]] exec::pool_thread_factory thread_factory() noexcept;
     [[nodiscard]] static size_t             worker_bytes() noexcept;
+    // Set by the host before issuing the pool stop signal.
+    void notify_on_exit(AsyncCompletion complete) noexcept;
 
   private:
     struct Worker;
@@ -32,5 +36,7 @@ class PoolStorage final : public std::pmr::memory_resource
     void                              do_deallocate(void *pointer, size_t bytes, size_t alignment) override;
     [[nodiscard]] bool                do_is_equal(const std::pmr::memory_resource &other) const noexcept override;
     std::shared_ptr<AllocationBudget> budget_;
+    std::atomic<size_t>               running_{0};
+    AsyncCompletion                   on_exit_;
 };
 } // namespace crowdb::tree::detail

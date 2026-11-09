@@ -19,6 +19,21 @@
 #    include <poll.h>
 #    include <unistd.h>
 #endif
+#if defined(__linux__) && defined(CROWDB_HAVE_LIBURING)
+#    include "crowdb-tree/runtime_c_api.h"
+#    include "crowdb-tree/status.h"
+
+#    include <linux/filter.h>
+#    include <linux/seccomp.h>
+#    include <sys/prctl.h>
+#    include <sys/syscall.h>
+
+#    include <cerrno>
+#    include <cstddef>
+#    include <filesystem>
+#    include <memory>
+#    include <thread>
+#endif
 
 namespace
 {
@@ -39,6 +54,57 @@ ct_status put_flush(ct_tree *t, uint64_t slot, const std::string &k, const std::
     return ct_flush(t);
 }
 } // namespace
+
+#if defined(__linux__) && defined(CROWDB_HAVE_LIBURING)
+TEST(CApi, LinuxBlockOpenRejectsUnavailableUring)
+{
+    crowdb::tree_test::TempDir tmp("capi_no_uring_");
+    ct_options                 options{};
+    options.backend = CT_BACKEND_BLOCK;
+    options.path    = tmp.path.c_str();
+
+    ct_runtime_options runtime_options{};
+    ct_runtime_options_default(&runtime_options);
+    runtime_options.workers         = 1;
+    runtime_options.backend_workers = 1;
+    ct_runtime *raw_runtime         = nullptr;
+    ASSERT_EQ(ct_runtime_create(&runtime_options, &raw_runtime), 0);
+    const std::unique_ptr<ct_runtime, decltype(&ct_runtime_free)> runtime(raw_runtime, ct_runtime_free);
+    ct_tree_runtime_options                                       binding{};
+    ct_tree_runtime_options_default(&binding);
+
+    int          filter_error = 0;
+    std::jthread open_without_uring([&] {
+        sock_filter instructions[]{
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_io_uring_setup, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        };
+        sock_fprog filter{.len = static_cast<unsigned short>(std::size(instructions)), .filter = instructions};
+        // Only this test thread is restricted.
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) != 0 ||
+            prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter) != 0) {
+            filter_error = errno;
+            return;
+        }
+        const auto expected = static_cast<ct_status>(crowdb::tree::Code::kNotSupported);
+        ct_tree   *tree     = nullptr;
+        EXPECT_EQ(ct_open(&options, &tree), expected);
+        EXPECT_EQ(tree, nullptr);
+        ct_close(tree);
+        tree = nullptr;
+        EXPECT_EQ(ct_open_with_runtime(&options, runtime.get(), &binding, &tree), expected);
+        EXPECT_EQ(tree, nullptr);
+        ct_close(tree);
+    });
+    open_without_uring.join();
+    if (filter_error != 0) {
+        GTEST_SKIP() << "Cannot install a thread-local seccomp filter: " << std::strerror(filter_error);
+    }
+    EXPECT_TRUE(std::filesystem::is_empty(tmp.path));
+}
+#endif
 
 TEST(CApi, MemOpenApplyGetScan)
 {
@@ -268,7 +334,7 @@ TEST(CApi, FileCheckpointReopen)
             oracle[make_key(i)] = v;
         }
         uint64_t durable = 0;
-        ASSERT_EQ(ct_snapshot(t, &durable), 0);
+        ASSERT_EQ(ct_flush_with_persistent(t, &durable), 0);
         EXPECT_EQ(durable, 50U);
         ct_close(t);
     }
@@ -316,7 +382,7 @@ TEST(CApi, BlockDeviceCheckpointReopen)
             oracle[make_key(i)] = v;
         }
         uint64_t durable = 0;
-        ASSERT_EQ(ct_snapshot(t, &durable), 0);
+        ASSERT_EQ(ct_flush_with_persistent(t, &durable), 0);
         EXPECT_EQ(durable, 50U);
         ct_close(t);
     }
@@ -456,7 +522,7 @@ TEST(CApi, SyncSkipSnapshotReopen)
         ASSERT_EQ(put_flush(t, 1, "key1", "val1"), 0);
         ASSERT_EQ(put_flush(t, 2, "key2", "val2"), 0);
         uint64_t durable = 0;
-        ASSERT_EQ(ct_snapshot(t, &durable), 0);
+        ASSERT_EQ(ct_flush_with_persistent(t, &durable), 0);
         EXPECT_EQ(durable, 2U);
         ct_close(t);
     }

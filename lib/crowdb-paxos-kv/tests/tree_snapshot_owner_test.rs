@@ -5,8 +5,8 @@ use crowdb_rpc_ffi::Buffer;
 use crowdb_tree_ffi::{TreeRuntime, TreeRuntimeOptions};
 use std::sync::Arc;
 
-#[test]
-fn snapshot_view_propagates_failed_handoff_without_returning_an_old_prefix() {
+#[tokio::test(flavor = "current_thread")]
+async fn portable_export_publishes_pending_entries_with_small_handoff_budget() {
     let runtime = Arc::new(TreeRuntime::new(TreeRuntimeOptions::default()).unwrap());
     let mut config = CrowdbTreeConfig {
         runtime: Some(runtime),
@@ -15,17 +15,17 @@ fn snapshot_view_propagates_failed_handoff_without_returning_an_old_prefix() {
     config.runtime_binding.limits.handoff_bytes = 1024 * 1024;
     let engine = CrowdbTreeEngine::open(&config).unwrap();
     engine.handle().apply_put(1, b"key", b"value").unwrap();
-    assert!(engine.handle().flush().is_err());
-    let result = engine.snapshot_view();
-    assert!(
-        result.is_err(),
-        "a rejected handoff cannot expose an older successful snapshot: {result:?}"
-    );
+    let export = engine.snapshot_export_begin(64).await.unwrap();
+    assert_eq!(export.metadata().at_slot, 1);
+    let (slot, entries) = engine.snapshot_view().unwrap();
+    assert_eq!(slot, 1);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].value, b"value");
     assert_eq!(engine.handle().get(b"key").unwrap(), Some((1, b"value".to_vec())));
 }
 
-#[test]
-fn rpc_snapshot_buffer_retains_native_bytes_after_all_engine_handles_close() {
+#[tokio::test(flavor = "current_thread")]
+async fn rpc_snapshot_buffer_retains_native_bytes_after_all_engine_handles_close() {
     let runtime = Arc::new(TreeRuntime::new(TreeRuntimeOptions::default()).unwrap());
     let engine = CrowdbTreeEngine::open(&CrowdbTreeConfig {
         runtime: Some(Arc::clone(&runtime)),
@@ -35,8 +35,8 @@ fn rpc_snapshot_buffer_retains_native_bytes_after_all_engine_handles_close() {
     let tree = engine.handle();
     tree.apply_put(1, b"key", &vec![b'v'; 8192]).unwrap();
     tree.flush().unwrap();
-    let mut export = engine.snapshot_export_begin(64).unwrap();
-    let chunk = export.read(0).unwrap();
+    let mut export = engine.snapshot_export_begin(64).await.unwrap();
+    let chunk = export.read(0).await.unwrap();
     assert_eq!(chunk.bytes.len(), 64);
     let retained = chunk.bytes.slice(4..36);
     let pointer = retained.as_ptr();

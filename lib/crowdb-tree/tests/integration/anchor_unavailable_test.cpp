@@ -37,10 +37,10 @@ TEST(Persist, UnavailableAnchorCannotBecomeAnEmptyOrOlderTree)
         Crowdbtree tree(opt);
         ASSERT_TRUE(tree.apply(1, Batch{{{.key = "retained", .kind = OpKind::kPut, .value = "first"}}}).ok());
         ASSERT_TRUE(tree.flush().ok());
-        ASSERT_TRUE(tree.snapshot(nullptr).ok());
+        ASSERT_TRUE(tree.flush_with_persistent(nullptr).ok());
         ASSERT_TRUE(tree.apply(2, Batch{{{.key = "retained", .kind = OpKind::kPut, .value = "latest"}}}).ok());
         ASSERT_TRUE(tree.flush().ok());
-        ASSERT_TRUE(tree.snapshot(nullptr).ok());
+        ASSERT_TRUE(tree.flush_with_persistent(nullptr).ok());
     }
     for (bool io_error : {false, true}) {
         for (uint64_t mask : {uint64_t{1}, uint64_t{2}, uint64_t{3}}) {

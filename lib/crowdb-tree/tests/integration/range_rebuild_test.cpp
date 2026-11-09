@@ -77,7 +77,7 @@ TEST(RangeRebuild, UnboundedVolatileSourceBuildsIntoAnotherSharedHost)
     const auto                  status = rebuild_range(source, KeyRange::unbounded(), config, &destination);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(live_entries(*destination), live_entries(source));
-    EXPECT_EQ(destination->durable_snapshot_last_applied_slot(), source.last_applied_slot());
+    EXPECT_EQ(destination->durable_coverage(), source.last_applied_slot());
 }
 
 TEST(RangeRebuild, AdjacentChildrenHaveExactUnionAndEmptyIntersection)
@@ -93,7 +93,7 @@ TEST(RangeRebuild, AdjacentChildrenHaveExactUnionAndEmptyIntersection)
         ASSERT_TRUE(source.put(Slice(key), Slice("value" + std::to_string(i))).ok());
     }
     ASSERT_TRUE(source.flush().ok());
-    ASSERT_TRUE(source.snapshot().ok());
+    ASSERT_TRUE(source.flush_with_persistent().ok());
     const auto expected = live_entries(source);
 
     MemPageStore left_store(1);
@@ -338,7 +338,7 @@ TEST(RangeRebuild, ConcurrentWorkersPublishIndependentTrees)
         ASSERT_TRUE(source.put(Slice("k" + std::to_string(i + 10)), Slice("v")).ok());
     }
     ASSERT_TRUE(source.flush().ok());
-    ASSERT_TRUE(source.snapshot().ok());
+    ASSERT_TRUE(source.flush_with_persistent().ok());
 
     MemPageStore low_store(1);
     MemPageStore high_store(1);
@@ -374,7 +374,7 @@ TEST(RangeRebuild, WhollyContainedTreeCopiesIntoIndependentPaidFrames)
         ASSERT_TRUE(source.put(Slice("k" + std::to_string(i + 100)), Slice("value")).ok());
     }
     ASSERT_TRUE(source.flush().ok());
-    ASSERT_TRUE(source.snapshot().ok());
+    ASSERT_TRUE(source.flush_with_persistent().ok());
 
     MemPageStore destination_store(1);
     options.page_store = &destination_store;
@@ -404,7 +404,7 @@ TEST(RangeRebuild, CopiesOnlyOverflowChainsReferencedByTheChildRange)
     ASSERT_TRUE(source.put(Slice("m"), Slice(kept_value)).ok());
     ASSERT_TRUE(source.put(Slice("z"), Slice(high_value)).ok());
     ASSERT_TRUE(source.flush().ok());
-    ASSERT_TRUE(source.snapshot().ok());
+    ASSERT_TRUE(source.flush_with_persistent().ok());
 
     MemPageStore destination_store(1);
     options.page_store = &destination_store;
@@ -729,7 +729,7 @@ TEST(RangeRebuild, RecoveredTreeValidatesBeforeFirstRangePruning)
             ASSERT_TRUE(source.put(Slice("k" + std::to_string(index + 1000)), Slice("value")).ok());
         }
         ASSERT_TRUE(source.flush().ok());
-        ASSERT_TRUE(source.snapshot().ok());
+        ASSERT_TRUE(source.flush_with_persistent().ok());
     }
 
     std::unique_ptr<Crowdbtree> recovered;
@@ -763,7 +763,7 @@ TEST(RangeRebuild, LazyRecoveryRetainsPhysicalPagesWhileEnforcingTheNarrowedRang
         ASSERT_TRUE(source.put(Slice("b"), Slice("inside")).ok());
         ASSERT_TRUE(source.put(Slice("z"), Slice("outside")).ok());
         ASSERT_TRUE(source.flush().ok());
-        ASSERT_TRUE(source.snapshot().ok());
+        ASSERT_TRUE(source.flush_with_persistent().ok());
     }
 
     options.key_range = KeyRange::bounded(std::string("a"), std::string("m"));

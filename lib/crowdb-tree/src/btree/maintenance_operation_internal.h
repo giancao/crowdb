@@ -76,7 +76,7 @@ struct MaintenanceOperation : std::enable_shared_from_this<MaintenanceOperation>
 
     struct Cold
     {
-        explicit Cold(const std::shared_ptr<AllocationReservation> &metadata)
+        explicit Cold(const std::shared_ptr<AllocationBudget> &metadata)
             : replacements(ReservationAllocator<PageReplacement>(metadata)),
               siblings(ReservationAllocator<uint64_t>(metadata))
         {

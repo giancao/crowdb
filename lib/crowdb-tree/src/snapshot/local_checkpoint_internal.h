@@ -26,7 +26,7 @@ struct LocalCheckpointOperation::State : std::enable_shared_from_this<State>
 
     struct Window
     {
-        Window(size_t size, size_t alignment, const std::shared_ptr<detail::AllocationReservation> &budget);
+        Window(size_t size, size_t alignment, const std::shared_ptr<AllocationBudget> &budget);
         detail::ReservedVector<uint8_t, AllocationKind::kIo> storage;
         std::span<uint8_t>                                   bytes;
     };
@@ -36,22 +36,18 @@ struct LocalCheckpointOperation::State : std::enable_shared_from_this<State>
     // cannot advance the state machine until submit has returned successfully.
     struct IoStep
     {
-        explicit IoStep(const PageLoadBudget &budget) : credit(budget.io, 1)
-        {
-        }
-
         static void                                completed(void *context, Status status) noexcept;
         void                                       returned(Status status) noexcept;
         void                                       publish() noexcept;
         std::shared_ptr<State>                     owner;
         std::shared_ptr<Window>                    window;
         std::shared_ptr<const ProtectedCheckpoint> checkpoint;
-        AllocationLease                            credit;
-        Status                                     completion_status;
-        Status                                     submission_status;
-        std::atomic<unsigned>                      events{0};
-        std::atomic<bool>                          claimed{false};
-        std::atomic<bool>                          reported{false};
+
+        Status                completion_status;
+        Status                submission_status;
+        std::atomic<unsigned> events{0};
+        std::atomic<bool>     claimed{false};
+        std::atomic<bool>     reported{false};
     };
 
     explicit State(PageLoadBudget credits);

@@ -99,41 +99,6 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted();
 }
 
-Status CallbackRootCatalog::load_legacy_reference_owned(uint64_t tree, uint64_t object, ChunkRootBytes *out) const
-try {
-    if (object == 0 || out == nullptr || !out->get_allocator().owner()) {
-        return Status::invalid_argument();
-    }
-    return load_root(callbacks_, protection_, context_, tree, object, out, CT_ROOT_CATALOG_REFERENCE_SEGMENT);
-}
-catch (const std::bad_alloc &) {
-    return Status::resource_exhausted();
-}
-
-Status CallbackRootCatalog::prepare_legacy_migration(uint64_t tree, uint64_t generation,
-                                                     std::span<const uint8_t> manifest)
-{
-    if (!pc::supported(protection_)) {
-        return Status::not_supported();
-    }
-    if (tree == 0 || generation == 0 || manifest.empty() || manifest.size() > kMaxCandidateManifestBytes) {
-        return Status::invalid_argument();
-    }
-    return pc::status(callbacks_.store(context_, CT_ROOT_CATALOG_LEGACY_MIGRATION, tree, generation, manifest.data(),
-                                       manifest.size()));
-}
-
-Status CallbackRootCatalog::load_legacy_migration_owned(uint64_t tree, uint64_t generation, ChunkRootBytes *out) const
-try {
-    if (generation == 0 || out == nullptr || !out->get_allocator().owner()) {
-        return Status::invalid_argument();
-    }
-    return load_root(callbacks_, protection_, context_, tree, generation, out, CT_ROOT_CATALOG_LEGACY_MIGRATION);
-}
-catch (const std::bad_alloc &) {
-    return Status::resource_exhausted();
-}
-
 Status CallbackRootCatalog::begin_candidate(uint64_t tree, const ChunkManifestCandidate &candidate)
 {
     if (!pc::supported(protection_)) {

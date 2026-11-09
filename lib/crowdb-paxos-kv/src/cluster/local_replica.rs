@@ -381,13 +381,19 @@ impl ReplicaHandler for PxLocalReplica {
 impl PxLocalReplica {
     #[must_use]
     pub fn new(id: u64, role: PxLocalReplicaRole) -> Self {
+        Self::new_with_learner(id, role, PxLearner::new())
+    }
+
+    /// Constructs a replica around the engine already opened by its caller.
+    #[must_use]
+    pub(super) fn new_with_learner(id: u64, role: PxLocalReplicaRole, learner: PxLearner) -> Self {
         Self {
             id,
             log_store_id: AtomicU64::new(0),
             log_group_id: AtomicU64::new(0),
             endpoint: parking_lot::Mutex::new(None),
             acceptor: Arc::new(PxAcceptor::new()),
-            learner: Arc::new(PxLearner::new()),
+            learner: Arc::new(learner),
             voting: true,
             election_state: Mutex::new(ElectionPersistentState::initial(id, role)),
             current_term_atomic: AtomicU64::new(0),
@@ -412,18 +418,6 @@ impl PxLocalReplica {
             apply_loop_handle: parking_lot::Mutex::new(None),
             gap_slots: Arc::new(Mutex::new(BTreeSet::new())),
             fetchgap_inflight: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    /// Like [`Self::new`], but with a caller-supplied [`PxLearner`] (already
-    /// wrapping whichever [`KVEngine`] backend was chosen) instead of a
-    /// freshly-default-constructed one. Used by
-    /// [`Self::restore_from_replay_with_engine`].
-    #[must_use]
-    pub(super) fn new_with_learner(id: u64, role: PxLocalReplicaRole, learner: PxLearner) -> Self {
-        Self {
-            learner: Arc::new(learner),
-            ..Self::new(id, role)
         }
     }
 

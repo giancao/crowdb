@@ -174,7 +174,7 @@ Status TreeCore::State::capture_split_sources(TreeCore &core, uint64_t target)
         }
         auto baseline = split_sources->baseline;
         if (!baseline) {
-            status = core.capture_snapshot(frozen.base, &baseline);
+            status = core.capture_read_only_view(frozen.base, &baseline);
             if (!status.ok()) {
                 return status;
             }

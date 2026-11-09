@@ -75,18 +75,17 @@ class SnapshotChanges
     using Owner = std::shared_ptr<const Node>;
 
   public:
-    static constexpr uint64_t     kPageLimit = uint64_t{1} << 30;
-    [[nodiscard]] SnapshotChanges replace(SnapshotPageChange                                    change,
-                                          const std::shared_ptr<detail::AllocationReservation> &metadata = {}) const;
+    static constexpr uint64_t                  kPageLimit = uint64_t{1} << 30;
+    [[nodiscard]] SnapshotChanges              replace(SnapshotPageChange                       change,
+                                                       const std::shared_ptr<AllocationBudget> &metadata = {}) const;
     [[nodiscard]] const SnapshotPageChange    *get(uint64_t pid) const noexcept;
     [[nodiscard]] size_t                       size() const noexcept;
     [[nodiscard]] bool                         empty() const noexcept;
     [[nodiscard]] bool                         same_root(const SnapshotChanges &other) const noexcept;
     [[nodiscard]] static size_t                change_allocation_bound() noexcept;
     [[nodiscard]] static std::optional<size_t> initial_allocation_bound(size_t pages) noexcept;
-    [[nodiscard]] static SnapshotChanges
-    from_sorted(std::span<const SnapshotPageChange>                   changes,
-                const std::shared_ptr<detail::AllocationReservation> &metadata = {});
+    [[nodiscard]] static SnapshotChanges       from_sorted(std::span<const SnapshotPageChange>      changes,
+                                                           const std::shared_ptr<AllocationBudget> &metadata = {});
 
     using Visitor = void (*)(void *, const SnapshotPageChange &);
     // Resume at next_pid; each step returns one selected PID, never scans gaps.
@@ -94,10 +93,9 @@ class SnapshotChanges
 
   private:
     static Owner       insert(const Owner &node, const std::shared_ptr<const Leaf> &leaf,
-                              const std::shared_ptr<detail::AllocationReservation> &metadata);
+                              const std::shared_ptr<AllocationBudget> &metadata);
     static const Leaf *lower_bound(const Owner &node, uint64_t pid) noexcept;
-    static Owner       build(std::span<const SnapshotPageChange>                   changes,
-                             const std::shared_ptr<detail::AllocationReservation> &metadata);
-    Owner              root_;
+    static Owner build(std::span<const SnapshotPageChange> changes, const std::shared_ptr<AllocationBudget> &metadata);
+    Owner        root_;
 };
 } // namespace crowdb::tree

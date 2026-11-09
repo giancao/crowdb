@@ -4,22 +4,28 @@
 #include "crowdb-rpc/scheduled_executor.h"
 
 #include <algorithm>
+#include <limits>
+#include <vector>
 
 namespace crowdb::rpc
 {
 
-ScheduledExecutor::TaskId ScheduledExecutor::schedule(Task task, uint32_t delay_ms)
+ScheduledExecutor::TaskId ScheduledExecutor::schedule(Task task, uint32_t delay_ms, Task cancelled)
 {
     if (!task) {
         return 0;
     }
     TaskId        id = next_id_.fetch_add(1, std::memory_order_relaxed);
     ScheduledTask st;
-    st.deadline = Clock::now() + std::chrono::milliseconds(delay_ms);
-    st.callback = std::move(task);
+    st.deadline  = Clock::now() + std::chrono::milliseconds(delay_ms);
+    st.callback  = std::move(task);
+    st.cancelled = std::move(cancelled);
     {
         std::scoped_lock lock(mu_);
-        tasks_[id] = std::move(st);
+        if (closed_ || id == 0) {
+            return 0;
+        }
+        tasks_.emplace(id, std::move(st));
     }
     return id;
 }
@@ -29,42 +35,87 @@ bool ScheduledExecutor::cancel(TaskId id)
     if (id == 0) {
         return false;
     }
-    std::scoped_lock lock(mu_);
-    return tasks_.erase(id) > 0;
+    decltype(tasks_)::node_type removed;
+    {
+        std::scoped_lock lock(mu_);
+        removed = tasks_.extract(id);
+    }
+    if (removed.empty()) {
+        return false;
+    }
+    if (removed.mapped().cancelled) {
+        removed.mapped().cancelled();
+    }
+    return true;
 }
 
-int ScheduledExecutor::run_due_tasks()
+int ScheduledExecutor::run_due_tasks(const std::function<void(int)> &rearm)
 {
-    std::vector<std::pair<TaskId, Task>> to_run;
-    Clock::time_point                    now           = Clock::now();
-    Clock::time_point                    next_deadline = Clock::time_point::max();
+    std::vector<decltype(tasks_)::node_type> to_run;
+    Clock::time_point                        now = Clock::now();
 
     {
         std::scoped_lock lock(mu_);
+        to_run.reserve(tasks_.size());
         for (auto it = tasks_.begin(); it != tasks_.end();) {
             if (it->second.deadline <= now) {
-                to_run.emplace_back(it->first, std::move(it->second.callback));
-                it = tasks_.erase(it);
+                // Grow the vector before extracting so allocation failure
+                // leaves the accepted timer in the task map.
+                to_run.emplace_back();
+                to_run.back() = tasks_.extract(it++);
             }
             else {
-                if (it->second.deadline < next_deadline) {
-                    next_deadline = it->second.deadline;
-                }
                 ++it;
             }
         }
     }
 
     // Run callbacks outside the lock (callbacks may schedule new tasks).
-    for (auto &[_, cb] : to_run) {
-        cb();
+    for (auto &task : to_run) {
+        try {
+            task.mapped().callback();
+        }
+        catch (...) {
+            // One receiver must not strand other accepted timers.
+        }
     }
+    std::scoped_lock lock(mu_);
+    auto             next_deadline = Clock::time_point::max();
+    for (const auto &[id, task] : tasks_) {
+        (void)id;
+        next_deadline = std::min(next_deadline, task.deadline);
+    }
+    int next = -1;
+    if (next_deadline != Clock::time_point::max()) {
+        const auto ms = std::chrono::ceil<std::chrono::milliseconds>(next_deadline - Clock::now()).count();
+        next          = static_cast<int>(std::clamp<int64_t>(ms, 1, std::numeric_limits<int>::max()));
+    }
+    // Serialize kernel rearm with task-map mutations. This hook only sets
+    // the engine timer; user callbacks above never execute under the lock.
+    if (rearm) {
+        rearm(next);
+    }
+    return next;
+}
 
-    if (next_deadline == Clock::time_point::max()) {
-        return -1; // no pending tasks
+void ScheduledExecutor::close()
+{
+    decltype(tasks_) cancelled;
+    {
+        std::scoped_lock lock(mu_);
+        closed_ = true;
+        tasks_.swap(cancelled);
     }
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(next_deadline - now);
-    return static_cast<int>(ms.count());
+    for (auto &[id, task] : cancelled) {
+        (void)id;
+        if (task.cancelled) {
+            try {
+                task.cancelled();
+            }
+            catch (...) {
+            }
+        }
+    }
 }
 
 size_t ScheduledExecutor::pending_count()

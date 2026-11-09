@@ -15,15 +15,16 @@ pub mod async_tree;
 pub mod backend_release;
 pub mod batch;
 pub mod chunk;
+mod close;
 pub mod config;
 pub mod cpp_global_metrics;
 pub mod crc;
 pub mod error;
-pub mod immutable_snapshot;
 pub mod maintenance;
 mod owner_budget;
 pub mod page;
 pub mod reactor;
+pub mod read_only_view;
 pub mod runtime;
 pub mod scan;
 pub mod snapshot;
@@ -40,8 +41,8 @@ pub use async_tree::{AsyncCrowdbtree, GetOutcome, OwnedGetOutcome, PinnedGetOutc
 pub use backend_release::BackendReleaseService;
 pub use batch::{BatchOp, ExtOp, OwnedAllocation, OwnedOp};
 pub use chunk::{
-    ChunkPageStoreOptions, ChunkPageStoreStats, ChunkRootCatalog, ChunkRpcDiskRoute, ChunkRpcRoute,
-    ChunkRpcTransportOptions, ChunkRuntimeOptions, ChunkTransport, RootCatalogObject, RootCatalogStore,
+    ChunkRootCatalog, ChunkRpcDiskRoute, ChunkRpcRoute, ChunkRpcTransportOptions, ChunkRuntimeOptions,
+    ChunkTransport, RootCatalogObject, RootCatalogStore,
 };
 #[cfg(feature = "chunk-rpc")]
 pub use chunk::{ChunkRpcRouteResolver, OwnedChunkRpcDiskRoute, OwnedChunkRpcTransportOptions};
@@ -52,9 +53,9 @@ pub use config::{
 pub use cpp_global_metrics::{cpp_global_metrics_max_name_len, flush_cpp_global_metrics};
 pub use crc::{crc32c, crc32c_update};
 pub use error::CtError;
-pub use immutable_snapshot::ImmutableTreeSnapshot;
 pub use maintenance::{CheckpointReport, FlushPhase, FlushReport};
 pub use reactor::PinnedValue;
+pub use read_only_view::ReadOnlyTreeView;
 pub use runtime::{
     TreeBindingOptions, TreeExecutorSnapshot, TreeResourceLimits, TreeRuntime, TreeRuntimeOptions,
     TreeRuntimeSnapshot,
@@ -72,7 +73,7 @@ pub use stats::{
 };
 pub use tree::{
     ct_add_log_stderr, ct_flush_logging, ct_init_logging, ct_init_test_logging, ct_shutdown_logging,
-    Crowdbtree, InstalledSplit, PreparedSplitOverlay, SplitOverlayLimits,
+    Crowdbtree, InstalledSplit, PreparedSplitOverlay, SplitOverlayLimits, TreeClose,
 };
 pub use uring::{Uring, UringFile};
 pub use write_handle::WriteHandle;

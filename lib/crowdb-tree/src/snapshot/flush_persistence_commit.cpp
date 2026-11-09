@@ -65,20 +65,7 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
         auto  source = owner->pages_ ? std::shared_ptr<const CapturedDurablePages>(owner->pages_) : owner->inherited_;
         CapturedWritePlan plan;
         plan.segments = source ? source->frames.segment_count() : 0;
-        auto extra    = detail::AllocationBound(detail::shared_allocation_bound<CapturedDurablePages>())
-                            .add_product(plan.segments + 1, 128)
-                            .add_product(std::min(plan.segments, view->snapshot_changes.size()),
-                                         ReadablePageFrames::segment_allocation_bound());
-        if (p.core->chunk_backend()) {
-            extra.add(p.core->chunk_backend()->checkpoint_allocation_bound(
-                source ? source->frames.size() : 0, source ? source->stored_reference_count : 0));
-        }
-        auto bound = extra.value();
-        if (!bound) {
-            finish(Status::resource_exhausted("flush metadata bound overflow"));
-            return;
-        }
-        auto result = p.work(*view, &plan, &work, *bound);
+        auto result   = p.work(*view, &plan, &work);
         if (!result.ok()) {
             reconcile(std::move(result));
             return;
@@ -86,8 +73,7 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
         if (!source || source->coverage != view->coverage || source->generation != view->generation ||
             source->root_page_id != view->root_page_id || source->next_page_id != view->next_page_id || owner->pages_) {
             if (!owner->pages_) {
-                owner->pages_ =
-                    detail::reserved_shared<CapturedDurablePages>(work.budget.reservation(), work.budget.reservation());
+                owner->pages_ = detail::reserved_shared<CapturedDurablePages>(work.budget.bytes, work.budget.bytes);
                 if (source) {
                     owner->pages_->frames.inherit(source->frames);
                     owner->pages_->overflow_counts_known  = source->overflow_counts_known;
@@ -95,7 +81,7 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
                 }
             }
             auto &catalog = *owner->pages_;
-            catalog.frames.budget(work.budget.reservation());
+            catalog.frames.budget(work.budget.bytes);
             result = catalog.initialize_overflow_counts();
             if (!result.ok()) {
                 reconcile(std::move(result));
@@ -144,17 +130,15 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
         owner->initial_.reset();
         owner->report_.captured_coverage = view->coverage;
         if (p.core->chunk_backend()) {
-            result = p.core->chunk_backend()->prepare_checkpoint(
-                {.pages                = pages,
-                 .view                 = *view,
-                 .wal_offset           = owner->wal_offset_,
-                 .max_dependency_steps = p.options.write.max_dependency_steps,
-                 .store                = p.ticket->backend(p.core->async_backend()),
-                 .runtime              = p.core->binding()->cpu(),
-                 .lane                 = p.core->binding()->lane(),
-                 .budget               = work.budget,
-                 .owner                = owner},
-                &chunk);
+            result = p.core->chunk_backend()->prepare_checkpoint({.pages      = pages,
+                                                                  .view       = *view,
+                                                                  .wal_offset = owner->wal_offset_,
+                                                                  .store   = p.ticket->backend(p.core->async_backend()),
+                                                                  .runtime = p.core->binding()->cpu(),
+                                                                  .lane    = p.core->binding()->lane(),
+                                                                  .budget  = work.budget,
+                                                                  .owner   = owner},
+                                                                 &chunk);
         }
         else {
             auto metadata                   = p.options.metadata;

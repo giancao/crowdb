@@ -37,7 +37,7 @@ try {
     }
     auto ticket = std::move(accepted);
     if (!ticket) {
-        auto status = state_->lifetime->acquire(binding()->lifecycle_budget(), &ticket);
+        auto status = state_->lifetime->acquire(state_->work_allocations, &ticket);
         if (!status.ok()) {
             return status;
         }
@@ -60,7 +60,7 @@ try {
         return Status::unavailable("Tree ingress closed");
     }
     std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
-    auto status = state_->lifetime->acquire(binding()->lifecycle_budget(), &ticket);
+    auto status = state_->lifetime->acquire(state_->work_allocations, &ticket);
     if (!status.ok()) {
         return status;
     }

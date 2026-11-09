@@ -59,7 +59,7 @@ TEST(RangeRuntimeBinding, BothCopyPathsUseTheProcessHostAndCallerLimits)
         EXPECT_TRUE(destination->get("a", nullptr, &value));
         EXPECT_EQ(value, "one");
         EXPECT_EQ(destination->get("z", nullptr, &value), !bounded);
-        EXPECT_EQ(destination->durable_snapshot_last_applied_slot(), source.last_applied_slot());
+        EXPECT_EQ(destination->durable_coverage(), source.last_applied_slot());
     }
 }
 

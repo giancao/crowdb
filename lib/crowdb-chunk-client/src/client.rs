@@ -155,7 +155,10 @@ impl ChunkIoClient {
             .native_routes()
             .await
             .map_err(|error| crate::IoError::Topology(format!("resolve ChunkDB route: {error}")))?;
-        Ok((chunkdb, topology.disk_writer.storage_route_resolver(timeout_ms)?))
+        Ok((
+            chunkdb,
+            topology.disk_writer.storage_route_resolver(timeout_ms).await?,
+        ))
     }
 
     /// Construct low-level seams with an explicit small-write policy.

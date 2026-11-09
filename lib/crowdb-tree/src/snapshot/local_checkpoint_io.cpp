@@ -11,7 +11,6 @@ void LocalCheckpointOperation::State::IoStep::completed(void *context, Status st
         return;
     }
     step.completion_status = std::move(status);
-    step.credit.reset();
     step.events.fetch_or(1, std::memory_order_acq_rel);
     step.publish();
 }
@@ -35,7 +34,7 @@ void LocalCheckpointOperation::State::IoStep::publish() noexcept
 
 void LocalCheckpointOperation::State::io(bool barrier, uint64_t address, size_t bytes, Stage next, bool anchor)
 {
-    auto step        = detail::reserved_shared<IoStep>(budget.reservation(), budget);
+    auto step        = detail::reserved_shared<IoStep>(budget.bytes);
     step->owner      = shared_from_this();
     step->window     = window;
     step->checkpoint = image;

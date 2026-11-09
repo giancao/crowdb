@@ -15,10 +15,15 @@ class AllocationAccount final : public AllocationBudget
   public:
     static Status create(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category,
                          std::shared_ptr<AllocationAccount> *out);
+    // Only controls and continuations of already-admitted work use this owner.
+    static Status create_ongoing(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category,
+                                 std::shared_ptr<AllocationAccount> *out);
     // Legacy backend construction records physical capacity before a Tree
     // exists. First rebind admits every retained byte before runtime use.
     static Status      create_unbound(std::shared_ptr<AllocationAccount> *out);
     [[nodiscard]] bool claim(size_t bytes) noexcept override;
+    [[nodiscard]] bool claim_ongoing(size_t bytes) noexcept;
+    [[nodiscard]] bool belongs_to(const std::shared_ptr<ResourceBudget::Account> &account) noexcept;
     void               release(size_t bytes) noexcept override;
     void               record_allocation(AllocationKind kind, size_t bytes, bool acquired) noexcept override;
 
@@ -36,6 +41,8 @@ class AllocationAccount final : public AllocationBudget
     {
         return work_.lock();
     }
+
+    [[nodiscard]] RetirementCompletion retirement_started() noexcept override;
 
     [[nodiscard]] std::shared_ptr<TreeResourceMetrics> resource_metrics() const noexcept override
     {
@@ -75,10 +82,11 @@ class AllocationAccount final : public AllocationBudget
         kWaitForWriter
     };
     using Hook = void (*)(void *, Step, size_t) noexcept;
-    AllocationAccount(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category);
+    AllocationAccount(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category, bool ongoing);
     static Status build(std::shared_ptr<ResourceBudget::Account> account, BudgetClass category,
-                        std::shared_ptr<AllocationAccount> *out);
+                        std::shared_ptr<AllocationAccount> *out, bool ongoing = false);
     Status        rebind(std::shared_ptr<ResourceBudget::Account> account, Hook hook, void *context);
+    bool          claim(size_t bytes, bool ongoing) noexcept;
     void          release(size_t bytes, Hook hook, void *context) noexcept;
     void          leave() noexcept;
     bool          adopt_existing(const std::shared_ptr<ResourceBudget::Account> &source, BudgetClass category,
@@ -95,6 +103,7 @@ class AllocationAccount final : public AllocationBudget
     const std::weak_ptr<TreeResourceMetrics> resources_;
     std::shared_ptr<ResourceBudget::Account> account_;
     BudgetClass                              category_;
+    const bool                               ongoing_;
     std::atomic<const void *>                domain_;
     // Closing succeeds only between active account accesses. Closed releases
     // publish bounded deltas without waiting. Reopen requires no active writer

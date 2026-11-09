@@ -4,6 +4,7 @@
 #include "c_api_internal.h"
 #include "c_api_owned_budget.h"
 #include "crowdb-tree/snapshot/snapshot_io.h"
+#include "snapshot/published_byte_export.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -49,6 +50,29 @@ struct ct_snapshot_chunk
 
 static_assert(sizeof(ct_snapshot_chunk) <= kSnapshotChunkHandleBytes);
 
+namespace
+{
+ct_export *allocate_export(std::shared_ptr<AllocationBudget> budget, std::unique_ptr<SnapshotExport> stream)
+{
+    MetadataAllocator<ct_export> allocator(budget);
+    auto                        *result = allocator.allocate(1);
+    std::construct_at(result);
+    result->metadata = std::move(budget);
+    result->exp      = std::move(stream);
+    return result;
+}
+
+ct_snapshot_chunk *take_chunk(ct_export &e, int32_t *done)
+{
+    MetadataAllocator<ct_snapshot_chunk> allocator(e.pending.allocation_budget);
+    auto                                *result = allocator.allocate(1);
+    std::construct_at(result, ct_snapshot_chunk{std::move(e.pending)});
+    *done = e.pending_done ? 1 : 0;
+    e.consumed();
+    return result;
+}
+} // namespace
+
 ct_status ct_snapshot_export_begin(ct_tree *tree, size_t chunk_bytes, ct_export **out)
 try {
     if (tree == nullptr || out == nullptr || chunk_bytes == 0) {
@@ -63,13 +87,46 @@ try {
     if (!status.ok()) {
         return static_cast<ct_status>(status.code());
     }
-    MetadataAllocator<ct_export> allocator(budget);
-    auto                        *result = allocator.allocate(1);
-    std::construct_at(result);
-    result->metadata = std::move(budget);
-    result->exp      = std::move(stream);
-    *out             = result;
+    *out = allocate_export(std::move(budget), std::move(stream));
     return 0;
+}
+catch (const std::bad_alloc &) {
+    return static_cast<ct_status>(Code::kResourceExhausted);
+}
+catch (...) {
+    return static_cast<ct_status>(Code::kInternal);
+}
+
+ct_status ct_snapshot_export_begin_published_async(ct_tree *tree, size_t chunk_bytes,
+                                                   ct_snapshot_export_complete complete, void *context)
+try {
+    if (tree == nullptr || complete == nullptr || chunk_bytes == 0 || chunk_bytes > kSnapshotChunkBytes) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    auto                                     *core = TreeCoreAccess::get(*c_api_tree(tree));
+    std::shared_ptr<PublishedReadViewContext> view;
+    auto                                      status = core->capture_read_only_view(&view);
+    if (status.ok()) {
+        status = PublishedByteExport::create_portable_async(
+            std::move(view), chunk_bytes,
+            [budget = core->binding()->lifecycle_budget(), complete,
+             context](Status result, std::shared_ptr<PublishedByteExport> stream) noexcept {
+                ct_export *exported = nullptr;
+                if (result.ok()) {
+                    try {
+                        exported = allocate_export(budget, std::make_unique<SnapshotExport>(std::move(stream)));
+                    }
+                    catch (const std::bad_alloc &) {
+                        result = Status::resource_exhausted();
+                    }
+                    catch (...) {
+                        result = Status::internal_error();
+                    }
+                }
+                complete(context, static_cast<ct_status>(result.code()), exported);
+            });
+    }
+    return static_cast<ct_status>(status.code());
 }
 catch (const std::bad_alloc &) {
     return static_cast<ct_status>(Code::kResourceExhausted);
@@ -146,13 +203,50 @@ try {
     if (!status.ok()) {
         return static_cast<ct_status>(status.code());
     }
-    MetadataAllocator<ct_snapshot_chunk> allocator(e->pending.allocation_budget);
-    auto                                *result = allocator.allocate(1);
-    std::construct_at(result, ct_snapshot_chunk{std::move(e->pending)});
-    *out  = result;
-    *done = e->pending_done ? 1 : 0;
-    e->consumed();
+    *out = take_chunk(*e, done);
     return 0;
+}
+catch (const std::bad_alloc &) {
+    return static_cast<ct_status>(Code::kResourceExhausted);
+}
+catch (...) {
+    return static_cast<ct_status>(Code::kInternal);
+}
+
+ct_status ct_snapshot_export_next_async(ct_export *e, uint64_t offset, ct_snapshot_chunk_complete complete,
+                                        void *context)
+try {
+    if (e == nullptr || complete == nullptr || offset != ct_snapshot_export_offset(e)) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    if (e->pending_valid) {
+        int32_t done  = 0;
+        auto   *chunk = take_chunk(*e, &done);
+        complete(context, 0, chunk, done);
+        return 0;
+    }
+    auto status =
+        e->exp->next_owned_async([e, offset, complete, context](Status result, SnapshotChunk chunk, bool end) noexcept {
+            ct_snapshot_chunk *owned = nullptr;
+            int32_t            done  = 0;
+            if (result.ok()) {
+                e->pending        = std::move(chunk);
+                e->pending_offset = offset;
+                e->pending_done   = end;
+                e->pending_valid  = true;
+                try {
+                    owned = take_chunk(*e, &done);
+                }
+                catch (const std::bad_alloc &) {
+                    result = Status::resource_exhausted();
+                }
+                catch (...) {
+                    result = Status::internal_error();
+                }
+            }
+            complete(context, static_cast<ct_status>(result.code()), owned, done);
+        });
+    return static_cast<ct_status>(status.code());
 }
 catch (const std::bad_alloc &) {
     return static_cast<ct_status>(Code::kResourceExhausted);

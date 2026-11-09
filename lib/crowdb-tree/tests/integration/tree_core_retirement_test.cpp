@@ -1,9 +1,15 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "backend/local/local_backend_state.h"
 #include "btree/retirement_queue.h"
 #include "btree/tree_core_access.h"
+#include "btree/tree_core_checkpoint_internal.h"
+#include "crowdb-tree/backend/block_page_store.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
+
+#include <future>
 
 namespace crowdb::tree
 {
@@ -65,6 +71,44 @@ TEST(TreeCoreRetirement, OldPublicationRootsAreCollectedWhileTreeRemainsOpen)
     const auto totals = core->publisher().work_metrics()->totals()[static_cast<size_t>(TreeStage::MemoryRetireWait)];
     EXPECT_GT(totals.attempts, 0U);
     EXPECT_EQ(totals.inflight, 0U);
+}
+
+TEST(TreeCoreRetirement, BackgroundLocalGcSuspendsWithoutHoldingTheBackendWorker)
+{
+    tree_test::TempDir              directory("runtime_gc_retirement_");
+    std::unique_ptr<BlockPageStore> store;
+    ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 1, 2, 64 * 1024, 4096, &store).ok());
+    Config config;
+    ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &config.runtime).ok());
+    config.page_store  = store.get();
+    config.frame_bytes = 4096;
+    std::shared_ptr<TreeCore> core;
+    const auto                opened = TreeCore::open(config, &core);
+    ASSERT_TRUE(opened.ok()) << opened.to_string();
+    auto                                           binding = core->binding();
+    auto                                           local   = core->local_backend();
+    std::shared_ptr<TreeOperationLifetime::Ticket> ticket;
+    ASSERT_TRUE(core->operation_lifetime().acquire(binding->lifecycle_budget(), &ticket).ok());
+
+    struct Probe
+    {
+        std::promise<void>    done;
+        ApplyDispatcher::Node node{[](void *context) noexcept { static_cast<Probe *>(context)->done.set_value(); },
+                                   this};
+    };
+
+    auto probe      = std::make_shared<Probe>();
+    auto completed  = probe->done.get_future();
+    auto retirement = core->accepted_allocations()->retirement_started();
+    ASSERT_NE(retirement.finish, nullptr);
+    checkpoint_detail::schedule_free_blocks(*core, std::move(ticket));
+    binding->backend_progress()->request(probe->node, probe);
+    const auto ready = completed.wait_for(std::chrono::seconds(3));
+    EXPECT_TRUE(local->gc_active.load(std::memory_order_acquire));
+    retirement.finish(retirement.owner.get());
+    EXPECT_EQ(ready, std::future_status::ready);
+    core->close_and_drain();
+    EXPECT_FALSE(local->gc_active.load(std::memory_order_acquire));
 }
 } // namespace
 } // namespace crowdb::tree

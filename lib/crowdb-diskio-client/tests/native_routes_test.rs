@@ -27,7 +27,10 @@ async fn native_route_reconnects_after_server_restart_without_invalidating_old_l
         )
         .unwrap(),
     );
-    let resolver = client.native_route_resolver(Duration::from_secs(30)).unwrap();
+    let resolver = client
+        .native_route_resolver(Duration::from_secs(30))
+        .await
+        .unwrap();
     let old = resolver.resolve(1, 2).unwrap();
     assert!(old.is_open());
     server.stop();

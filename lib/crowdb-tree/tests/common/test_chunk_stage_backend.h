@@ -23,14 +23,15 @@ class TestFixedTransport final : public ChunkTransport
     bool                              fail_write       = false;
     size_t                            allocations      = 0;
 
-    uint64_t              physical_epoch = 1;
-    std::function<void()> before_drain;
-    bool                  absent_after_delete = false;
-    bool                  fail_drain          = false;
-    mutable size_t        drains              = 0;
-    bool                  unknown_delete      = false;
-    bool                  physically_deleted  = false;
-    size_t                deletions           = 0;
+    uint64_t                                      physical_epoch = 1;
+    std::function<void()>                         before_drain;
+    std::function<bool(ChunkTransportCompletion)> after_drain_async;
+    bool                                          absent_after_delete = false;
+    bool                                          fail_drain          = false;
+    mutable size_t                                drains              = 0;
+    bool                                          unknown_delete      = false;
+    bool                                          physically_deleted  = false;
+    size_t                                        deletions           = 0;
 
     [[nodiscard]] Status drain_fixed_chunk(ChunkId /*unused*/) const override
     {
@@ -42,6 +43,15 @@ class TestFixedTransport final : public ChunkTransport
             return Status::not_found();
         }
         return fail_drain ? Status::unavailable() : Status::Ok();
+    }
+
+    void submit_drain_fixed_chunk(ChunkId chunk, ChunkTransportCompletion complete) const override
+    {
+        auto status = drain_fixed_chunk(chunk);
+        if (status.ok() && after_drain_async && after_drain_async(complete)) {
+            return;
+        }
+        complete.complete(std::move(status));
     }
 
     Status inspect_fixed_allocation(ChunkId id, uint64_t epoch, ChunkAllocationIdentity *out) const override
@@ -84,12 +94,6 @@ class TestFixedTransport final : public ChunkTransport
         return unknown_allocate ? Status::unavailable() : status;
     }
 
-    Status allocate_mirror_chunk(uint64_t /*unused*/, uint64_t /*unused*/, ChunkId * /*unused*/,
-                                 PagePurpose /*unused*/) override
-    {
-        return Status::not_supported();
-    }
-
     [[nodiscard]] Status verify_fixed_read_fence(ChunkId /*unused*/, uint32_t /*unused*/,
                                                  ChunkIoContext /*unused*/) const override
     {
@@ -108,7 +112,7 @@ class TestFixedTransport final : public ChunkTransport
         return read_mirror(id, mirror, offset, data, length);
     }
 
-    Status write_mirror(ChunkId id, uint32_t mirror, uint64_t offset, const uint8_t *data, size_t length) override
+    Status write_mirror(ChunkId id, uint32_t mirror, uint64_t offset, const uint8_t *data, size_t length)
     {
         return fail_write ? Status::unavailable() : memory.write_mirror(id, mirror, offset, data, length);
     }
@@ -118,7 +122,7 @@ class TestFixedTransport final : public ChunkTransport
         return memory.advance_write(id, expected, bytes);
     }
 
-    Status read_mirror(ChunkId id, uint32_t mirror, uint64_t offset, uint8_t *data, size_t length) const override
+    Status read_mirror(ChunkId id, uint32_t mirror, uint64_t offset, uint8_t *data, size_t length) const
     {
         return memory.read_mirror(id, mirror, offset, data, length);
     }

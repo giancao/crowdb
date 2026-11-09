@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -96,8 +97,9 @@ pub(super) async fn add_store(
         None
     };
     if req.store_id == 0
-        && (super::system_bootstrap::has_owner(&state)?
+        && (super::system_bootstrap::has_owner(&state).await?
             || super::system_bootstrap::system_cleanup_pending(&state.config.config_root)
+                .await
                 .map_err(|error| err_json(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?)
     {
         return Err(err_json(
@@ -174,72 +176,117 @@ pub(super) async fn add_store(
         params(("sid" = u64, Path, description = "Store id")),
         responses(
             (status = 200, description = "Store removed"),
-            (status = 404, description = "Store not found", body = ErrorResponse)
+            (status = 404, description = "Store not found", body = ErrorResponse),
+            (status = 503, description = "Removal is waiting for accepted work or resource release", body = ErrorResponse)
         )
     )]
 pub(super) async fn remove_store(
     State(state): State<RegistryArc>,
     Path(sid): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let execution = super::system_bootstrap::begin(&state)?;
+    let timeout = Duration::from_millis(state.config.server.shutdown_timeout_ms);
+    let removal = prepare_store_removal(&state, sid).await?;
+    super::runtime_shutdown::finish_removal(timeout, format!("remove store {sid}"), async move {
+        let _execution = execution;
+        removal.await?;
+        Ok(StatusCode::OK)
+    })
+    .await
+}
+
+pub(super) async fn prepare_store_removal(
+    state: &RegistryArc,
+    sid: u64,
+) -> Result<
+    impl std::future::Future<Output = Result<(), super::system_bootstrap::ManagementError>> + Send + 'static,
+    super::system_bootstrap::ManagementError,
+> {
     info!(s = sid, "removing PxKvStore via management API");
     let store = state
         .get_store(sid)
         .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
-    let runtime = store.has_runtime_engine();
-    if !runtime {
-        let _ = state.remove_store(sid);
+    let groups = store.group_ids();
+    let mut membership = Vec::with_capacity(groups.len());
+    for &gid in &groups {
+        membership.push(store.membership_guard(gid).lock_owned().await);
     }
-    let report = store
-        .shutdown(std::time::Duration::from_millis(
-            state.config.server.shutdown_timeout_ms,
-        ))
-        .await;
+    let timeout = Duration::from_millis(state.config.server.shutdown_timeout_ms);
+    let report = store.shutdown(timeout).await;
     if !report.is_clean() {
         for err in &report.errors {
             tracing::error!(s = sid, "{err}");
         }
     }
 
-    if runtime {
-        if !report.is_clean() {
-            return Err(err_json(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!(
-                    "runtime store retained; shutdown incomplete: {}",
-                    report.errors.join("; ")
-                ),
-            ));
-        }
-        let _ = state.remove_store(sid);
+    if store.has_runtime_engine() && !report.is_clean() {
+        return Err(err_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "runtime store retained; shutdown incomplete: {}",
+                report.errors.join("; ")
+            ),
+        ));
     }
 
-    // Delete the engine store dir (cascades all group subdirs).
+    let state = state.clone();
+    Ok(async move {
+        let _membership = membership;
+        let mut closing = Vec::with_capacity(groups.len());
+        store.for_each_group(|group| {
+            if let Some(close) = super::runtime_shutdown::tree_close(group) {
+                closing.push(close);
+            }
+        });
+        for gid in groups {
+            store.remove_group(gid);
+        }
+        for close in closing {
+            super::runtime_shutdown::wait_tree_close(Some(close)).await?;
+        }
+        remove_store_files(&state, sid).await?;
+        let _ = state.remove_store(sid);
+        info!(
+            s = sid,
+            error_count = report.errors.len(),
+            "PxKvStore removed via management API"
+        );
+        Ok(())
+    })
+}
+
+pub(super) async fn remove_store_files(
+    state: &RegistryArc,
+    sid: u64,
+) -> Result<(), super::system_bootstrap::ManagementError> {
     let engine_store_dir = state.config.data_root.join(format!("store{sid}"));
     if let Err(e) = tokio::fs::remove_dir_all(&engine_store_dir).await {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(s = sid, error = %e, "failed to delete engine store dir; continuing");
+            return Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to delete engine store dir: {e}"),
+            ));
         }
     }
 
     // Delete the WAL store dir (cascades all group subdirs).
     let wal_store_dir = crate::recovery::startup::store_wal_root(&state.config.wal_root, sid);
-    if let Err(e) = tokio::fs::remove_dir_all(&wal_store_dir).await {
+    if let Err(e) = state.wal_backend.remove_dir_all(&wal_store_dir).await {
         if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(s = sid, error = %e, "failed to delete WAL store dir; continuing");
+            return Err(err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to delete WAL store dir: {e}"),
+            ));
         }
     }
 
     // Update node-config.json so the store does not resurrect on restart.
     let node_config_store =
         crowdb_paxos_kv::cluster::node_config::NodeConfigStore::new(&state.config.config_root);
-    if let Err(e) = node_config_store.remove_store(sid).await {
-        tracing::warn!(s = sid, error = %e, "failed to update node_config; continuing");
-    }
-
-    info!(
-        s = sid,
-        error_count = report.errors.len(),
-        "PxKvStore removed via management API (dirs deleted + node_config updated)"
-    );
-    Ok(StatusCode::OK)
+    node_config_store.remove_store(sid).await.map_err(|error| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to update node config: {error}"),
+        )
+    })
 }

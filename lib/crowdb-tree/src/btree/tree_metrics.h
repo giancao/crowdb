@@ -77,9 +77,8 @@ class CheckpointPendingMetrics
     class PreparedCapture
     {
       public:
-        explicit PreparedCapture(CheckpointPendingMetrics                      &owner,
-                                 std::shared_ptr<detail::AllocationReservation> metadata       = {},
-                                 std::shared_ptr<const void>                    resource_owner = {});
+        explicit PreparedCapture(CheckpointPendingMetrics &owner, std::shared_ptr<AllocationBudget> metadata = {},
+                                 std::shared_ptr<const void> resource_owner = {});
         [[nodiscard]] std::shared_ptr<const void> commit(uint64_t token) noexcept;
 
       private:

@@ -42,7 +42,7 @@ class PageCacheResidency
     void                                  clear() noexcept;
     // Host-thread boundary: stop index producers, drain only this progress
     // registration and detach from the runtime. Late pin releases are safe.
-    void                                                      close_and_drain() noexcept;
+    void                                                      close_async(AsyncCompletion complete) noexcept;
     [[nodiscard]] uint64_t                                    proxy_pages() const noexcept;
     [[nodiscard]] const std::shared_ptr<TreeResourceMetrics> &resources() const noexcept;
     [[nodiscard]] static size_t                               page_allocation_bound(size_t refs) noexcept;

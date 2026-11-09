@@ -26,7 +26,16 @@ TreeRuntimeBinding::TreeRuntimeBinding(std::shared_ptr<TreeRuntime> runtime, Tre
 {
     account_->set_work_metrics(work_metrics_);
     account_->set_resource_metrics(resource_metrics_);
-    owner_->state_->bindings.fetch_add(1, std::memory_order_relaxed);
+}
+
+const std::shared_ptr<ApplyDispatcher> &TreeRuntimeBinding::view_cpu_progress() const noexcept
+{
+    return owner_->state_->view_cpu_progress;
+}
+
+const std::shared_ptr<ApplyDispatcher> &TreeRuntimeBinding::view_backend_progress() const noexcept
+{
+    return owner_->state_->view_backend_progress;
 }
 
 void TreeRuntimeBinding::drain() const noexcept
@@ -46,8 +55,9 @@ ResourceUsageSnapshot TreeRuntimeBinding::resource_usage() const noexcept
 
 TreeRuntimeBinding::~TreeRuntimeBinding()
 {
-    owner_->state_->bindings.fetch_sub(1, std::memory_order_relaxed);
+    backend_progress_.reset();
     lifecycle_->seal();
+    owner_->state_->finish_binding();
 }
 
 Status TreeRuntimeBinding::create(std::shared_ptr<TreeRuntime> runtime, TreeBindingOptions options,
@@ -60,9 +70,25 @@ try {
     if (!status.ok()) {
         return status;
     }
-    auto &state   = *runtime->state_;
-    auto  account = state.budget.make_account(resource_limits(options.limits), state.lifecycle);
-    auto  credit = detail::ResourceBudget::try_reserve(account, detail::BudgetClass::kRouting, options.lifecycle_bytes);
+    auto &state = *runtime->state_;
+    if (!state.start_binding()) {
+        return Status::unavailable();
+    }
+
+    struct PendingBinding
+    {
+        TreeRuntime::State *state;
+
+        ~PendingBinding()
+        {
+            if (state != nullptr) {
+                state->finish_binding();
+            }
+        }
+    } pending{&state};
+
+    auto account = state.budget.make_account(resource_limits(options.limits), state.lifecycle);
+    auto credit  = detail::ResourceBudget::try_reserve(account, detail::BudgetClass::kRouting, options.lifecycle_bytes);
     if (!credit) {
         return runtime->stopped() ? Status::unavailable() : Status::resource_exhausted();
     }
@@ -72,6 +98,7 @@ try {
     auto result       = detail::reserved_construct<TreeRuntimeBinding>(lifecycle, [&](TreeRuntimeBinding *value) {
         ::new (static_cast<void *>(value))
             TreeRuntimeBinding(runtime, options, account, lifecycle, std::move(lane), std::move(backend_lane));
+        pending.state = nullptr;
     });
     status =
         ApplyDispatcher::create(result->backend_cpu_, result->backend_lane_, 1, lifecycle, &result->backend_progress_);

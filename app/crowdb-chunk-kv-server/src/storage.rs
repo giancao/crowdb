@@ -19,14 +19,13 @@ use crowdb_protocol::chunk_kv::{
 };
 use crowdb_protocol::chunk_stream::{StreamRecord, StreamRecordState};
 use crowdb_tree_ffi::{
-    ChunkPageStoreOptions, ChunkRootCatalog, ChunkTransport, OwnedChunkRpcTransportOptions, PageStore,
+    ChunkRootCatalog, ChunkRuntimeOptions, ChunkTransport, OwnedChunkRpcTransportOptions, PageStore,
 };
 use thiserror::Error;
 
 use crate::{BootstrapPartitionConfig, ChunkKvServerConfig};
 
 mod bootstrap;
-pub mod legacy_retirement;
 mod root_catalog;
 #[cfg(feature = "test-util")]
 mod root_catalog_test;
@@ -292,7 +291,7 @@ impl ChunkKvStorage {
     /// Returns an invalid native page-store or transport error.
     pub fn open_tree_page_store(
         &self,
-        mut options: ChunkPageStoreOptions,
+        mut options: ChunkRuntimeOptions,
         catalog: Arc<ChunkRootCatalog>,
     ) -> Result<Arc<PageStore>, StorageRuntimeError> {
         options.mirror_copies = self.tree_mirror_copies;
@@ -305,25 +304,15 @@ impl ChunkKvStorage {
         self.pin_releases
             .bind(&catalog)
             .map_err(|error| StorageRuntimeError::Tree(error.to_string()))?;
-        let opened = PageStore::open_chunk_runtime(
-            &self.tree_runtime,
-            crowdb_tree_ffi::ChunkRuntimeOptions {
-                tree_id: options.tree_id,
-                owner_epoch: options.owner_epoch,
-                open_generation: options.open_generation,
-                iu_size: if options.iu_size != 0 {
-                    options.iu_size
-                } else if self.tree_options.iu_size != 0 {
-                    self.tree_options.iu_size
-                } else {
-                    64 * 1024
-                },
-                mirror_copies: options.mirror_copies,
-                max_chunk_bytes: options.max_chunk_bytes,
-            },
-            catalog,
-            &self.tree_transport,
-        );
+        if options.iu_size == 0 {
+            options.iu_size = if self.tree_options.iu_size == 0 {
+                ChunkRuntimeOptions::default().iu_size
+            } else {
+                self.tree_options.iu_size
+            };
+        }
+        let opened =
+            PageStore::open_chunk_runtime(&self.tree_runtime, options, catalog, &self.tree_transport);
         opened
             .map(Arc::new)
             .map_err(|error| StorageRuntimeError::Tree(error.to_string()))
@@ -337,7 +326,7 @@ impl ChunkKvStorage {
     /// Returns a stale authority, KV availability, or native page-store error.
     pub async fn open_durable_tree_page_store(
         &self,
-        options: ChunkPageStoreOptions,
+        options: ChunkRuntimeOptions,
         metadata_group_id: u64,
     ) -> Result<Arc<PageStore>, StorageRuntimeError> {
         self.open_durable_tree(options, metadata_group_id)
@@ -567,14 +556,11 @@ impl ChunkKvStorage {
             .map_err(|error| StorageRuntimeError::Stream(error.to_string()))?;
         let (page_store, catalog) = self
             .open_durable_tree(
-                ChunkPageStoreOptions {
+                ChunkRuntimeOptions {
                     tree_id: config.tree_id,
                     owner_epoch: config.owner_epoch,
                     open_generation: 0,
-                    pack_bytes: 0,
                     iu_size: 0,
-                    max_concurrent_packs: 0,
-                    materialization_bytes_per_pass: 0,
                     mirror_copies: 0,
                     max_chunk_bytes: 0,
                 },
@@ -640,6 +626,7 @@ impl ChunkKvStorage {
         } else {
             parent
                 .release_generation_pin(split_plan(transition).transition_id)
+                .await
                 .map_err(|error| storage_plan_error(&error.to_string()))?;
             let parent_record = self
                 .streams
@@ -662,7 +649,8 @@ impl ChunkKvStorage {
                 .page_store
                 .as_ref()
                 .ok_or_else(|| storage_plan_error("split child page store is absent"))?
-                .unpin_chunk_generation(child.tree_id, transition_id.high, transition_id.low)
+                .unpin_chunk_generation_async(child.tree_id, transition_id.high, transition_id.low)
+                .await
                 .map_err(|error| storage_plan_error(&error.to_string()))?;
             child
         };
@@ -694,6 +682,7 @@ impl ChunkKvStorage {
                 high: transition.transition_id.high,
                 low: transition.transition_id.low,
             })
+            .await
             .map_err(|error| storage_plan_error(&error.to_string()))?;
         let record = self
             .streams
@@ -765,14 +754,11 @@ impl ChunkKvStorage {
             .await?;
         let page_store = self
             .open_durable_tree_page_store(
-                ChunkPageStoreOptions {
+                ChunkRuntimeOptions {
                     tree_id: artifact.tree_id,
                     owner_epoch,
                     open_generation: 0,
-                    pack_bytes: 0,
                     iu_size: 0,
-                    max_concurrent_packs: 0,
-                    materialization_bytes_per_pass: 0,
                     mirror_copies: 0,
                     max_chunk_bytes: 0,
                 },

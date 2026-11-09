@@ -302,7 +302,7 @@ try {
             flush_ns += elapsed(start);
             start                 = Clock::now();
             uint64_t durable_slot = 0;
-            check(ct_snapshot(tree.get(), &durable_slot), "snapshot");
+            check(ct_flush_with_persistent(tree.get(), &durable_slot), "snapshot");
             ct_set_gc_watermark(tree.get(), durable_slot, durable_slot);
             snapshot_ns += elapsed(start);
             if (options.cold != 0) {

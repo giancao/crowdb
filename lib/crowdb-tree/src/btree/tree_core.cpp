@@ -44,22 +44,6 @@ class EmptyBackend final : public AsyncPageStore
     }
 };
 
-FlushBatchOptions flush_options(const Config &config, const TreeRuntimeBinding &binding, size_t max_key_size)
-{
-    FlushBatchOptions batch;
-    batch.parallelism =
-        std::max<size_t>(1, std::min(binding.cpu()->worker_count(), binding.options().limits.io_operations));
-    if (config.execution.flush_parallelism != 0) {
-        batch.parallelism = config.execution.flush_parallelism;
-    }
-    batch.run_limits         = {.max_entries     = config.execution.run_max_entries,
-                                .max_key_bytes   = std::max(config.execution.run_max_key_bytes, max_key_size),
-                                .key_block_bytes = config.execution.run_key_block_bytes};
-    batch.max_run_bytes      = config.execution.run_max_bytes;
-    batch.install_run_window = config.execution.install_run_window;
-    return batch;
-}
-
 Status configure_maintenance(const Config &config, PageMaintenanceOperationOptions *maintenance)
 {
     maintenance->visits_per_step = config.execution.maintenance_visits_per_step;
@@ -89,6 +73,29 @@ Status configure_maintenance(const Config &config, PageMaintenanceOperationOptio
 
 } // namespace
 
+FlushBatchOptions TreeCore::State::flush_batch_options(size_t max_key_size) const
+{
+    FlushBatchOptions batch;
+    batch.parallelism        = std::max<size_t>(1, config.execution.flush_parallelism);
+    batch.run_limits         = {.max_entries     = config.execution.run_max_entries,
+                                .max_key_bytes   = std::max(config.execution.run_max_key_bytes, max_key_size),
+                                .key_block_bytes = config.execution.run_key_block_bytes};
+    batch.max_run_bytes      = config.execution.run_max_bytes;
+    batch.install_run_window = config.execution.install_run_window;
+    return batch;
+}
+
+SourceWriteOptions TreeCore::State::source_write_options() const
+{
+    SourceWriteOptions writers{.account = binding->account()};
+    writers.max_entries       = config.execution.source_max_entries;
+    writers.max_key_bytes     = config.execution.source_max_key_bytes;
+    writers.max_gap_entries   = config.execution.source_max_gap_entries;
+    writers.max_gap_key_bytes = config.execution.source_max_gap_key_bytes;
+    writers.max_key_size      = config.max_key_size != 0 ? config.max_key_size : config.frame_bytes / 2;
+    return writers;
+}
+
 std::shared_ptr<PublishedTreeState>
 TreeCore::State::empty_state(const std::shared_ptr<detail::AllocationReservation> &credit)
 {
@@ -116,13 +123,31 @@ TreeCore::State::State(Config options, std::shared_ptr<TreeRuntimeBinding> host)
 
 TreeCore::State::~State()
 {
-    if (cache) {
+    if (release_on_close) {
+        return;
+    }
+    if (async_bootstrap) {
+        // Initialization can have queued private cache residency work. Keep
+        // the binding through its completion even though no Tree was exposed.
+        if (cache) {
+            cache->close_async({.owner = binding});
+        }
+        release_resources();
+        return;
+    }
+    if (cache && close_state.load(std::memory_order_acquire) != 2) {
         cache->close_and_drain();
     }
-    // State teardown is a host boundary. Drop roots before waiting for this
-    // account's accepted retirement work; immutable external views may remain.
+    release_resources();
+    // The standalone compatibility facade destroys the State on its host.
+    binding->drain();
+}
+
+void TreeCore::State::release_resources() noexcept
+{
     source_rotation.reset();
     flush.reset();
+    preparation = {};
     publisher.reset();
     sources.reset();
     cache.reset();
@@ -136,7 +161,7 @@ TreeCore::State::~State()
     local.reset();
     chunk.reset();
     backend.reset();
-    binding->drain();
+    config.backend_owner.reset();
 }
 
 Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
@@ -198,12 +223,9 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
     else if (chunk) {
         lifetime_owner = chunk;
     }
-    lifetime        = detail::reserved_unique<TreeOperationLifetime>(credit, binding->options().cpu_queue_limit, credit,
-                                                                     lifetime_owner);
-    apply_lifetime  = detail::reserved_unique<TreeOperationLifetime>(credit, binding->options().cpu_queue_limit, credit,
-                                                                     lifetime_owner);
-    replay_lifetime = detail::reserved_unique<TreeOperationLifetime>(credit, binding->options().cpu_queue_limit + 2,
-                                                                     credit, lifetime_owner);
+    lifetime                = detail::reserved_unique<TreeOperationLifetime>(credit, credit, lifetime_owner);
+    apply_lifetime          = detail::reserved_unique<TreeOperationLifetime>(credit, credit, lifetime_owner);
+    replay_lifetime         = detail::reserved_unique<TreeOperationLifetime>(credit, credit, lifetime_owner);
     const auto replay_bytes = TreeApplyOperation::allocation_bound(TreeApplyOperation::kReplayCallerControlBytes);
     if (!replay_bytes) {
         return Status::resource_exhausted("replay control bound overflow");
@@ -225,12 +247,7 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
     if (!status.ok()) {
         return status;
     }
-    SourceWriteOptions writers{.account = binding->account()};
-    writers.max_entries       = config.execution.source_max_entries;
-    writers.max_key_bytes     = config.execution.source_max_key_bytes;
-    writers.max_gap_entries   = config.execution.source_max_gap_entries;
-    writers.max_gap_key_bytes = config.execution.source_max_gap_key_bytes;
-    writers.max_key_size      = config.max_key_size != 0 ? config.max_key_size : config.frame_bytes / 2;
+    const auto writers = source_write_options();
     sources   = detail::reserved_unique<SourceAdmission>(credit, initial->coverage, initial->generation, writers,
                                                          source_lifecycle);
     resources = binding->resource_metrics();
@@ -298,10 +315,18 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
         return read_status;
     }
     reads.metadata = std::move(read_allocations);
-    auto batch     = flush_options(config, *binding, writers.max_key_size);
-    preparation    = {.runtime = binding->cpu(), .store = backend, .loads = loads, .maintenance = {}, .cache = cache};
+    std::shared_ptr<detail::AllocationAccount> ongoing;
+    auto                                       ongoing_status =
+        detail::AllocationAccount::create_ongoing(binding->account(), detail::BudgetClass::kRouting, &ongoing);
+    if (!ongoing_status.ok()) {
+        return ongoing_status;
+    }
+    work_allocations = std::move(ongoing);
+    auto batch       = flush_batch_options(writers.max_key_size);
+    preparation      = {.runtime = binding->cpu(), .store = backend, .loads = loads, .maintenance = {}, .cache = cache};
     preparation.cpu_progress = apply_dispatcher;
-    status                   = publisher->prepare_lane(batch.parallelism + 1, credit, &preparation.publication);
+    preparation.allocations  = work_allocations;
+    status                   = publisher->prepare_lane(credit, &preparation.publication);
     if (!status.ok()) {
         return status;
     }
@@ -349,7 +374,7 @@ TreeCore::TreeCore(detail::ReservedUnique<State> state) : state_(std::move(state
 }
 
 Status TreeCore::create(Config config, std::shared_ptr<TreeRuntimeBinding> binding, TreeCoreBootstrap bootstrap,
-                        std::shared_ptr<TreeCore> *out)
+                        std::shared_ptr<TreeCore> *out, bool async_bootstrap)
 try {
     if (!binding || out == nullptr || *out || !config.runtime || config.frame_bytes < 512 ||
         config.frame_bytes > kMaxPhysicalPageBytes || config.buffer_pool_bytes < config.frame_bytes ||
@@ -363,18 +388,16 @@ try {
     if (!execution_status.ok()) {
         return execution_status;
     }
-    if (config.execution.flush_parallelism > binding->cpu()->worker_count() ||
-        config.execution.flush_parallelism > binding->options().limits.io_operations) {
-        return Status::invalid_argument("flush_parallelism exceeds CPU workers or Tree I/O permits");
-    }
-    const auto credit = binding->lifecycle_budget();
-    auto       state  = detail::reserved_unique<State>(credit, std::move(config), std::move(binding));
-    auto       status = state->initialize(std::move(bootstrap));
+    const auto credit      = binding->lifecycle_budget();
+    auto       state       = detail::reserved_unique<State>(credit, std::move(config), std::move(binding));
+    state->async_bootstrap = async_bootstrap;
+    auto status            = state->initialize(std::move(bootstrap));
     if (!status.ok()) {
         return status;
     }
     *out = detail::reserved_construct<TreeCore>(
         credit, [&](auto *storage) { ::new (static_cast<void *>(storage)) TreeCore(std::move(state)); });
+    (*out)->state_->async_bootstrap = false;
     return Status::Ok();
 }
 catch (const std::bad_alloc &) {
@@ -386,6 +409,8 @@ catch (const std::invalid_argument &error) {
 
 TreeCore::~TreeCore()
 {
-    close_and_drain();
+    if (!state_->async_bootstrap) {
+        close_and_drain();
+    }
 }
 } // namespace crowdb::tree

@@ -34,7 +34,7 @@ void checkpoint_large_values(size_t source_entries)
             auto status = tree.flush();
             ASSERT_TRUE(status.ok()) << status.to_string();
             uint64_t durable = 0;
-            status           = tree.snapshot(&durable);
+            status           = tree.flush_with_persistent(&durable);
             ASSERT_TRUE(status.ok()) << status.to_string();
             EXPECT_EQ(durable, (pass + 1) * 4096);
             tree.set_gc_watermark(durable, durable);

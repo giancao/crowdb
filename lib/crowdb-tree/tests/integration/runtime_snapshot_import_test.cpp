@@ -5,6 +5,8 @@
 #include "crowdb-tree/snapshot/snapshot_io.h"
 #include "native_import_test_support.h"
 
+#include <future>
+
 namespace crowdb::tree
 {
 namespace
@@ -197,6 +199,54 @@ TEST_F(RuntimeSnapshotImportTest, CrcTruncationOrderAndFieldFailuresNeverReplace
     }
     ASSERT_TRUE(tree->put("after", "works").ok());
     EXPECT_EQ(tree->get_view("after").slot(), 2U);
+}
+
+TEST(RuntimeSnapshotImportAsync, AcceptedInstallRetainsStagingAfterImporterRelease)
+{
+    Config config;
+    ASSERT_TRUE(TreeRuntime::create({.workers = 1}, &config.runtime).ok());
+    Crowdbtree tree(config);
+    ASSERT_TRUE(tree.put("old", "value").ok());
+    const auto wire     = test_portable({
+        {.key = "new", .slot = 7, .kind = 0, .value = std::string(9000, 'n')}
+    });
+    auto       importer = std::make_unique<SnapshotImport>(tree);
+    ASSERT_TRUE(importer->feed(wire).ok());
+    auto binding = TreeCoreAccess::get(tree)->binding();
+
+    struct Pause
+    {
+        std::promise<void>    entered;
+        std::future<void>     resume;
+        ApplyDispatcher::Node node{[](void *context) noexcept {
+                                       auto &pause = *static_cast<Pause *>(context);
+                                       pause.entered.set_value();
+                                       pause.resume.wait();
+                                   },
+                                   this};
+    };
+
+    std::promise<void> resume;
+    auto               pause = std::make_shared<Pause>();
+    pause->resume            = resume.get_future();
+    auto entered             = pause->entered.get_future();
+    binding->view_cpu_progress()->request(pause->node, pause);
+    ASSERT_EQ(entered.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+
+    auto done      = std::make_shared<std::promise<std::pair<Status, uint64_t>>>();
+    auto installed = done->get_future();
+    auto status    = importer->finish_async(
+        [done](Status result, uint64_t coverage) { done->set_value({std::move(result), coverage}); });
+    ASSERT_TRUE(status.ok()) << status.to_string();
+    importer.reset();
+    EXPECT_EQ(installed.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    resume.set_value();
+    ASSERT_EQ(installed.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    auto [result, coverage] = installed.get();
+    ASSERT_TRUE(result.ok()) << result.to_string();
+    EXPECT_EQ(coverage, 17U);
+    EXPECT_EQ(tree.get_view("new").value().to_string(), std::string(9000, 'n'));
+    EXPECT_FALSE(tree.get_view("old").found());
 }
 
 TEST_F(RuntimeSnapshotImportTest, NativeStreamsRetainOnlyChargedFramesBeforeAtomicInstall)

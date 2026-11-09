@@ -37,12 +37,12 @@ uint64_t Crowdbtree::inner_count_atomic() const
     return core_->capture()->stats.inner_pages;
 }
 
-uint64_t Crowdbtree::durable_snapshot_seq() const
+uint64_t Crowdbtree::durable_sequence() const
 {
     return core_->snapshot_sequence();
 }
 
-uint64_t Crowdbtree::durable_snapshot_last_applied_slot() const
+uint64_t Crowdbtree::durable_coverage() const
 {
     return core_->durable_coverage();
 }

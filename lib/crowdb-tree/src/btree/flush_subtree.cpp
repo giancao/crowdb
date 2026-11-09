@@ -141,17 +141,7 @@ void FlushBatch::State::Subtree::start(detail::CallbackComplete callback, void *
         }
         finished = false;
         status   = Status::Ok();
-        if (expected && expected->level == 0) {
-            auto *head = owner.leaf_waiters.load(std::memory_order_relaxed);
-            do {
-                leaf_next = head;
-            } while (!owner.leaf_waiters.compare_exchange_weak(head, this, std::memory_order_release,
-                                                               std::memory_order_relaxed));
-            owner.start_leaves();
-        }
-        else {
-            schedule();
-        }
+        schedule();
     }
     catch (const std::bad_alloc &) {
         complete(Status::resource_exhausted("flush task allocation failed"));
@@ -194,51 +184,19 @@ void FlushBatch::State::Subtree::run(void *raw) noexcept
 
 void FlushBatch::State::Subtree::complete(Status result) noexcept
 {
-    auto       lifetime = owner.weak_from_this().lock();
-    auto      &state    = owner;
-    const bool release  = std::exchange(leaf_permit, false);
-    status              = std::move(result);
+    auto lifetime = owner.weak_from_this().lock();
+    status        = std::move(result);
     if (layout_metrics) {
         (void)layout_metrics->finish(status.ok() ? TreeOutcome::Success : TreeOutcome::Error, tree_metrics_now_ns());
     }
     finished          = true;
     const auto signal = status.ok() ? detail::CallbackSignal::kValue : detail::CallbackSignal::kError;
     done(context, signal, status);
-    if (release) {
-        state.active_leaves.fetch_sub(1, std::memory_order_acq_rel);
-        state.start_leaves();
-    }
 }
 
 size_t FlushBatch::State::Subtree::fork_bytes() noexcept
 {
     return (2 * sizeof(Children)) + detail::shared_allocation_bound<Children::Operation>();
-}
-
-void FlushBatch::State::start_leaves() noexcept
-{
-    auto count = active_leaves.load(std::memory_order_relaxed);
-    while (count < options.parallelism) {
-        if (!active_leaves.compare_exchange_weak(count, count + 1, std::memory_order_acq_rel)) {
-            continue;
-        }
-        auto *next = leaf_waiters.load(std::memory_order_acquire);
-        while (next != nullptr &&
-               !leaf_waiters.compare_exchange_weak(next, next->leaf_next, std::memory_order_acq_rel)) {
-        }
-        if (next != nullptr) {
-            next->leaf_permit = true;
-            next->schedule();
-        }
-        else {
-            active_leaves.fetch_sub(1, std::memory_order_acq_rel);
-            // An enqueuer either takes this permit or observes our idle edge.
-            if (leaf_waiters.load(std::memory_order_acquire) == nullptr) {
-                return;
-            }
-        }
-        count = active_leaves.load(std::memory_order_relaxed);
-    }
 }
 
 void FlushBatch::State::Subtree::step()

@@ -98,7 +98,7 @@ struct Config
 
     // ── Persistence ──
     // Durable backend. Non-owning; nullptr = pure in-memory engine (no
-    // snapshot/recovery). When set, snapshot() writes the materialized L1
+    // flush with persistent/recovery). When set, flush_with_persistent() writes the materialized L1
     // state and open() recovers it.
     PageStore *page_store = nullptr;
 

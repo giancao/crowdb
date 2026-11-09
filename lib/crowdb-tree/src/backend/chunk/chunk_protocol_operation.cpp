@@ -11,18 +11,18 @@ namespace crowdb::tree
 {
 struct ChunkProtocolOperation::State : std::enable_shared_from_this<State>
 {
-    explicit State(PageLoadBudget credit) : budget(std::move(credit)), io(budget.io, 1)
+    explicit State(PageLoadBudget credit) : budget(std::move(credit))
     {
     }
 
     PageLoadBudget                                  budget;
-    AllocationLease                                 io;
     std::shared_ptr<AsyncPageStore>                 store;
     std::shared_ptr<detail::FlushRuntime::Progress> progress;
     std::shared_ptr<ApplyDispatcher>                dispatcher;
     ApplyDispatcher::Node                           node{&State::run, this};
     std::shared_ptr<const void>                     owner;
     Step                                            step;
+    AsyncStep                                       async_step;
     Done                                            done;
     std::atomic<uint8_t>                            lifecycle{0};
     std::atomic<bool>                               stopped{false};
@@ -92,9 +92,16 @@ struct ChunkProtocolOperation::State : std::enable_shared_from_this<State>
         auto *scheduled = static_cast<ScheduledPageStore *>(store.get());
         waiting         = true;
         ready.store(false, std::memory_order_release);
-        auto status = scheduled->submit_step(
-            [self] { return self->step(self->stopped.load(std::memory_order_acquire)); },
-            {.context = this, .complete_fn = &State::completed, .owner = self, .allocations = budget.reservation()});
+        const AsyncCompletion complete{
+            .context = this, .complete_fn = &State::completed, .owner = self, .allocations = budget.bytes};
+        auto status = async_step
+                        ? scheduled->submit_async_step(
+                              [self](AsyncCompletion complete) {
+                                  self->async_step(self->stopped.load(std::memory_order_acquire), std::move(complete));
+                              },
+                              complete)
+                        : scheduled->submit_step(
+                              [self] { return self->step(self->stopped.load(std::memory_order_acquire)); }, complete);
         if (!status.ok()) {
             waiting = false;
             finish(std::move(status));
@@ -106,9 +113,9 @@ struct ChunkProtocolOperation::State : std::enable_shared_from_this<State>
         if (lifecycle.exchange(3, std::memory_order_acq_rel) == 3) {
             return;
         }
-        io   = {};
-        step = {};
-        done = {};
+        step       = {};
+        async_step = {};
+        done       = {};
         owner.reset();
         store.reset();
         complete(context, status.ok() ? detail::CallbackSignal::kValue : detail::CallbackSignal::kError,
@@ -122,36 +129,58 @@ size_t ChunkProtocolOperation::allocation_bound() noexcept
            detail::FlushRuntime::progress_allocation_bound();
 }
 
-Status ChunkProtocolOperation::create(std::shared_ptr<AsyncPageStore>             store,
-                                      std::shared_ptr<detail::FlushRuntime>       runtime,
-                                      std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadBudget budget,
-                                      std::shared_ptr<const void> owner, Step step, Done done,
-                                      std::shared_ptr<ChunkProtocolOperation> *out)
+Status ChunkProtocolOperation::create_impl(std::shared_ptr<AsyncPageStore>             store,
+                                           std::shared_ptr<detail::FlushRuntime>       runtime,
+                                           std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadBudget budget,
+                                           std::shared_ptr<const void> owner, Step step, AsyncStep async_step,
+                                           Done done, std::shared_ptr<ChunkProtocolOperation> *out)
 try {
-    if (!store || dynamic_cast<ScheduledPageStore *>(store.get()) == nullptr || !runtime || !lane ||
-        !budget.reservation() || !budget.io || !step || !done || out == nullptr || *out ||
-        budget.reservation()->account() != budget.io->account() || budget.io->category() != detail::BudgetClass::kIo) {
+    if (!store || dynamic_cast<ScheduledPageStore *>(store.get()) == nullptr || !runtime || !lane || !budget.bytes ||
+        (!step && !async_step) || !done || out == nullptr || *out ||
+        (budget.io && (!budget.reservation() || budget.reservation()->account() != budget.io->account() ||
+                       budget.io->category() != detail::BudgetClass::kIo))) {
         return Status::invalid_argument();
     }
-    auto state        = detail::reserved_shared<State>(budget.reservation(), budget);
+    auto state        = detail::reserved_shared<State>(budget.bytes, budget);
     state->store      = std::move(store);
     state->owner      = std::move(owner);
     state->step       = std::move(step);
+    state->async_step = std::move(async_step);
     state->done       = std::move(done);
     state->dispatcher = budget.cpu_progress;
     if (!state->dispatcher) {
-        auto status = runtime->reserve_progress(lane, &State::run, state.get(), budget.reservation(), &state->progress);
+        auto status = runtime->reserve_progress(lane, &State::run, state.get(), budget.bytes, &state->progress);
         if (!status.ok()) {
             return status;
         }
     }
-    *out = detail::reserved_construct<ChunkProtocolOperation>(budget.reservation(), [&](auto *storage) {
+    *out = detail::reserved_construct<ChunkProtocolOperation>(budget.bytes, [&](auto *storage) {
         ::new (static_cast<void *>(storage)) ChunkProtocolOperation(std::move(state));
     });
     return Status::Ok();
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted();
+}
+
+Status ChunkProtocolOperation::create(std::shared_ptr<AsyncPageStore>             store,
+                                      std::shared_ptr<detail::FlushRuntime>       runtime,
+                                      std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadBudget budget,
+                                      std::shared_ptr<const void> owner, Step step, Done done,
+                                      std::shared_ptr<ChunkProtocolOperation> *out)
+{
+    return create_impl(std::move(store), std::move(runtime), std::move(lane), std::move(budget), std::move(owner),
+                       std::move(step), {}, std::move(done), out);
+}
+
+Status ChunkProtocolOperation::create_async(std::shared_ptr<AsyncPageStore>             store,
+                                            std::shared_ptr<detail::FlushRuntime>       runtime,
+                                            std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadBudget budget,
+                                            std::shared_ptr<const void> owner, AsyncStep step, Done done,
+                                            std::shared_ptr<ChunkProtocolOperation> *out)
+{
+    return create_impl(std::move(store), std::move(runtime), std::move(lane), std::move(budget), std::move(owner), {},
+                       std::move(step), std::move(done), out);
 }
 
 detail::CallbackSender ChunkProtocolOperation::sender() noexcept

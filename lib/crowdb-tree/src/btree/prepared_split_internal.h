@@ -22,6 +22,7 @@ struct PreparedSplitOverlay::State
     std::shared_ptr<SplitSourceSession>            session;
     std::shared_ptr<SplitSourceSession>            previous_session;
     std::shared_ptr<TreeGenerationLease>           lease;
+    AsyncCompletion                                on_prepared;
     std::atomic<uint8_t>                           phase{Armed};
     uint64_t                                       source_identity  = 0;
     uint64_t                                       start            = 0;

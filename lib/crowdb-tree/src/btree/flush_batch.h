@@ -99,9 +99,8 @@ class FlushBatch
     static Status prepare(PublicationCoordinator &publisher, detail::FlushRuntime &runtime,
                           std::shared_ptr<detail::FlushRuntime::Lane> lane, uint64_t batch_id, uint64_t frontier,
                           FlushBatchOptions options, Maintenance maintenance, std::shared_ptr<FlushBatch> *out,
-                          std::shared_ptr<const PublishedSources>        inputs                = {},
-                          std::shared_ptr<detail::AllocationReservation> metadata              = {},
-                          uint64_t                                       flush_admission_owner = 0);
+                          std::shared_ptr<const PublishedSources> inputs = {},
+                          std::shared_ptr<AllocationBudget> metadata = {}, uint64_t flush_admission_owner = 0);
     ~FlushBatch();
     FlushBatch(const FlushBatch &)            = delete;
     FlushBatch &operator=(const FlushBatch &) = delete;

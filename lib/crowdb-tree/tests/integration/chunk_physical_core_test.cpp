@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "backend/chunk/chunk_purpose.h"
 #include "common/test_tree_core_chunk.h"
 
 namespace crowdb::tree
@@ -9,7 +10,7 @@ TEST(ChunkPhysicalCore, SingleIoCheckpointReportsAllPhysicalMirrorAllocationsInc
     test_chunk::TestCoreChunk test;
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, std::string(20000, 'x')).ok());
-    auto status = test.tree->snapshot();
+    auto status = test.tree->flush_with_persistent();
     ASSERT_TRUE(status.ok()) << status.to_string();
     uint64_t expected = 0;
     bool     index    = false;
@@ -23,7 +24,7 @@ TEST(ChunkPhysicalCore, SingleIoCheckpointReportsAllPhysicalMirrorAllocationsInc
     EXPECT_EQ(test.tree->tree_state_stats().resources.allocated_backing_bytes, expected);
     const auto first = expected;
     ASSERT_TRUE(test.put(2, "small").ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     expected = 0;
     for (const auto &[identity, receipt] : test.backend.transport->receipts) {
         (void)identity;

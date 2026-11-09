@@ -1,17 +1,21 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
+use std::ffi::c_void;
 use std::os::raw::c_int;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use tokio::sync::oneshot;
 
 use crate::error::{check, take_buf, CtError};
 use crate::scan::ViewEntry;
 use crate::sys;
 use crate::tree::Crowdbtree;
+use crate::AsyncCrowdbtree;
 
 mod owner;
 pub use owner::OwnedSnapshotChunk;
+type ChunkResult = Result<OwnedSnapshotChunk, CtError>;
 
 /// Immutable metadata captured when a portable snapshot export begins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,16 +36,67 @@ pub struct SnapshotChunk {
 
 /// Non-clone owner of one C snapshot-export handle.
 pub struct SnapshotExportSession {
-    _tree: Arc<Crowdbtree>,
-    ptr: NonNull<sys::ct_export>,
+    handle: Arc<ExportHandle>,
+    _tree: Option<Arc<Crowdbtree>>,
     metadata: SnapshotMetadata,
+    pending: Option<(u64, oneshot::Receiver<ChunkResult>)>,
 }
 
-// The C handle is used sequentially by this owner and never shared. The held
-// tree Arc keeps its backing engine alive while the session moves to an actor.
-unsafe impl Send for SnapshotExportSession {}
+struct ExportHandle(NonNull<sys::ct_export>);
+
+// SAFETY: the session and its one outstanding native operation use the cursor
+// sequentially. Callback owners share only its lifetime, through the Arc.
+unsafe impl Send for ExportHandle {}
+unsafe impl Sync for ExportHandle {}
+
+impl Drop for ExportHandle {
+    fn drop(&mut self) {
+        unsafe { sys::ct_snapshot_export_end(self.0.as_ptr()) };
+    }
+}
+
+type ExportReply = oneshot::Sender<Result<ExportHandle, CtError>>;
+
+unsafe extern "C" fn export_ready(context: *mut c_void, status: c_int, handle: *mut sys::ct_export) {
+    let reply = unsafe { Box::from_raw(context.cast::<ExportReply>()) };
+    let handle = NonNull::new(handle).map(ExportHandle);
+    let _ = reply.send(check(status).and_then(|()| handle.ok_or(CtError::Internal)));
+}
+
+struct ReadReply {
+    _handle: Arc<ExportHandle>,
+    offset: u64,
+    sender: oneshot::Sender<ChunkResult>,
+}
+
+unsafe extern "C" fn chunk_ready(
+    context: *mut c_void,
+    status: c_int,
+    chunk: *mut sys::ct_snapshot_chunk,
+    done: c_int,
+) {
+    let reply = unsafe { Box::from_raw(context.cast::<ReadReply>()) };
+    let result = check(status).and_then(|()| owner::from_raw(chunk, reply.offset, done));
+    let _ = reply.sender.send(result);
+}
 
 impl SnapshotExportSession {
+    fn new(handle: ExportHandle, tree: Option<Arc<Crowdbtree>>) -> Self {
+        let ptr = handle.0.as_ptr();
+        let metadata = SnapshotMetadata {
+            at_slot: unsafe { sys::ct_snapshot_export_at_slot(ptr) },
+            total_bytes: unsafe { sys::ct_snapshot_export_total_bytes(ptr) },
+            final_crc32c: unsafe { sys::ct_snapshot_export_final_crc32c(ptr) },
+            chunk_bytes: unsafe { sys::ct_snapshot_export_chunk_bytes(ptr) },
+        };
+        Self {
+            _tree: tree,
+            handle: Arc::new(handle),
+            metadata,
+            pending: None,
+        }
+    }
+
     #[must_use]
     pub const fn metadata(&self) -> SnapshotMetadata {
         self.metadata
@@ -49,24 +104,66 @@ impl SnapshotExportSession {
 
     #[must_use]
     pub fn offset(&self) -> u64 {
-        unsafe { sys::ct_snapshot_export_offset(self.ptr.as_ptr()) }
+        self.pending.as_ref().map_or_else(
+            || unsafe { sys::ct_snapshot_export_offset(self.handle.0.as_ptr()) },
+            |(offset, _)| *offset,
+        )
     }
 
     /// Retains the native chunk allocation through every returned Bytes clone
     /// and slice, even after this session and its Tree are closed.
     pub fn read_owned(&mut self, offset: u64) -> Result<OwnedSnapshotChunk, CtError> {
-        owner::read(self.ptr.as_ptr(), offset)
+        if self.pending.is_some() {
+            return Err(CtError::Unavailable);
+        }
+        owner::read(self.handle.0.as_ptr(), offset)
+    }
+
+    /// Awaits one owned chunk. A canceled wait can resume at the same offset.
+    pub async fn read_owned_async(&mut self, offset: u64) -> Result<OwnedSnapshotChunk, CtError> {
+        if offset != self.offset() {
+            return Err(CtError::InvalidArgument);
+        }
+        if self.pending.is_none() {
+            let (sender, receiver) = oneshot::channel();
+            let context = Box::into_raw(Box::new(ReadReply {
+                _handle: Arc::clone(&self.handle),
+                offset,
+                sender,
+            }));
+            if let Err(error) = check(unsafe {
+                sys::ct_snapshot_export_next_async(
+                    self.handle.0.as_ptr(),
+                    offset,
+                    chunk_ready,
+                    context.cast(),
+                )
+            }) {
+                unsafe { drop(Box::from_raw(context)) };
+                return Err(error);
+            }
+            self.pending = Some((offset, receiver));
+        }
+        let (_, receiver) = self.pending.as_mut().expect("export read submitted");
+        let result = receiver.await;
+        self.pending = None;
+        result.map_err(|_| CtError::Internal)?
     }
 
     /// Read the next sequential chunk. A source registry may cache this result
     /// to serve an exact retry without advancing the C encoder twice.
     pub fn read(&mut self, offset: u64) -> Result<SnapshotChunk, CtError> {
+        if self.pending.is_some() {
+            return Err(CtError::Unavailable);
+        }
         let mut chunk = sys::ct_buf {
             data: std::ptr::null_mut(),
             len: 0,
         };
         let mut done: c_int = 0;
-        check(unsafe { sys::ct_snapshot_export_next(self.ptr.as_ptr(), offset, &mut chunk, &mut done) })?;
+        check(unsafe {
+            sys::ct_snapshot_export_next(self.handle.0.as_ptr(), offset, &mut chunk, &mut done)
+        })?;
         Ok(SnapshotChunk {
             offset,
             bytes: take_buf(chunk),
@@ -75,9 +172,33 @@ impl SnapshotExportSession {
     }
 }
 
-impl Drop for SnapshotExportSession {
-    fn drop(&mut self) {
-        unsafe { sys::ct_snapshot_export_end(self.ptr.as_ptr()) };
+impl AsyncCrowdbtree {
+    /// Flushes and preflights a portable export on one fixed published view.
+    pub async fn snapshot_export_begin(&self, chunk_bytes: usize) -> Result<SnapshotExportSession, CtError> {
+        if chunk_bytes == 0 || chunk_bytes > 1024 * 1024 {
+            return Err(CtError::InvalidArgument);
+        }
+        let flush = self.flush_report().await?;
+        flush.status?;
+        let (reply, result) = oneshot::channel::<Result<ExportHandle, CtError>>();
+        let context = Box::into_raw(Box::new(reply));
+        if let Err(error) = check(unsafe {
+            sys::ct_snapshot_export_begin_published_async(
+                self.handle().as_ptr(),
+                chunk_bytes,
+                export_ready,
+                context.cast(),
+            )
+        }) {
+            unsafe { drop(Box::from_raw(context)) };
+            return Err(error);
+        }
+        let handle = result.await.map_err(|_| CtError::Internal)??;
+        let session = SnapshotExportSession::new(handle, None);
+        if session.metadata().at_slot < flush.published_coverage {
+            return Err(CtError::Unavailable);
+        }
+        Ok(session)
     }
 }
 
@@ -85,6 +206,13 @@ impl Drop for SnapshotExportSession {
 pub struct SnapshotImportSession {
     _tree: Arc<Crowdbtree>,
     ptr: NonNull<sys::ct_import>,
+}
+
+type ImportReply = oneshot::Sender<Result<u64, CtError>>;
+
+unsafe extern "C" fn import_finished(context: *mut c_void, status: c_int, coverage: u64) {
+    let reply = unsafe { Box::from_raw(context.cast::<ImportReply>()) };
+    let _ = reply.send(check(status).map(|()| coverage));
 }
 
 // As with export, the importer is moved between tasks but is only ever
@@ -100,6 +228,20 @@ impl SnapshotImportSession {
         let mut at_slot = 0;
         check(unsafe { sys::ct_snapshot_import_finish(self.ptr.as_ptr(), &mut at_slot) })?;
         Ok(at_slot)
+    }
+
+    /// Installs the staged image and awaits Tree publication. Dropping this
+    /// wait leaves an accepted installation to finish on the native runtime.
+    pub async fn finish_async(self) -> Result<u64, CtError> {
+        let (reply, result) = oneshot::channel::<Result<u64, CtError>>();
+        let context = Box::into_raw(Box::new(reply));
+        if let Err(error) = check(unsafe {
+            sys::ct_snapshot_import_finish_async(self.ptr.as_ptr(), import_finished, context.cast())
+        }) {
+            unsafe { drop(Box::from_raw(context)) };
+            return Err(error);
+        }
+        result.await.map_err(|_| CtError::Internal)?
     }
 
     pub fn abort(self) {}
@@ -120,18 +262,8 @@ impl Crowdbtree {
     ) -> Result<SnapshotExportSession, CtError> {
         let mut raw: *mut sys::ct_export = std::ptr::null_mut();
         check(unsafe { sys::ct_snapshot_export_begin(self.as_ptr(), chunk_bytes, &mut raw) })?;
-        let ptr = NonNull::new(raw).ok_or(CtError::Internal)?;
-        let metadata = SnapshotMetadata {
-            at_slot: unsafe { sys::ct_snapshot_export_at_slot(ptr.as_ptr()) },
-            total_bytes: unsafe { sys::ct_snapshot_export_total_bytes(ptr.as_ptr()) },
-            final_crc32c: unsafe { sys::ct_snapshot_export_final_crc32c(ptr.as_ptr()) },
-            chunk_bytes: unsafe { sys::ct_snapshot_export_chunk_bytes(ptr.as_ptr()) },
-        };
-        Ok(SnapshotExportSession {
-            _tree: Arc::clone(self),
-            ptr,
-            metadata,
-        })
+        let handle = ExportHandle(NonNull::new(raw).ok_or(CtError::Internal)?);
+        Ok(SnapshotExportSession::new(handle, Some(Arc::clone(self))))
     }
 
     /// Begin a portable import. Feeding does not change the tree; finish
@@ -145,26 +277,27 @@ impl Crowdbtree {
         })
     }
 
-    pub fn snapshot(&self) -> Result<u64, CtError> {
+    pub fn flush_with_persistent(&self) -> Result<u64, CtError> {
         let mut last = 0u64;
-        check(unsafe { sys::ct_snapshot(self.as_ptr(), &mut last) })?;
+        check(unsafe { sys::ct_flush_with_persistent(self.as_ptr(), &mut last) })?;
         Ok(last)
     }
 
-    /// Persists a snapshot and returns `(snapshot generation, applied slot)`.
-    pub fn snapshot_info(&self) -> Result<(u64, u64), CtError> {
+    /// Runs flush with persistent and returns `(durable sequence, applied slot)`.
+    pub fn flush_with_persistent_info(&self) -> Result<(u64, u64), CtError> {
         let mut generation = 0_u64;
         let mut last_applied = 0_u64;
-        check(unsafe { sys::ct_snapshot_info(self.as_ptr(), &mut generation, &mut last_applied) })?;
+        check(unsafe {
+            sys::ct_flush_with_persistent_info(self.as_ptr(), &mut generation, &mut last_applied)
+        })?;
         Ok((generation, last_applied))
     }
 
-    /// Return the loaded durable generation and frontier without writing a
-    /// new snapshot.
-    pub fn snapshot_state(&self) -> Result<(u64, u64), CtError> {
+    /// Return the current durable sequence and frontier.
+    pub fn durable_state(&self) -> Result<(u64, u64), CtError> {
         let mut generation = 0;
         let mut last_applied = 0;
-        check(unsafe { sys::ct_snapshot_state(self.as_ptr(), &mut generation, &mut last_applied) })?;
+        check(unsafe { sys::ct_durable_state(self.as_ptr(), &mut generation, &mut last_applied) })?;
         Ok((generation, last_applied))
     }
 

@@ -9,7 +9,7 @@
 
 namespace crowdb::tree
 {
-class PublishedSnapshotContext;
+class PublishedReadViewContext;
 
 #ifdef CROWDB_TREE_TEST_UTIL
 void set_between_split_captures_for_tests(std::function<void()> callback);
@@ -36,7 +36,7 @@ struct SplitSourceSession
     size_t                                             table_count    = 0;
     size_t                                             interval_count = 0;
     SourceWriteOptions                                 limits;
-    std::shared_ptr<PublishedSnapshotContext>          baseline;
+    std::shared_ptr<PublishedReadViewContext>          baseline;
     uint64_t                                           generation = 0;
     uint64_t                                           session    = 0;
     uint64_t                                           frontier   = 0;

@@ -20,6 +20,19 @@ SourceWriteOptions combined_limits(SourceWriteOptions local, const SourceWriteOp
     local.max_key_size      = std::max(local.max_key_size, source.max_key_size);
     return local;
 }
+
+Status finish_split_handoff(SplitHandoff &handoff)
+{
+    const auto &report = handoff.operation->result();
+    auto        status = report.handoff_status.ok() ? report.maintenance_status : report.handoff_status;
+    if (status.ok()) {
+        handoff.operation.reset();
+        handoff.coverage.reset();
+        handoff.maintenance = {};
+        handoff.reservations.seal();
+    }
+    return status;
+}
 } // namespace
 
 Status TreeCore::State::prepare_split_handoff(const SplitSourceSession &session, uint64_t identity, uint64_t end)
@@ -71,12 +84,7 @@ Status TreeCore::State::prepare_split_handoff(const SplitSourceSession &session,
     if (!controls) {
         return Status::resource_exhausted("split handoff control bound overflow");
     }
-    FlushBatchOptions options;
-    options.parallelism =
-        std::max<size_t>(1, std::min(binding->cpu()->worker_count(), binding->options().limits.io_operations));
-    options.run_limits.max_entries     = 128;
-    options.run_limits.max_key_bytes   = std::max<size_t>(256 * 1024, limits.max_key_size);
-    options.run_limits.key_block_bytes = 1024;
+    auto                      options = flush_batch_options(limits.max_key_size);
     FlushBatch::Maintenance   maintenance;
     detail::FlushReservations reservations;
     status = detail::prepare_flush_reservations(*publisher, *view, catalog, prepare, *controls, binding->lane(),
@@ -180,17 +188,145 @@ try {
     if (!status.ok()) {
         return status;
     }
-    const auto &report = handoff->operation->result();
-    status             = report.handoff_status.ok() ? report.maintenance_status : report.handoff_status;
-    if (status.ok()) {
-        handoff->operation.reset();
-        handoff->coverage.reset();
-        handoff->maintenance = {};
-        handoff->reservations.seal();
-    }
-    return status;
+    return finish_split_handoff(*handoff);
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted("split handoff allocation failed");
+}
+
+Status TreeCore::publish_installed_split_view_async(uint64_t generation, uint64_t journal_frontier,
+                                                    TreeCore &destination, const KeyRange &range,
+                                                    std::function<void(Status)> complete)
+try {
+    if (!complete || &destination == this || config().runtime != destination.config().runtime ||
+        !range.validate().ok() || range.start() != destination.config().key_range.start() ||
+        range.end() != destination.config().key_range.end()) {
+        return Status::invalid_argument("split publication must cover the destination's complete key range");
+    }
+
+    struct Guards
+    {
+        Guards(State &source, State &child)
+            : source_ingress(source),
+              child_ingress(child),
+              source_gate(source.split_busy),
+              child_gate(child.split_busy)
+        {
+        }
+
+        State::Ingress    source_ingress;
+        State::Ingress    child_ingress;
+        detail::SplitGate source_gate;
+        detail::SplitGate child_gate;
+    };
+
+    struct Call
+    {
+        struct Receiver
+        {
+            using receiver_concept [[maybe_unused]] = stdexec::receiver_tag;
+            std::shared_ptr<Call> owner;
+
+            void set_value() noexcept
+            {
+                set_error(Status::Ok());
+            }
+
+            void set_stopped() noexcept
+            {
+                set_error(Status::unavailable());
+            }
+
+            void set_error(Status status) noexcept
+            {
+                auto call = std::move(owner);
+                call->finish(std::move(status));
+            }
+        };
+
+        using Connection = stdexec::connect_result_t<detail::CallbackSender, Receiver>;
+
+        Call(std::shared_ptr<TreeCore> source, std::shared_ptr<TreeCore> child, std::function<void(Status)> complete)
+            : source(std::move(source)),
+              child(std::move(child)),
+              complete(std::move(complete))
+        {
+        }
+
+        void finish(Status status) noexcept
+        {
+            if (status.ok() && batch) {
+                try {
+                    status = finish_split_handoff(*handoff);
+                }
+                catch (const std::bad_alloc &) {
+                    status = Status::resource_exhausted();
+                }
+            }
+            guards.reset();
+            complete(std::move(status));
+        }
+
+        std::shared_ptr<TreeCore>     source;
+        std::shared_ptr<TreeCore>     child;
+        std::optional<Guards>         guards;
+        std::function<void(Status)>   complete;
+        std::shared_ptr<SplitHandoff> handoff;
+        std::shared_ptr<FlushBatch>   batch;
+        std::shared_ptr<Connection>   connected;
+    };
+
+    auto &child  = *destination.state_;
+    auto  budget = destination.binding()->lifecycle_budget();
+    auto  call =
+        detail::reserved_shared<Call>(budget, shared_from_this(), destination.shared_from_this(), std::move(complete));
+    const auto &guards = call->guards.emplace(*state_, child);
+    if (guards.source_ingress.owner == nullptr || guards.child_ingress.owner == nullptr || !guards.source_gate.held() ||
+        !guards.child_gate.held()) {
+        return Status::unavailable("split administration is closed or busy");
+    }
+    const auto &session = state_->split_sources;
+    if (!session || !session->active || generation == 0 || generation != session->session ||
+        journal_frontier > session->frontier || journal_frontier > contiguous_slot()) {
+        return Status::invalid_argument("split source generation or frontier is not active");
+    }
+    const auto identity = state_->sources->identity();
+    const auto view     = destination.capture();
+    if (const auto &inherited = view->sources->inheritance) {
+        if (inherited->owner_identity != identity || inherited->session != generation ||
+            inherited->frontier != journal_frontier) {
+            return Status::invalid_argument("another split prefix is already installed");
+        }
+    }
+    else if (view->coverage < journal_frontier) {
+        return Status::not_found("split baseline or overlay is not installed");
+    }
+    else if (view->coverage != journal_frontier) {
+        return Status::invalid_argument("split prefix predates the child coverage");
+    }
+    else if (!child.split_handoff) {
+        call->finish(Status::Ok());
+        return Status::Ok();
+    }
+
+    auto status = child.prepare_split_handoff(*session, identity, journal_frontier);
+    if (!status.ok()) {
+        return status;
+    }
+    call->handoff = child.split_handoff;
+    call->batch   = call->handoff->operation;
+    if (!call->batch) {
+        call->finish(Status::Ok());
+        return Status::Ok();
+    }
+    call->connected = detail::reserved_construct<Call::Connection>(budget, [&](auto *storage) {
+        ::new (static_cast<void *>(storage))
+            Call::Connection(stdexec::connect(call->batch->sender(), Call::Receiver{.owner = call}));
+    });
+    stdexec::start(*call->connected);
+    return Status::Ok();
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted();
 }
 } // namespace crowdb::tree

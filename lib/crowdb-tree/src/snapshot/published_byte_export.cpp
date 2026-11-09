@@ -42,19 +42,11 @@ try {
     if (format != snapshot_format::kPortable && format != snapshot_format::kNative) {
         return Status::not_supported("unknown snapshot wire format");
     }
-    using detail::shared_allocation_bound;
-    const auto bound = shared_allocation_bound<State>() + shared_allocation_bound<PublishedByteExport>() +
-                       shared_allocation_bound<detail::AllocationReservation>() + sizeof(SnapshotExport);
-    auto credit = detail::ResourceBudget::try_reserve(core->binding()->account(), detail::BudgetClass::kRouting, bound);
-    if (!credit) {
+    auto stream = allocate(core->binding(), format, chunk_bytes);
+    if (!stream) {
         return Status::resource_exhausted("snapshot export control reserve unavailable");
     }
-    auto metadata           = detail::AllocationReservation::create(std::move(*credit));
-    auto state              = detail::reserved_shared<State>(metadata);
-    state->metadata         = metadata;
-    state->binding          = core->binding();
-    state->format           = format;
-    state->info.chunk_bytes = chunk_bytes == 0 ? kSnapshotChunkBytes : chunk_bytes;
+    auto  &state = stream->state_;
     Status status;
     if (format == snapshot_format::kNative) {
         status = PublishedNativeCursor::create(core, {}, &state->native);
@@ -68,7 +60,7 @@ try {
     else {
         status = core->flush();
         if (status.ok()) {
-            status = core->capture_snapshot(&state->snapshot);
+            status = core->capture_read_only_view(&state->snapshot);
         }
         if (status.ok()) {
             state->info.slot = state->snapshot->view()->coverage;
@@ -80,12 +72,31 @@ try {
     if (!status.ok()) {
         return status;
     }
-    *out = detail::reserved_construct<PublishedByteExport>(
-        metadata, [&](auto *storage) { ::new (static_cast<void *>(storage)) PublishedByteExport(std::move(state)); });
+    *out = std::move(stream);
     return Status::Ok();
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot export allocation failed");
+}
+
+std::shared_ptr<PublishedByteExport> PublishedByteExport::allocate(const std::shared_ptr<TreeRuntimeBinding> &binding,
+                                                                   snapshot_format format, size_t chunk_bytes)
+{
+    using detail::shared_allocation_bound;
+    const auto bound  = shared_allocation_bound<State>() + shared_allocation_bound<PublishedByteExport>() +
+                        shared_allocation_bound<detail::AllocationReservation>() + sizeof(SnapshotExport);
+    auto       credit = detail::ResourceBudget::try_reserve(binding->account(), detail::BudgetClass::kRouting, bound);
+    if (!credit) {
+        return {};
+    }
+    auto metadata           = detail::AllocationReservation::create(std::move(*credit));
+    auto state              = detail::reserved_shared<State>(metadata);
+    state->metadata         = metadata;
+    state->binding          = binding;
+    state->format           = format;
+    state->info.chunk_bytes = chunk_bytes == 0 ? kSnapshotChunkBytes : chunk_bytes;
+    return detail::reserved_construct<PublishedByteExport>(
+        metadata, [&](auto *storage) { ::new (static_cast<void *>(storage)) PublishedByteExport(std::move(state)); });
 }
 
 const SnapshotByteInfo &PublishedByteExport::info() const noexcept

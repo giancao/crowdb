@@ -15,7 +15,7 @@ fn follows_real_root_children_and_preserves_binary_keys() {
         tree.apply_put(slot, &slot.to_be_bytes(), &[255; 100]).unwrap();
     }
     tree.flush().unwrap();
-    tree.snapshot().unwrap();
+    tree.flush_with_persistent().unwrap();
     let before = tree.stats().snapshot_pages_total;
     let root = tree.inspect_page(&[], None).unwrap();
     assert!(root.inner);
@@ -40,7 +40,7 @@ fn follows_real_root_children_and_preserves_binary_keys() {
     ));
     tree.apply_put(2001, b"new", b"value").unwrap();
     tree.flush().unwrap();
-    tree.snapshot().unwrap();
+    tree.flush_with_persistent().unwrap();
     assert!(matches!(
         tree.inspect_page(&[], Some(root.version)),
         Err(CtError::Unavailable)
@@ -58,8 +58,8 @@ fn inspection_does_not_flush_pending_memory() {
     assert_eq!(tree.get(b"key").unwrap().unwrap().1, b"pending");
 }
 
-#[test]
-fn reopened_pages_are_read_without_advancing_the_checkpoint() {
+#[tokio::test(flavor = "current_thread")]
+async fn reopened_pages_are_read_without_advancing_the_checkpoint() {
     let config = Config {
         page_store: Some(crowdb_tree_ffi::PageStore::open_mem(4096).unwrap().into()),
         ..Config::default()
@@ -67,14 +67,14 @@ fn reopened_pages_are_read_without_advancing_the_checkpoint() {
     let tree = Crowdbtree::open(&config).unwrap();
     tree.apply_put(1, &[0, 255], b"retained").unwrap();
     tree.flush().unwrap();
-    tree.snapshot().unwrap();
+    tree.flush_with_persistent().unwrap();
     let root = tree.inspect_page(&[], None).unwrap();
     drop(tree);
     let reopened = Crowdbtree::open(&config).unwrap();
-    let checkpoint = reopened.snapshot_state().unwrap();
-    let observed = reopened.inspect_page(&[], None).unwrap();
+    let checkpoint = reopened.durable_state().unwrap();
+    let observed = reopened.inspect_page_async(&[], None).await.unwrap();
     assert_eq!(observed.page, root.page);
     assert_eq!(observed.entry(0).unwrap().key.unwrap(), &[0, 255]);
     assert_eq!(&observed.entry(0).unwrap().cell.unwrap()[9..], b"retained");
-    assert_eq!(checkpoint, reopened.snapshot_state().unwrap());
+    assert_eq!(checkpoint, reopened.durable_state().unwrap());
 }

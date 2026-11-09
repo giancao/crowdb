@@ -8,7 +8,7 @@ namespace crowdb::tree::detail
 {
 struct SplitWindowLayout
 {
-    explicit SplitWindowLayout(const std::shared_ptr<AllocationReservation> &metadata)
+    explicit SplitWindowLayout(const std::shared_ptr<AllocationBudget> &metadata)
         : separators(ReservationAllocator<OwnedKey>(metadata)),
           primary_bytes(ReservationAllocator<size_t>(metadata)),
           statistics(ReservationAllocator<LeafLayoutStats>(metadata))

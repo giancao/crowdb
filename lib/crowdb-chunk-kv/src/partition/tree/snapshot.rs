@@ -5,17 +5,17 @@
 use super::{map_tree_read_error, CrowdbPartitionTree, PartitionTree};
 use crate::{ChunkKvError, MutationOperation, PartitionRange, Result, ScanEntry, ValueRevision};
 use async_trait::async_trait;
-use crowdb_tree_ffi::{Config, ImmutableTreeSnapshot, RangeRebuildStats, ScanDirection, ScanOptions};
+use crowdb_tree_ffi::{Config, RangeRebuildStats, ReadOnlyTreeView, ScanDirection, ScanOptions};
 use std::{any::Any, sync::Arc};
 
 pub(super) struct CapturedPartitionTree {
     tree_id: u64,
     manifest: u64,
-    snapshot: Arc<ImmutableTreeSnapshot>,
+    snapshot: Arc<ReadOnlyTreeView>,
 }
 
 impl CapturedPartitionTree {
-    pub(super) fn new(tree_id: u64, manifest: u64, snapshot: ImmutableTreeSnapshot) -> Self {
+    pub(super) fn new(tree_id: u64, manifest: u64, snapshot: ReadOnlyTreeView) -> Self {
         Self {
             tree_id,
             manifest,
@@ -24,11 +24,7 @@ impl CapturedPartitionTree {
     }
 
     async fn scan(&self, options: ScanOptions) -> Result<(Vec<ScanEntry>, bool)> {
-        let snapshot = self.snapshot.clone();
-        let (entries, truncated) = tokio::task::spawn_blocking(move || snapshot.scan(&options))
-            .await
-            .map_err(|error| ChunkKvError::TreeUnavailable(error.to_string()))?
-            .map_err(map_tree_read_error)?;
+        let (entries, truncated) = self.snapshot.scan(&options).await.map_err(map_tree_read_error)?;
         Ok((
             entries
                 .into_iter()
@@ -58,11 +54,9 @@ impl PartitionTree for CapturedPartitionTree {
         self.tree_id
     }
     async fn get(&self, key: &[u8]) -> Result<Option<ValueRevision>> {
-        let snapshot = self.snapshot.clone();
-        let key = key.to_vec();
-        tokio::task::spawn_blocking(move || snapshot.get(&key))
+        self.snapshot
+            .get(key)
             .await
-            .map_err(|error| ChunkKvError::TreeUnavailable(error.to_string()))?
             .map(|entry| entry.map(|(revision, value)| ValueRevision { revision, value }))
             .map_err(map_tree_read_error)
     }
@@ -154,7 +148,7 @@ impl PartitionTree for CapturedPartitionTree {
     async fn checkpoint(&self, _wal: u64) -> Result<(u64, u64)> {
         Err(readonly())
     }
-    async fn checkpoint_snapshot(&self, _wal: u64) -> Result<(u64, u64, Arc<dyn PartitionTree>)> {
+    async fn flush_with_persistent_view(&self, _wal: u64) -> Result<(u64, u64, Arc<dyn PartitionTree>)> {
         Err(readonly())
     }
 
@@ -174,10 +168,10 @@ impl PartitionTree for CapturedPartitionTree {
             end: range.end.clone(),
         };
         let retained_config = config.clone();
-        let snapshot = self.snapshot.clone();
-        let (tree, stats) = tokio::task::spawn_blocking(move || snapshot.rebuild_range(&config))
+        let (tree, stats) = self
+            .snapshot
+            .rebuild_range_async(&config)
             .await
-            .map_err(|error| ChunkKvError::MaintenanceDegraded(error.to_string()))?
             .map_err(map_tree_read_error)?;
         Ok((
             Arc::new(CrowdbPartitionTree {

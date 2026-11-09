@@ -6,20 +6,18 @@
 
 namespace crowdb::tree
 {
-Status PublicationCoordinator::prepare_lane(size_t                                                capacity,
-                                            const std::shared_ptr<detail::AllocationReservation> &metadata,
-                                            std::shared_ptr<PublicationLane>                     *out)
+Status PublicationCoordinator::prepare_lane(const std::shared_ptr<AllocationBudget> &metadata,
+                                            std::shared_ptr<PublicationLane>        *out)
 {
-    if (capacity == 0 || capacity > capacity_ || !metadata || out == nullptr || *out) {
-        return Status::invalid_argument("publication progress needs a bounded prepaid window");
+    if (!metadata || out == nullptr || *out) {
+        return Status::invalid_argument("publication progress needs owned metadata");
     }
     if (closed_.load(std::memory_order_acquire) || lane_prepared_.exchange(true, std::memory_order_acq_rel)) {
         return Status::unavailable("publication progress window already prepared or closed");
     }
     try {
-        *out = detail::reserved_construct<PublicationLane>(metadata, [&](auto *storage) {
-            ::new (static_cast<void *>(storage)) PublicationLane(identity_, capacity);
-        });
+        *out = detail::reserved_construct<PublicationLane>(
+            metadata, [&](auto *storage) { ::new (static_cast<void *>(storage)) PublicationLane(identity_); });
     }
     catch (const std::bad_alloc &) {
         lane_prepared_.store(false, std::memory_order_release);
@@ -38,13 +36,6 @@ bool PublicationCoordinator::try_submit(const std::shared_ptr<PublicationRequest
         request->submitted_.exchange(true, std::memory_order_acq_rel)) {
         return false;
     }
-    auto queued = lane->queued_.load(std::memory_order_relaxed);
-    do {
-        if (queued == lane->capacity_) {
-            request->submitted_.store(false, std::memory_order_release);
-            return false;
-        }
-    } while (!lane->queued_.compare_exchange_weak(queued, queued + 1, std::memory_order_acq_rel));
     request->lane_ = lane;
     enqueue(request);
     return true;

@@ -36,7 +36,7 @@ struct TestSnapshotDomain
                 return status;
             }
         }
-        status = tree->snapshot();
+        status = tree->flush_with_persistent();
         if (!status.ok()) {
             return status;
         }
@@ -51,8 +51,8 @@ TEST(PublishedSnapshotDomain, DetachedGetScanAndEntriesKeepTheCapturedLogicalRan
     TestSnapshotDomain test;
     auto               status = test.open();
     ASSERT_TRUE(status.ok()) << status.to_string();
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
-    ASSERT_TRUE(TreeCoreAccess::get(*test.tree)->capture_snapshot(&snapshot).ok());
+    std::shared_ptr<PublishedReadViewContext> snapshot;
+    ASSERT_TRUE(TreeCoreAccess::get(*test.tree)->capture_read_only_view(&snapshot).ok());
     auto public_view = test.tree->snapshot_view();
     test.tree.reset();
     test.config.key_range = KeyRange::unbounded();

@@ -3,7 +3,7 @@
 
 //! An admitted source prefix ready for a non-waiting route cutover.
 
-use crate::{ChunkKvError, Result};
+use crate::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -38,6 +38,15 @@ pub trait PreparedSplitOverlay: Send + Sync {
 
     /// Returns the sole committed frontier, including after an idempotent retry.
     fn committed_frontier(&self) -> Option<u64>;
+
+    /// Releases the host's capability after the cutover worker drops its copy.
+    ///
+    /// # Errors
+    /// Returns a failure to retire the native capability.
+    async fn release(self: Arc<Self>) -> Result<()> {
+        drop(self);
+        Ok(())
+    }
 }
 
 pub(super) struct NativePreparedOverlay(pub(super) Arc<crowdb_tree_ffi::PreparedSplitOverlay>);
@@ -45,10 +54,9 @@ pub(super) struct NativePreparedOverlay(pub(super) Arc<crowdb_tree_ffi::Prepared
 #[async_trait]
 impl PreparedSplitOverlay for NativePreparedOverlay {
     async fn prepare(&self, replayed_prefix: u64) -> Result<()> {
-        let prepared = self.0.clone();
-        tokio::task::spawn_blocking(move || prepared.prepare(replayed_prefix))
+        self.0
+            .prepare_async(replayed_prefix)
             .await
-            .map_err(|error| ChunkKvError::MaintenanceDegraded(error.to_string()))?
             .map_err(super::map_tree_read_error)
     }
 
@@ -62,5 +70,12 @@ impl PreparedSplitOverlay for NativePreparedOverlay {
 
     fn committed_frontier(&self) -> Option<u64> {
         self.0.committed_frontier()
+    }
+
+    async fn release(self: Arc<Self>) -> Result<()> {
+        if let Some(owner) = Arc::into_inner(self).and_then(|overlay| Arc::into_inner(overlay.0)) {
+            owner.release().await.map_err(super::map_tree_read_error)?;
+        }
+        Ok(())
     }
 }

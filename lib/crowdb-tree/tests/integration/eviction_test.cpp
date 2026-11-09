@@ -86,7 +86,7 @@ TEST(Eviction, EvictedLeavesFreeMemoryAndReloadCorrectly)
 
     std::map<std::string, std::string> oracle;
     fill_buf(&t, 200, &oracle);
-    ASSERT_TRUE(t.snapshot(nullptr).ok()); // all reachable pages now clean
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // all reachable pages now clean
     ASSERT_NO_FATAL_FAILURE(warm_cache(t, oracle));
 
     uint32_t before  = t.stats().buffer_pool_used;
@@ -123,7 +123,7 @@ TEST(Eviction, EvictIsIdempotentAndSkipsDirty)
     // is evictable.
     EXPECT_EQ(t.evict_clean_leaves(0), 0U);
 
-    ASSERT_TRUE(t.snapshot(nullptr).ok()); // pages become clean
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok()); // pages become clean
     ASSERT_NO_FATAL_FAILURE(warm_cache(t, oracle));
     size_t first = t.evict_clean_leaves(1);
     EXPECT_GT(first, 0U);
@@ -158,7 +158,7 @@ TEST(Eviction, ConcurrentReadersWhileEvicting)
     const int                          K = 250;
     std::map<std::string, std::string> oracle;
     fill_buf(&t, K, &oracle);
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     std::atomic<bool>        stop{false};
     std::atomic<bool>        fail{false};
@@ -207,7 +207,7 @@ TEST(Eviction, RecentlyTouchedLeafSurvivesEvictionOverColderOnes)
 
     std::map<std::string, std::string> oracle;
     fill_buf(&t, 200, &oracle);
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     ASSERT_NO_FATAL_FAILURE(warm_cache(t, oracle));
 
     // Re-touch the very first key's leaf so it becomes the *most* recently
@@ -249,7 +249,7 @@ TEST(Eviction, EvictCleanInnerNeverTouchesLeaves)
 
     std::map<std::string, std::string> oracle;
     fill_buf(&t, 300, &oracle); // enough keys for several inner levels
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     ASSERT_NO_FATAL_FAILURE(warm_cache(t, oracle));
 
     int reads_before = store.reads.load();
@@ -309,7 +309,7 @@ TEST(Eviction, RecentlyTouchedAncestorChainSurvivesInnerEvictionOverColderOnes)
 
     std::map<std::string, std::string> oracle;
     fill_buf(&t, 300, &oracle);
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     std::string v;
     uint64_t    s;
@@ -377,7 +377,7 @@ TEST(Eviction, InstallSnapshotReclaimsResidentLeavesEvenWhenInnerAncestorWasEvic
 
     std::map<std::string, std::string> oracle;
     fill_buf(&t, 300, &oracle);
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     ASSERT_NO_FATAL_FAILURE(warm_cache(t, oracle));
 
     // Evict every inner base -- every leaf remains fully resident underneath

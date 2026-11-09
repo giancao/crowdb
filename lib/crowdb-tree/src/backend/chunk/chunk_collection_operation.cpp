@@ -7,13 +7,14 @@
 
 namespace crowdb::tree
 {
-struct ChunkCollectionOperation::State
+struct ChunkCollectionOperation::State : std::enable_shared_from_this<State>
 {
     std::shared_ptr<ChunkBackendState> backend;
     PageLoadBudget                     budget;
     detail::ChunkCollectionProgress    progress;
     size_t                             steps     = 0;
     bool                               owns_gate = false;
+    AsyncCompletion                    completion;
 
     ~State()
     {
@@ -35,20 +36,30 @@ struct ChunkCollectionOperation::State
         }
     }
 
-    Status step(bool stopped)
+    static void completed(void *raw, Status status)
+    {
+        auto &self = *static_cast<State *>(raw);
+        ++self.steps;
+        if (!status.ok() || self.done()) {
+            self.release_gate();
+        }
+        auto done = std::exchange(self.completion, {});
+        done.complete(std::move(status));
+    }
+
+    void submit_step(bool stopped, AsyncCompletion complete)
     {
         if (stopped) {
             release_gate();
-            return Status::unavailable();
+            complete.complete(Status::unavailable());
+            return;
         }
+        completion         = std::move(complete);
         const auto &domain = *backend->domain;
-        auto        status = backend->collector.step(*domain.catalog, *domain.transport, domain.tree, domain.epoch,
-                                                     budget.reservation(), &progress, domain.physical_registry);
-        ++steps;
-        if (!status.ok() || done()) {
-            release_gate();
-        }
-        return status;
+        backend->collector.submit_step(
+            domain.catalog, domain.transport, domain.tree, domain.epoch, budget.bytes, &progress,
+            domain.physical_registry,
+            {.context = this, .complete_fn = &completed, .owner = shared_from_this(), .allocations = budget.bytes});
     }
 
     [[nodiscard]] bool done() const noexcept
@@ -69,10 +80,10 @@ Status ChunkCollectionOperation::create(std::shared_ptr<ChunkBackendState>      
                                         std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadBudget budget,
                                         std::shared_ptr<ChunkCollectionOperation> *out)
 try {
-    if (!backend || !store || !budget.reservation() || !budget.io || out == nullptr || *out) {
+    if (!backend || !store || !budget.bytes || out == nullptr || *out) {
         return Status::invalid_argument();
     }
-    auto state     = detail::reserved_shared<State>(budget.reservation());
+    auto state     = detail::reserved_shared<State>(budget.bytes);
     state->backend = std::move(backend);
     state->budget  = budget;
     if (state->backend->needs_recovery.load(std::memory_order_acquire) ||
@@ -80,13 +91,12 @@ try {
         return Status::unavailable();
     }
     state->owns_gate = true;
-    auto operation   = detail::reserved_construct<ChunkCollectionOperation>(budget.reservation(), [&](auto *storage) {
-        ::new (static_cast<void *>(storage)) ChunkCollectionOperation(state);
-    });
-    auto status      = ChunkProtocolOperation::create(
+    auto operation   = detail::reserved_construct<ChunkCollectionOperation>(
+        budget.bytes, [&](auto *storage) { ::new (static_cast<void *>(storage)) ChunkCollectionOperation(state); });
+    auto status = ChunkProtocolOperation::create_async(
         std::move(store), std::move(runtime), std::move(lane), budget, state,
-        [state](bool stopped) { return state->step(stopped); }, [state] { return state->done(); },
-        &operation->protocol_);
+        [state](bool stopped, AsyncCompletion complete) { state->submit_step(stopped, std::move(complete)); },
+        [state] { return state->done(); }, &operation->protocol_);
     if (status.ok()) {
         *out = std::move(operation);
     }

@@ -49,15 +49,61 @@ impl CrowdbTreeEngine {
     /// Returns the underlying [`CtError`] if the engine fails to open (e.g. a
     /// corrupt or unreadable durable file).
     pub fn open(opt: &CrowdbTreeConfig) -> Result<Self, CtError> {
-        let inner = AsyncCrowdbtree::open(opt)?;
-        let work_collector = Some(inner.handle().work_metrics_collector()?);
-        Ok(Self {
-            work_collector,
+        let tree = Crowdbtree::open(opt)?;
+        let work_collector = tree.work_metrics_collector()?;
+        Ok(Self::with_tree(opt, tree, work_collector))
+    }
+
+    /// Opens a Block Tree from the extent names discovered by the host.
+    ///
+    /// # Errors
+    /// Returns an invalid host, native open error or metrics initialization error.
+    pub async fn open_block_from_names(
+        opt: &CrowdbTreeConfig,
+        names: &[std::ffi::OsString],
+    ) -> Result<Self, CtError> {
+        let tree = Crowdbtree::open_block_from_names(opt, names).await?;
+        Self::finish_open(opt, tree).await
+    }
+
+    /// Opens a native Tree and awaits recovery on the shared host.
+    ///
+    /// # Errors
+    /// Returns the underlying [`CtError`] for an unsupported backend, failed
+    /// recovery, or failure to initialize metrics collection.
+    pub async fn open_async(opt: &CrowdbTreeConfig) -> Result<Self, CtError> {
+        let tree = Crowdbtree::open_async(opt).await?;
+        Self::finish_open(opt, tree).await
+    }
+
+    async fn finish_open(opt: &CrowdbTreeConfig, tree: Crowdbtree) -> Result<Self, CtError> {
+        match tree.work_metrics_collector() {
+            Ok(collector) => Ok(Self::with_tree(opt, tree, collector)),
+            Err(error) => {
+                let release = tree.backend_release_service();
+                if let Ok(close) = tree.begin_close() {
+                    let _ = close.wait().await;
+                }
+                if let Some(release) = release {
+                    release.shutdown().await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn with_tree(
+        opt: &CrowdbTreeConfig,
+        tree: Crowdbtree,
+        work_collector: crowdb_tree_ffi::TreeWorkCollector,
+    ) -> Self {
+        Self {
+            work_collector: Some(work_collector),
             work_window: arc_swap::ArcSwapOption::empty(),
-            inner,
+            inner: AsyncCrowdbtree::from_sync(tree),
             has_backend: opt.page_store.is_some() || opt.path.as_deref().is_some_and(|path| !path.is_empty()),
             maintenance_pending: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        })
+        }
     }
 
     /// Borrow the underlying FFI handle for engine-specific operations
@@ -303,7 +349,7 @@ impl KVEngine for CrowdbTreeEngine {
         // Native async maintenance uses checkpoint_report instead. A prior
         // flush may advance publication but does not establish durability.
         let snap_t0 = std::time::Instant::now();
-        let snap_result = self.inner.handle().snapshot();
+        let snap_result = self.inner.handle().flush_with_persistent();
         let snap_ms = snap_t0.elapsed().as_millis();
         match &snap_result {
             Ok(slot) => tracing::info!("persist_snapshot: snapshot_ms={} snapshot_slot={}", snap_ms, slot),
@@ -335,14 +381,18 @@ impl KVEngine for CrowdbTreeEngine {
             .map_err(|error| error.to_string())
     }
 
-    fn snapshot_export_begin(&self, chunk_bytes: usize) -> Result<Box<dyn SnapshotExporter>, String> {
-        self.inner.handle().flush().map_err(|error| error.to_string())?;
-        let session = self
-            .inner
-            .handle()
-            .snapshot_export_begin(chunk_bytes)
-            .map_err(|error| error.to_string())?;
-        Ok(Box::new(CrowdbTreeSnapshotExporter { session }))
+    fn snapshot_export_begin(
+        &self,
+        chunk_bytes: usize,
+    ) -> KVFuture<Result<Box<dyn SnapshotExporter>, String>> {
+        let tree = self.inner.clone();
+        KVFuture::Pending(Box::pin(async move {
+            let session = tree
+                .snapshot_export_begin(chunk_bytes)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Box::new(CrowdbTreeSnapshotExporter { session }) as Box<dyn SnapshotExporter>)
+        }))
     }
 
     fn snapshot_import_begin(&self) -> Result<Box<dyn SnapshotImporter>, String> {
@@ -402,15 +452,18 @@ impl SnapshotExporter for CrowdbTreeSnapshotExporter {
         self.session.offset()
     }
 
-    fn read(&mut self, offset: u64) -> Result<SnapshotChunk, String> {
-        self.session
-            .read_owned(offset)
-            .map(|chunk| SnapshotChunk {
-                offset: chunk.offset,
-                bytes: chunk.bytes,
-                done: chunk.done,
-            })
-            .map_err(|error| error.to_string())
+    fn read(&mut self, offset: u64) -> futures::future::BoxFuture<'_, Result<SnapshotChunk, String>> {
+        Box::pin(async move {
+            self.session
+                .read_owned_async(offset)
+                .await
+                .map(|chunk| SnapshotChunk {
+                    offset: chunk.offset,
+                    bytes: chunk.bytes,
+                    done: chunk.done,
+                })
+                .map_err(|error| error.to_string())
+        })
     }
 }
 
@@ -423,8 +476,13 @@ impl SnapshotImporter for CrowdbTreeSnapshotImporter {
         self.session.feed(chunk).map_err(|error| error.to_string())
     }
 
-    fn finish(self: Box<Self>) -> Result<u64, String> {
-        self.session.finish().map_err(|error| error.to_string())
+    fn finish(self: Box<Self>) -> KVFuture<Result<u64, String>> {
+        KVFuture::Pending(Box::pin(async move {
+            self.session
+                .finish_async()
+                .await
+                .map_err(|error| error.to_string())
+        }))
     }
 
     fn abort(self: Box<Self>) {

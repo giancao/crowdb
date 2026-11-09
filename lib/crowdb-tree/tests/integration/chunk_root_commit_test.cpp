@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "btree/allocation_account.h"
 #include "btree/allocation_bound.h"
 #include "common/test_chunk_root.h"
 #include "snapshot/chunk_root_codec_internal.h"
@@ -137,5 +138,59 @@ TEST(ChunkRootCommit, AdmittedMetadataAndOneWindowFinishWithHostCreditExhausted)
     complete(operation);
     ASSERT_TRUE(operation->status().ok()) << operation->status().to_string();
     EXPECT_TRUE(operation->committed());
+}
+
+TEST(ChunkRootCommit, DependencyTraversalContinuesPastTheFormerCumulativeWorkLimit)
+{
+    constexpr size_t                           leaves     = 257;
+    constexpr size_t                           references = 4096;
+    test_chunk::TestRootBackend                test(512);
+    auto                                       pages = test.pages(leaves + 1);
+    std::shared_ptr<detail::AllocationAccount> metadata;
+    ASSERT_TRUE(
+        detail::AllocationAccount::create_ongoing(test.credits.account, detail::BudgetClass::kRouting, &metadata).ok());
+    auto shared = detail::reserved_shared<StoredOverflowReferences>(
+        metadata, detail::ReservationAllocator<StoredOverflowReference>(metadata));
+    shared->assign(references, {.head = leaves, .bytes = 1});
+    for (size_t pid = 0; pid < leaves; ++pid) {
+        pages->frames.at(pid).stored_overflow = shared;
+    }
+    auto &overflow          = pages->frames.at(leaves);
+    overflow.type           = page_type::kOverflowFrame;
+    overflow.overflow_bytes = 1;
+    overflow.stored_overflow.reset();
+    auto   operation = test.commit(pages, metadata);
+    size_t steps     = 0;
+    while (!operation->done() && steps++ < 100000) {
+        const auto status = operation->step();
+        ASSERT_TRUE(status.ok()) << status.to_string();
+    }
+    ASSERT_TRUE(operation->done());
+    ASSERT_TRUE(operation->status().ok()) << operation->status().to_string();
+    ASSERT_TRUE(operation->committed());
+    EXPECT_EQ(operation->manifest()->dependency_entries, leaves * references);
+    EXPECT_GT(steps, 1024U);
+}
+
+TEST(ChunkRootCommit, OverflowCyclesFailByGraphIdentityWithoutExhaustingAWorkQuota)
+{
+    test_chunk::TestRootBackend test;
+    auto                        pages      = test.pages(3);
+    auto                        references = detail::reserved_shared<StoredOverflowReferences>(
+        test.credits.credits.bytes, detail::ReservationAllocator<StoredOverflowReference>(test.credits.credits.bytes));
+    references->push_back({.head = 1, .bytes = UINT64_MAX});
+    pages->frames.at(0).stored_overflow = references;
+    for (uint64_t pid : {1, 2}) {
+        auto &frame          = pages->frames.at(pid);
+        frame.type           = page_type::kOverflowFrame;
+        frame.overflow_bytes = 1;
+        frame.next_overflow  = pid == 1 ? 2 : 1;
+        frame.stored_overflow.reset();
+    }
+    auto operation = test.commit(pages);
+    complete(operation);
+    EXPECT_EQ(operation->status().code(), Code::kCorruption);
+    EXPECT_FALSE(operation->committed());
+    EXPECT_EQ(test.catalog->begin_calls, 0U);
 }
 } // namespace crowdb::tree

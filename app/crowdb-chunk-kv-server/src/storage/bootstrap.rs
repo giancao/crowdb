@@ -54,25 +54,20 @@ pub(super) async fn open_bootstrap_partition(
         high: config.partition_id.high,
         low: config.partition_id.low,
     };
-    let owner_epoch = config.owner_epoch;
-    let tree_id = config.tree_id;
-    tokio::task::spawn_blocking(move || {
-        Partition::open_native(
-            partition_id,
-            PartitionRange {
-                start: Some(Vec::new()),
-                end: None,
-            },
-            owner_epoch,
-            partition_config,
-            tree_id,
-            tree_config,
-            page_store,
-            stream,
-        )
-    })
+    Partition::open_native_async(
+        partition_id,
+        PartitionRange {
+            start: Some(Vec::new()),
+            end: None,
+        },
+        config.owner_epoch,
+        partition_config,
+        config.tree_id,
+        tree_config,
+        page_store,
+        stream,
+    )
     .await
-    .map_err(|error| StorageRuntimeError::Partition(error.to_string()))?
     .map_err(|error| StorageRuntimeError::Partition(format!("bootstrap tree open: {error}")))
 }
 

@@ -14,7 +14,7 @@ namespace
 {
 struct NativeReadBuffer
 {
-    NativeReadBuffer(size_t bytes, const std::shared_ptr<detail::AllocationReservation> &metadata,
+    NativeReadBuffer(size_t bytes, const std::shared_ptr<AllocationBudget> &metadata,
                      std::shared_ptr<const BackingRef> extent)
         : frame(bytes, detail::ReservationAllocator<uint8_t, AllocationKind::kFrame>(metadata)),
           backing(std::move(extent))
@@ -30,34 +30,33 @@ struct NativeFrameRead::State : PageLoadProgress, std::enable_shared_from_this<S
 {
     State(const PageLoadBudget &budget, uint64_t started_at_ns)
         : PageLoadProgress(budget, started_at_ns),
-          metadata(budget.reservation()),
+          metadata(budget.bytes),
           blob(detail::ReservationAllocator<uint8_t>(metadata))
     {
     }
 
-    std::shared_ptr<detail::AllocationReservation> metadata;
-    std::shared_ptr<AsyncPageStore>                store;
-    std::shared_ptr<detail::FlushRuntime>          runtime;
-    std::shared_ptr<detail::FlushRuntime::Lane>    lane;
-    std::shared_ptr<State>                         queued_owner;
-    std::shared_ptr<State>                         lifetime;
-    std::shared_ptr<NativeReadBuffer>              buffer;
-    AlignedLoadBytes                               blob;
-    OverflowBackingPage                            descriptor;
-    uint64_t                                       pid = kInvalidPageId;
-    std::atomic<bool>                              started{false};
-    std::atomic<bool>                              terminal{false};
-    std::atomic<bool>                              stopped{false};
-    detail::CallbackComplete                       complete = nullptr;
-    void                                          *context  = nullptr;
-    NativeFrameReadResult                          report;
+    std::shared_ptr<AllocationBudget>           metadata;
+    std::shared_ptr<AsyncPageStore>             store;
+    std::shared_ptr<detail::FlushRuntime>       runtime;
+    std::shared_ptr<detail::FlushRuntime::Lane> lane;
+    std::shared_ptr<State>                      queued_owner;
+    std::shared_ptr<State>                      lifetime;
+    std::shared_ptr<NativeReadBuffer>           buffer;
+    AlignedLoadBytes                            blob;
+    OverflowBackingPage                         descriptor;
+    uint64_t                                    pid = kInvalidPageId;
+    std::atomic<bool>                           started{false};
+    std::atomic<bool>                           terminal{false};
+    std::atomic<bool>                           stopped{false};
+    detail::CallbackComplete                    complete = nullptr;
+    void                                       *context  = nullptr;
+    NativeFrameReadResult                       report;
 
     void finish(Status status) noexcept
     {
         if (terminal.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
-        release_if_idle();
         if (stopped.load(std::memory_order_acquire)) {
             status = Status::unavailable();
         }
@@ -187,9 +186,9 @@ Status NativeFrameRead::create(uint64_t pid, OverflowBackingPage page, std::shar
     std::shared_ptr<State> state;
     auto                   status = [&]() -> Status {
         try {
-            if (out == nullptr || *out || pid == kInvalidPageId || !runtime || !lane || !budget.reservation() ||
-                budget.reservation()->category() == detail::BudgetClass::kIo || !page.backing ||
-                !page.backing->readable() || page.backing->encoding != 0 || page.bytes == 0 ||
+            if (out == nullptr || *out || pid == kInvalidPageId || !runtime || !lane || !budget.bytes ||
+                (budget.reservation() && budget.reservation()->category() == detail::BudgetClass::kIo) ||
+                !page.backing || !page.backing->readable() || page.backing->encoding != 0 || page.bytes == 0 ||
                 page.frame_bytes <= kFrameHeaderSize + kFrameTrailerSize ||
                 page.bytes > overflow_chunk_cap(page.frame_bytes) || page.next == pid) {
                 return Status::invalid_argument("native frame read requires a protected bounded descriptor");
@@ -201,11 +200,12 @@ Status NativeFrameRead::create(uint64_t pid, OverflowBackingPage page, std::shar
                     return Status::invalid_argument("native resident descriptor has inconsistent physical geometry");
                 }
             }
-            else if (!store || !budget.io || budget.io->category() != detail::BudgetClass::kIo ||
-                     budget.reservation()->account() != budget.io->account() ||
+            else if (!store ||
+                     (budget.io && (!budget.reservation() || budget.io->category() != detail::BudgetClass::kIo ||
+                                    budget.reservation()->account() != budget.io->account())) ||
                      page.logical_bytes < kDurableBlobHeader || page.logical_bytes > page.backing->length) {
                 return Status::invalid_argument(
-                    "native durable frame read needs matching I/O credit and blob geometry");
+                    "native durable frame read needs valid allocation ownership and blob geometry");
             }
             if (page.backing->length > limits.max_blob_bytes || page.frame_bytes > limits.max_frame_bytes ||
                 !chunk_load_allowed(*page.backing, limits)) {
@@ -215,15 +215,14 @@ Status NativeFrameRead::create(uint64_t pid, OverflowBackingPage page, std::shar
             if (resident) {
                 progress.io.reset();
             }
-            state             = detail::reserved_shared<State>(budget.reservation(), progress, started_at_ns);
+            state             = detail::reserved_shared<State>(budget.bytes, progress, started_at_ns);
             state->pid        = pid;
             state->descriptor = std::move(page);
             state->store      = std::move(store);
             state->runtime    = std::move(runtime);
             state->lane       = std::move(lane);
-            *out              = detail::reserved_construct<NativeFrameRead>(budget.reservation(), [&](auto *storage) {
-                ::new (static_cast<void *>(storage)) NativeFrameRead(state);
-            });
+            *out              = detail::reserved_construct<NativeFrameRead>(
+                budget.bytes, [&](auto *storage) { ::new (static_cast<void *>(storage)) NativeFrameRead(state); });
             return Status::Ok();
         }
         catch (const std::bad_alloc &) {

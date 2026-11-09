@@ -2,8 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
 #include "crowdb-tree/backend/page_store.h"
+#include "local_checkpoint_test_support.h"
 
 #include <gtest/gtest.h>
+
+#include <future>
 
 namespace crowdb::tree
 {
@@ -68,7 +71,7 @@ TEST(RuntimeInspection, ColdIndexAndLeafUseOneIoPermitAndRejectStaleOrInvalidPat
         batch.ops.push_back({.key = std::to_string(1000 + i), .kind = OpKind::kPut, .value = std::string(100, 'v')});
     }
     ASSERT_TRUE(test.tree->apply(1, batch).ok());
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     test.tree.reset();
     ASSERT_TRUE(Crowdbtree::open(test.config, &test.tree).ok());
     NativeFrame frame;
@@ -90,6 +93,62 @@ TEST(RuntimeInspection, ColdIndexAndLeafUseOneIoPermitAndRejectStaleOrInvalidPat
     EXPECT_EQ(
         test.tree->inspect_page(std::vector<uint32_t>(33), kInvalidPageId, &frame, &version, &root, &deltas).code(),
         Code::kInvalidArgument);
+}
+
+TEST(RuntimeInspection, ColdReadLetsTheOnlyBackendWorkerRunAndKeepsItsOriginalRevision)
+{
+    TestInspection test;
+    ASSERT_TRUE(test.tree->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = "persisted"}}}).ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
+    test.tree.reset();
+    auto backend                 = std::make_shared<test_write::TestCheckpointStore>();
+    backend->device              = test.store;
+    test.config.async_page_store = backend.get();
+    test.config.backend_owner    = backend;
+    ASSERT_TRUE(Crowdbtree::open(test.config, &test.tree).ok());
+    auto *core = TreeCoreAccess::get(*test.tree);
+
+    std::promise<std::function<void()>> read;
+    auto                                pending = read.get_future();
+    backend->defer_read = [&, defer = true](PageAddr at, void *out, size_t bytes, AsyncCompletion &done) mutable {
+        if (!std::exchange(defer, false)) {
+            return false;
+        }
+        read.set_value([at, out, bytes, done = std::move(done), store = test.store] {
+            done.complete(store->read_at(at, static_cast<uint8_t *>(out), bytes));
+        });
+        return true;
+    };
+
+    std::promise<Status> inspected;
+    auto                 terminal = inspected.get_future();
+    ASSERT_TRUE(core->inspect_page_async({}, test.tree->version(),
+                                         [&](Status status, NativeFrame, uint64_t, uint64_t, uint32_t) {
+                                             inspected.set_value(std::move(status));
+                                         })
+                    .ok());
+    ASSERT_EQ(pending.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(terminal.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    auto resume = pending.get();
+
+    std::promise<void> progress;
+    auto               advanced = progress.get_future();
+    auto               binding  = core->binding();
+    ASSERT_TRUE(binding->backend_cpu()
+                    ->try_submit(
+                        binding->backend_lane(),
+                        [](void *context) noexcept { static_cast<std::promise<void> *>(context)->set_value(); },
+                        &progress)
+                    .ok());
+    EXPECT_EQ(advanced.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    ASSERT_TRUE(test.tree->apply(2, {}).ok());
+    ASSERT_TRUE(test.tree->flush().ok());
+    resume();
+    resume = {};
+    ASSERT_EQ(terminal.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(terminal.get().code(), Code::kUnavailable);
+    binding->cpu()->drain();
+    binding->backend_cpu()->drain();
 }
 } // namespace
 } // namespace crowdb::tree

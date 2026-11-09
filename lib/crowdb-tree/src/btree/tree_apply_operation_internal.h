@@ -81,6 +81,7 @@ struct TreeApplyOperation::State : std::enable_shared_from_this<State>
 
     State(std::weak_ptr<TreeCore> core, uint64_t generation, std::shared_ptr<AdmittedBatch> batch,
           std::shared_ptr<detail::AllocationReservation> metadata);
+    ~State();
     Status      arm();
     void        start(uint64_t chosen_slot, detail::CallbackComplete callback, void *argument) noexcept;
     static void run(void *context) noexcept;
@@ -99,6 +100,7 @@ struct TreeApplyOperation::State : std::enable_shared_from_this<State>
 
     std::shared_ptr<ApplyWaiters>                  waiters;
     bool                                           owns_replay_waiters = false;
+    const ReplayControls                          *replay_controls     = nullptr;
     ReplayControls::Lease                          replay_control;
     std::optional<ReplayInput>                     replay_input;
     uint64_t                                       replay_slot    = 0;

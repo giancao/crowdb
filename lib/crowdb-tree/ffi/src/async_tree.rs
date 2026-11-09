@@ -64,9 +64,9 @@ impl AsyncCrowdbtree {
         self.flush_report().await?.status
     }
 
-    /// Awaits the captured checkpoint, including its backend completion.
-    pub async fn snapshot(&self) -> Result<u64, CtError> {
-        let report = self.checkpoint_report().await?;
+    /// Runs flush with persistent and awaits durable coverage.
+    pub async fn flush_with_persistent(&self) -> Result<u64, CtError> {
+        let report = self.flush_with_persistent_report().await?;
         report.status?;
         Ok(report.durable_coverage)
     }

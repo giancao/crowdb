@@ -30,7 +30,7 @@ Status TreeApplyOperation::bind_replay(std::shared_ptr<TreeCore> core, uint64_t 
     }
     const auto completed   = core->contiguous_slot();
     const bool current_gap = slot <= completed || slot - completed == 1;
-    auto       controls    = core->state_->replay_controls->acquire(current_gap);
+    auto       controls    = core->state_->replay_controls->acquire(slot, current_gap);
     if (!controls) {
         return Status::unavailable("caller exceeded the bounded replay registration window");
     }
@@ -41,9 +41,10 @@ Status TreeApplyOperation::bind_replay(std::shared_ptr<TreeCore> core, uint64_t 
     }
     auto state =
         detail::reserved_shared<State>(metadata, core, sources->generation, std::shared_ptr<AdmittedBatch>{}, metadata);
-    state->waiters        = core->state_->replay_waiters;
-    state->replay_control = std::move(controls);
-    state->replay_slot    = slot;
+    state->waiters         = core->state_->replay_waiters;
+    state->replay_controls = core->state_->replay_controls.get();
+    state->replay_control  = std::move(controls);
+    state->replay_slot     = slot;
     state->replay_input.emplace(State::ReplayInput{.count        = count,
                                                    .read         = std::move(read),
                                                    .caller_owner = std::move(caller_owner),
@@ -90,7 +91,15 @@ bool TreeApplyOperation::State::prepare_replay_batch()
         return false;
     }
     if (slot - completed != 1) {
-        await_progress(observed);
+        if (replay_controls->can_wait_for(completed + 1)) {
+            await_progress(observed);
+        }
+        else if (frontier->contiguous().load(std::memory_order_acquire) != completed) {
+            dispatcher->request(node, self);
+        }
+        else {
+            finish(Status::unavailable("Tree closing with a gap in accepted replay"));
+        }
         return false;
     }
     if (!owns_replay_waiters) {

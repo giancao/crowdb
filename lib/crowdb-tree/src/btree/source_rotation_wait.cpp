@@ -42,6 +42,11 @@ void SourceRotation::plan_flush()
         start_flush();
         return;
     }
+    if (preparation_.allocations) {
+        resumed_ = Status::Ok();
+        credit_ready();
+        return;
+    }
     admission_metrics_.emplace(publisher_.work_metrics(), TreeStage::FlushAdmissionWait, tree_metrics_now_ns());
     next_credit_ = 0;
     await_credit();
@@ -60,19 +65,21 @@ void SourceRotation::credit_ready()
         finish();
         return;
     }
-    if (!credit_wait_) {
-        std::terminate();
-    }
-    auto credit = credit_wait_->request.take_credit();
-    credit_wait_.reset();
-    if (!credit) {
-        finish();
-        return;
-    }
-    credits_[next_credit_++] = std::move(*credit);
-    if (next_credit_ != credits_.size()) {
-        await_credit();
-        return;
+    if (!preparation_.allocations) {
+        if (!credit_wait_) {
+            std::terminate();
+        }
+        auto credit = credit_wait_->request.take_credit();
+        credit_wait_.reset();
+        if (!credit) {
+            finish();
+            return;
+        }
+        credits_[next_credit_++] = std::move(*credit);
+        if (next_credit_ != credits_.size()) {
+            await_credit();
+            return;
+        }
     }
     auto status = flush_controller_->prepare_prepaid(preparation_, plan_, std::move(credits_), &flush_);
     if (admission_metrics_) {

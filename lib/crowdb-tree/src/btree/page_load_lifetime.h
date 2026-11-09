@@ -10,23 +10,10 @@
 
 namespace crowdb::tree
 {
-inline std::shared_ptr<detail::AllocationReservation> page_load_io_credit(const PageLoadBudget &budget)
-{
-    if (budget.io || !budget.account) {
-        return budget.io;
-    }
-    auto io = detail::ResourceBudget::try_reserve(budget.account, detail::BudgetClass::kIo, 1);
-    if (!io) {
-        throw std::bad_alloc();
-    }
-    return detail::reserved_shared<detail::AllocationReservation>(budget.bytes, std::move(*io));
-}
-
 struct PageLoadProgress
 {
     PageLoadProgress(const PageLoadBudget &budget, uint64_t started_at_ns)
-        : io_credit(page_load_io_credit(budget), 1),
-          metrics(budget.work_metrics, TreeStage::PageLoadPipeline, started_at_ns),
+        : metrics(budget.work_metrics, TreeStage::PageLoadPipeline, started_at_ns),
           backend_budget(budget.backend),
           cpu_progress(budget.cpu_progress),
           cause(budget.cause),
@@ -34,15 +21,9 @@ struct PageLoadProgress
     {
     }
 
-    ~PageLoadProgress()
-    {
-        release_progress();
-    }
-
     PageLoadProgress(const PageLoadProgress &)            = delete;
     PageLoadProgress &operator=(const PageLoadProgress &) = delete;
 
-    AllocationLease                   io_credit;
     TreeMetricsOperation              metrics;
     std::shared_ptr<AllocationBudget> backend_budget;
     std::shared_ptr<void>             loader_owner;
@@ -56,27 +37,6 @@ struct PageLoadProgress
     {
         auto &self = *static_cast<PageLoadProgress *>(context);
         self.cpu_task(self.cpu_context);
-    }
-
-    std::atomic<size_t> *inflight = nullptr;
-    std::atomic<bool>    io_pending{false};
-    std::atomic<bool>    progress_released{false};
-
-    void release_progress() noexcept
-    {
-        if (!progress_released.exchange(true, std::memory_order_acq_rel)) {
-            io_credit.reset();
-            if (inflight != nullptr) {
-                inflight->fetch_sub(1, std::memory_order_release);
-            }
-        }
-    }
-
-    void release_if_idle() noexcept
-    {
-        if (!io_pending.load(std::memory_order_acquire)) {
-            release_progress();
-        }
     }
 };
 
@@ -156,11 +116,10 @@ void queue_page_load(const std::shared_ptr<Load> &operation, detail::FlushRuntim
 template <class Load> void page_read_completed(void *context, Status status) noexcept
 {
     auto operation = static_cast<Load *>(context)->shared_from_this();
-    operation->io_pending.store(false, std::memory_order_release);
     if (operation->terminal.load(std::memory_order_acquire)) {
-        operation->release_progress();
+        return;
     }
-    else if (!status.ok()) {
+    if (!status.ok()) {
         operation->finish(std::move(status));
     }
     else {
@@ -175,7 +134,6 @@ void submit_page_read(const std::shared_ptr<Load> &operation, std::shared_ptr<co
     auto ticket = detail::reserved_shared<PageReadTicket>(operation->metadata, operation, operation.get(),
                                                           &page_read_completed<Load>, operation->metadata,
                                                           operation->blob.capacity());
-    operation->io_pending.store(true, std::memory_order_release);
     try {
         submit_backing_read(*operation->store, std::move(backing), buffer, bytes, operation->metadata,
                             {.context     = ticket.get(),
@@ -190,9 +148,8 @@ void submit_page_read(const std::shared_ptr<Load> &operation, std::shared_ptr<co
     catch (...) {
         operation->finish(Status::io_error());
     }
-    // On rejection, finish reported the error but retained the operation's
-    // progress credit. A late callback or final ticket destruction releases
-    // it; neither path may decode or report a second terminal.
+    // An uncertain submit retains the ticket and operation until the backend
+    // releases its owner. A late callback cannot decode or finish twice.
     ticket->submitted();
 }
 } // namespace crowdb::tree

@@ -35,7 +35,7 @@ Crowdbtree::Crowdbtree(Config opt, std::shared_ptr<TreeCore> core)
 
 Crowdbtree::~Crowdbtree()
 {
-    core_->close_and_drain();
+    core_->close_facade();
 }
 
 void Crowdbtree::set_gc_watermark(uint64_t snapshot_slot, uint64_t safe_slot)

@@ -62,20 +62,13 @@ class Crowdbtree
 
     // Recover durable state or initialize an empty backend.
     static Status open(const Config &opt, std::unique_ptr<Crowdbtree> *out);
-    // Host-only migration. Stop and drain every legacy writer first, claim its
-    // catalog authority, and inject the runtime Chunk factory. The exact old
-    // generation stays pinned until the new root CAS is confirmed. On failure
-    // reopen with a fresh catalog incarnation before resolving/retrying.
-    static Status migrate_legacy_chunk(const Config &opt, uint64_t expected_generation,
-                                       std::unique_ptr<Crowdbtree> *out);
-
     // Finite source handoff, frame writes, durable root commit, and publication reconciliation.
-    Status snapshot(uint64_t *out_last_applied = nullptr, uint64_t *out_snapshot_seq = nullptr);
+    Status flush_with_persistent(uint64_t *out_last_applied = nullptr, uint64_t *out_persistent_sequence = nullptr);
 
     Status materialize_ownership(uint64_t *bytes_written, bool *complete);
 
     // Completion runs on the shared host runtime; close is a host-thread operation.
-    void snapshot_async(std::function<void(Status, uint64_t last_applied)> on_done);
+    void flush_with_persistent_async(std::function<void(Status, uint64_t last_applied)> on_done);
 
     // Explicit-slot apply preserves higher versions beyond a contiguous gap.
     Status apply(uint64_t slot, const Batch &batch);
@@ -168,7 +161,7 @@ class Crowdbtree
     Status install_snapshot_native(std::vector<NativeFrame> frames, uint64_t root_page_id, uint64_t at_slot,
                                    uint64_t next_page_id = 0);
 
-    // Install an empty namespace atomically; a subsequent snapshot makes it durable.
+    // Install an empty namespace atomically; a subsequent flush with persistent makes it durable.
     Status clear();
 
     [[nodiscard]] uint64_t last_applied_slot() const;
@@ -178,8 +171,8 @@ class Crowdbtree
     Status inspect_page(const std::vector<uint32_t> &path, uint64_t expected_version, NativeFrame *out,
                         uint64_t *out_version, uint64_t *out_root, uint32_t *out_deltas) const;
 
-    [[nodiscard]] uint64_t durable_snapshot_seq() const;
-    [[nodiscard]] uint64_t durable_snapshot_last_applied_slot() const;
+    [[nodiscard]] uint64_t durable_sequence() const;
+    [[nodiscard]] uint64_t durable_coverage() const;
     [[nodiscard]] uint64_t root_page_id() const;
 
     [[nodiscard]] bool io_failed() const

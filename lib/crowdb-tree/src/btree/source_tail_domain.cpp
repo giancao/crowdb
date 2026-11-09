@@ -62,8 +62,7 @@ try {
     barrier->destroy = [](EpochManager::Deferred *node) noexcept {
         auto &signal = *static_cast<Barrier *>(node);
         auto  owner  = std::move(signal.owner);
-        signal.ready.store(true, std::memory_order_release);
-        signal.ready.notify_all();
+        signal.signal();
     };
     Registration *expected = nullptr;
     entry->owner           = entry;
@@ -115,10 +114,20 @@ void SourceTailDomain::close() noexcept
     }
 }
 
-void SourceTailDomain::Barrier::wait() const noexcept
+void SourceTailDomain::Barrier::on_ready(std::function<void()> complete) noexcept
 {
-    while (!ready.load(std::memory_order_acquire)) {
-        ready.wait(false, std::memory_order_acquire);
+    complete_ = std::move(complete);
+    if ((state_.fetch_or(kWaiting, std::memory_order_acq_rel) & kReady) != 0) {
+        auto callback = std::move(complete_);
+        callback();
+    }
+}
+
+void SourceTailDomain::Barrier::signal() noexcept
+{
+    if ((state_.fetch_or(kReady, std::memory_order_acq_rel) & kWaiting) != 0) {
+        auto callback = std::move(complete_);
+        callback();
     }
 }
 } // namespace crowdb::tree

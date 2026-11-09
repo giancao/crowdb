@@ -14,7 +14,7 @@ namespace crowdb::tree
 {
 namespace
 {
-Status plan_native(const std::shared_ptr<PublishedSnapshotContext> &snapshot, CapturedFrameLimits frames,
+Status plan_native(const std::shared_ptr<PublishedReadViewContext> &snapshot, CapturedFrameLimits frames,
                    NativeLayoutLimits limits, uint64_t backend_id, uint64_t incarnation, size_t load_bound,
                    std::shared_ptr<NativeLayoutPlanner> *out)
 {
@@ -57,7 +57,7 @@ Status plan_native(const std::shared_ptr<PublishedSnapshotContext> &snapshot, Ca
     return status;
 }
 
-std::optional<size_t> loader_bound(const PublishedSnapshotContext &snapshot, size_t depth, size_t sources)
+std::optional<size_t> loader_bound(const PublishedReadViewContext &snapshot, size_t depth, size_t sources)
 {
     // This traversal loads primary frames only; old overflow frames have
     // their own one-frame reader and are never materialized as full values.
@@ -91,8 +91,8 @@ try {
     if (!status.ok()) {
         return status;
     }
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
-    status = core->capture_snapshot(&snapshot);
+    std::shared_ptr<PublishedReadViewContext> snapshot;
+    status = core->capture_read_only_view(&snapshot);
     if (!status.ok()) {
         return status;
     }

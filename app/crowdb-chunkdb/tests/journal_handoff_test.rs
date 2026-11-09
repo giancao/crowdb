@@ -95,7 +95,7 @@ async fn journal_cas_retains_future_revision_through_flush_and_reopen() {
     group.set_self_weak();
     seed_gap(&group).await;
     handle.flush().unwrap();
-    assert_eq!(handle.snapshot().unwrap(), 851);
+    assert_eq!(handle.flush_with_persistent().unwrap(), 851);
 
     let pending_group = Arc::clone(&group);
     let pending = tokio::spawn(async move {
@@ -118,7 +118,7 @@ async fn journal_cas_retains_future_revision_through_flush_and_reopen() {
     // must preserve that work while reads still observe the contiguous prefix.
     for _ in 0..3 {
         handle.flush().unwrap();
-        assert_eq!(handle.snapshot().unwrap(), 851);
+        assert_eq!(handle.flush_with_persistent().unwrap(), 851);
         assert_metadata(engine, 843, 58, 23039).await;
         assert!(!pending.is_finished(), "future apply must wait for the gap");
     }
@@ -132,7 +132,7 @@ async fn journal_cas_retains_future_revision_through_flush_and_reopen() {
     for _ in 0..3 {
         tokio::task::yield_now().await;
         handle.flush().unwrap();
-        assert_eq!(handle.snapshot().unwrap(), 851);
+        assert_eq!(handle.flush_with_persistent().unwrap(), 851);
         assert_metadata(engine, 843, 58, 23039).await;
         assert!(!cas.is_finished(), "the apply fence must not cross the gap");
     }
@@ -147,7 +147,7 @@ async fn journal_cas_retains_future_revision_through_flush_and_reopen() {
         .unwrap();
     assert!(matches!(result, ProposeResult::Chosen { slot: 854 }));
     handle.flush().unwrap();
-    assert_eq!(handle.snapshot().unwrap(), 854);
+    assert_eq!(handle.flush_with_persistent().unwrap(), 854);
     drop(group);
     drop(handle);
 

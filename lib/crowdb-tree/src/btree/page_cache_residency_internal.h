@@ -79,6 +79,7 @@ struct PageCacheResidency::State : std::enable_shared_from_this<State>
     void        enqueue(Command *command) noexcept;
     bool        enter() noexcept;
     void        leave() noexcept;
+    void        close_progress() noexcept;
     static void discard(Command *command) noexcept;
     void        wake() noexcept;
     void        drain() noexcept;
@@ -99,6 +100,7 @@ struct PageCacheResidency::State : std::enable_shared_from_this<State>
     std::atomic<Command *>                          incoming{nullptr};
     static constexpr uint64_t                       kClosed = uint64_t{1} << 63;
     std::atomic<uint64_t>                           producers{0};
+    AsyncCompletion                                 on_drained;
     std::atomic<bool>                               clear_requested{false};
     std::shared_ptr<detail::FlushRuntime::Progress> progress;
     Command                                        *reversing = nullptr;

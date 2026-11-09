@@ -27,7 +27,6 @@ struct BackendCheckpointInput
     std::shared_ptr<const CapturedDurablePages> pages;
     const PublishedTreeState                   &view;
     uint64_t                                    wal_offset;
-    size_t                                      max_dependency_steps;
     std::shared_ptr<AsyncPageStore>             store;
     std::shared_ptr<detail::FlushRuntime>       runtime;
     std::shared_ptr<detail::FlushRuntime::Lane> lane;
@@ -60,7 +59,7 @@ class CheckpointBackend
                                                                             size_t heads) const noexcept = 0;
     [[nodiscard]] virtual size_t                reservation_allocation_bound() const noexcept            = 0;
     [[nodiscard]] virtual PageWriteOperation::ReserveExtent
-                   reserve(const std::shared_ptr<detail::AllocationReservation> &metadata) const             = 0;
+                   reserve(const std::shared_ptr<AllocationBudget> &metadata) const                          = 0;
     virtual Status prepare_checkpoint(BackendCheckpointInput input, std::shared_ptr<BackendCheckpoint> *out) = 0;
 
     [[nodiscard]] virtual BackingStatsSampler backing_sampler() const noexcept

@@ -44,7 +44,6 @@ TEST(ChunkBacking, SealedWriteCreditProducesDirectLeafReloadWithoutActiveManifes
     EXPECT_EQ(backing->storage, BackingStorage::kChunkPack);
     EXPECT_TRUE(backing->reloadable());
     EXPECT_EQ(test.empty_device.size(), 0U);
-    EXPECT_EQ(test.catalog->manifest_loads, 0U);
     test_read::LoadCredits reads;
     PageLoadLimits         read_limits;
     read_limits.max_blob_bytes       = 8192;
@@ -62,7 +61,6 @@ TEST(ChunkBacking, SealedWriteCreditProducesDirectLeafReloadWithoutActiveManifes
     test.binding->drain();
     ASSERT_TRUE(loaded);
     EXPECT_EQ(CellView(loaded->cell(0)).value(), Slice("value"));
-    EXPECT_EQ(test.catalog->manifest_loads, 0U);
     EXPECT_EQ(test.catalog->reader_checks, 4U);
 }
 

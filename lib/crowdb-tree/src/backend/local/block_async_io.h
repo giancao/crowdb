@@ -10,7 +10,7 @@
 #ifdef CROWDB_HAVE_LIBURING
 namespace crowdb::tree::detail
 {
-std::optional<size_t> block_io_allocation_bound(size_t bytes, size_t parts) noexcept;
+std::optional<size_t> block_io_allocation_bound(size_t bytes, size_t parts, bool opens_extents) noexcept;
 std::optional<size_t> block_sync_allocation_bound(size_t extents) noexcept;
 
 // Splits aligned byte ranges across extents and retains the completion owner

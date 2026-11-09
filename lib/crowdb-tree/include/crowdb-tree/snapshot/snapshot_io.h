@@ -10,6 +10,7 @@
 #include "crowdb-tree/status.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -41,6 +42,8 @@ struct SnapshotChunk
     std::shared_ptr<AllocationBudget> allocation_budget = nullptr;
 };
 
+using SnapshotImportComplete = std::function<void(Status, uint64_t)>;
+
 // A resumable export over an immutable point-in-time view. Runtime sources
 // use bounded owned chunks and retain no whole serialized stream. A bounded
 // preflight computes exact length and CRC before the first emitted chunk.
@@ -70,6 +73,8 @@ class SnapshotExport
     Status next_chunk(std::string *out, bool *done);
     // Independently owned capacity remains accounted across chunk copies.
     Status next_owned(SnapshotChunk *out, bool *done);
+    // Keep this cursor alive and use it sequentially until completion.
+    Status next_owned_async(std::function<void(Status, SnapshotChunk, bool)> complete);
 
     [[nodiscard]] uint64_t at_slot() const
     {
@@ -139,6 +144,7 @@ class SnapshotImport
     // Parse + verify the accumulated stream, then replace the engine state.
     // Returns the snapshot's slot via *out_at_slot (if non-null).
     Status finish(uint64_t *out_at_slot);
+    Status finish_async(SnapshotImportComplete complete);
 
   private:
     std::shared_ptr<RuntimeSnapshotImport> runtime_;

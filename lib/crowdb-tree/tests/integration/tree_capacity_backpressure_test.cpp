@@ -158,19 +158,19 @@ TEST(TreeCapacityBackpressure, AutomaticChunkPersistenceKeepsThePreviouslyPaired
     ASSERT_TRUE(test.open().ok());
     ASSERT_TRUE(test.put(1, "first").ok());
     test.store->request_wal_offset(4096);
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     EXPECT_EQ(test.store->durable_wal_offset(), 4096U);
     test.store->request_wal_offset(8192);
     ASSERT_TRUE(test.put(2, "second").ok());
     ASSERT_TRUE(test.put(3, "third").ok());
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 3U);
+    EXPECT_EQ(test.tree->durable_coverage(), 3U);
     EXPECT_EQ(test.store->durable_wal_offset(), 4096U);
-    ASSERT_TRUE(test.tree->snapshot().ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
     EXPECT_EQ(test.store->durable_wal_offset(), 8192U);
     test.tree.reset();
     ASSERT_TRUE(test.open().ok());
     EXPECT_EQ(test.tree->get_view("key").value().to_string(), "third");
-    EXPECT_EQ(test.tree->durable_snapshot_last_applied_slot(), 3U);
+    EXPECT_EQ(test.tree->durable_coverage(), 3U);
 }
 
 TEST(TreeCapacityBackpressure, AsyncFlushJoiningAnOlderCheckpointStillCoversItsEntryPrefix)

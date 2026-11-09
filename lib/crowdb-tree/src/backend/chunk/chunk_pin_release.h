@@ -73,12 +73,14 @@ class ChunkPinReleaseQueue : public std::enable_shared_from_this<ChunkPinRelease
 
   private:
     friend class ChunkPinOwner;
-    Status prepare_node(const std::shared_ptr<AllocationBudget> &budget, std::shared_ptr<RootCatalog> catalog,
-                        uint64_t tree, ChunkStageId stage, ChunkStageId pin, bool writer,
-                        std::shared_ptr<ChunkPinOwner> *out);
-    void   release(ChunkPinReleaseNode *node) noexcept;
-    void   finish(ChunkPinReleaseNode *node) noexcept;
-    void   push(ChunkPinReleaseNode *node) noexcept;
+    Status      prepare_node(const std::shared_ptr<AllocationBudget> &budget, std::shared_ptr<RootCatalog> catalog,
+                             uint64_t tree, ChunkStageId stage, ChunkStageId pin, bool writer,
+                             std::shared_ptr<ChunkPinOwner> *out);
+    void        release(ChunkPinReleaseNode *node) noexcept;
+    void        finish(ChunkPinReleaseNode *node) noexcept;
+    void        push(ChunkPinReleaseNode *node) noexcept;
+    static void completed(void *context, Status status) noexcept;
+    void        collect(Step &result) noexcept;
     static constexpr size_t            kClosed = size_t{1} << ((sizeof(size_t) * 8) - 1);
     std::shared_ptr<const void>        wake_owner_;
     Wake                               wake_     = nullptr;
@@ -88,6 +90,7 @@ class ChunkPinReleaseQueue : public std::enable_shared_from_this<ChunkPinRelease
     std::atomic<size_t>                pending_{0};
     std::atomic<uint64_t>              denied_{0};
     std::atomic<ChunkPinReleaseNode *> incoming_{nullptr};
+    std::atomic<ChunkPinReleaseNode *> replies_{nullptr};
     ChunkPinReleaseNode               *active_       = nullptr;
     ChunkPinReleaseNode               *retry_        = nullptr;
     bool                               prefer_retry_ = false;

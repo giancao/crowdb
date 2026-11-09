@@ -12,24 +12,27 @@ namespace crowdb::tree
 // A backend-lane protocol. Each step handles at most one index pack or one
 // bounded reference authority window. The caller yields between steps; no CPU task
 // performs catalog waits, and an unknown mutation is queried by its exact ID.
-class ChunkRootCommit
+class ChunkRootCommit : public std::enable_shared_from_this<ChunkRootCommit>
 {
+    struct IndexFlow;
+
     struct ConstructionKey
     {
     };
 
   public:
-    ChunkRootCommit(ConstructionKey, std::shared_ptr<detail::AllocationReservation> metadata);
+    ChunkRootCommit(ConstructionKey, std::shared_ptr<AllocationBudget> metadata);
     static Status create(std::shared_ptr<const CapturedDurablePages> pages,
                          std::shared_ptr<const ChunkBackingDomain> domain, std::shared_ptr<detail::ChunkRuntimeIds> ids,
-                         ChunkRootIdentity identity, std::shared_ptr<detail::AllocationReservation> metadata,
-                         std::shared_ptr<detail::AllocationReservation> window, std::shared_ptr<ChunkRootCommit> *out,
-                         size_t                                      max_dependency_steps = 1024 * 1024,
-                         std::shared_ptr<const ChunkRootManifest>    previous             = {},
-                         std::shared_ptr<const CapturedDurablePages> baseline             = {});
+                         ChunkRootIdentity identity, std::shared_ptr<AllocationBudget> metadata,
+                         std::shared_ptr<AllocationBudget> window, std::shared_ptr<ChunkRootCommit> *out,
+                         std::shared_ptr<const ChunkRootManifest>    previous = {},
+                         std::shared_ptr<const CapturedDurablePages> baseline = {});
     [[nodiscard]] static std::optional<size_t> allocation_bound(size_t frames, size_t previous_indexes = 0) noexcept;
     [[nodiscard]] static std::optional<size_t> window_allocation_bound(size_t stored_references) noexcept;
     Status                                     step(bool stop_requested = false) noexcept;
+
+    void submit_step(bool stopped, std::shared_ptr<ScheduledPageStore> store, AsyncCompletion complete) noexcept;
 
     [[nodiscard]] bool done() const noexcept
     {
@@ -85,6 +88,10 @@ class ChunkRootCommit
         Done
     };
     using References = std::set<detail::ChunkStageId, std::less<>, detail::ReservationAllocator<detail::ChunkStageId>>;
+    void   submit_index(bool stopped, std::shared_ptr<ScheduledPageStore> store, AsyncCompletion complete) noexcept;
+    Status query_loaded(Status status, const std::optional<detail::ChunkCandidateStatus> &current);
+    AsyncCompletion    step_reply(AsyncCompleteFn callback);
+    void               complete_step(Status status);
     Status             advance();
     Status             index();
     [[nodiscard]] bool unchanged(std::span<const DurableCapturedFrame *const> frames,
@@ -104,16 +111,19 @@ class ChunkRootCommit
     Status             query_result(const detail::ChunkCandidateStatus &current);
     void               accepted_window();
 
-    std::shared_ptr<detail::AllocationReservation> metadata_;
-    std::shared_ptr<detail::AllocationReservation> window_;
-    std::shared_ptr<const CapturedDurablePages>    pages_;
-    std::shared_ptr<const ChunkBackingDomain>      domain_;
-    std::shared_ptr<detail::ChunkRuntimeIds>       ids_;
-    std::shared_ptr<const CapturedDurablePages>    baseline_;
-    std::shared_ptr<const ChunkRootManifest>       previous_;
-    std::shared_ptr<ChunkRootManifest>             pending_root_;
-    std::shared_ptr<const ChunkRootManifest>       committed_root_;
-    size_t                                         previous_index_ = 0;
+    AsyncCompletion                             step_completion_;
+    std::shared_ptr<IndexFlow>                  index_flow_;
+    std::optional<detail::ChunkCandidateStatus> candidate_query_;
+    std::shared_ptr<AllocationBudget>           metadata_;
+    std::shared_ptr<AllocationBudget>           window_;
+    std::shared_ptr<const CapturedDurablePages> pages_;
+    std::shared_ptr<const ChunkBackingDomain>   domain_;
+    std::shared_ptr<detail::ChunkRuntimeIds>    ids_;
+    std::shared_ptr<const CapturedDurablePages> baseline_;
+    std::shared_ptr<const ChunkRootManifest>    previous_;
+    std::shared_ptr<ChunkRootManifest>          pending_root_;
+    std::shared_ptr<const ChunkRootManifest>    committed_root_;
+    size_t                                      previous_index_ = 0;
 
     ChunkRootManifest                                               root_;
     ChunkMetadataBytes                                              manifest_;
@@ -123,18 +133,18 @@ class ChunkRootCommit
     References::const_iterator                                      reference_;
     detail::ChunkStageId                                            candidate_{};
     std::array<detail::ChunkStageId, detail::kMaxReferenceWindow>   pending_{};
-    size_t                                                          pending_count_        = 0;
-    uint64_t                                                        prepared_             = 0;
-    uint64_t                                                        released_             = 0;
-    uint32_t                                                        checksum_             = 0;
-    size_t                                                          dependency_           = 0;
-    size_t                                                          max_dependency_steps_ = 0;
-    uint64_t                                                        chain_pid_            = kInvalidPageId;
-    uint64_t                                                        chain_bytes_          = 0;
-    Stage                                                           stage_                = Stage::Index;
-    bool                                                            candidate_started_    = false;
-    bool                                                            committed_            = false;
-    bool                                                            uncertain_            = false;
+    size_t                                                          pending_count_     = 0;
+    uint64_t                                                        prepared_          = 0;
+    uint64_t                                                        released_          = 0;
+    uint32_t                                                        checksum_          = 0;
+    size_t                                                          dependency_        = 0;
+    uint64_t                                                        chain_pid_         = kInvalidPageId;
+    uint64_t                                                        chain_bytes_       = 0;
+    uint64_t                                                        chain_steps_       = 0;
+    Stage                                                           stage_             = Stage::Index;
+    bool                                                            candidate_started_ = false;
+    bool                                                            committed_         = false;
+    bool                                                            uncertain_         = false;
     Status                                                          status_;
 };
 } // namespace crowdb::tree

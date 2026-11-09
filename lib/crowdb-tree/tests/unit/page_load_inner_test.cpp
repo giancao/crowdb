@@ -92,14 +92,14 @@ TEST(InnerLoad, ValidatesChecksumChildIdsAndMetadataBounds)
     }
 }
 
-TEST(InnerLoad, SlowIoDoesNotHoldCpuWorkerAndLateErrorReturnsPermit)
+TEST(InnerLoad, SlowIoDoesNotHoldCpuWorkerOrDelayOtherReads)
 {
     auto runtime                 = std::make_shared<detail::FlushRuntime>(1, 1);
     auto lane                    = std::make_shared<detail::FlushRuntime::Lane>(1);
     auto store                   = std::make_shared<TestInnerStore>();
     store->deferred              = true;
     auto                 backing = inner_backing(store, 0, *inner({"m"}, {1, 2}));
-    AsyncStorePageLoader loader(store, runtime, lane, {.max_inflight = 1});
+    AsyncStorePageLoader loader(store, runtime, lane, {});
     std::vector<Code>    outcomes;
     auto complete = [&](Status status, std::shared_ptr<const InnerPageState>) { outcomes.push_back(status.code()); };
     loader.load_inner(backing, complete);
@@ -116,8 +116,9 @@ TEST(InnerLoad, SlowIoDoesNotHoldCpuWorkerAndLateErrorReturnsPermit)
     store->finish(Status::io_error("first read failed"));
     loader.load_inner(backing, complete);
     store->finish(Status::io_error("second read failed"));
-    EXPECT_EQ(outcomes, (std::vector<Code>{Code::kResourceExhausted, Code::kIoError, Code::kIoError}));
-    EXPECT_EQ(store->reads.load(), 2U);
+    store->finish(Status::io_error("third read failed"));
+    EXPECT_EQ(outcomes, (std::vector<Code>{Code::kIoError, Code::kIoError, Code::kIoError}));
+    EXPECT_EQ(store->reads.load(), 3U);
 }
 
 TEST(InnerLoad, RejectsWrongFrameTypeAndCpuQueueShutdown)

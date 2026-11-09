@@ -44,6 +44,14 @@ pub(super) fn read(export: *mut sys::ct_export, offset: u64) -> Result<OwnedSnap
     let mut handle = std::ptr::null_mut();
     let mut done = 0;
     check(unsafe { sys::ct_snapshot_export_next_v2(export, offset, &mut handle, &mut done) })?;
+    from_raw(handle, offset, done)
+}
+
+pub(super) fn from_raw(
+    handle: *mut sys::ct_snapshot_chunk,
+    offset: u64,
+    done: i32,
+) -> Result<OwnedSnapshotChunk, CtError> {
     if handle.is_null() {
         return Err(CtError::Internal);
     }

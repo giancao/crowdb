@@ -24,7 +24,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -110,7 +109,7 @@ class PageStore
 
     virtual Status decode_mapping_location(uint64_t word, uint64_t *addr, uint32_t *physical_len) const
     {
-        if (addr == nullptr || physical_len == nullptr || !slot_word::is_byte_location(word)) {
+        if (addr == nullptr || physical_len == nullptr || !slot_word::is_unloaded(word)) {
             return Status::corruption("mapping byte location has an invalid tag");
         }
         *addr         = slot_word::unloaded_iu_index(word) * iu_size();
@@ -219,9 +218,16 @@ class PageStore
         return sync_mode_;
     }
 
-    using RuntimeFactory = Status (*)(const Config &, std::shared_ptr<TreeCore> *);
+    using RuntimeFactory      = Status (*)(const Config &, std::shared_ptr<TreeCore> *);
+    using RuntimeOpenComplete = std::function<void(Status, std::shared_ptr<TreeCore>)>;
+    using RuntimeAsyncFactory = Status (*)(const Config &, RuntimeOpenComplete);
 
     [[nodiscard]] virtual RuntimeFactory runtime_factory() const noexcept
+    {
+        return nullptr;
+    }
+
+    [[nodiscard]] virtual RuntimeAsyncFactory runtime_async_factory() const noexcept
     {
         return nullptr;
     }
@@ -241,6 +247,8 @@ class MemPageStore : public PageStore
   public:
     static constexpr size_t kBackingPageBytes = 64 * 1024;
 
+    // Concurrent overlapping byte accesses require caller ordering. Existing
+    // backing/extent owners protect each I/O from whole-page reclamation.
     explicit MemPageStore(uint32_t iu_size = 1);
     ~MemPageStore() override;
 
@@ -268,7 +276,6 @@ class MemPageStore : public PageStore
 
   private:
     struct Data;
-    mutable std::mutex    mu_;
     std::unique_ptr<Data> data_;
     uint32_t              iu_size_;
 };

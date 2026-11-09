@@ -236,31 +236,35 @@ TEST(ExtentLedger, MiddleRecoveryFitsItsBoundAndEveryFailedAllocationRollsBack)
 
 TEST(ExtentLedger, QueueReentryAndThrowingReceiverDoNotStrandAllocationOrRelease)
 {
-    LedgerFixture test({.backend_id = 1, .queue_capacity = 1});
+    LedgerFixture test({.backend_id = 1});
     ASSERT_TRUE(test.activate().status.ok());
     size_t          delivered = 0;
     ProtectedExtent retained;
-    ASSERT_TRUE(
-        test.ledger
-            ->reserve(4096, test.credits.credits.reservation(),
-                      [&](ExtentLedgerResult first) {
-                          EXPECT_TRUE(first.status.ok());
-                          EXPECT_TRUE(test.ledger
-                                          ->reserve(4096, test.credits.credits.reservation(),
-                                                    [&](ExtentLedgerResult next) {
-                                                        EXPECT_TRUE(next.status.ok());
-                                                        retained = std::move(next.extent);
-                                                        ++delivered;
-                                                    })
-                                          .ok());
-                          EXPECT_EQ(
-                              test.ledger->reserve(4096, test.credits.credits.reservation(), [](ExtentLedgerResult) {})
-                                  .code(),
-                              Code::kResourceExhausted);
-                          throw std::runtime_error("controlled receiver failure");
-                      })
-            .ok());
-    EXPECT_EQ(delivered, 1U);
+    ASSERT_TRUE(test.ledger
+                    ->reserve(4096, test.credits.credits.reservation(),
+                              [&](ExtentLedgerResult first) {
+                                  EXPECT_TRUE(first.status.ok());
+                                  EXPECT_TRUE(test.ledger
+                                                  ->reserve(4096, test.credits.credits.reservation(),
+                                                            [&](ExtentLedgerResult next) {
+                                                                EXPECT_TRUE(next.status.ok());
+                                                                retained = std::move(next.extent);
+                                                                ++delivered;
+                                                            })
+                                                  .ok());
+                                  for (size_t i = 0; i < 128; ++i) {
+                                      EXPECT_TRUE(test.ledger
+                                                      ->reserve(4096, test.credits.credits.reservation(),
+                                                                [&](ExtentLedgerResult next) {
+                                                                    EXPECT_TRUE(next.status.ok());
+                                                                    ++delivered;
+                                                                })
+                                                      .ok());
+                                  }
+                                  throw std::runtime_error("controlled receiver failure");
+                              })
+                    .ok());
+    EXPECT_EQ(delivered, 129U);
     EXPECT_EQ(test.ledger->stats().protected_ranges, 1U);
     test.ledger->close();
     test.ledger.reset();

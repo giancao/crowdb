@@ -1,7 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "backend/chunk/chunk_page_staging.h"
 #include "buffer_pool_test_support.h"
 #include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/backend/page_store.h"
@@ -196,7 +195,7 @@ TEST_P(SnapshotMemoryTest, ReleasesCompletedPageBuffersBeforeWritingMetadata)
         ASSERT_GT(store.baseline, 0U);
         if (GetParam()) {
             std::atomic<bool> complete{false};
-            tree.snapshot_async([&](Status status, uint64_t applied) {
+            tree.flush_with_persistent_async([&](Status status, uint64_t applied) {
                 EXPECT_TRUE(status.ok()) << status.to_string();
                 EXPECT_EQ(applied, 256U);
                 complete.store(true, std::memory_order_release);
@@ -209,7 +208,7 @@ TEST_P(SnapshotMemoryTest, ReleasesCompletedPageBuffersBeforeWritingMetadata)
             }
         }
         else {
-            ASSERT_TRUE(tree.snapshot().ok());
+            ASSERT_TRUE(tree.flush_with_persistent().ok());
         }
         ASSERT_TRUE(store.retained_bytes.has_value());
         ASSERT_TRUE(store.prepared_bytes.has_value());
@@ -233,42 +232,6 @@ TEST_P(SnapshotMemoryTest, ReleasesCompletedPageBuffersBeforeWritingMetadata)
 }
 
 INSTANTIATE_TEST_SUITE_P(WritePaths, SnapshotMemoryTest, ::testing::Bool());
-
-TEST(SnapshotMemory, PaddedOverlayKeepsZeroCoverageWithoutRetainingPadding)
-{
-    constexpr size_t     fragment_bytes = 65536;
-    constexpr size_t     page_count     = 256;
-    std::vector<uint8_t> page(2 * fragment_bytes, 0);
-    std::fill_n(page.begin(), fragment_bytes + 32, 0x53);
-    detail::ChunkPageStaging staging;
-    const auto               before = resident_bytes();
-    for (size_t i = 0; i < page_count; ++i) {
-        staging.write(i * page.size(), page);
-    }
-    const auto growth = resident_bytes() - before;
-    std::cout << "Padded overlay RSS growth: " << growth << " bytes\n";
-    EXPECT_LT(growth, 24U * 1024 * 1024) << "overlay retained allocation-unit padding alongside logical page bytes";
-    const size_t size = page_count * page.size();
-    ASSERT_EQ(staging.size(), size);
-    ASSERT_TRUE(staging.covers(0, size));
-
-    std::vector<uint8_t> expected(size);
-    for (size_t i = 0; i < page_count; ++i) {
-        std::copy(page.begin(), page.end(), expected.begin() + static_cast<std::ptrdiff_t>(i * page.size()));
-    }
-    const std::array<uint8_t, 3> patch{4, 0, 5};
-    for (const size_t offset : {fragment_bytes + 1024, (3 * fragment_bytes) - 1}) {
-        staging.write(offset, patch);
-        std::copy(patch.begin(), patch.end(), expected.begin() + static_cast<std::ptrdiff_t>(offset));
-    }
-    const std::vector<uint8_t> zeros(fragment_bytes, 0);
-    staging.write(0, zeros);
-    std::fill_n(expected.begin(), fragment_bytes, 0);
-    std::vector<uint8_t> actual(size, 0xAA);
-    staging.overlay(0, actual);
-    EXPECT_EQ(actual, expected);
-    EXPECT_TRUE(staging.covers(0, size));
-}
 
 TEST(SnapshotMemory, UnusedFrameCapacityDoesNotPrefaultTheArena)
 {

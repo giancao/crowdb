@@ -31,7 +31,8 @@ impl PxLocalReplica {
             backend: CrowdbTreeBackend::MemBlock,
             ..Default::default()
         };
-        let engine = CrowdbTreeEngine::open(&opt)
+        let engine = CrowdbTreeEngine::open_async(&opt)
+            .await
             .map_err(|e| io::Error::other(format!("crowdb-tree mem-block open failed: {e:?}")))?;
         Self::restore_from_replay_with_engine(id, role, replay, Box::new(engine)).await
     }

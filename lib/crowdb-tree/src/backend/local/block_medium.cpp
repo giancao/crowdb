@@ -16,29 +16,23 @@ namespace crowdb::tree
 
 Status MemoryMedium::pwrite_at(uint64_t off, const uint8_t *buf, size_t len)
 {
-    if (len == 0) {
-        return Status::Ok();
-    }
-    std::scoped_lock lk(mu_);
-    if (off + len > data_.size()) {
-        data_.resize(off + len, 0);
-    }
-    std::memcpy(data_.data() + off, buf, len);
-    return Status::Ok();
+    return data_.write_at(off, buf, len);
 }
 
 Status MemoryMedium::pread_partial(uint64_t off, uint8_t *buf, size_t len, size_t *out_read) const
 {
-    std::scoped_lock lk(mu_);
-    if (off >= data_.size()) {
+    if (out_read == nullptr) {
+        return Status::invalid_argument("memory partial read requires an output length");
+    }
+    const auto end = data_.size();
+    if (off >= end) {
         *out_read = 0;
         return Status::Ok();
     }
-    size_t avail = data_.size() - off;
-    size_t n     = len < avail ? len : avail;
-    std::memcpy(buf, data_.data() + off, n);
-    *out_read = n;
-    return Status::Ok();
+    const auto count  = static_cast<size_t>(std::min<uint64_t>(len, end - off));
+    auto       status = data_.read_at(off, buf, count);
+    *out_read         = status.ok() ? count : 0;
+    return status;
 }
 
 Status MemoryMedium::fsync()
@@ -48,7 +42,6 @@ Status MemoryMedium::fsync()
 
 uint64_t MemoryMedium::size() const
 {
-    std::scoped_lock lk(mu_);
     return data_.size();
 }
 
@@ -100,18 +93,28 @@ Status FileMedium::open(const std::string &path, bool o_direct, std::unique_ptr<
     return status;
 }
 
-Status FileMedium::open_owned(const char *path, bool direct, const std::shared_ptr<AllocationBudget> &budget,
-                              std::shared_ptr<FileMedium> *out, const std::shared_ptr<BackendReleaseService> &release)
+Status FileMedium::allocate_owned(const std::shared_ptr<AllocationBudget> &budget, std::shared_ptr<FileMedium> *out,
+                                  const std::shared_ptr<BackendReleaseService> &release)
 {
     detail::BackendObjectStorage storage(sizeof(FileMedium), alignof(FileMedium), budget);
     auto                        *file = ::new (storage.get()) FileMedium(-1);
     (void)storage.release();
     std::shared_ptr<FileMedium> result(file, std::default_delete<FileMedium>{}, MetadataAllocator<FileMedium>(budget));
     auto                        status = result->prepare_close(budget, release);
-    if (!status.ok()) {
-        return status;
+    if (status.ok()) {
+        *out = std::move(result);
     }
-    status = open_file_descriptor(path, direct, &result->fd_);
+    return status;
+}
+
+Status FileMedium::open_owned(const char *path, bool direct, const std::shared_ptr<AllocationBudget> &budget,
+                              std::shared_ptr<FileMedium> *out, const std::shared_ptr<BackendReleaseService> &release)
+{
+    std::shared_ptr<FileMedium> result;
+    auto                        status = allocate_owned(budget, &result, release);
+    if (status.ok()) {
+        status = open_file_descriptor(path, direct, &result->fd_);
+    }
     if (status.ok()) {
         *out = std::move(result);
     }

@@ -253,7 +253,7 @@ TEST(MetricsRegistry, FlushMetricsStrFormat)
     // Trigger a snapshot to populate some metrics.
     ASSERT_TRUE(t.apply(1, Batch{{{.key = "k", .kind = OpKind::kPut, .value = "v"}}}).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     std::string out = t.flush_metrics_str(5.0, "2026-07-15T16:30:05.123Z", 0);
     ASSERT_FALSE(out.empty());

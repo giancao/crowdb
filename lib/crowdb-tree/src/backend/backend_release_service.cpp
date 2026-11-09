@@ -74,9 +74,15 @@ Status BackendReleaseService::register_node(Node &node)
 void BackendReleaseService::enqueue(Node &node) noexcept
 {
     assert(node.service && !node.queued);
-    auto keep   = node.service;
     node.queued = true;
-    keep->pending_.fetch_add(1, std::memory_order_relaxed);
+    node.service->pending_.fetch_add(1, std::memory_order_relaxed);
+    resume(node);
+}
+
+void BackendReleaseService::resume(Node &node) noexcept
+{
+    assert(node.service && node.queued);
+    auto  keep = node.service;
     auto *head = keep->incoming_.load(std::memory_order_relaxed);
     do {
         node.next = head;
@@ -84,7 +90,7 @@ void BackendReleaseService::enqueue(Node &node) noexcept
     keep->wake();
 }
 
-BackendReleaseService::Step BackendReleaseService::pump(size_t limit) noexcept
+BackendReleaseService::Step BackendReleaseService::pump(size_t limit, common::DiskIOUring *reactor) noexcept
 {
     if (consumer_.test_and_set(std::memory_order_acquire)) {
         return {.more = true};
@@ -110,12 +116,13 @@ BackendReleaseService::Step BackendReleaseService::pump(size_t limit) noexcept
         auto *node = active_;
         active_    = node->next;
         // The method retains the service through actual free and publication.
-        if (node->dispose(node)) {
+        const auto disposal = node->dispose(node, reactor);
+        if (disposal == Disposal::kDone) {
             pending_.fetch_sub(1, std::memory_order_relaxed);
             state_.fetch_sub(1, std::memory_order_release);
             ++result.completed;
         }
-        else {
+        else if (disposal == Disposal::kMore) {
             node->next = deferred_;
             deferred_  = node;
         }

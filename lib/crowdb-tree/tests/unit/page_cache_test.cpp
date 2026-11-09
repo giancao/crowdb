@@ -185,7 +185,7 @@ TEST(SharedPageCache, IdentityIncludesGenerationAndBackendProtection)
     EXPECT_EQ(upstream->calls, 4U);
 }
 
-TEST(SharedPageCache, FixedCapacityRejectsBeforeIoAndCallbacksCanReenter)
+TEST(SharedPageCache, WaiterPoolPressureBypassesCacheAndCallbacksCanReenter)
 {
     SharedPageCache cache({.max_pages = 1, .max_waiters = 2});
     auto            upstream = std::make_shared<TestLoader>();
@@ -212,17 +212,21 @@ TEST(SharedPageCache, FixedCapacityRejectsBeforeIoAndCallbacksCanReenter)
         EXPECT_TRUE(leaf);
         ++done;
     });
-    loader->load_leaf(input, [](Status status, auto leaf) {
-        EXPECT_EQ(status.code(), Code::kUnavailable);
-        EXPECT_FALSE(leaf);
+    loader->load_leaf(input, [&](Status status, auto leaf) {
+        EXPECT_TRUE(status.ok());
+        EXPECT_TRUE(leaf);
+        ++done;
     });
+    EXPECT_EQ(upstream->calls, 2U);
     upstream->finish();
     EXPECT_EQ(done, 3U);
+    upstream->finish();
+    EXPECT_EQ(done, 4U);
     EXPECT_EQ(cache.snapshot().waiters, 0U);
     EXPECT_EQ(cache.snapshot().rejected, 1U);
 }
 
-TEST(SharedPageCache, ReservedWaiterSurvivesOrdinaryPressureAndWaitsForInFlightPageCapacity)
+TEST(SharedPageCache, ReservedWaiterAndOrdinaryOverflowStartWithoutWaitingForCacheEntries)
 {
     LoadCredits     credits;
     SharedPageCache cache({.max_pages = 1, .max_waiters = 2}, credits.credits.reservation());
@@ -243,9 +247,10 @@ TEST(SharedPageCache, ReservedWaiterSurvivesOrdinaryPressureAndWaitsForInFlightP
         EXPECT_TRUE(leaf);
         ++ordinary_done;
     });
-    ordinary->load_leaf(cold(1), [](Status status, auto leaf) {
-        EXPECT_EQ(status.code(), Code::kUnavailable);
-        EXPECT_FALSE(leaf);
+    ordinary->load_leaf(cold(1), [&](Status status, auto leaf) {
+        EXPECT_TRUE(status.ok());
+        EXPECT_TRUE(leaf);
+        ++ordinary_done;
     });
     reserved->load_leaf(cold(2), [&](Status status, auto leaf) {
         EXPECT_TRUE(status.ok());
@@ -253,11 +258,13 @@ TEST(SharedPageCache, ReservedWaiterSurvivesOrdinaryPressureAndWaitsForInFlightP
         ++reserved_done;
     });
     EXPECT_EQ(cache.snapshot().waiters, 2U);
-    EXPECT_EQ(upstream->calls, 1U);
+    EXPECT_EQ(upstream->calls, 3U);
     upstream->finish();
     EXPECT_EQ(ordinary_done, 1U);
     EXPECT_EQ(reserved_done, 0U);
-    EXPECT_EQ(upstream->calls, 2U);
+    EXPECT_EQ(upstream->calls, 3U);
+    upstream->finish();
+    EXPECT_EQ(ordinary_done, 2U);
     upstream->finish();
     EXPECT_EQ(reserved_done, 1U);
     EXPECT_EQ(cache.snapshot().waiters, 0U);
@@ -501,9 +508,9 @@ TEST(SharedPageCache, HighWaterPressureReclaimsToLowWaterAndKeepsReadPinsValid)
     EXPECT_EQ(CellView(pinned->cell(0)).value().to_string(), "value");
 }
 
-TEST(SharedPageCache, ForegroundReadsHaveBoundedPriorityOverQueuedMaintenance)
+TEST(SharedPageCache, IndependentReadsAndMaintenanceStartBeforeUnrelatedIoCompletes)
 {
-    SharedPageCache             cache({.max_pages = 1, .max_waiters = 8, .max_read_burst = 2});
+    SharedPageCache             cache({.max_pages = 1, .max_waiters = 8});
     auto                        upstream = std::make_shared<TestReplayLoader>();
     auto                        read     = cache.bind(upstream);
     std::shared_ptr<PageLoader> maintenance;
@@ -524,13 +531,51 @@ TEST(SharedPageCache, ForegroundReadsHaveBoundedPriorityOverQueuedMaintenance)
     auto frame = base({
         {.key = "a", .value = "value"}
     });
-    for (size_t i = 0; i < 5; ++i) {
-        ASSERT_EQ(upstream->callbacks.size(), i + 1);
+    ASSERT_EQ(upstream->callbacks.size(), 5U);
+    for (const size_t i : {4U, 3U, 2U, 1U, 0U}) {
         auto done = upstream->callbacks[i];
         done(Status::Ok(), frame);
     }
-    EXPECT_EQ(completed, (std::vector<uint64_t>{1, 3, 4, 2, 5}));
+    EXPECT_EQ(completed, (std::vector<uint64_t>{5, 4, 3, 2, 1}));
     EXPECT_EQ(cache.snapshot().waiters, 0U);
+}
+
+TEST(SharedPageCache, BypassedLoadsRejectStaleCallbacksAfterWaiterReuseAndCheckSlotProof)
+{
+    SharedPageCache cache({.max_pages = 1, .max_waiters = 2});
+    auto            upstream = std::make_shared<TestReplayLoader>();
+    auto            loader   = cache.bind(upstream);
+    size_t          values   = 0;
+    size_t          errors   = 0;
+    auto            accept   = [&](Status status, auto leaf) {
+        EXPECT_TRUE(status.ok());
+        EXPECT_TRUE(leaf);
+        ++values;
+    };
+    loader->load_leaf(cold(1), accept);
+    loader->load_leaf(cold(2, 1), [&](Status status, auto leaf) {
+        EXPECT_EQ(status.code(), Code::kCorruption);
+        EXPECT_FALSE(leaf);
+        ++errors;
+    });
+    ASSERT_EQ(upstream->callbacks.size(), 2U);
+    auto frame = base({
+        {.key = "a", .slot = 2, .value = "value"}
+    });
+    upstream->callbacks[1](Status::Ok(), frame);
+    EXPECT_EQ(errors, 1U);
+    loader->load_leaf(cold(3, 2), accept);
+    ASSERT_EQ(upstream->callbacks.size(), 3U);
+    upstream->callbacks[1](Status::Ok(), frame);
+    EXPECT_EQ(errors, 1U);
+    EXPECT_EQ(values, 0U);
+    EXPECT_EQ(cache.snapshot().inflight, 2U);
+    upstream->callbacks[2](Status::Ok(), frame);
+    upstream->callbacks[0](Status::Ok(), frame);
+    EXPECT_EQ(values, 2U);
+    EXPECT_EQ(errors, 1U);
+    EXPECT_EQ(cache.snapshot().waiters, 0U);
+    EXPECT_EQ(cache.snapshot().inflight, 0U);
 }
 
 TEST(SharedPageCache, MaintenanceFramesAreEvictedBeforeRecentlyReadFrames)
@@ -563,10 +608,10 @@ TEST(SharedPageCache, MaintenanceFramesAreEvictedBeforeRecentlyReadFrames)
     EXPECT_EQ(upstream->calls, 4U);
 }
 
-TEST(SharedPageCache, InvalidWatermarksAndUnboundedReadPriorityRejectAtConstruction)
+TEST(SharedPageCache, InvalidWatermarksAndEmptyMetadataPoolRejectAtConstruction)
 {
     EXPECT_THROW(SharedPageCache({.max_resident_bytes = 10, .low_resident_bytes = 11}), std::invalid_argument);
-    EXPECT_THROW(SharedPageCache({.max_read_burst = 0}), std::invalid_argument);
+    EXPECT_THROW(SharedPageCache({.max_waiters = 0}), std::invalid_argument);
 }
 } // namespace
 } // namespace crowdb::tree

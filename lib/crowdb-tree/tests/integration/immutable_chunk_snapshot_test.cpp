@@ -15,13 +15,13 @@ TEST(ImmutableChunkSnapshot, ColdPackCanRebuildFixedRangeAfterSourceWriterCloses
                 {.key = "z", .kind = OpKind::kPut, .value = std::string(9000, 'v')}}
     };
     ASSERT_TRUE(source.tree->apply(1, batch).ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
     source.tree.reset();
     ASSERT_TRUE(source.open().ok());
-    std::shared_ptr<PublishedSnapshotContext> snapshot;
-    ASSERT_TRUE(TreeCoreAccess::get(*source.tree)->capture_snapshot(&snapshot).ok());
+    std::shared_ptr<PublishedReadViewContext> snapshot;
+    ASSERT_TRUE(TreeCoreAccess::get(*source.tree)->capture_read_only_view(&snapshot).ok());
     ASSERT_TRUE(source.tree->apply(2, Batch{.ops = {{.key = "z", .kind = OpKind::kPut, .value = "new"}}}).ok());
-    ASSERT_TRUE(source.tree->snapshot().ok());
+    ASSERT_TRUE(source.tree->flush_with_persistent().ok());
     source.tree.reset();
 
     GetView value;
@@ -33,10 +33,10 @@ TEST(ImmutableChunkSnapshot, ColdPackCanRebuildFixedRangeAfterSourceWriterCloses
     auto              *core = TreeCoreAccess::get(*destination.tree);
     RuntimeRangeImport staging;
     // The fixed-range planner reserves its observed import shape.
-    auto status = copy_snapshot_range(snapshot, *core, destination.config.key_range, staging);
+    auto status = copy_read_only_view_range(snapshot, *core, destination.config.key_range, staging);
     ASSERT_TRUE(status.ok()) << status.to_string();
     ASSERT_TRUE(core->install_readable(std::move(staging.catalog), staging.credit).ok());
-    ASSERT_TRUE(destination.tree->snapshot().ok());
+    ASSERT_TRUE(destination.tree->flush_with_persistent().ok());
     EXPECT_EQ(staging.stats.entries_emitted, 1U);
     EXPECT_EQ(staging.stats.pages_reused, 0U);
     EXPECT_GT(staging.stats.pages_rebuilt, 0U);

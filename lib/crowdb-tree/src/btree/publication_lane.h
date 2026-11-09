@@ -7,25 +7,17 @@
 
 namespace crowdb::tree
 {
-// Fixed publication window reserved before a Tree accepts proposals. Requests
-// already own their metadata; this lane only bounds their simultaneous ingress.
+// Publication ownership for accepted Tree work. Each request owns its memory;
+// suspended children do not consume a bounded publication slot.
 class PublicationLane
 {
-  public:
-    [[nodiscard]] size_t capacity() const noexcept
-    {
-        return capacity_;
-    }
-
   private:
     friend class PublicationCoordinator;
 
-    PublicationLane(uint64_t publisher, size_t capacity) : publisher_(publisher), capacity_(capacity)
+    explicit PublicationLane(uint64_t publisher) : publisher_(publisher)
     {
     }
 
-    const uint64_t      publisher_;
-    const size_t        capacity_;
-    std::atomic<size_t> queued_{0};
+    const uint64_t publisher_;
 };
 } // namespace crowdb::tree

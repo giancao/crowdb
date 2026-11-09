@@ -124,6 +124,13 @@ Status SnapshotImport::finish(uint64_t *out_at_slot)
     return runtime_->finish(out_at_slot);
 }
 
+Status SnapshotImport::finish_async(SnapshotImportComplete complete)
+{
+    auto runtime = runtime_;
+    return runtime ? runtime->finish_async(std::move(complete))
+                   : Status::invalid_argument("snapshot: stream truncated");
+}
+
 Status snapshot_load_from_file(Crowdbtree &tree, const std::string &path)
 {
     std::ifstream f(path, std::ios::binary);

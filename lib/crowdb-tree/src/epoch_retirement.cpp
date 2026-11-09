@@ -137,13 +137,11 @@ bool EpochManager::Lifetime::retire_step() noexcept
         pending = live_pending.exchange(nullptr);
     }
     size_t steps = 0;
-    for (auto **head : {&pending, &collected}) {
-        while (*head != nullptr && steps < 64) {
-            auto *node = *head;
-            *head      = node->next;
-            node->destroy(node);
-            ++steps;
-        }
+    while (pending != nullptr && steps < 64) {
+        auto *node = pending;
+        pending    = node->next;
+        node->destroy(node);
+        ++steps;
     }
     while (!retired.empty() && steps < 64) {
         auto entry = std::move(retired.back());
@@ -157,7 +155,7 @@ bool EpochManager::Lifetime::retire_step() noexcept
         participants = next;
         ++steps;
     }
-    return pending == nullptr && collected == nullptr && retired.empty() && participants == nullptr;
+    return pending == nullptr && retired.empty() && participants == nullptr;
 }
 
 EpochManager::Lifetime::~Lifetime()
