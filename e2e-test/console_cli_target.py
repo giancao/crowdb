@@ -94,7 +94,7 @@ class CliAttachedCluster(CliClient, Cluster):
                     esac
                 done
                 """, "owned-service-pids", *(str(current["pid"]) for current in status["services"].values()))
-        # Aggregate PID fields are optional fresh samples. Lifecycle invariance
+        # Aggregate process fields are optional fresh samples. Lifecycle invariance
         # uses each owning monitor, including services absent from that cache.
         services = request(self.endpoint(0), "/api/servers")
         assert len({item["id"] for item in services}) == len(services), services
@@ -112,7 +112,7 @@ class CliAttachedCluster(CliClient, Cluster):
             if item.get("pid") is not None:
                 assert item.get("pid_node_id") == item["node_id"], ("cached PID namespace changed", item)
                 assert item["pid"] == actual[0], ("cached PID differs from owning monitor", item, actual)
-        volatile = {"pid", "pid_node_id", "health", "start_pending"}
+        volatile = {"pid", "pid_node_id", "health", "start_pending", "process_observed"}
         registrations = [{key: value for key, value in item.items() if key not in volatile} for item in services]
         return {"containers": [(item["Id"], item["Image"]) for item in containers],
                 "processes": sorted((node, service, *identity) for (node, service), identity in processes.items()),
@@ -138,7 +138,8 @@ class CliAttachedCluster(CliClient, Cluster):
                          "data": console_cli_operations.data}[checkpoint]
             operation(self)
             self.check_ready()
-            assert self.inventory() == before, "logical CLI operation changed runtime lifecycle"
+            after = self.inventory()
+            assert after == before, ("logical CLI operation changed runtime lifecycle", before, after)
             (self.artifacts / "operation-proof.json").write_text(json.dumps({
                 "cluster_id": self.cluster_id, "operation": checkpoint, "inventory": before}, indent=2))
             print("PASS selected-cluster CLI", checkpoint, flush=True)
@@ -167,7 +168,8 @@ class CliAttachedCluster(CliClient, Cluster):
                                endpoint=self.endpoint(index)) == value
         self.invoke("cluster", "stop", endpoint=self.endpoint(0), expected_exit=2)
         self.check_ready(endpoint=self.endpoint(2))
-        assert self.inventory() == before, "attachment changed container or service lifecycle"
+        after = self.inventory()
+        assert after == before, ("attachment changed container or service lifecycle", before, after)
         assert not (self.root / "persistent/oci-clusters").exists(), "attachment created a runtime receipt"
         (self.artifacts / "attachment-proof.json").write_text(json.dumps({
             "cluster_id": self.cluster_id, "inventory": before,

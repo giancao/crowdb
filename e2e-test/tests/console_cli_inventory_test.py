@@ -54,7 +54,7 @@ class AttachedInventoryTest(unittest.TestCase):
     def test_cold_cache_does_not_hide_process_or_registration_changes(self):
         before = self.cluster.inventory()
         self.assertEqual(len(before["processes"]), 21)
-        self.services[0].update(pid=101, pid_node_id=1, health="up")
+        self.services[0].update(pid=101, pid_node_id=1, health="up", process_observed=True)
         self.assertEqual(self.cluster.inventory(), before)
         self.status["owned-1"]["services"]["chunk-kv-1"]["pid"] += 1
         self.assertNotEqual(self.cluster.inventory(), before)
