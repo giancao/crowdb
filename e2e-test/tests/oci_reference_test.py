@@ -124,15 +124,16 @@ class OciReferenceOwnershipTest(unittest.TestCase):
         cluster = self.cluster()
         cluster.expected_names = [f'owned-node{index}' for index in range(1, 5)]
         cluster.port_base, cluster.image, cluster.containers = 20000, 'expected', []
+        ports = {'http_port': 10135, 'rpc_port': 11135}
         accepted = {'setup': {'services': [
-            {'kind': 'paxos-kv', 'listeners': {'http_port': 10135, 'rpc_port': 11135}}]}}
+            {'kind': 'paxos-kv', 'listeners': {**ports, 's3_port': None}}]}}
         with tempfile.TemporaryDirectory() as directory:
             cluster.artifacts = Path(directory)
             with patch.object(recovery, 'read_json', return_value=accepted) as read:
                 recovery.create_nonvoter(cluster)
                 policy = tomllib.loads((cluster.artifacts / 'later-member.toml').read_text())
                 kv = next(service for service in policy['services'] if service['kind'] == 'paxos-kv')
-                self.assertEqual(kv['listeners'], accepted['setup']['services'][0]['listeners'])
+                self.assertEqual(kv['listeners'], ports)
                 self.assertEqual(policy['storage']['mode'], 'diskless')
                 self.assertTrue(all(not service['enabled'] for service in policy['services']
                                     if service['kind'] != 'paxos-kv'))

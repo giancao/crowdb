@@ -2,6 +2,8 @@
 # Licensed under the Apache License, Version 2.0.
 """Explicit choices for fixtures that test bootstrap rather than default setup."""
 
+import json
+
 
 def diskless_setup(listeners=None):
     services = [
@@ -19,7 +21,8 @@ def diskless_policy(listeners=None):
     for service in diskless_setup(listeners)["services"]:
         lines += ['[[services]]', f'kind = "{service["kind"]}"',
                   f'enabled = {str(service["enabled"]).lower()}']
-        if service["listeners"]:
-            lines += ['[services.listeners]',
-                      *(f'{key} = {value}' for key, value in service["listeners"].items())]
+        listener_fields = [f'{key} = {json.dumps(value)}'
+                           for key, value in service["listeners"].items() if value is not None]
+        if listener_fields:
+            lines += ['[services.listeners]', *listener_fields]
     return '\n'.join(lines) + '\n'
