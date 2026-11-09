@@ -15,6 +15,24 @@ class TreeCore;
 struct CoreScanOptions;
 class ScanPackedBuf;
 
+namespace detail
+{
+class HostCompletion;
+}
+
+// Retained only by a synchronous export window and its accepted I/O.
+struct HostReadTail
+{
+    explicit HostReadTail(detail::HostCompletion &done) : done(done)
+    {
+    }
+
+    ~HostReadTail();
+
+    detail::HostCompletion         &done;
+    std::shared_ptr<AsyncPageStore> backend;
+};
+
 // One accepted window. Idle cursor handles keep no I/O reserve or Tree
 // ticket. Lower-level callback owners independently retain accepted I/O.
 // Windows that borrow a Core must release the host guard off runtime workers.
@@ -51,7 +69,7 @@ class PublishedReadViewContext
     // bytes covers the caller's operation, loader and output capacities.
     // This adds reservation-control/ticket overhead and reserves one I/O.
     Status prepare_window(size_t bytes, SnapshotReadWindow *out) const;
-    Status prepare_window(SnapshotReadWindow *out) const;
+    Status prepare_window(SnapshotReadWindow *out, const std::shared_ptr<HostReadTail> &tail = {}) const;
     Status get(Slice key, GetView *out) const;
     // For detached views. Once accepted, complete can run inline or after I/O.
     Status get_async(Slice key, std::function<void(Status, GetView)> complete) const;
@@ -80,7 +98,8 @@ class PublishedReadViewContext
     {
     }
 
-    Status finish_window(SnapshotReadWindow window, SnapshotReadWindow *out) const;
+    Status finish_window(SnapshotReadWindow window, SnapshotReadWindow *out,
+                         const std::shared_ptr<HostReadTail> &tail = {}) const;
 
     std::shared_ptr<State> state_;
 };

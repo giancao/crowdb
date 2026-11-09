@@ -29,7 +29,8 @@ class PublishedSnapshotEntries
     {
     }
 
-    Status                 next_impl(Complete complete, std::shared_ptr<TreeCore> *host_core);
+    Status                 next_impl(Complete complete, std::shared_ptr<TreeCore> *host_core,
+                                     const std::shared_ptr<HostReadTail> &tail = {});
     std::shared_ptr<State> state_;
 };
 } // namespace crowdb::tree

@@ -276,11 +276,11 @@ TEST(FlushRuntime, ConcurrentHostRequestsDuringCompletionNeverBecomeIdleAndPendi
     std::shared_ptr<FlushRuntime::Progress> progress;
     ASSERT_TRUE(runtime.reserve_progress(lane, &Observed::run, owner.get(), {}, &progress).ok());
     constexpr size_t requests     = 10000;
-    const auto       deadline     = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     size_t           acknowledged = 0;
     for (size_t i = 1; i <= requests; ++i) {
         owner->requested.store(i, std::memory_order_release);
         progress->request(owner);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (owner->completed.load(std::memory_order_acquire) < i && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::yield();
         }

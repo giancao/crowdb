@@ -7,7 +7,7 @@ use crowdb_paxos_kv_client::{ClientConfig, PaxosKvClient};
 use crowdb_protocol::port::ports::WEB_BASE;
 use reqwest::{Client, Method};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 pub(super) struct TestNativeContext {
     pub(super) http: Client,
@@ -20,13 +20,22 @@ pub(super) struct TestNativeContext {
 impl TestNativeContext {
     pub(super) async fn connect() -> Self {
         let addresses = crate::common::management::addresses(3);
+        let artifacts =
+            PathBuf::from(std::env::var_os("CROWDB_E2E_ARTIFACTS").expect("fixture artifact directory"));
+        let endpoints: Value = serde_json::from_slice(
+            &std::fs::read(artifacts.join("native-endpoints.json")).expect("native fixture endpoints"),
+        )
+        .expect("native fixture endpoints JSON");
+        let management = endpoints["management_address"]
+            .as_str()
+            .expect("fixture management address");
         // A restart includes the supervisor's stop grace and startup probe.
         let http = Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap();
-        let base = format!("http://{}:{WEB_BASE}", addresses[0]);
+        let base = format!("http://{management}:{WEB_BASE}");
         let group = crate::common::management::request(
             &http,
             &base,

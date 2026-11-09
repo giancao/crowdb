@@ -29,7 +29,7 @@ class ShellBrowserCluster(StandaloneWebCluster):
         shutil.copytree(self.bundle / "clients/console-ui", project,
                         ignore=shutil.ignore_patterns("node_modules"))
         env = os.environ.copy()
-        address = self.addresses[0]
+        address = getattr(self, "management_address", self.addresses[0])
         browser_output = (self.artifacts / "browser").resolve()
         bypass = ",".join(filter(None, [env.get("NO_PROXY", ""), env.get("no_proxy", ""), address]))
         env.update(NO_PROXY=bypass, no_proxy=bypass,

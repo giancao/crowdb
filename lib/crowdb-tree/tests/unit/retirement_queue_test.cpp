@@ -470,10 +470,10 @@ TEST_F(EpochRetirement, EveryDeferralDuringCollectorCompletionHasItsOwnProgress)
     EpochManager        epoch(credit);
     std::atomic<size_t> freed{0};
     constexpr size_t    entries      = 50000;
-    const auto          deadline     = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     size_t              acknowledged = 0;
     for (size_t index = 1; index <= entries; ++index) {
         enqueue(epoch, freed);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (freed.load(std::memory_order_acquire) < index && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::yield();
         }

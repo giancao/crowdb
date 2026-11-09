@@ -26,9 +26,10 @@ struct ScheduledPageStore::State
 
 struct ScheduledPageStore::Job
 {
+    // The consumer's read ticket must remain alive until the backend owner is released.
+    AsyncCompletion                               consumer;
     std::shared_ptr<State>                        state;
     std::shared_ptr<Job>                          queued_owner;
-    AsyncCompletion                               consumer;
     detail::InlineFunction<Status()>              step;
     detail::InlineFunction<void(AsyncCompletion)> async_step;
     PageAddr                                      address     = 0;

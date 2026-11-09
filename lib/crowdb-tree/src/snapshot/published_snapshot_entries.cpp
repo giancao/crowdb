@@ -58,8 +58,10 @@ struct PublishedSnapshotEntries::State::Window
         }
     };
 
-    Window(std::shared_ptr<State> state, SnapshotReadWindow window, Complete complete)
-        : state(std::move(state)),
+    Window(std::shared_ptr<State> state, SnapshotReadWindow window, Complete complete,
+           std::shared_ptr<HostReadTail> tail)
+        : tail(std::move(tail)),
+          state(std::move(state)),
           window(std::move(window)),
           complete(std::move(complete)),
           connected(stdexec::connect(this->state->scan->next_sender(), Receiver{.window = this}))
@@ -99,6 +101,8 @@ struct PublishedSnapshotEntries::State::Window
         complete_entries(complete, std::move(status), std::move(entry), end);
     }
 
+    // Signal the host after the window and its view have released their owners.
+    std::shared_ptr<HostReadTail>               tail;
     std::shared_ptr<State>                      state;
     SnapshotReadWindow                          window;
     Complete                                    complete;
@@ -171,7 +175,8 @@ Status PublishedSnapshotEntries::next_async(Complete complete)
     return next_impl(std::move(complete), nullptr);
 }
 
-Status PublishedSnapshotEntries::next_impl(Complete complete, std::shared_ptr<TreeCore> *host_core)
+Status PublishedSnapshotEntries::next_impl(Complete complete, std::shared_ptr<TreeCore> *host_core,
+                                           const std::shared_ptr<HostReadTail> &tail)
 {
     if (!complete) {
         return Status::invalid_argument("read-only view entry cursor needs a completion");
@@ -207,7 +212,7 @@ Status PublishedSnapshotEntries::next_impl(Complete complete, std::shared_ptr<Tr
     }
     try {
         SnapshotReadWindow window;
-        auto               status = state->snapshot->prepare_window(&window);
+        auto               status = state->snapshot->prepare_window(&window, tail);
         if (!status.ok()) {
             state->failure = status.without_message();
             return status;
@@ -217,9 +222,9 @@ Status PublishedSnapshotEntries::next_impl(Complete complete, std::shared_ptr<Tr
             // after the read ticket and callback have finished.
             *host_core = std::move(window.host_core);
         }
-        auto pending =
-            detail::reserved_shared<State::Window>(state->metadata, state, std::move(window), std::move(complete));
-        status = state->loader->begin(pending->window.loader);
+        auto pending = detail::reserved_shared<State::Window>(state->metadata, state, std::move(window),
+                                                              std::move(complete), tail);
+        status       = state->loader->begin(pending->window.loader);
         if (!status.ok()) {
             state->failure = status.without_message();
             return status;
@@ -241,7 +246,7 @@ Status PublishedSnapshotEntries::next_impl(Complete complete, std::shared_ptr<Tr
 }
 
 Status PublishedSnapshotEntries::next(std::optional<PublishedScanEntry> *out, bool *complete)
-{
+try {
     if (out == nullptr || complete == nullptr) {
         return Status::invalid_argument("read-only view entry cursor needs result outputs");
     }
@@ -249,6 +254,8 @@ Status PublishedSnapshotEntries::next(std::optional<PublishedScanEntry> *out, bo
     *complete = false;
     std::shared_ptr<TreeCore> host_core;
     detail::HostCompletion    done;
+    detail::HostCompletion    released;
+    auto                      tail = detail::reserved_shared<HostReadTail>(state_->metadata, released);
     Status                    terminal;
     auto                      status = next_impl(
         [&](Status result, std::optional<PublishedScanEntry> entry, bool end) noexcept {
@@ -257,12 +264,18 @@ Status PublishedSnapshotEntries::next(std::optional<PublishedScanEntry> *out, bo
             *complete = end;
             done.signal();
         },
-        &host_core);
+        &host_core, tail);
+    tail.reset();
     if (!status.ok()) {
+        released.wait();
         return status;
     }
     done.wait();
+    released.wait();
     return terminal;
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted("synchronous export read owner allocation failed");
 }
 
 uint64_t PublishedSnapshotEntries::skipped_subtrees() const noexcept

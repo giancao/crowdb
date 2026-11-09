@@ -7,6 +7,7 @@
 #include "backend/local/scheduled_page_store.h"
 #include "btree/allocation_bound.h"
 #include "btree/tree_core.h"
+#include "host_completion.h"
 
 namespace crowdb::tree
 {
@@ -20,6 +21,12 @@ struct SnapshotBackendOwner
     std::shared_ptr<AsyncPageStore>     scheduled;
 };
 } // namespace
+
+HostReadTail::~HostReadTail()
+{
+    backend.reset();
+    done.signal();
+}
 
 struct PublishedReadViewContext::State : std::enable_shared_from_this<State>
 {
@@ -261,7 +268,8 @@ catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot read window allocation failed");
 }
 
-Status PublishedReadViewContext::prepare_window(SnapshotReadWindow *out) const
+Status PublishedReadViewContext::prepare_window(SnapshotReadWindow                  *out,
+                                                const std::shared_ptr<HostReadTail> &tail) const
 try {
     using namespace detail;
     if (out == nullptr || out->host_core || out->budget.bytes || out->loader || out->ticket) {
@@ -274,13 +282,14 @@ try {
         window.budget.cpu_progress = state_->binding->view_cpu_progress();
     }
     window.budget.cause = TreeWorkCause::Snapshot;
-    return finish_window(std::move(window), out);
+    return finish_window(std::move(window), out, tail);
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted("snapshot read window allocation failed");
 }
 
-Status PublishedReadViewContext::finish_window(SnapshotReadWindow window, SnapshotReadWindow *out) const
+Status PublishedReadViewContext::finish_window(SnapshotReadWindow window, SnapshotReadWindow *out,
+                                               const std::shared_ptr<HostReadTail> &tail) const
 try {
     using namespace detail;
     Status          status;
@@ -301,6 +310,10 @@ try {
         return status;
     }
     window.backend = window.ticket->backend(backend);
+    if (tail && window.backend) {
+        tail->backend  = std::move(window.backend);
+        window.backend = std::shared_ptr<AsyncPageStore>(tail, backend);
+    }
     window.loader =
         reserved_shared<AsyncStorePageLoader>(window.budget.bytes, window.backend, state_->binding->cpu(), state_->lane,
                                               state_->loads, OverflowBackingResolver{}, window.budget);
