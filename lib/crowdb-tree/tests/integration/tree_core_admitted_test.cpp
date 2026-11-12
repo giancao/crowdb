@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <latch>
 #include <thread>
 #include <vector>
 
@@ -237,7 +238,61 @@ TEST_F(TreeCoreAdmitted, CompleteBatchMustFitTheGapSourceBeforeItCanBeProposed)
     EXPECT_EQ(core->contiguous_slot(), 0U);
 }
 
-TEST_F(TreeCoreAdmitted, FullOrdinaryCpuQueueCannotRejectAcceptedApply)
+TEST_F(TreeCoreAdmitted, OrdinaryFlushBatchesEightFullMemTables)
+{
+    tree.reset();
+    config.max_memtable_count           = 16;
+    config.memtable_flush_count         = 8;
+    config.execution.source_max_entries = 1;
+    tree                                = std::make_unique<Crowdbtree>(config);
+    core                                = TreeCoreAccess::get(*tree);
+
+    for (uint64_t slot = 1; slot <= 8; ++slot) {
+        const auto                          key = "key" + std::to_string(slot);
+        std::shared_ptr<TreeApplyOperation> operation;
+        ASSERT_TRUE(prepare(key, "value", &operation).ok());
+        ASSERT_TRUE(operation->arm().ok());
+        TestApplyCompletion completed;
+        operation->start(slot, &TestApplyCompletion::complete, &completed);
+        completed.wait();
+        ASSERT_TRUE(completed.status.ok()) << completed.status.to_string();
+        core->binding()->drain();
+        EXPECT_EQ(core->capture()->coverage, slot < 8 ? 0U : 8U);
+        EXPECT_EQ(tree->frozen_table_count(), slot < 8 ? slot : 0U);
+        EXPECT_TRUE(tree->get(key, nullptr, nullptr));
+    }
+    const auto totals = core->publisher().work_metrics()->totals();
+    EXPECT_EQ(totals[static_cast<size_t>(TreeStage::FlushBatch)].count, 1U);
+    EXPECT_EQ(core->durable_coverage(), 0U);
+}
+
+TEST_F(TreeCoreAdmitted, FullGapSourceRotatesBeforeTheBatchFlushThreshold)
+{
+    tree.reset();
+    config.max_memtable_count               = 16;
+    config.memtable_flush_count             = 8;
+    config.execution.source_max_gap_entries = 1;
+    tree                                    = std::make_unique<Crowdbtree>(config);
+    core                                    = TreeCoreAccess::get(*tree);
+
+    for (uint64_t slot : {4U, 1U, 2U}) {
+        const auto                          key = "key" + std::to_string(slot);
+        std::shared_ptr<TreeApplyOperation> operation;
+        ASSERT_TRUE(prepare(key, "value", &operation).ok());
+        ASSERT_TRUE(operation->arm().ok());
+        TestApplyCompletion completed;
+        operation->start(slot, &TestApplyCompletion::complete, &completed);
+        completed.wait();
+        ASSERT_TRUE(completed.status.ok()) << completed.status.to_string();
+        core->binding()->drain();
+        EXPECT_TRUE(tree->get(key, nullptr, nullptr));
+    }
+    EXPECT_EQ(core->capture()->coverage, 0U);
+    EXPECT_EQ(tree->frozen_table_count(), 1U);
+    EXPECT_EQ(tree->contiguous_slot(), 2U);
+}
+
+TEST_F(TreeCoreAdmitted, ReadyQueueBacklogDoesNotRejectAcceptedApply)
 {
     tree.reset();
     config.max_memtable_count     = 2;
@@ -253,28 +308,40 @@ TEST_F(TreeCoreAdmitted, FullOrdinaryCpuQueueCannotRejectAcceptedApply)
     ASSERT_TRUE(operation->arm().ok());
     const auto filled = fill_full_source();
     ASSERT_TRUE(filled.ok()) << filled.to_string();
-    auto runtime = core->binding()->cpu();
-    auto other   = std::make_shared<detail::FlushRuntime::Lane>(1024);
-    std::vector<std::shared_ptr<detail::FlushRuntime::Progress>> occupied;
-    for (;;) {
-        std::shared_ptr<detail::FlushRuntime::Progress> slot;
-        auto status = runtime->reserve_progress(other, [](void *) noexcept {}, nullptr, {}, &slot);
-        if (!status.ok()) {
-            ASSERT_EQ(status.code(), Code::kResourceExhausted);
-            break;
-        }
-        occupied.push_back(std::move(slot));
+    const auto &runtime = core->binding()->cpu();
+    const auto &lane    = core->binding()->lane();
+
+    struct Gate
+    {
+        std::latch started{2};
+        std::latch release{1};
+    } gate;
+
+    for (size_t index = 0; index < 2; ++index) {
+        EXPECT_TRUE(runtime
+                        ->try_submit(
+                            lane,
+                            +[](void *raw) noexcept {
+                                auto &gate = *static_cast<Gate *>(raw);
+                                gate.started.count_down();
+                                gate.release.wait();
+                            },
+                            &gate)
+                        .ok());
     }
-    ASSERT_FALSE(occupied.empty());
-    EXPECT_EQ(
-        runtime->try_submit(core->binding()->lane(), [](void *) noexcept {}, nullptr).code(), Code::kResourceExhausted);
+    gate.started.wait();
+    for (size_t index = 0; index <= runtime->queue_target(); ++index) {
+        EXPECT_TRUE(runtime->try_submit(lane, +[](void *) noexcept {}, nullptr).ok());
+    }
+    EXPECT_GT(lane->queued(), runtime->queue_target());
     pressure.reset();
     TestApplyCompletion completed;
     operation->start(129, &TestApplyCompletion::complete, &completed);
+    gate.release.count_down();
     completed.wait();
+    lane->drain();
     ASSERT_TRUE(completed.status.ok()) << completed.status.to_string();
     EXPECT_EQ(core->contiguous_slot(), 129U);
-    occupied.clear();
     EXPECT_EQ(tree->get_view("accepted").value().to_string(), "paid");
 }
 

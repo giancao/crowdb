@@ -35,6 +35,7 @@ struct Accounted<T, A> {
 impl<T, A: OwnerAllocation> Accounted<T, A> {
     const VTABLE: Vtable = Vtable {
         owner_allocation: Some(owner_allocation::<T, A>),
+        owner: None,
         clone: clone::<T, A>,
         into_vec: into_vec::<T, A>,
         into_mut: into_mut::<T, A>,

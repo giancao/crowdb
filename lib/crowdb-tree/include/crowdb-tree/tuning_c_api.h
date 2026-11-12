@@ -33,6 +33,7 @@ struct ct_tree_tuning
     size_t   maintenance_max_steps;
     size_t   maintenance_metadata_bytes;
     size_t   cache_max_pages;
+    uint32_t memtable_flush_count;
 };
 
 void ct_tree_tuning_default(ct_tree_tuning *out);

@@ -21,7 +21,7 @@ fn accepted(ballot: u64, term: u64, value: &[u8]) -> WALRecord {
             slot: 1,
             ballot: PxBallot::new(ballot, 7),
             term,
-            payload: Bytes::from(payload),
+            payload: Bytes::from(payload).into(),
         },
     )
 }

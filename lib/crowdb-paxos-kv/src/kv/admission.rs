@@ -15,7 +15,7 @@ pub enum ApplyAdmissionError {
 /// A prepaid apply operation for one exact proposal payload.
 /// Dropping it before choosing returns unused resource credit.
 pub trait AdmittedApply: Send {
-    /// Transfer the reserved bytes into the chosen slot's owned allocations.
+    /// Submit the chosen slot without blocking and return its completion.
     ///
     /// # Errors
     /// Reports a local terminal storage failure, never a consensus rejection.

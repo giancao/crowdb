@@ -111,8 +111,9 @@ TEST(CapturedFrames, FinalLeafOutputEncodesWithoutBuildingAnotherMapping)
     ASSERT_TRUE(test.stream->result().complete);
     EXPECT_EQ(test.stream->stats().pages, 1U);
     EXPECT_EQ(test.stream->stats().loads, 0U);
+    EXPECT_EQ(test.stream->stats().cpu_steps, 1U);
     EXPECT_EQ(test.frame().info.page_id, 17U);
-    const auto &buffer = test.frame().buffer->bytes;
+    const auto &buffer = test.frame().buffer->bytes();
     ASSERT_TRUE(frame_validate(buffer.data(), buffer.size()));
     LeafFrameView leaf(buffer.data(), buffer.size());
     ASSERT_EQ(leaf.count(), 1U);
@@ -145,7 +146,7 @@ TEST(CapturedFrames, FinalIndexOutputUsesJoinedFencesWithoutTraversingChildren)
     EXPECT_EQ(test.stream->stats().pages, 1U);
     EXPECT_EQ(test.stream->stats().loads, 0U);
     EXPECT_EQ(test.frame().info.page_id, 20U);
-    const auto &buffer = test.frame().buffer->bytes;
+    const auto &buffer = test.frame().buffer->bytes();
     ASSERT_TRUE(frame_validate(buffer.data(), buffer.size()));
     InnerFrameView index(buffer.data(), buffer.size());
     EXPECT_EQ(index.child_at(0), 7U);
@@ -168,8 +169,8 @@ TEST(CapturedFrames, MaterializationBytesFollowTheLastOutputOwnerAfterStreamDest
     ASSERT_EQ(done.values.load(), 1U);
     auto retained = test.frame().buffer;
     ASSERT_TRUE(retained);
-    EXPECT_EQ(credits.resources->snapshot().materialize_inflight_bytes, retained->bytes.capacity());
-    EXPECT_EQ(retained->bytes.capacity(), 4096U);
+    EXPECT_EQ(credits.resources->snapshot().materialize_inflight_bytes, retained->capacity());
+    EXPECT_EQ(retained->capacity(), 4096U);
     test.stream.reset();
     test.runtime->drain();
     credits.seal();
@@ -231,7 +232,7 @@ TEST(CapturedFrames, CapturedMappingSurvivesUnvisitedReplacementAndFiltersFuture
     test.next(&second);
     ASSERT_EQ(second.values.load(), 1U);
     ASSERT_TRUE(test.stream->result().frame);
-    const auto   &bytes = test.frame().buffer->bytes;
+    const auto   &bytes = test.frame().buffer->bytes();
     LeafFrameView leaf(bytes.data(), bytes.size());
     ASSERT_EQ(leaf.count(), 1U);
     EXPECT_EQ(CellView(leaf.cell(0)).value().to_string(), "v");
@@ -268,7 +269,7 @@ TEST(CapturedFrames, ColdIndexTraversalLoadsOnDemandWithOneCpuWorker)
         ASSERT_TRUE(test.stream->result().frame);
         const auto &frame = test.frame();
         ids.push_back(frame.info.page_id);
-        EXPECT_TRUE(frame_validate(frame.buffer->bytes.data(), frame.info.bytes));
+        EXPECT_TRUE(frame_validate(frame.buffer->bytes().data(), frame.info.bytes));
     }
     EXPECT_EQ(ids, (std::vector<uint64_t>{3, 4, 1, 5, 6, 2, 0}));
     EXPECT_EQ(cold_tree.store->reads.load(), 3U);
@@ -286,12 +287,12 @@ TEST(CapturedFrames, PinnedOutputAppliesBackpressureWithoutOverwritingOrAdvancin
     ASSERT_EQ(first.values.load(), 1U);
     auto pinned = std::make_unique<CapturedFrame>(test.frame());
     ASSERT_TRUE(pinned);
-    const auto crc = frame_u32(pinned->buffer->bytes.data(), pinned->info.bytes - kFrameTrailerSize);
+    const auto crc = frame_u32(pinned->buffer->bytes().data(), pinned->info.bytes - kFrameTrailerSize);
     Completion rejected;
     test.next(&rejected);
     EXPECT_EQ(rejected.errors.load(), 1U);
     EXPECT_EQ(test.stream->result().status.code(), Code::kUnavailable);
-    EXPECT_EQ(frame_u32(pinned->buffer->bytes.data(), pinned->info.bytes - kFrameTrailerSize), crc);
+    EXPECT_EQ(frame_u32(pinned->buffer->bytes().data(), pinned->info.bytes - kFrameTrailerSize), crc);
     EXPECT_EQ(test.stream->stats().frames, 1U);
     pinned.reset();
     Completion second;
@@ -329,9 +330,9 @@ TEST(CapturedFrames, OverflowStreamsThroughOneWindowWithOwnedDisjointIdentities)
         ASSERT_TRUE(test.stream->result().frame);
         const auto &frame = test.frame();
         if (address == nullptr) {
-            address = frame.buffer->bytes.data();
+            address = frame.buffer->bytes().data();
         }
-        EXPECT_EQ(frame.buffer->bytes.data(), address);
+        EXPECT_EQ(frame.buffer->bytes().data(), address);
         EXPECT_TRUE(frame_validate(address, frame.info.bytes));
         if (frame.info.type == page_type::kOverflowFrame) {
             OverflowFrameView overflow(address, frame.info.bytes);
@@ -488,8 +489,8 @@ TEST(CapturedFrames, GcEmptyLeavesDoNotBecomeInnerFenceEndpoints)
     }
     const auto &frame = test.frame();
     EXPECT_EQ(frame.info.page_id, 3U);
-    EXPECT_EQ(frame_lower_fence_page_id(frame.buffer->bytes.data()), 1U);
-    EXPECT_EQ(frame_upper_fence_page_id(frame.buffer->bytes.data()), 1U);
+    EXPECT_EQ(frame_lower_fence_page_id(frame.buffer->bytes().data()), 1U);
+    EXPECT_EQ(frame_upper_fence_page_id(frame.buffer->bytes().data()), 1U);
 }
 
 TEST(CapturedFrames, ReusedOverflowDependencyOutlivesStreamAndCapturedInput)

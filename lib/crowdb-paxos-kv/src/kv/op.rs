@@ -2,6 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 use bytes::Bytes;
+use std::ops::Range;
+
+use crate::paxos::roles::ProposalPayload;
+
+pub(super) type OperationRanges = (Range<usize>, Option<Range<usize>>);
 
 /// A single mutation within a batch: set a value or delete (tombstone) a key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +45,20 @@ pub struct EngineDiff {
 }
 
 impl Batch {
+    pub(crate) fn single_put_key(payload: &[u8]) -> Option<&[u8]> {
+        Self::single_put_ranges(payload).map(|(key, _)| &payload[key])
+    }
+
+    pub(crate) fn single_put_ranges(payload: &[u8]) -> Option<(Range<usize>, Range<usize>)> {
+        if !payload.starts_with(&[1, 0, 0]) {
+            return None;
+        }
+        let mut cursor = 3;
+        let key = read_field_range(payload, &mut cursor).ok()?;
+        let value = read_field_range(payload, &mut cursor).ok()?;
+        (cursor == payload.len()).then_some((key, value))
+    }
+
     /// Validate an entire consensus payload before admitting or applying it.
     /// Empty payloads represent gap-repair `NoOp` entries.
     ///
@@ -47,30 +66,92 @@ impl Batch {
     /// Rejects truncated fields, unknown operations, nonempty delete values,
     /// and bytes following the declared operation count.
     pub fn try_decode(payload: &Bytes) -> Result<Self, &'static str> {
-        if payload.is_empty() {
-            return Ok(Self::default());
-        }
-        let count = payload.get(..2).ok_or("truncated batch operation count")?;
-        let count = usize::from(u16::from_le_bytes([count[0], count[1]]));
-        let mut cursor = 2;
+        let (count, ranges) = Self::operation_ranges(payload)?;
         let mut ops = Vec::with_capacity(count);
-        for _ in 0..count {
-            let kind = *payload.get(cursor).ok_or("truncated operation kind")?;
-            cursor += 1;
-            let key = read_field(payload, &mut cursor)?;
-            let value = read_field(payload, &mut cursor)?;
-            let op = match kind {
-                0 => Op::Put(value),
-                1 if value.is_empty() => Op::Delete,
-                1 => return Err("delete operation carries a value"),
-                _ => return Err("unknown batch operation kind"),
-            };
-            ops.push(BatchOp { key, op });
+        Self::append_operations(payload, ranges, &mut ops)?;
+        Ok(Self { ops })
+    }
+
+    pub(crate) fn try_decode_proposal(payload: &ProposalPayload) -> Result<Self, &'static str> {
+        if let Some(bytes) = payload.contiguous() {
+            return Self::try_decode(bytes);
         }
-        if cursor != payload.len() {
-            return Err("trailing bytes after batch operations");
+        let parts = payload.segments().expect("segmented proposal");
+        let count = parts.operation_count();
+        let mut ops = Vec::with_capacity(count);
+        for batch in parts.batches() {
+            let (_, ranges) = Self::operation_ranges(batch)?;
+            Self::append_operations(batch, ranges, &mut ops)?;
+        }
+        if ops.len() != count {
+            return Err("coalesced batch operation count mismatch");
         }
         Ok(Self { ops })
+    }
+
+    fn append_operations(
+        payload: &Bytes,
+        ranges: impl Iterator<Item = Result<OperationRanges, &'static str>>,
+        ops: &mut Vec<BatchOp>,
+    ) -> Result<(), &'static str> {
+        for operation in ranges {
+            let (key, value) = operation?;
+            ops.push(BatchOp {
+                key: payload.slice(key),
+                op: value.map_or(Op::Delete, |value| Op::Put(payload.slice(value))),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn operation_ranges(
+        payload: &[u8],
+    ) -> Result<
+        (
+            usize,
+            impl Iterator<Item = Result<OperationRanges, &'static str>> + '_,
+        ),
+        &'static str,
+    > {
+        let mut cursor = 0;
+        let count = if payload.is_empty() {
+            0
+        } else {
+            let count = payload.get(..2).ok_or("truncated batch operation count")?;
+            cursor = 2;
+            usize::from(u16::from_le_bytes([count[0], count[1]]))
+        };
+        if count > (payload.len() - cursor) / 9 {
+            return Err("truncated batch operation");
+        }
+        if count == 0 && cursor != payload.len() {
+            return Err("trailing bytes after batch operations");
+        }
+        let mut remaining = count;
+        let operations = std::iter::from_fn(move || {
+            if remaining == 0 {
+                return None;
+            }
+            remaining -= 1;
+            let mut read = || {
+                let kind = *payload.get(cursor).ok_or("truncated operation kind")?;
+                cursor += 1;
+                let key = read_field_range(payload, &mut cursor)?;
+                let value = read_field_range(payload, &mut cursor)?;
+                let value = match kind {
+                    0 => Some(value),
+                    1 if value.is_empty() => None,
+                    1 => return Err("delete operation carries a value"),
+                    _ => return Err("unknown batch operation kind"),
+                };
+                if remaining == 0 && cursor != payload.len() {
+                    return Err("trailing bytes after batch operations");
+                }
+                Ok((key, value))
+            };
+            Some(read())
+        });
+        Ok((count, operations))
     }
 
     /// Decode the minimal KV payload emitted by
@@ -131,7 +212,7 @@ fn read_u32_le(buf: &Bytes, offset: usize) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
-fn read_field(payload: &Bytes, cursor: &mut usize) -> Result<Bytes, &'static str> {
+fn read_field_range(payload: &[u8], cursor: &mut usize) -> Result<Range<usize>, &'static str> {
     let end = cursor.checked_add(4).ok_or("batch field length overflow")?;
     let length = payload.get(*cursor..end).ok_or("truncated batch field length")?;
     let length = u32::from_le_bytes([length[0], length[1], length[2], length[3]]) as usize;
@@ -140,7 +221,7 @@ fn read_field(payload: &Bytes, cursor: &mut usize) -> Result<Bytes, &'static str
     if end > payload.len() {
         return Err("truncated batch field bytes");
     }
-    let field = payload.slice(*cursor..end);
+    let field = *cursor..end;
     *cursor = end;
     Ok(field)
 }

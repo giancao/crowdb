@@ -118,7 +118,8 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
         let group = build_wal_group(id, &wal_dir, &conf_dir, &placeholders, cfg).await;
 
         let store = Arc::new(PxKvStore::new(id, "127.0.0.1:0".parse().unwrap()));
-        store.add_group(group);
+        // Start the initial election only after the peer endpoints are bound.
+        store.add_group_without_election(group);
         store.start().await.expect("start store");
         nodes.push(WalNode { id, store, wal_dir });
     }

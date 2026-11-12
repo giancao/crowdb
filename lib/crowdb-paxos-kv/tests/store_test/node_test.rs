@@ -121,7 +121,7 @@ async fn classic_prepare_and_accept_track_state() {
         slot: 5,
         ballot,
         term: 0,
-        payload: bytes::Bytes::from_static(b"payload"),
+        payload: bytes::Bytes::from_static(b"payload").into(),
     };
 
     let accept_reply = node.on_accept(&entry).await;

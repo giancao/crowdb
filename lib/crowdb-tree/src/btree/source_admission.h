@@ -182,7 +182,8 @@ class SourceAdmission
         // failure abandons the batch and its permit, returning unused source
         // capacity. The buffer is an encoded owned cell or a charged split
         // external value; all preparation is thread-bound.
-        Status prepare_write(Slice key, uint8_t flags, buffer value, Prepared *out);
+        Status prepare_write(Slice key, uint8_t flags, buffer &&value, Prepared *out,
+                             std::optional<AllocationLease> charge = {});
         bool   commit_write(Prepared write, uint64_t slot) noexcept;
 
       private:

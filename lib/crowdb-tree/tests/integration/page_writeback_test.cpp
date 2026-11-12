@@ -219,9 +219,10 @@ TEST(PageWriteback, CapturedFrameWritesToFileAndReloadsThroughExistingDurableCod
     }),
                                                                         {}, 10));
     captured->next_page_id = 1;
+    const PageWriteLimits                limits{.max_frame_bytes = 4096, .compression = compress_algo::kNone};
     std::shared_ptr<CapturedFrameStream> stream;
-    ASSERT_TRUE(CapturedFrameStream::create(captured, {}, test.runtime, test.lane, {.encode = {.frame_bytes = 4096}},
-                                            {}, &stream)
+    ASSERT_TRUE(CapturedFrameStream::create(captured, {}, test.runtime, test.lane,
+                                            {.encode = {.frame_bytes = 4096}, .raw_write = limits}, {}, &stream)
                     .ok());
     ASSERT_TRUE(stdexec::sync_wait(stream->sender()));
     test.runtime->drain();
@@ -229,12 +230,23 @@ TEST(PageWriteback, CapturedFrameWritesToFileAndReloadsThroughExistingDurableCod
     if (!frame) {
         FAIL() << "captured frame missing";
     }
-    ASSERT_TRUE(
-        test.prepare(
-                {.info = frame->info, .frame = frame->buffer->bytes, .owner = frame->buffer, .reload_dependencies = {}})
-            .ok());
+    const auto          &buffer = *frame->buffer;
+    std::vector<uint8_t> expected;
+    encode_durable_page(buffer.bytes().data(), frame->info.bytes, compress_algo::kNone, &expected);
+    ASSERT_GE(buffer.raw_blob().size(), expected.size());
+    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), buffer.raw_blob().begin()));
+    EXPECT_TRUE(std::all_of(buffer.raw_blob().begin() + static_cast<ptrdiff_t>(expected.size()),
+                            buffer.raw_blob().end(), [](auto b) { return b == 0; }));
+    ASSERT_TRUE(test.prepare({.info                = frame->info,
+                              .frame               = buffer.bytes(),
+                              .owner               = frame->buffer,
+                              .reload_dependencies = {},
+                              .raw_blob            = buffer.raw_blob()},
+                             limits)
+                    .ok());
     ASSERT_TRUE(stdexec::sync_wait(test.operation->sender()));
     test.runtime->drain();
+    EXPECT_EQ(test.store->data, buffer.raw_blob().data());
     ASSERT_TRUE(test.store->device->sync().ok());
     auto backing = test.operation->result().backing;
     ASSERT_TRUE(backing);

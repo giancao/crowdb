@@ -3,12 +3,13 @@
 #include "crowdb-tree/maptable/compressor.h"
 #include "page_load_internal.h"
 
-#include <algorithm>
-
 namespace crowdb::tree
 {
-Status decode_backing_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
-                            const std::shared_ptr<AllocationBudget> &metadata, LoadBytes *out)
+namespace
+{
+template <typename Bytes>
+Status decode_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
+                    Bytes &scratch, std::span<const uint8_t> *out)
 {
     if (!backing.readable()) {
         return Status::corruption("backing has neither an extent nor an owned resident frame");
@@ -18,18 +19,32 @@ Status decode_backing_frame(std::span<const uint8_t> blob, const BackingRef &bac
     if (length <= kFrameHeaderSize + kFrameTrailerSize || length > limits.max_frame_bytes || length > UINT32_MAX) {
         return Status::corruption("backing frame exceeds declared bounds");
     }
-    LoadBytes frame(length, LoadBytes::allocator_type(metadata));
     if (resident) {
-        std::copy(backing.resident_frame.begin(), backing.resident_frame.end(), frame.begin());
+        *out = backing.resident_frame;
+        return Status::Ok();
     }
-    else {
-        auto status = decode_durable_page(blob.data(), blob.size(), frame.data(), static_cast<uint32_t>(length));
-        if (!status.ok()) {
-            return status;
-        }
+    if (blob.front() == static_cast<uint8_t>(compress_algo::kNone)) {
+        return view_raw_durable_page(blob, static_cast<uint32_t>(length), out);
     }
-    record_work(metadata, TreeWorkCounter::MaterializeCopyBytes, length);
-    out->swap(frame);
-    return Status::Ok();
+    scratch.resize(length);
+    auto status = decode_durable_page(blob.data(), blob.size(), scratch.data(), static_cast<uint32_t>(length));
+    if (status.ok()) {
+        record_work(scratch.get_allocator().owner(), TreeWorkCounter::MaterializeCopyBytes, length);
+        *out = scratch;
+    }
+    return status;
+}
+} // namespace
+
+Status decode_backing_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
+                            LoadBytes &scratch, std::span<const uint8_t> *out)
+{
+    return decode_frame(blob, backing, limits, scratch, out);
+}
+
+Status decode_backing_frame(std::span<const uint8_t> blob, const BackingRef &backing, const PageLoadLimits &limits,
+                            FrameStore::Bytes &scratch, std::span<const uint8_t> *out)
+{
+    return decode_frame(blob, backing, limits, scratch, out);
 }
 } // namespace crowdb::tree

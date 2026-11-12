@@ -4,8 +4,9 @@
 //! Per-pipeline dedicated writer task (W3).
 //!
 //! Each pipeline has one long-running async task that owns the active
-//! `WalSegment` exclusively. Append callers push encoded records onto an
-//! unbounded mpsc channel and await a oneshot ack. The writer drains all
+//! `WalSegment` exclusively. Append callers use one command queue. Strict
+//! appends carry an encoded record and an ack. Early-ack Accepted records
+//! are encoded by the writer and do not carry a waiter. The writer drains
 //! queued records in a batch, writes them to the segment in one `pwrite`,
 //! issues a single `fdatasync`, then resolves every pending ack.
 //!
@@ -38,12 +39,12 @@ use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
 use super::index::{SegmentMeta, ShardedSegmentIndex, SlotLocation};
-use super::record::{RecordFrame, WalRecordFormat};
+use super::record::{RecordFrame, WALRecord, WalRecordFormat};
 use super::segment::WalSegment;
 use super::IoBackend;
 
 /// Encoded record ready for the writer. Binary records use a zero-copy frame
-/// that borrows the payload via `Bytes`; text-line records keep the formatted
+/// that retains the original payload owners; text-line records keep the formatted
 /// line as bytes.
 pub(crate) enum EncodedRecord {
     Binary(RecordFrame),
@@ -51,12 +52,27 @@ pub(crate) enum EncodedRecord {
 }
 
 impl EncodedRecord {
+    pub fn encode(record: &WALRecord, format: WalRecordFormat) -> Self {
+        match format {
+            WalRecordFormat::Binary => Self::Binary(record.encode_frame()),
+            WalRecordFormat::TextLine => Self::TextLine(record.encode_text_line().into_bytes()),
+            WalRecordFormat::Auto => unreachable!("Auto must be resolved at pipeline creation"),
+        }
+    }
+
     /// Total on-disk byte length.
     #[must_use]
     pub fn total_len(&self) -> usize {
         match self {
             Self::Binary(frame) => frame.total_len(),
             Self::TextLine(bytes) => bytes.len(),
+        }
+    }
+
+    fn io_slice_count(&self) -> usize {
+        match self {
+            Self::Binary(frame) => frame.io_slice_count(),
+            Self::TextLine(_) => 1,
         }
     }
 
@@ -77,9 +93,46 @@ pub(crate) struct PendingWrite {
     pub slot: SlotIndex,
     pub term: u64,
     pub is_vote: bool,
-    /// Ack channel: resolves with the record's `SlotLocation` when the
-    /// covering flush succeeds.
-    pub ack: oneshot::Sender<io::Result<SlotLocation>>,
+    pub completion: WriteCompletion,
+}
+
+pub(crate) enum WriteCompletion {
+    Ack(oneshot::Sender<io::Result<SlotLocation>>),
+    Early(Option<(std::time::Instant, Arc<LatencySummary>)>),
+}
+
+impl WriteCompletion {
+    fn fail(self, slot: SlotIndex, error: io::Error) {
+        match self {
+            Self::Ack(ack) => {
+                let _ = ack.send(Err(error));
+            }
+            Self::Early(_) => error!(slot, %error, "WAL persist Accepted failed (early ack)"),
+        }
+    }
+}
+
+pub(crate) enum WriteRequest {
+    Encoded(PendingWrite),
+    EarlyAccepted {
+        record: WALRecord,
+        completion: WriteCompletion,
+    },
+}
+
+impl WriteRequest {
+    fn encode(self, format: WalRecordFormat) -> PendingWrite {
+        match self {
+            Self::Encoded(write) => write,
+            Self::EarlyAccepted { record, completion } => PendingWrite {
+                encoded: EncodedRecord::encode(&record, format),
+                slot: record.slot,
+                term: record.term,
+                is_vote: false,
+                completion,
+            },
+        }
+    }
 }
 
 /// Acknowledgment sender for Seal/Flush commands.
@@ -88,7 +141,7 @@ type WriterAck = oneshot::Sender<io::Result<()>>;
 /// Commands sent to the writer task.
 pub(crate) enum WriterCommand {
     /// A pending write from an append caller.
-    Write(PendingWrite),
+    Write(WriteRequest),
     /// Seal the active segment and open a new one. The oneshot is resolved
     /// after the seal is durable.
     Seal { ack: oneshot::Sender<io::Result<()>> },
@@ -183,7 +236,7 @@ async fn pipeline_writer_loop(
         Err(e) => {
             failed.store(true, Ordering::Release);
             error!(pipeline_idx, error = %e, "failed to create initial WAL segment");
-            drain_and_fail_all(&mut rx);
+            drain_and_fail_all(&mut rx).await;
             return;
         }
     };
@@ -224,7 +277,7 @@ async fn pipeline_writer_loop(
             }
             WriterCommand::Write(first) => {
                 if !handle_write_command(
-                    first,
+                    first.encode(record_format),
                     &mut batch,
                     &mut offsets,
                     &mut segment,
@@ -293,7 +346,32 @@ async fn handle_write_command(
     batch.push(first);
     let mut batch_bytes_acc = batch[0].encoded.total_len();
     let (mut pending_seal_acks, pending_flush_acks) =
-        drain_pending_commands(rx, batch, &mut batch_bytes_acc, batch_bytes);
+        drain_pending_commands(rx, batch, &mut batch_bytes_acc, batch_bytes, record_format);
+
+    // A MemBlock segment already owns its normal capacity. Rotate before a
+    // batch would grow it. An oversized batch can fill a fresh segment.
+    if matches!(backend.as_ref(), IoBackend::MemBlock(_))
+        && segment.record_count != 0
+        && batch_bytes_acc as u64 > segment_size.saturating_sub(segment.len())
+    {
+        if let Err(error) = rotate_segment(
+            segment,
+            backend,
+            pipeline_path,
+            next_segment_id,
+            group_id,
+            record_format,
+            index,
+            pipeline_idx,
+        )
+        .await
+        {
+            failed.store(true, Ordering::Release);
+            fail_batch(batch, &error);
+            drain_and_fail_all(rx).await;
+            return false;
+        }
+    }
 
     // Capture segment_id before potential rotation.
     let segment_id = segment.segment_id;
@@ -314,23 +392,24 @@ async fn handle_write_command(
             records_flushed.fetch_add(batch.len() as u64, Ordering::Relaxed);
             update_index_for_batch(index, batch, offsets, pipeline_idx, segment_id);
 
-            if let Err(e) = rotate_if_full(
-                segment,
-                backend,
-                pipeline_path,
-                next_segment_id,
-                group_id,
-                record_format,
-                index,
-                pipeline_idx,
-                segment_size,
-            )
-            .await
-            {
-                failed.store(true, Ordering::Release);
-                fail_batch(batch, &e);
-                drain_and_fail_all(rx);
-                return false;
+            if segment.is_full(segment_size) {
+                if let Err(e) = rotate_segment(
+                    segment,
+                    backend,
+                    pipeline_path,
+                    next_segment_id,
+                    group_id,
+                    record_format,
+                    index,
+                    pipeline_idx,
+                )
+                .await
+                {
+                    failed.store(true, Ordering::Release);
+                    fail_batch(batch, &e);
+                    drain_and_fail_all(rx).await;
+                    return false;
+                }
             }
 
             resolve_batch_acks(batch, offsets, pipeline_idx, segment_id);
@@ -367,7 +446,7 @@ async fn handle_write_command(
         Err(e) => {
             failed.store(true, Ordering::Release);
             fail_batch(batch, &e);
-            drain_and_fail_all(rx);
+            drain_and_fail_all(rx).await;
             false
         }
     }
@@ -432,7 +511,7 @@ async fn handle_seal_command(
                 failed.store(true, Ordering::Release);
                 error!(pipeline_idx, error = %e, "failed to create new segment after seal");
                 let _ = ack.send(Err(e));
-                drain_and_fail_all(rx);
+                drain_and_fail_all(rx).await;
                 return false;
             }
         }
@@ -450,12 +529,14 @@ fn drain_pending_commands(
     batch: &mut Vec<PendingWrite>,
     batch_bytes_acc: &mut usize,
     batch_bytes: usize,
+    record_format: WalRecordFormat,
 ) -> (Vec<WriterAck>, Vec<WriterAck>) {
     let mut pending_seal_acks: Vec<WriterAck> = Vec::new();
     let mut pending_flush_acks: Vec<WriterAck> = Vec::new();
     loop {
         match rx.try_recv() {
             Ok(WriterCommand::Write(req)) => {
+                let req = req.encode(record_format);
                 *batch_bytes_acc += req.encoded.total_len();
                 batch.push(req);
                 if *batch_bytes_acc >= batch_bytes {
@@ -499,10 +580,10 @@ fn update_index_for_batch(
     }
 }
 
-/// If the segment is full, seal it, register it, and open a new segment.
+/// Seal the current segment, register it, and open the next segment.
 /// Returns `Err` if sealing or creating the new segment fails.
 #[allow(clippy::too_many_arguments)]
-async fn rotate_if_full(
+async fn rotate_segment(
     segment: &mut WalSegment,
     backend: &Arc<IoBackend>,
     pipeline_path: &std::path::Path,
@@ -511,11 +592,7 @@ async fn rotate_if_full(
     record_format: WalRecordFormat,
     index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
-    segment_size: u64,
 ) -> io::Result<()> {
-    if !segment.is_full(segment_size) {
-        return Ok(());
-    }
     segment.seal().await?;
     register_sealed(index, segment, pipeline_idx);
     *segment = create_segment(backend, pipeline_path, next_segment_id, group_id, record_format).await?;
@@ -525,11 +602,20 @@ async fn rotate_if_full(
 /// Send each pending write its resolved `SlotLocation`.
 fn resolve_batch_acks(batch: &mut Vec<PendingWrite>, offsets: &[u64], pipeline_idx: usize, segment_id: u64) {
     for (i, req) in batch.drain(..).enumerate() {
-        let _ = req.ack.send(Ok(SlotLocation {
-            disk_idx: pipeline_idx,
-            segment_id,
-            file_offset: offsets[i],
-        }));
+        match req.completion {
+            WriteCompletion::Ack(ack) => {
+                let _ = ack.send(Ok(SlotLocation {
+                    disk_idx: pipeline_idx,
+                    segment_id,
+                    file_offset: offsets[i],
+                }));
+            }
+            WriteCompletion::Early(Some((started, summary))) => {
+                #[allow(clippy::cast_possible_truncation)]
+                summary.observe(started.elapsed().as_nanos() as u64);
+            }
+            WriteCompletion::Early(None) => {}
+        }
     }
 }
 
@@ -563,7 +649,7 @@ async fn process_pending_seal_acks(
                 Err(e) => {
                     failed.store(true, Ordering::Release);
                     let _ = seal_ack.send(Err(e));
-                    drain_and_fail_all(rx);
+                    drain_and_fail_all(rx).await;
                     return false;
                 }
             }
@@ -578,7 +664,7 @@ async fn process_pending_seal_acks(
 /// probes at runtime.
 const MAX_IOV: usize = 1024;
 
-/// Write a batch of encoded records to the segment in one vectored write,
+/// Write a batch of encoded records to the segment in vectored writes,
 /// then `fdatasync`. Fills `offsets` with the file offset of each record in
 /// the batch. The caller-owned `offsets` Vec is cleared and reused across
 /// batches to avoid per-batch heap allocation.
@@ -594,42 +680,31 @@ async fn write_batch(
         return Ok(());
     }
 
-    let total_len: usize = batch.iter().map(|r| r.encoded.total_len()).sum();
-
     // Compute per-record offsets from the current segment tail.
     offsets.clear();
     offsets.reserve(batch.len());
     let base_offset = segment.len();
     let mut cur = base_offset;
+    let mut slice_count = 0;
     for req in batch {
         offsets.push(cur);
         cur += req.encoded.total_len() as u64;
+        slice_count += req.encoded.io_slice_count();
     }
+    let total_len = cur - base_offset;
 
-    // Build a vectored slice list covering the whole batch. Binary records
-    // contribute four slices (frame_len, header, payload, crc); text-line
-    // records contribute one. This avoids any caller-side concatenation copy.
-    //
-    // This Vec is allocated per batch (not reused across wake cycles) because
-    // `IoSlice<'a>` borrows data from `EncodedRecord` inside `batch`; the
-    // borrow checker prevents hoisting it outside the `Write` arm. Pre-sized
-    // to avoid reallocation — 1 malloc per batch, 0 reallocs.
-    let mut io_slices: Vec<std::io::IoSlice<'_>> = Vec::with_capacity(batch.len() * 4);
+    // Retain whole records in each submission. This also bounds the
+    // descriptor allocation when a batch needs multiple writes.
+    let split = slice_count > MAX_IOV;
+    let mut io_slices = Vec::with_capacity(slice_count.min(MAX_IOV));
     for req in batch {
+        if split && io_slices.len() + req.encoded.io_slice_count() > MAX_IOV {
+            segment.write_raw_vectored(&io_slices).await?;
+            io_slices.clear();
+        }
         req.encoded.append_io_slices(&mut io_slices);
     }
-
-    // Write in chunks of MAX_IOV slices. Each chunk advances the segment
-    // write_offset, so the next chunk starts at the right place.
-    let mut chunk_start = 0;
-    while chunk_start < io_slices.len() {
-        let chunk_end = (chunk_start + MAX_IOV).min(io_slices.len());
-        let chunk = &io_slices[chunk_start..chunk_end];
-        if chunk.iter().map(|s| s.len()).sum::<usize>() > 0 {
-            segment.write_raw_vectored(chunk).await?;
-        }
-        chunk_start = chunk_end;
-    }
+    segment.write_raw_vectored(&io_slices).await?;
 
     // Update segment metadata (min/max slot, record_count).
     for req in batch {
@@ -662,7 +737,7 @@ async fn write_batch(
     // Observe batch write bytes (regardless of fsync — the write happened).
     if let Some(bw) = write_bandwidth.get() {
         #[allow(clippy::cast_possible_truncation)]
-        bw.observe(total_len as u64);
+        bw.observe(total_len);
     }
 
     trace!(
@@ -712,18 +787,22 @@ fn register_sealed(index: &ShardedSegmentIndex, segment: &WalSegment, pipeline_i
 fn fail_batch(batch: &mut Vec<PendingWrite>, e: &io::Error) {
     let kind = e.kind();
     for req in batch.drain(..) {
-        let _ = req
-            .ack
-            .send(Err(io::Error::new(kind, "WAL durable flush failed")));
+        req.completion
+            .fail(req.slot, io::Error::new(kind, "WAL durable flush failed"));
     }
 }
 
-/// Drain all remaining commands from the channel and fail any Write acks.
-fn drain_and_fail_all(rx: &mut mpsc::UnboundedReceiver<WriterCommand>) {
-    while let Ok(cmd) = rx.try_recv() {
+/// Reject new commands and fail every command already accepted by the channel.
+async fn drain_and_fail_all(rx: &mut mpsc::UnboundedReceiver<WriterCommand>) {
+    rx.close();
+    while let Some(cmd) = rx.recv().await {
         match cmd {
             WriterCommand::Write(req) => {
-                let _ = req.ack.send(Err(io::Error::other("WAL disk failed")));
+                let (slot, completion) = match req {
+                    WriteRequest::Encoded(req) => (req.slot, req.completion),
+                    WriteRequest::EarlyAccepted { record, completion } => (record.slot, completion),
+                };
+                completion.fail(slot, io::Error::other("WAL disk failed"));
             }
             WriterCommand::Seal { ack } | WriterCommand::Flush { ack } => {
                 let _ = ack.send(Err(io::Error::other("WAL disk failed")));

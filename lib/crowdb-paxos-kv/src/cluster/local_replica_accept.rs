@@ -7,7 +7,6 @@ use crate::cluster::local_replica::PxLocalReplica;
 use crate::paxos::roles::{Acceptor, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxTerm;
 use crate::wal::record::WALRecord;
-use std::sync::Arc;
 use tracing::debug;
 
 impl PxLocalReplica {
@@ -112,29 +111,27 @@ impl PxLocalReplica {
         }
     }
 
-    /// R16b: spawn the WAL persist as a detached background task.
-    /// Used when `wal_early_ack` is enabled — the value is already
-    /// Paxos-chosen, so the persist is durability best-effort.
-    pub fn spawn_accept_persist(&self, entry: PxLogEntry) {
-        if let Some(wal) = &self.wal {
-            let wal = Arc::clone(wal);
-            #[cfg(feature = "test-util")]
-            let gate = self.persist_gate.lock().clone();
+    /// Hand the local Accepted record directly to its WAL pipeline.
+    pub(super) fn enqueue_accept_persist(&self, entry: &PxLogEntry) {
+        let Some(wal) = &self.wal else { return };
+        let record = WALRecord::from_accepted(wal.group_id(), entry);
+        #[cfg(feature = "test-util")]
+        if let Some(gate) = self.persist_gate.lock().clone() {
+            let wal = wal.clone();
             tokio::spawn(async move {
-                #[cfg(feature = "test-util")]
-                if let Some(notify) = gate {
-                    notify.notified().await;
-                }
-                let record = WALRecord::from_accepted(wal.group_id(), &entry);
-                if let Err(e) = wal.append(&record).await {
-                    tracing::error!(
-                        slot = entry.slot,
-                        ballot = ?entry.ballot,
-                        error = %e,
-                        "WAL persist Accepted failed (early-ack background)"
-                    );
-                }
+                gate.notified().await;
+                enqueue_accepted(&wal, record);
             });
+            return;
         }
+        enqueue_accepted(wal, record);
+    }
+}
+
+fn enqueue_accepted(wal: &crate::wal::wal_engine::WalEngine, record: WALRecord) {
+    let slot = record.slot;
+    let ballot = record.ballot;
+    if let Err(error) = wal.enqueue_accepted(record) {
+        tracing::error!(slot, ?ballot, %error, "WAL enqueue Accepted failed (early ack)");
     }
 }

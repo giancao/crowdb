@@ -270,11 +270,11 @@ bool RdmaTransport::prepare_passive_accept(PassiveAccept &attempt)
     }
     auto pools = std::make_shared<ConnectionPools>(config_.send_queue_capacity,
                                                    config_.receive_batch_size > 1 ? config_.posted_receive_target : 0);
-    configure_peer(*pools, peer_offer);
     pools->qp_number          = id->qp->qp_num;
     pools->effective_capacity = qp_attr.cap;
     pools->cq_index           = reservation.queue->index;
     pools->reserved_capacity  = reservation.capacity;
+    configure_peer(*pools, peer_offer);
     if ((config_.wire_layout == RdmaWireLayout::ControlData &&
          (qp_attr.cap.max_send_sge < 2 || qp_attr.cap.max_recv_sge < 2)) ||
         !create_connection_pools(*pools)) {

@@ -33,12 +33,9 @@ SourceTail::SourceTail(std::shared_ptr<detail::AllocationReservation> metadata, 
 
 std::optional<size_t> SourceTail::allocation_bound(size_t records, size_t bytes) noexcept
 {
-    SourceWriteOptions options;
-    options.max_entries     = records;
-    options.max_gap_entries = 0;
     // No payload allocation occurs here. The byte cap includes copied keys
     // and retained values, conservatively treating all of it as possible keys.
-    auto writes = SourceWriteBudget::allocation_bound(options, {.entries = records, .key_bytes = bytes});
+    auto writes = SourceWriteBudget::allocation_bound({.entries = records, .key_bytes = bytes});
     return detail::AllocationBound()
         .add(writes)
         .add(detail::shared_allocation_bound<SourceTail>())
@@ -72,8 +69,7 @@ SourceTail::Write SourceTail::prepare(const std::shared_ptr<SourceTail> &owner,
     try {
         // All allocations precede the parent CAS.
         // A failed observation expires only the split, never the parent write.
-        result.prepared = owner->table_->prepare_reference(parent.key(), parent.cell_owner(), 0, owner->max_records_,
-                                                           owner->metadata_);
+        result.prepared = owner->table_->prepare_reference(parent.key(), parent.cell_owner(), 0, owner->metadata_);
     }
     catch (...) {
         owner->expire();

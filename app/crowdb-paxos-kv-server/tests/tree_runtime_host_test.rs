@@ -51,7 +51,7 @@ async fn standalone_constructor_uses_runtime_without_a_mode_flag() {
     let group = result.unwrap();
     let engine = group.local_replica().learner.engine();
     assert!(engine.requires_contiguous_apply());
-    let permit = engine.admit_proposal(Bytes::new()).await.unwrap().unwrap();
+    let permit = engine.admit_proposal(Bytes::new().into()).await.unwrap().unwrap();
     permit.apply(1).await.unwrap();
 }
 
@@ -79,7 +79,7 @@ async fn every_group_uses_the_same_registry_owned_native_host() {
     for group in &groups {
         let engine = group.local_replica().learner.engine();
         assert!(engine.requires_contiguous_apply());
-        let permit = engine.admit_proposal(Bytes::new()).await.unwrap().unwrap();
+        let permit = engine.admit_proposal(Bytes::new().into()).await.unwrap().unwrap();
         permit.apply(1).await.unwrap();
     }
     registry.tree_runtime.stop_admission();
@@ -89,7 +89,7 @@ async fn every_group_uses_the_same_registry_owned_native_host() {
             .local_replica()
             .learner
             .engine()
-            .admit_proposal(Bytes::new())
+            .admit_proposal(Bytes::new().into())
             .await
             .is_err());
     }

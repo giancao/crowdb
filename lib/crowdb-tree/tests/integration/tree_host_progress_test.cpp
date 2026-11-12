@@ -136,7 +136,8 @@ TEST(TreeHostProgress, OneCpuPreservesOtherTreeProgressDuringSlowPersistentFlush
     // the gap payload reserve. The missing predecessor drives persistent flush.
     ASSERT_TRUE(prepare(slow, 4, "d", value, operations.data()).ok());
     operations[0]->start(4, &TestHostCompletion::complete, completed.data());
-    ASSERT_TRUE(prepare(slow, 3, "c", value, &operations[1]).ok());
+    const std::string pressure_value(640 * 1024, 'p');
+    ASSERT_TRUE(prepare(slow, 3, "c", pressure_value, &operations[1]).ok());
     operations[1]->start(3, &TestHostCompletion::complete, &completed[1]);
 
     std::promise<void> cpu_terminal;

@@ -229,6 +229,16 @@ pub(super) fn submit_error(
     code: FBKvRetCode,
     msg: &str,
 ) {
+    let ctrl = build_error_response(req_id, create_nano, code, msg);
+    submit_fb_response(server, conn_handle, ctrl, msg_type, req_id);
+}
+
+pub(super) fn build_error_response(
+    req_id: u64,
+    create_nano: u64,
+    code: FBKvRetCode,
+    msg: &str,
+) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = builder.create_string(msg);
     let args = FBPromiseResponseArgs {
@@ -251,8 +261,7 @@ pub(super) fn submit_error(
     };
     let resp = FBPromiseResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let ctrl = builder.collapse();
-    submit_fb_response(server, conn_handle, ctrl, msg_type, req_id);
+    builder.collapse()
 }
 
 // ── Zero-copy response submit helper ──────────────────────────────

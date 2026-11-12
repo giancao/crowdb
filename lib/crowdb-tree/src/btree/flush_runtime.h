@@ -38,7 +38,9 @@ class FlushRuntime
     class Lane
     {
       public:
-        explicit Lane(size_t queue_limit) : limit_(queue_limit)
+        explicit Lane(size_t queue_target, std::shared_ptr<AllocationBudget> allocations = {})
+            : queue_target_(queue_target),
+              allocations_(std::move(allocations))
         {
         }
 
@@ -52,24 +54,35 @@ class FlushRuntime
         // ordinary jobs and completes once its accepted jobs have exited.
         void close_async(AsyncCompletion complete) noexcept;
 
-        [[nodiscard]] size_t queue_permits() const noexcept
+        [[nodiscard]] size_t queued() const noexcept
         {
             return queued_.load(std::memory_order_relaxed);
         }
 
+        [[nodiscard]] size_t queue_target() const noexcept
+        {
+            return queue_target_;
+        }
+
+        [[nodiscard]] const std::shared_ptr<AllocationBudget> &allocations() const noexcept
+        {
+            return allocations_;
+        }
+
       private:
         friend class FlushRuntime;
-        static constexpr size_t kClosing = size_t{1} << ((sizeof(size_t) * 8) - 1);
-        static constexpr size_t kNotify  = kClosing >> 1;
-        static constexpr size_t kJobs    = ~(kClosing | kNotify);
-        bool                    try_start_job() noexcept;
-        void                    finish_job() noexcept;
-        void                    arm_drain(size_t flags, AsyncCompletion complete) noexcept;
-        void                    complete_drain() noexcept;
-        size_t                  limit_;
-        std::atomic<size_t>     queued_{0};
-        std::atomic<size_t>     jobs_{0};
-        AsyncCompletion         on_drained_;
+        static constexpr size_t           kClosing = size_t{1} << ((sizeof(size_t) * 8) - 1);
+        static constexpr size_t           kNotify  = kClosing >> 1;
+        static constexpr size_t           kJobs    = ~(kClosing | kNotify);
+        bool                              try_start_job() noexcept;
+        void                              finish_job() noexcept;
+        void                              arm_drain(size_t flags, AsyncCompletion complete) noexcept;
+        void                              complete_drain() noexcept;
+        size_t                            queue_target_;
+        std::shared_ptr<AllocationBudget> allocations_;
+        std::atomic<size_t>               queued_{0};
+        std::atomic<size_t>               jobs_{0};
+        AsyncCompletion                   on_drained_;
     };
 
     using Task = void (*)(void *) noexcept;
@@ -90,7 +103,7 @@ class FlushRuntime
         // Fence racing producer requests and drain accepted jobs. The caller
         // owns disposal of any work that has yet to enter this registration.
         void stop_async(AsyncCompletion complete) noexcept;
-        // Reject late requests, drain accepted work and return the fixed slot.
+        // Reject late requests and drain accepted work.
         // The closed handle may outlive the runtime. Do not call from its task.
         void close_and_drain() noexcept;
 
@@ -98,26 +111,25 @@ class FlushRuntime
         std::shared_ptr<ProgressState> state_;
     };
 
-    FlushRuntime(size_t workers, size_t queue_limit, std::shared_ptr<AllocationBudget> budget = {});
+    FlushRuntime(size_t workers, size_t queue_target, std::shared_ptr<AllocationBudget> budget = {});
     ~FlushRuntime();
     FlushRuntime(const FlushRuntime &)            = delete;
     FlushRuntime &operator=(const FlushRuntime &) = delete;
 
     // No callback on rejection. The context must live through task return.
-    // A lane caps queued work from one Tree; executing steps release that
-    // credit before starting, so a single-worker nested submission progresses.
-    [[nodiscard]] Status try_submit(std::shared_ptr<Lane> lane, Task task, void *context);
-    // Registration reserves one real job slot and one lane/global queue
-    // credit. Requests never allocate or fail because ordinary queues fill.
+    // Ready work goes directly to the pool. A lane tracks Tree-local drain.
+    [[nodiscard]] Status try_submit(std::shared_ptr<Lane> lane, Task task, void *context,
+                                    std::shared_ptr<const void> owner = {});
+    // A registered owner embeds its operation state. Requests do not allocate.
     // Registered work remains usable after close to finish admitted work.
     // The host joins producers and releases registrations before destroying
     // this runtime; drain includes all queued/running progress continuations.
     [[nodiscard]] Status reserve_progress(std::shared_ptr<Lane> lane, Task task, void *context,
                                           std::shared_ptr<AllocationBudget> budget, std::shared_ptr<Progress> *out);
     [[nodiscard]] static size_t progress_allocation_bound() noexcept;
-    // Owned state, fixed job cells and lifecycle control. The host separately
+    // Owned state and lifecycle control. The host separately
     // provisions the shared executor's thread/bootstrap storage.
-    [[nodiscard]] static std::optional<size_t> allocation_bound(size_t workers, size_t queue_limit) noexcept;
+    [[nodiscard]] static std::optional<size_t> allocation_bound(size_t workers) noexcept;
     void                                       close() noexcept;
     void                                       drain() noexcept;
     // All progress registrations must already be detached. One host call.
@@ -127,7 +139,7 @@ class FlushRuntime
     void                      stop_workers(AsyncCompletion complete) noexcept;
     [[nodiscard]] Snapshot    snapshot() const noexcept;
     [[nodiscard]] size_t      worker_count() const noexcept;
-    [[nodiscard]] size_t      queue_permits() const noexcept;
+    [[nodiscard]] size_t      queue_target() const noexcept;
     [[nodiscard]] static bool on_worker_thread() noexcept;
 
   private:

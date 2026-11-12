@@ -1796,6 +1796,7 @@ unsafe fn rebuild_vec(ptr: *mut u8, mut len: usize, mut cap: usize, off: usize) 
 
 static SHARED_VTABLE: Vtable = Vtable {
     owner_allocation: None,
+    owner: None,
     clone: shared_v_clone,
     into_vec: shared_v_to_vec,
     into_mut: shared_v_to_mut,

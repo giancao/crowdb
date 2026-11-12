@@ -30,6 +30,7 @@ pub struct TreeTuningOptions {
     pub maintenance_max_steps: usize,
     pub maintenance_metadata_bytes: usize,
     pub cache_max_pages: usize,
+    pub memtable_flush_count: u32,
 }
 
 impl Default for TreeTuningOptions {
@@ -61,6 +62,7 @@ impl Default for TreeTuningOptions {
             maintenance_max_steps: raw.maintenance_max_steps,
             maintenance_metadata_bytes: raw.maintenance_metadata_bytes,
             cache_max_pages: raw.cache_max_pages,
+            memtable_flush_count: raw.memtable_flush_count,
         }
     }
 }
@@ -93,6 +95,7 @@ impl TreeTuningOptions {
             maintenance_max_steps: self.maintenance_max_steps,
             maintenance_metadata_bytes: self.maintenance_metadata_bytes,
             cache_max_pages: self.cache_max_pages,
+            memtable_flush_count: self.memtable_flush_count,
         }
     }
 }

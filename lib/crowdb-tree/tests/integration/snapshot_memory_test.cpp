@@ -10,11 +10,14 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -65,9 +68,9 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
         return Status::Ok();
     }
 
-    Status write_typed_at(PagePurpose /*purpose*/, uint64_t off, const uint8_t *buf, size_t len) override
+    Status write_typed_at(PagePurpose purpose, uint64_t off, const uint8_t *buf, size_t len) override
     {
-        if (!retained_bytes.has_value()) {
+        if (purpose == PagePurpose::kPageIndex && prepared_bytes.has_value() && !retained_bytes.has_value()) {
             const auto current = resident_bytes();
             retained_bytes     = current > baseline ? current - baseline : 0;
         }
@@ -106,16 +109,17 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
 
     uint64_t submit_write(PageAddr addr, const void *buf, size_t len, AsyncCompletion done) override
     {
-        pending_ = Pending{.addr = addr, .data = buf, .length = len, .done = done, .typed = false};
-        wake();
-        return 0;
+        return submit_typed_write(PagePurpose::kBtreePage, addr, buf, len, std::move(done));
     }
 
-    uint64_t submit_typed_write(PagePurpose /*purpose*/, PageAddr addr, const void *buf, size_t len,
+    uint64_t submit_typed_write(PagePurpose purpose, PageAddr addr, const void *buf, size_t len,
                                 AsyncCompletion done) override
     {
-        pending_ = Pending{.addr = addr, .data = buf, .length = len, .done = done, .typed = true};
-        wake();
+        {
+            std::scoped_lock lock(pending_mutex_);
+            pending_.push_back({.addr = addr, .data = buf, .length = len, .done = std::move(done), .purpose = purpose});
+        }
+        ready_.notify_one();
         return 0;
     }
 
@@ -131,22 +135,26 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
 
     void wake()
     {
-        ready_.store(true, std::memory_order_release);
+        {
+            std::scoped_lock lock(pending_mutex_);
+            terminal_ = true;
+        }
         ready_.notify_one();
     }
 
     bool complete_next()
     {
-        ready_.wait(false, std::memory_order_acquire);
-        if (!pending_.has_value()) {
-            return false;
+        Pending write;
+        {
+            std::unique_lock lock(pending_mutex_);
+            ready_.wait(lock, [&] { return terminal_ || !pending_.empty(); });
+            if (pending_.empty()) {
+                return false;
+            }
+            write = std::move(pending_.front());
+            pending_.pop_front();
         }
-        const auto write = pending_.value();
-        pending_.reset();
-        ready_.store(false, std::memory_order_release);
-        const auto *data   = static_cast<const uint8_t *>(write.data);
-        auto        status = write.typed ? write_typed_at(PagePurpose::kPageIndex, write.addr, data, write.length)
-                                         : write_at(write.addr, data, write.length);
+        auto status = write_typed_at(write.purpose, write.addr, static_cast<const uint8_t *>(write.data), write.length);
         write.done.complete(std::move(status));
         return true;
     }
@@ -162,13 +170,15 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
         const void     *data;
         size_t          length;
         AsyncCompletion done;
-        bool            typed;
+        PagePurpose     purpose;
     };
 
-    std::vector<uint8_t>   bytes_;
-    uint64_t               size_ = 0;
-    std::optional<Pending> pending_;
-    std::atomic<bool>      ready_{false};
+    std::vector<uint8_t>    bytes_;
+    uint64_t                size_ = 0;
+    std::mutex              pending_mutex_;
+    std::condition_variable ready_;
+    std::deque<Pending>     pending_;
+    bool                    terminal_ = false;
 };
 
 class SnapshotMemoryTest : public ::testing::TestWithParam<bool>

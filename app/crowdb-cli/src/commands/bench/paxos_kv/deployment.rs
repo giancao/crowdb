@@ -6,7 +6,12 @@ mod memory;
 mod native;
 use super::args::PaxosKvArgs;
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, UdpSocket},
+    path::PathBuf,
+    time::Duration,
+};
 
 pub(super) struct ServerProcess {
     pub evidence: Value,
@@ -135,8 +140,16 @@ pub(super) async fn inspect(args: &PaxosKvArgs) -> Result<Vec<ServerProcess>, St
             }
         }
         let origin = reqwest::Url::parse(endpoint).map_err(|e| e.to_string())?;
-        if !matches!(origin.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) {
-            return Err("local host-network benchmark endpoints must use loopback".into());
+        let host = origin.host_str().ok_or("management endpoint has no host")?;
+        // A RoCE local-loop endpoint uses the address assigned to the local
+        // adapter. Validate that address by binding it without sending traffic.
+        let local = host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| !ip.is_unspecified() && UdpSocket::bind((ip, 0)).is_ok());
+        if !local {
+            return Err("host-network benchmark endpoints must use a local address".into());
         }
         if flag("--management-port").and_then(|v| v.parse::<u16>().ok()) != origin.port_or_known_default() {
             return Err(format!(

@@ -31,14 +31,10 @@ struct TestReadCpuGate
             return;
         }
         entered.acquire();
-        auto queued = Status::Ok();
         for (size_t i = 0; i <= binding->options().cpu_queue_limit; ++i) {
-            queued = binding->cpu()->try_submit(lane, +[](void *) noexcept {}, nullptr);
-            if (!queued.ok()) {
-                break;
-            }
+            EXPECT_TRUE(binding->cpu()->try_submit(lane, +[](void *) noexcept {}, nullptr).ok());
         }
-        EXPECT_EQ(queued.code(), Code::kResourceExhausted);
+        EXPECT_GT(lane->queued(), binding->options().cpu_queue_limit);
     }
 
     ~TestReadCpuGate()
@@ -98,7 +94,7 @@ struct TestProgressReadStore final : AsyncPageStore
     }
 };
 
-TEST(TreeReadProgress, AdmittedAsyncReadsWaitForFullOrdinaryCpuQueue)
+TEST(TreeReadProgress, AdmittedAsyncReadsWaitForBusyCpu)
 {
     Config             config;
     TreeRuntimeOptions host;
@@ -145,7 +141,7 @@ TEST(TreeReadProgress, AdmittedAsyncReadsWaitForFullOrdinaryCpuQueue)
     ASSERT_TRUE(scan_status.ok()) << scan_status.to_string();
 }
 
-TEST(TreeReadProgress, ColdDecodeUsesReservedProgressWhenOrdinaryCpuQueueFills)
+TEST(TreeReadProgress, ColdDecodeContinuesWithReadyQueueBacklog)
 {
     auto store          = std::make_shared<TestProgressReadStore>();
     store->store.device = std::make_shared<MemPageStore>(4096);
@@ -186,7 +182,7 @@ TEST(TreeReadProgress, ColdDecodeUsesReservedProgressWhenOrdinaryCpuQueueFills)
     ASSERT_TRUE(status.ok()) << status.to_string();
 }
 
-TEST(TreeReadProgress, DetachedScanUsesHostProgressWhenCpuQueueIsFull)
+TEST(TreeReadProgress, DetachedScanContinuesWithReadyQueueBacklog)
 {
     Config config;
     ASSERT_TRUE(TreeRuntime::create({.workers = 1, .cpu_queue_limit = 8}, &config.runtime).ok());

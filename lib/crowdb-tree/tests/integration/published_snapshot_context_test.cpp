@@ -361,7 +361,7 @@ TEST(PublishedReadViewContext, AsyncScanCompletesColdReadAfterClosingAndReleasin
     expect_async_read_after_view_close(true);
 }
 
-TEST(PublishedReadViewContext, DetachedBackendFallbackDoesNotDelaySourceTreeClose)
+TEST(PublishedReadViewContext, DetachedBackendBacklogDoesNotDelaySourceTreeClose)
 {
     TestSnapshotContext test(true, {.workers = 1, .backend_workers = 1, .backend_queue_limit = 4});
     ASSERT_TRUE(test.open().ok());
@@ -392,11 +392,10 @@ TEST(PublishedReadViewContext, DetachedBackendFallbackDoesNotDelaySourceTreeClos
                         &gate)
                     .ok());
     gate.entered.wait();
-    auto full = Status::Ok();
-    while (full.ok()) {
-        full = backend->try_submit(filler, [](void *) noexcept {}, nullptr);
+    for (size_t index = 0; index <= backend->queue_target(); ++index) {
+        EXPECT_TRUE(backend->try_submit(filler, [](void *) noexcept {}, nullptr).ok());
     }
-    EXPECT_EQ(full.code(), Code::kResourceExhausted);
+    EXPECT_GT(filler->queued(), backend->queue_target());
 
     auto       read     = std::make_shared<std::promise<std::pair<Status, GetView>>>();
     auto       result   = read->get_future();

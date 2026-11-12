@@ -58,16 +58,8 @@ RdmaTransport::RdmaTransport(RdmaConfig config, BufferPool *application_pool)
         CRB_LOG_WARN("rdma configuration: inconsistent queue depths, slot capacity, or arena budget; using TCP");
         return;
     }
-    control_send_budget_ = std::make_shared<ControlStreamBudget>(config_.control_send_budget_bytes);
-    control_receive_budget_ =
-        std::make_shared<ControlStreamBudget>(config_.control_receive_budget_bytes, [state = repost_state_] {
-            Operation operation(state);
-            if (operation) {
-                for (uint32_t index = 0; index < state->transport->completion_queues_.size(); ++index) {
-                    state->transport->notify_queue(index);
-                }
-            }
-        });
+    control_send_budget_    = std::make_shared<ControlStreamBudget>(config_.control_send_budget_bytes);
+    control_receive_totals_ = std::make_shared<ControlStreamBudget>(0);
     if (config_.use_environment && config_.device.empty()) {
         if (const char *requested_device = std::getenv("CROWDB_RDMA_DEVICE"); requested_device != nullptr)
             config_.device = requested_device;

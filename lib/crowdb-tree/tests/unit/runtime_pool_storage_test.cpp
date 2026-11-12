@@ -61,7 +61,7 @@ class TestPoolBudget final : public AllocationBudget
 
 TEST(RuntimePoolStorage, FixedPoolAndNativeWorkerControlsUseActualMetadataBudget)
 {
-    const auto bound = FlushRuntime::allocation_bound(2, 4);
+    const auto bound = FlushRuntime::allocation_bound(2);
     if (!bound) {
         FAIL() << "pool storage bound overflow";
     }
@@ -96,7 +96,7 @@ TEST(RuntimePoolStorage, FixedPoolAndNativeWorkerControlsUseActualMetadataBudget
 
 TEST(RuntimePoolStorage, FailureAtEveryStartupAllocationReturnsActualCapacity)
 {
-    const auto bound = FlushRuntime::allocation_bound(2, 4);
+    const auto bound = FlushRuntime::allocation_bound(2);
     if (!bound) {
         FAIL() << "pool storage bound overflow";
     }
@@ -138,7 +138,7 @@ TEST(RuntimePoolStorage, OveralignedAllocationsFreeBeforeReturningBudget)
 
 TEST(RuntimePoolStorage, UnrepresentableWorkerGeometryRejectsWithoutStartingThreads)
 {
-    EXPECT_FALSE(FlushRuntime::allocation_bound(size_t{UINT16_MAX} + 1, 1));
+    EXPECT_FALSE(FlushRuntime::allocation_bound(size_t{UINT16_MAX} + 1));
     EXPECT_FALSE(exec::static_thread_pool::allocation_bound(UINT32_MAX, {SIZE_MAX, 8}));
     EXPECT_FALSE(exec::static_thread_pool::allocation_bound(UINT32_MAX, {32, SIZE_MAX}));
 }

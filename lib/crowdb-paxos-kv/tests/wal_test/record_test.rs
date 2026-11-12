@@ -22,7 +22,7 @@ fn encode_decode_roundtrip_accepted() {
         slot: 42,
         ballot: PxBallot::new(3, 7),
         term: 10,
-        payload: Bytes::from_static(b"hello world"),
+        payload: Bytes::from_static(b"hello world").into(),
     };
     let record = WALRecord::from_accepted(1, &entry);
     assert_eq!(record.record_type, RecordType::Accepted);
@@ -33,6 +33,15 @@ fn encode_decode_roundtrip_accepted() {
 
     let encoded = record.encode();
     assert!(encoded.len() >= MIN_RECORD_SIZE);
+    let frame = record.encode_frame();
+    let mut slices = Vec::new();
+    frame.append_io_slices(&mut slices);
+    let [prefix, payload, crc] = slices.as_slice() else {
+        panic!("binary WAL records must use three slices");
+    };
+    assert_eq!(&prefix[..], &encoded[..MIN_RECORD_SIZE - 4]);
+    assert_eq!(payload.as_ptr(), record.payload.contiguous().unwrap().as_ptr());
+    assert_eq!(&crc[..], &encoded[encoded.len() - 4..]);
 
     let (decoded, consumed) = WALRecord::decode(&encoded).unwrap();
     assert_eq!(consumed, encoded.len());
@@ -47,7 +56,7 @@ fn encode_decode_roundtrip_accepted() {
     assert_eq!(recovered.slot, 42);
     assert_eq!(recovered.ballot, PxBallot::new(3, 7));
     assert_eq!(recovered.term, 10);
-    assert_eq!(recovered.payload, Bytes::from_static(b"hello world"));
+    assert_eq!(recovered.payload.to_bytes(), Bytes::from_static(b"hello world"));
 }
 
 #[test]
@@ -109,7 +118,7 @@ fn noop_entry_roundtrip() {
         slot: 1,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::new(),
+        payload: Bytes::new().into(),
     };
     let record = WALRecord::from_accepted(1, &entry);
     let encoded = record.encode();
@@ -128,7 +137,7 @@ fn text_line_roundtrips_all_record_types_and_binary_payload() {
             term: 20,
             slot: 30,
             ballot: PxBallot::new(40, 50),
-            payload: Bytes::from_static(&[0, 1, 2, 0xff, b'\n', b' ', b'=']),
+            payload: Bytes::from_static(&[0, 1, 2, 0xff, b'\n', b' ', b'=']).into(),
         },
         WALRecord::from_vote_granted(14, 24, 34),
     ];

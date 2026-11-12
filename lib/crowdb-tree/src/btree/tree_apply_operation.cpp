@@ -12,8 +12,7 @@ TreeApplyOperation::State::State(std::weak_ptr<TreeCore> core, uint64_t generati
     : weak_core(std::move(core)),
       generation(generation),
       batch(std::move(batch)),
-      metadata(std::move(metadata)),
-      node(&State::run, this)
+      metadata(std::move(metadata))
 {
 }
 
@@ -32,6 +31,7 @@ std::optional<size_t> TreeApplyOperation::allocation_bound(size_t retained_metad
         .add(detail::shared_allocation_bound<TreeApplyOperation>())
         .add(detail::shared_allocation_bound<ApplyWaiters>())
         .add(detail::shared_allocation_bound<detail::AllocationReservation>())
+        .add(detail::FlushRuntime::progress_allocation_bound())
         .add_product(2, TreeOperationLifetime::ticket_allocation_bound())
         .add(retained_metadata_bytes)
         .value();
@@ -96,10 +96,13 @@ Status TreeApplyOperation::State::arm()
     if (!status.ok()) {
         return status;
     }
+    status = state.binding->cpu()->reserve_progress(state.binding->lane(), &State::run, this, metadata, &ready);
+    if (!status.ok()) {
+        return status;
+    }
     sources           = state.sources.get();
     frontier          = state.frontier.get();
     flush             = state.flush.get();
-    dispatcher        = state.apply_dispatcher;
     progress          = state.apply_progress;
     source_rotation   = state.source_rotation;
     work              = state.work;

@@ -24,7 +24,7 @@ fn write_entry(slot: u64, payload: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 0),
         term: 1,
-        payload: Bytes::copy_from_slice(payload),
+        payload: Bytes::copy_from_slice(payload).into(),
     }
 }
 
@@ -33,7 +33,7 @@ fn noop_entry(slot: u64) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 0),
         term: 1,
-        payload: Bytes::new(),
+        payload: Bytes::new().into(),
     }
 }
 
@@ -140,6 +140,31 @@ async fn dedup_is_per_client() {
         .await;
     assert_eq!(learner.dedup_lookup(10, 1), Some(1));
     assert_eq!(learner.dedup_lookup(20, 1), Some(2));
+}
+
+#[tokio::test]
+async fn coalesced_dedup_preserves_each_clients_eviction_order() {
+    let learner = PxLearner::new();
+    for seq in 1..=64 {
+        learner.learn(noop_entry(seq), &tag(10, seq)).await;
+    }
+    let identities = [
+        tag(10, 64)[0],
+        tag(20, 5)[0],
+        tag(10, 65)[0],
+        tag(0, 1)[0],
+        tag(20, 3)[0],
+        tag(10, 1)[0],
+        tag(10, 65)[0],
+    ];
+    learner.learn(noop_entry(65), &identities).await;
+
+    let window = learner.request_result_entries_for_tests(10);
+    assert_eq!(window.len(), 64);
+    assert_eq!(window.first(), Some(&(3, 3)));
+    assert_eq!(&window[61..], &[(64, 64), (65, 65), (1, 65)]);
+    assert_eq!(learner.request_result_entries_for_tests(20), [(5, 65), (3, 65)]);
+    assert!(learner.request_result_entries_for_tests(0).is_empty());
 }
 
 #[tokio::test]

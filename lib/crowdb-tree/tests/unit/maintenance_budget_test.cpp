@@ -201,13 +201,15 @@ TEST(MaintenanceBudget, EncoderRunsAfterSealAndFrameDependencyKeepsItsCharge)
     view->root_page_id = 0;
     view->next_page_id = 1;
     view->coverage     = 4;
-    auto prepared      = prepare_final_page(view, 0, {}, {.frame_bytes = 1024, .metadata = budget.reservation});
+    auto prepared      = prepare_final_page(view, 0, {}, {.metadata = budget.reservation});
     ASSERT_TRUE(prepared.status.ok()) << prepared.status.to_string();
     ASSERT_TRUE(prepared.encoder);
+    EXPECT_EQ(prepared.encoder->summary().encoded_entries, 4U);
+    EXPECT_LT(budget.allocated() - baseline, 8192U);
     EXPECT_EQ(prepared.encoder.get_deleter().owner, budget.reservation);
     budget.reservation->seal();
-    std::array<uint8_t, 1024> frame{};
-    auto                      step = prepared.encoder->next(frame);
+    std::array<uint8_t, 64 * 1024> frame{};
+    auto                           step = prepared.encoder->next(frame);
     ASSERT_TRUE(step.status.ok()) << step.status.to_string();
     ASSERT_TRUE(step.frame);
     EXPECT_TRUE(step.complete);

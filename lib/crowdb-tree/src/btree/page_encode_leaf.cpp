@@ -46,6 +46,9 @@ Status append_leaf_entry(FinalPageEncodeState &state, Slice key, LogicalCell cel
         if (overflow.overflow_head() >= MappingView::kPageLimit || value_bytes == 0) {
             return Status::corruption("invalid captured overflow pointer");
         }
+        if (state.reused.size() == state.reused.capacity()) {
+            state.reused.reserve(std::min(state.entries.capacity(), std::max(size_t{1}, 2 * state.reused.size())));
+        }
         state.reused.push_back({.head    = overflow.overflow_head(),
                                 .bytes   = value_bytes,
                                 .owner   = captured_backing ? nullptr : context.overflow_dependencies,
@@ -89,12 +92,24 @@ Status prepare_leaf(FinalPageEncodeState &state, uint64_t coverage, uint64_t gc_
     state.context  = context;
     state.gc_floor = gc_floor;
     state.cursor.emplace(page, context.range, coverage, state.limits.max_sources, false, state.limits.metadata);
-    const size_t capacity =
-        std::min({state.limits.max_entries,
-                  static_cast<size_t>((state.limits.frame_bytes - kPageOverhead) / (kLeafSlotSize + kCellHeaderSize)),
-                  state.limits.max_metadata_bytes / (sizeof(FinalLeafEntry) + sizeof(ReusedOverflowDependency))});
-    state.entries.reserve(capacity);
-    state.reused.reserve(capacity);
+    if (state.cursor->valid()) {
+        const size_t limit = std::min(
+            {state.limits.max_entries,
+             static_cast<size_t>((state.limits.frame_bytes - kPageOverhead) / (kLeafSlotSize + kCellHeaderSize)),
+             state.limits.max_metadata_bytes / (sizeof(FinalLeafEntry) + sizeof(ReusedOverflowDependency))});
+        // Winners come from these existing entries. Read only source counts;
+        // the cursor will resolve duplicates, ranges and tombstones once.
+        size_t count = 0;
+        for (const auto &run : page->overlays) {
+            count += std::min(limit - count, run->entries().size());
+        }
+        for (const auto &base : page->bases) {
+            if (base.resident && base.range.overlaps(context.range)) {
+                count += std::min(limit - count, base.resident->count());
+            }
+        }
+        state.entries.reserve(count);
+    }
     state.summary.primary_used_bytes = kPageOverhead;
     return advance_leaf(state, result);
 }

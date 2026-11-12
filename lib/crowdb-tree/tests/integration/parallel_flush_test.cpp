@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/flush_batch.h"
 #include "btree/published_route.h"
+#include "common/test_chunk_physical.h"
 
 #include <gtest/gtest.h>
 
 #include <future>
-#include <latch>
 
 namespace crowdb::tree
 {
@@ -151,46 +151,23 @@ TEST(ParallelFlush, AllMemTablesMergeByRangeBeforeMaintenanceWithSingleOrMultipl
 TEST(ParallelFlush, PartialHandoffRetainsSourcesAndRetryDoesNotDuplicateInstalledRuns)
 {
     detail::FlushRuntime   runtime(1, 1);
-    auto                   lane = std::make_shared<detail::FlushRuntime::Lane>(1);
+    auto                   allocations = std::make_shared<test_chunk::TestPhysicalBudget>();
+    auto                   lane        = std::make_shared<detail::FlushRuntime::Lane>(1, allocations);
     PublicationCoordinator publisher;
     initialize(publisher, {
                               table({{"a", 1}, {"m", 1}}
                               )
     });
-    std::latch entered(1);
-    std::latch release(1);
-
-    struct Blocker
-    {
-        std::latch &entered;
-        std::latch &release;
-    } blocker{.entered = entered, .release = release};
-
-    ASSERT_TRUE(runtime
-                    .try_submit(
-                        lane,
-                        [](void *context) noexcept {
-                            auto *block = static_cast<Blocker *>(context);
-                            block->entered.count_down();
-                            block->release.wait();
-                        },
-                        &blocker)
-                    .ok());
-    entered.wait();
     std::shared_ptr<FlushBatch> batch;
     FlushBatchOptions           options;
-    // This case exercises queued-child admission failure.
+    // Admit routing, the post-publication step and the first child.
     options.inline_ranges_per_step = 0;
     ASSERT_TRUE(FlushBatch::prepare(publisher, runtime, lane, 1, 1, options, {}, &batch).ok());
-    std::promise<void> done;
-    auto               terminal  = done.get_future();
-    auto               operation = stdexec::connect(batch->sender(), Receiver{&done});
-    stdexec::start(operation);
-    release.count_down();
-    terminal.get();
+    allocations->allowances.store(3);
+    ASSERT_TRUE(stdexec::sync_wait(batch->sender()).has_value());
     runtime.drain();
     EXPECT_EQ(batch->result().phase, FlushPhase::kRepairRequired);
-    EXPECT_FALSE(batch->result().handoff_status.ok());
+    EXPECT_EQ(batch->result().handoff_status.code(), Code::kResourceExhausted);
     EXPECT_EQ(publisher.capture()->coverage, 0U);
     EXPECT_EQ(publisher.capture()->sources->tables.size(), 1U);
     auto installed = publisher.capture()->mapping.get(0);
@@ -205,6 +182,7 @@ TEST(ParallelFlush, PartialHandoffRetainsSourcesAndRetryDoesNotDuplicateInstalle
     };
     checkpoint->on_done = [](PublicationResult result) { EXPECT_EQ(result.status.code(), Code::kUnavailable); };
     ASSERT_TRUE(publisher.try_submit(checkpoint));
+    allocations->allowances.store(-1);
     ASSERT_TRUE(stdexec::sync_wait(batch->sender()).has_value());
     runtime.drain();
     EXPECT_TRUE(batch->result().handoff_status.ok());
@@ -523,7 +501,7 @@ TEST(ParallelFlush, CompleteSubtreeSplitContinuesAcrossEveryWorkAndOutputWindow)
     }
 }
 
-TEST(ParallelFlush, ParentMergesFinalLeavesAndContractsRootWithoutChangingOldView)
+TEST(ParallelFlush, ParentKeepsLeavesSeparateWhenNeitherLeafShrank)
 {
     detail::FlushRuntime   runtime(4, 32);
     auto                   lane = std::make_shared<detail::FlushRuntime::Lane>(32);
@@ -542,13 +520,14 @@ TEST(ParallelFlush, ParentMergesFinalLeavesAndContractsRootWithoutChangingOldVie
     runtime.drain();
     ASSERT_TRUE(batch->result().handoff_status.ok()) << batch->result().handoff_status.to_string();
     auto after = publisher.capture();
-    EXPECT_EQ(after->stats.height, 1U);
-    EXPECT_EQ(after->stats.leaf_pages, 1U);
-    EXPECT_EQ(after->stats.inner_pages, 0U);
+    EXPECT_EQ(after->stats.height, 2U);
+    EXPECT_EQ(after->stats.leaf_pages, 2U);
+    EXPECT_EQ(after->stats.inner_pages, 1U);
     const auto root = after->mapping.get(after->root_page_id);
-    ASSERT_TRUE(root->leaf);
-    EXPECT_EQ(root->leaf->lookup("a").cell.slot, 2U);
-    EXPECT_EQ(root->leaf->lookup("z").cell.slot, 2U);
+    ASSERT_TRUE(root->inner);
+    EXPECT_EQ(root->inner->children, before->mapping.get(2)->inner->children);
+    EXPECT_EQ(after->mapping.get(0)->leaf->lookup("a").cell.slot, 2U);
+    EXPECT_EQ(after->mapping.get(1)->leaf->lookup("z").cell.slot, 2U);
     EXPECT_EQ(before->root_page_id, 2U);
     ASSERT_TRUE(before->mapping.get(2)->inner);
     EXPECT_EQ(before->mapping.get(2)->inner->children.size(), 2U);

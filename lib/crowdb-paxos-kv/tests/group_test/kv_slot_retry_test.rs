@@ -29,7 +29,7 @@ async fn conditional_foreign_slot_returns_the_value_from_the_renewed_comparison(
             slot: 1,
             ballot: PxBallot::new(10, 99),
             term: 0,
-            payload: Bytes::from(accepted.clone()),
+            payload: Bytes::from(accepted.clone()).into(),
         };
         assert!(matches!(
             group.local_replica().on_accept(&entry).await,
@@ -67,7 +67,7 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
             slot: 1,
             ballot: PxBallot::new(10, 99),
             term: 0,
-            payload: bytes::Bytes::from(stale_payload.clone()),
+            payload: bytes::Bytes::from(stale_payload.clone()).into(),
         };
         let reply = follower_replica.on_accept(&entry).await;
         assert!(
@@ -107,7 +107,8 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
         let replica = group.local_replica();
         let slot1 = replica.accepted_at(1).await.expect("slot 1 accepted");
         assert_eq!(
-            *slot1.payload, stale_payload,
+            slot1.payload.to_bytes(),
+            stale_payload,
             "slot 1 must preserve pre-existing accepted value"
         );
     }

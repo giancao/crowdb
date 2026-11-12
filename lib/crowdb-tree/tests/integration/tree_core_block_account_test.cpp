@@ -75,7 +75,9 @@ TEST(TreeCoreBlockAccount, FailedOpenReleasesDomainAndPrivateCreateCannotBypassI
     std::shared_ptr<TreeCore> bypass;
     EXPECT_EQ(TreeCore::create(config, binding, {}, &bypass).code(), Code::kInvalidArgument);
     EXPECT_FALSE(bypass);
+    auto cpu = binding->cpu();
     binding.reset();
+    cpu->drain();
     const auto baseline                         = config.runtime->snapshot();
     const auto original_limit                   = config.runtime_binding.limits.routing_bytes;
     config.runtime_binding.limits.routing_bytes = config.runtime_binding.lifecycle_bytes + 1;
@@ -90,6 +92,8 @@ TEST(TreeCoreBlockAccount, FailedOpenReleasesDomainAndPrivateCreateCannotBypassI
     ASSERT_TRUE(device->try_claim_runtime_domain());
     device->release_runtime_domain();
     device.reset();
+    // The failed open reports completion before its CPU continuation releases the binding.
+    cpu->drain();
     EXPECT_EQ(config.runtime->snapshot().allocated.routing_bytes, baseline.allocated.routing_bytes);
     EXPECT_EQ(config.runtime->snapshot().reserved.routing_bytes, baseline.reserved.routing_bytes);
     ASSERT_TRUE(BlockPageStore::open_blocks(directory.path, 4, 5, 65536, 1, &device).ok());

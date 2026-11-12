@@ -25,16 +25,19 @@ class ScheduledPageStore final : public AsyncPageStore, public std::enable_share
     using MakeChunkWrites = std::shared_ptr<ChunkWriteQueue> (*)(const std::shared_ptr<AllocationBudget> &);
 
     static std::optional<size_t> allocation_bound() noexcept;
-    static Status create(PageStore *sync, AsyncPageStore *async, std::shared_ptr<const void> backend_owner,
-                         std::shared_ptr<TreeRuntimeBinding>                   binding,
-                         const std::shared_ptr<detail::AllocationReservation> &metadata,
-                         std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<AsyncPageStore> *out,
-                         std::shared_ptr<ApplyDispatcher> fallback = {}, MakeChunkWrites make_chunk_writes = nullptr);
-    [[nodiscard]] bool       write_completion_is_reloadable() const noexcept override;
+    static Status      create(PageStore *sync, AsyncPageStore *async, std::shared_ptr<const void> backend_owner,
+                              std::shared_ptr<TreeRuntimeBinding>                   binding,
+                              const std::shared_ptr<detail::AllocationReservation> &metadata,
+                              std::shared_ptr<detail::FlushRuntime::Lane> lane, std::shared_ptr<AsyncPageStore> *out,
+                              std::shared_ptr<ApplyDispatcher> extent_owner      = {},
+                              MakeChunkWrites                  make_chunk_writes = nullptr);
+    [[nodiscard]] bool write_completion_is_reloadable() const noexcept override;
     [[nodiscard]] PageStore *synchronous_store() const noexcept;
     [[nodiscard]] bool       uses_async_transport() const noexcept;
-    [[nodiscard]] size_t     allocation_workers() const noexcept;
-    uint64_t submit_read(PageAddr address, void *buffer, size_t length, AsyncCompletion complete) override;
+    [[nodiscard]] bool       reads_inline() const noexcept;
+    Status               read_inline(PageAddr address, void *buffer, size_t length, TreeWorkCause cause) const noexcept;
+    [[nodiscard]] size_t allocation_workers() const noexcept;
+    uint64_t             submit_read(PageAddr address, void *buffer, size_t length, AsyncCompletion complete) override;
     uint64_t submit_write(PageAddr address, const void *buffer, size_t length, AsyncCompletion complete) override;
     uint64_t submit_typed_write(PagePurpose purpose, PageAddr address, const void *buffer, size_t length,
                                 AsyncCompletion complete) override;

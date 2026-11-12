@@ -122,9 +122,10 @@ void CapturedWriteOperation::State::begin_write()
         return;
     }
     PageWriteInput input{.info                = frame->info,
-                         .frame               = frame->buffer->bytes,
+                         .frame               = frame->buffer->bytes(),
                          .owner               = frame->buffer,
-                         .reload_dependencies = dependencies};
+                         .reload_dependencies = dependencies,
+                         .raw_blob            = frame->buffer->raw_blob()};
     auto status = PageWriteOperation::create(store, runtime, lane, std::move(input), limits.write, budget,
                                              reserve_page(descriptor.type == page_type::kOverflowFrame), &write);
     if (!status.ok()) {

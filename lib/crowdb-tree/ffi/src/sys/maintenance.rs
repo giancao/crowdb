@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 use super::{ct_future, ct_tree};
+use std::ffi::c_void;
 
 #[repr(C)]
 #[derive(Default)]
@@ -41,6 +42,14 @@ pub struct ct_checkpoint_result_v1 {
 
 extern "C" {
     pub fn ct_durable_coverage(tree: *mut ct_tree) -> u64;
+    pub fn ct_flushes_since_persistent(tree: *mut ct_tree) -> u64;
+    pub fn ct_bind_flush_threshold(
+        tree: *mut ct_tree,
+        threshold: u64,
+        wake: unsafe extern "C" fn(*mut c_void),
+        drop_context: unsafe extern "C" fn(*mut c_void),
+        context: *mut c_void,
+    ) -> i32;
     pub fn ct_flush_report_async(tree: *mut ct_tree, out: *mut *mut ct_future) -> i32;
     pub fn ct_writeback_async(tree: *mut ct_tree, out: *mut *mut ct_future) -> i32;
     pub fn ct_flush_with_persistent_report_async(tree: *mut ct_tree, out: *mut *mut ct_future) -> i32;

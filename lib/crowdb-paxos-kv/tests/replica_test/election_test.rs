@@ -26,7 +26,7 @@ fn noop_apply_path() {
         term: 0,
         // Empty payload decodes to an empty batch — no Puts / Deletes
         // reach the engine.
-        payload: bytes::Bytes::new(),
+        payload: bytes::Bytes::new().into(),
     };
     let e = learner
         .engine()
@@ -88,7 +88,7 @@ async fn term_fencing_in_acceptor_rejects_old_term() {
         slot: 1,
         ballot: PxBallot::new(0, 0),
         term: 1,
-        payload: bytes::Bytes::from_static(b"old"),
+        payload: bytes::Bytes::from_static(b"old").into(),
     };
     let reply = replica.on_accept(&stale).await;
     match reply {
@@ -110,7 +110,7 @@ async fn term_fencing_in_acceptor_adopts_higher_term() {
         slot: 1,
         ballot: PxBallot::new(0, 0),
         term: 9,
-        payload: bytes::Bytes::from_static(b"v"),
+        payload: bytes::Bytes::from_static(b"v").into(),
     };
     let reply = replica.on_accept(&higher).await;
     assert!(
@@ -131,7 +131,7 @@ async fn request_vote_rejects_candidate_missing_higher_accepted_log_tip() {
         slot: 10,
         ballot: PxBallot::new(0, 7),
         term: 4,
-        payload: bytes::Bytes::from_static(b"v"),
+        payload: bytes::Bytes::from_static(b"v").into(),
     };
     let reply = voter.on_accept(&accepted).await;
     assert!(matches!(reply, PxAcceptReply::Accepted { .. }));
@@ -163,7 +163,7 @@ async fn request_vote_grants_candidate_with_matching_accepted_log_tip_even_if_le
         slot: 11,
         ballot: PxBallot::new(0, 8),
         term: 6,
-        payload: bytes::Bytes::from_static(b"v2"),
+        payload: bytes::Bytes::from_static(b"v2").into(),
     };
     let reply = voter.on_accept(&accepted).await;
     assert!(matches!(reply, PxAcceptReply::Accepted { .. }));

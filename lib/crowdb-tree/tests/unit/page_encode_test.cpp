@@ -79,10 +79,13 @@ TEST(FinalPageEncoder, LeafResolvesCapturedWinnersAndGcWithoutIntermediateValueC
     EXPECT_EQ(prepared.encoder->summary().dropped_tombstones, 1U);
     EXPECT_EQ(prepared.encoder->counters().inline_value_copy_bytes, 0U);
     std::array<uint8_t, 512> frame{};
-    auto                     step = prepared.encoder->next(frame);
+    frame.fill(0xA5);
+    auto step = prepared.encoder->next(frame);
     ASSERT_TRUE(step.status.ok());
     ASSERT_TRUE(step.complete);
-    EXPECT_TRUE(frame_validate(frame.data(), frame.size()));
+    ASSERT_TRUE(frame_validate(frame.data(), frame.size()));
+    EXPECT_TRUE(std::all_of(frame.begin() + frame_u32(frame.data(), fh::kFreeLo),
+                            frame.begin() + frame_u32(frame.data(), fh::kFreeHi), [](auto b) { return b == 0; }));
     LeafFrameView leaf(frame.data(), frame.size());
     ASSERT_EQ(leaf.count(), 3U);
     EXPECT_EQ(CellView(leaf.cell(0)).value().to_string(), "new");
@@ -125,6 +128,7 @@ TEST(FinalPageEncoder, LargeExternalValueStreamsThroughOneCallerFrameAndRetainsO
     EXPECT_EQ(prepared.encoder->next(std::span<uint8_t>(frame.data(), 255)).status.code(), Code::kInvalidArgument);
     size_t offset = 0;
     for (uint64_t index = 0; index < count; ++index) {
+        std::fill_n(frame.begin(), 256, 0xA5);
         auto step = prepared.encoder->next(frame);
         ASSERT_TRUE(step.status.ok());
         if (!step.frame.has_value()) {
@@ -133,9 +137,11 @@ TEST(FinalPageEncoder, LargeExternalValueStreamsThroughOneCallerFrameAndRetainsO
         }
         EXPECT_FALSE(step.complete);
         EXPECT_EQ(step.frame->page_id, 100 + index);
-        EXPECT_TRUE(frame_validate(frame.data(), 256));
+        ASSERT_TRUE(frame_validate(frame.data(), 256));
         OverflowFrameView overflow(frame.data(), 256);
         EXPECT_EQ(overflow.payload(), Slice(payload->data() + offset, overflow.chunk_len()));
+        EXPECT_TRUE(std::all_of(frame.begin() + kFrameHeaderSize + overflow.chunk_len(),
+                                frame.begin() + 256 - kFrameTrailerSize, [](auto b) { return b == 0; }));
         EXPECT_EQ(overflow.next_page_id(), index + 1 == count ? kInvalidPageId : 101 + index);
         offset += overflow.chunk_len();
         EXPECT_EQ(frame.back(), 0xAA);
@@ -263,8 +269,11 @@ TEST(FinalPageEncoder, InnerUsesOnlyCapturedRoutingAndExplicitDescendantFences)
     ASSERT_NE(prepared.encoder, nullptr);
     captured.reset();
     std::array<uint8_t, 256> frame{};
+    frame.fill(0xA5);
     EXPECT_TRUE(prepared.encoder->next(frame).complete);
-    EXPECT_TRUE(frame_validate(frame.data(), frame.size()));
+    ASSERT_TRUE(frame_validate(frame.data(), frame.size()));
+    EXPECT_TRUE(std::all_of(frame.begin() + frame_u32(frame.data(), fh::kFreeLo),
+                            frame.begin() + frame_u32(frame.data(), fh::kFreeHi), [](auto b) { return b == 0; }));
     InnerFrameView encoded(frame.data(), frame.size());
     EXPECT_EQ(encoded.child_at(0), 0U);
     EXPECT_EQ(encoded.child_at(1), 1U);

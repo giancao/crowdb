@@ -83,6 +83,15 @@ catch (...) {
     return 0;
 }
 
+bool SourceRotation::request_for_apply()
+{
+    if (options_.flush_tables == 0 || stopping() || sources_->capacity_paused()) {
+        return false;
+    }
+    const auto view = publisher_.capture();
+    return view->sources && !view->sources->inheritance && request() != 0;
+}
+
 uint64_t SourceRotation::request_pressure() noexcept
 {
     sources_->pause_capacity();
@@ -282,6 +291,9 @@ void SourceRotation::step()
              catalog->tables.size() >= std::max<size_t>(2, options_.tables)) {
         flush();
     }
+    else if (options_.flush_tables != 0 && catalog->tables.size() >= options_.flush_tables) {
+        flush(false);
+    }
     else if (catalog->active_budget && check_rotation_) {
         paused_catalog_ = catalog;
         paused_owner_   = shared_from_this();
@@ -297,9 +309,11 @@ void SourceRotation::step()
     }
 }
 
-void SourceRotation::flush()
+void SourceRotation::flush(bool pause_capacity)
 {
-    sources_->pause_capacity();
+    if (pause_capacity) {
+        sources_->pause_capacity();
+    }
     if (flush_controller_ != nullptr) {
         plan_flush();
         return;

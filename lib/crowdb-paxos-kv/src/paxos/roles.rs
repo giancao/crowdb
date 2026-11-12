@@ -2,7 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::paxos::PxNodeId;
-use bytes::Bytes;
+mod payload;
+pub use payload::ProposalPayload;
+pub(crate) use payload::MIN_PAYLOAD_VIEW_BYTES;
 
 pub trait Proposer {
     fn propose(&self);
@@ -72,21 +74,13 @@ pub type SlotIndex = u64;
 /// `payload` semantics: an empty payload is a `NoOp` (used to fill repair
 /// gaps); a non-empty payload is a serialized batch of `Operation` tuples.
 ///
-/// `payload` uses [`bytes::Bytes`], which is internally a ref-counted
-/// shared buffer. Cloning is `O(1)` (refcount bump) and the same buffer
-/// is shared across:
-///
-/// - per-peer Accept fanout (`AcceptedValue.payload` is also `Bytes`,
-///   zero-copy from the flatbuffer response);
-/// - slot-retry attempts in the proposer's `'slot_retry` loop;
-/// - the on-wire response → log-entry conversion in
-///   `accepted_value_to_log_entry`.
+/// Clones retain the same immutable bytes across Accept fanout and retries.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PxLogEntry {
     pub slot: SlotIndex,
     pub ballot: PxBallot,
     pub term: u64,
-    pub payload: Bytes,
+    pub payload: ProposalPayload,
 }
 
 /// Reply to a Phase-1 `Prepare`.

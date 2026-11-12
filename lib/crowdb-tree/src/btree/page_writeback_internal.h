@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "btree/apply_dispatcher.h"
 #include "page_writeback.h"
 #include "resource_observation.h"
 
@@ -23,12 +22,10 @@ struct PageWriteOperation::State : std::enable_shared_from_this<State>
     static void written(void *context, Status status) noexcept;
     void        prepare();
     void        reserved(Status status, ReservedWriteExtent extent) noexcept;
-    void        queue_write() noexcept;
+    void        queue_write(bool on_worker = false) noexcept;
     void        submit_write();
     void        finish(Status status) noexcept;
 
-    ApplyDispatcher::Node                       encode_node{&State::encode, this};
-    ApplyDispatcher::Node                       write_node{&State::write, this};
     PageWriteInput                              input;
     PageWriteLimits                             limits;
     PageLoadBudget                              budget;
@@ -39,7 +36,7 @@ struct PageWriteOperation::State : std::enable_shared_from_this<State>
     ReserveExtent                               reserve;
 
     ResourceObservation                                       io_resources;
-    detail::ReservedVector<uint8_t, AllocationKind::kIo>      blob;
+    OverwriteByteVector<AllocationKind::kIo>                  blob;
     detail::ReservedVector<uint8_t, AllocationKind::kScratch> scratch;
     std::span<uint8_t>                                        aligned;
     std::shared_ptr<BackingRef>                               backing;

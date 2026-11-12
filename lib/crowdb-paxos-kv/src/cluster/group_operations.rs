@@ -181,25 +181,33 @@ impl KvGroupOperations {
         identity: Option<KvRequestIdentity>,
     ) -> Result<KvGroupWrite, KvGroupOperationError> {
         self.ensure_tenure()?;
-        let payload = encode_mutations(mutations);
-        let result = if let Some(term) = self.required_leader_term {
-            self.group
-                .propose_in_tenure(
-                    payload,
-                    identity.map(|id| id.client_id),
-                    identity.map(|id| id.sequence),
-                    term,
-                )
-                .await
-        } else {
-            self.group
-                .propose(
-                    payload,
-                    identity.map(|id| id.client_id),
-                    identity.map(|id| id.sequence),
-                )
-                .await
-        };
+        self.propose_write(encode_mutations(mutations).into(), identity)
+            .await
+    }
+
+    pub(crate) async fn write_encoded(
+        &self,
+        payload: Bytes,
+        identity: Option<KvRequestIdentity>,
+    ) -> Result<KvGroupWrite, KvGroupOperationError> {
+        self.ensure_tenure()?;
+        self.propose_write(payload, identity).await
+    }
+
+    async fn propose_write(
+        &self,
+        payload: Bytes,
+        identity: Option<KvRequestIdentity>,
+    ) -> Result<KvGroupWrite, KvGroupOperationError> {
+        let result = self
+            .group
+            .propose_with_tenure(
+                payload,
+                identity.map(|id| id.client_id),
+                identity.map(|id| id.sequence),
+                self.required_leader_term,
+            )
+            .await;
         self.finish_write(result, false).await
     }
 

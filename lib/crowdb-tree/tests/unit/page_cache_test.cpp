@@ -185,7 +185,7 @@ TEST(SharedPageCache, IdentityIncludesGenerationAndBackendProtection)
     EXPECT_EQ(upstream->calls, 4U);
 }
 
-TEST(SharedPageCache, WaiterPoolPressureBypassesCacheAndCallbacksCanReenter)
+TEST(SharedPageCache, WaiterPoolCollisionStillJoinsTheReadAndCallbacksCanReenter)
 {
     SharedPageCache cache({.max_pages = 1, .max_waiters = 2});
     auto            upstream = std::make_shared<TestLoader>();
@@ -217,13 +217,11 @@ TEST(SharedPageCache, WaiterPoolPressureBypassesCacheAndCallbacksCanReenter)
         EXPECT_TRUE(leaf);
         ++done;
     });
-    EXPECT_EQ(upstream->calls, 2U);
-    upstream->finish();
-    EXPECT_EQ(done, 3U);
+    EXPECT_EQ(upstream->calls, 1U);
     upstream->finish();
     EXPECT_EQ(done, 4U);
     EXPECT_EQ(cache.snapshot().waiters, 0U);
-    EXPECT_EQ(cache.snapshot().rejected, 1U);
+    EXPECT_EQ(cache.snapshot().rejected, 0U);
 }
 
 TEST(SharedPageCache, ReservedWaiterAndOrdinaryOverflowStartWithoutWaitingForCacheEntries)

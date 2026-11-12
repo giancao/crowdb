@@ -10,6 +10,20 @@ uint64_t ct_durable_coverage(ct_tree *tree)
     return tree == nullptr ? 0 : c_api_tree(tree)->durable_coverage();
 }
 
+uint64_t ct_flushes_since_persistent(ct_tree *tree)
+{
+    return tree == nullptr ? 0 : c_api_tree(tree)->flushes_since_persistent();
+}
+
+int32_t ct_bind_flush_threshold(ct_tree *tree, uint64_t threshold, void (*wake)(void *), void (*drop_context)(void *),
+                                void *context)
+{
+    if (tree == nullptr || !c_api_tree(tree)->bind_flush_threshold(threshold, wake, drop_context, context)) {
+        return static_cast<int32_t>(Code::kInvalidArgument);
+    }
+    return static_cast<int32_t>(Code::kOk);
+}
+
 namespace crowdb::tree::c_api_detail
 {
 void store_report(ct_future_impl &result, const FlushResult &report, const Status &terminal) noexcept

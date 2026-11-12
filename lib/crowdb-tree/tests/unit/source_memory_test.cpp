@@ -48,14 +48,15 @@ TEST(SourceMemory, LegacyInsertOverwriteAndPruneMatchIndependentLinkedVersionSca
 TEST(SourceMemory, PreparedInsertionLoserAndReplacementUsePublishedCapacities)
 {
     ConcurrentSkipList source;
-    auto               older = source.prepare_write("a", value(0, "one"), 0, 4, {});
-    auto               newer = source.prepare_write("a", value(0, "longer-two"), 0, 4, {});
+    auto               older = source.prepare_write("a", encode_cell_buf(0, OpKind::kPut, "one"), 0, {}, 0, {});
+    auto               newer = source.prepare_write("a", encode_cell_buf(0, OpKind::kPut, "longer-two"), 0, {}, 0, {});
     EXPECT_TRUE(source.commit_write(std::move(newer), 2));
     EXPECT_TRUE(source.commit_write(std::move(older), 1));
     expect_same(source.memory(), source.scan_memory_for_tests());
     EXPECT_EQ(source.memory().history_count, 1U);
+    EXPECT_EQ(source.memory().descriptor_bytes, 2 * sizeof(CellVersion));
     {
-        auto abandoned = source.prepare_write("b", value(0, "unused"), 0, 16, {});
+        auto abandoned = source.prepare_write("b", encode_cell_buf(0, OpKind::kPut, "unused"), 0, {}, 0, {});
         expect_same(source.memory(), source.scan_memory_for_tests());
     }
     expect_same(source.memory(), source.scan_memory_for_tests());
@@ -79,12 +80,13 @@ TEST(SourceMemory, LaterReplaceAccountsBeforePreparedInsertionWithoutCountingItT
         }
     });
     std::thread insertion([&] {
-        auto prepared = source.prepare_write("a", value(0, "longer-initial-value"), 0, 4, {});
+        auto prepared =
+            source.prepare_write("a", encode_cell_buf(0, OpKind::kPut, "longer-initial-value"), 0, {}, 0, {});
         EXPECT_TRUE(source.commit_write(std::move(prepared), 1));
     });
     pause.published.wait();
     EXPECT_TRUE(source.upsert("a", value(2, "two"), 2));
-    EXPECT_LE(source.memory().payload_bytes, sizeof(CellVersion) + encode_cell_buf(2, OpKind::kPut, "two").size());
+    EXPECT_LE(source.memory().payload_bytes, encode_cell_buf(2, OpKind::kPut, "two").size());
     pause.proceed.count_down();
     insertion.join();
     source.set_hook_for_tests(nullptr, nullptr);

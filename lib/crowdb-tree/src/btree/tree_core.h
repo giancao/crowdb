@@ -31,6 +31,8 @@ class LocalCompactionOperation;
 struct LocalCompactionOptions;
 class TreeApplyOperation;
 struct CoreWriteInput;
+struct ExternalValue;
+struct ApplyInputOwner;
 struct ReadablePageCatalog;
 struct CheckpointOptions;
 struct SplitGeneration;
@@ -85,14 +87,15 @@ class TreeCore : public std::enable_shared_from_this<TreeCore>
     Status prepare_chunk_collection(std::shared_ptr<ChunkCollectionOperation> *out);
     Status prepare_apply(size_t count, const detail::InlineFunction<CoreWriteInput(size_t)> &read,
                          detail::BudgetClass category, size_t retained_metadata_bytes,
-                         std::shared_ptr<TreeApplyOperation> *out);
+                         std::shared_ptr<TreeApplyOperation> *out, const ExternalValue *external = nullptr,
+                         ApplyInputOwner *owner = nullptr);
     // The caller owns immutable input storage until terminal. Its owner is
     // retained while the bounded replay window awaits its complete grant.
-    using ReplayOwnerFactory =
-        detail::InlineFunction<std::shared_ptr<const void>(const std::shared_ptr<detail::AllocationReservation> &)>;
+    using ReplayOwnerFactory = detail::InlineFunction<std::shared_ptr<const void>(
+        const std::shared_ptr<detail::AllocationReservation> &, ApplyInputOwner **)>;
     Status prepare_replay_adopt(uint64_t slot, size_t count, detail::InlineFunction<CoreWriteInput(size_t)> read,
                                 ReplayOwnerFactory retain, size_t retained_metadata_bytes,
-                                std::shared_ptr<TreeApplyOperation> *out);
+                                std::shared_ptr<TreeApplyOperation> *out, const ExternalValue *external = nullptr);
     Status prepare_replay(uint64_t slot, size_t count, detail::InlineFunction<CoreWriteInput(size_t)> read,
                           std::shared_ptr<const void> caller_owner, size_t retained_metadata_bytes,
                           std::shared_ptr<TreeApplyOperation> *out);

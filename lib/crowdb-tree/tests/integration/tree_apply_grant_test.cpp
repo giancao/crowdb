@@ -6,6 +6,9 @@
 
 #include <gtest/gtest.h>
 
+#include <future>
+#include <semaphore>
+
 namespace crowdb::tree
 {
 namespace
@@ -26,14 +29,19 @@ class TreeApplyGrant : public testing::Test
     TreeCore                   *core = nullptr;
 };
 
-TEST_F(TreeApplyGrant, CompleteGapBoundIncludesBothCopiedInputAndFutureCell)
+TEST_F(TreeApplyGrant, CompleteGapBoundChargesTheFinalCellOnce)
 {
-    // A single 8 MiB value fits the read limit and one source's payload,
-    // but two owned copies plus descriptors cannot fit the 16 MiB gap budget.
-    const std::string                   value(8 * 1024 * 1024, 'v');
-    const auto                          before = core->binding()->account()->snapshot();
+    const std::string                   fitting(8 * 1024 * 1024, 'v');
     std::shared_ptr<TreeApplyOperation> operation;
-    const auto                          status = core->prepare_apply(
+    ASSERT_TRUE(core->prepare_apply(
+                        1, [&](size_t) { return CoreWriteInput{.key = Slice("key"), .value = Slice(fitting)}; },
+                        detail::BudgetClass::kAdmittedWriter, 0, &operation)
+                    .ok());
+    operation.reset();
+
+    const std::string value(16 * 1024 * 1024, 'v');
+    const auto        before = core->binding()->account()->snapshot();
+    const auto        status = core->prepare_apply(
         1, [&](size_t) { return CoreWriteInput{.key = Slice("key"), .value = Slice(value)}; },
         detail::BudgetClass::kAdmittedWriter, 0, &operation);
     EXPECT_EQ(status.code(), Code::kInvalidArgument);
@@ -61,7 +69,7 @@ TEST_F(TreeApplyGrant, PermanentOrdinaryLimitDoesNotBecomeAnUnfinishableWait)
     Config smaller                              = config;
     smaller.runtime_binding.limits.writer_bytes = 1024 * 1024;
     Crowdbtree                          local(smaller);
-    const std::string                   value(600 * 1024, 'v');
+    const std::string                   value(1024 * 1024, 'v');
     std::shared_ptr<TreeApplyOperation> operation;
     EXPECT_EQ(TreeCoreAccess::get(local)
                   ->prepare_apply(
@@ -72,7 +80,7 @@ TEST_F(TreeApplyGrant, PermanentOrdinaryLimitDoesNotBecomeAnUnfinishableWait)
     EXPECT_FALSE(operation);
 }
 
-TEST_F(TreeApplyGrant, DuplicateKeysKeepLastCellButChargeAllRetainedInputBytes)
+TEST_F(TreeApplyGrant, DuplicateKeysKeepLastCell)
 {
     const std::array<std::string, 3>    values{"first", "second", "last"};
     std::shared_ptr<TreeApplyOperation> operation;
@@ -105,5 +113,56 @@ TEST_F(TreeApplyGrant, DuplicateKeysKeepLastCellButChargeAllRetainedInputBytes)
     EXPECT_TRUE(completion.status.ok());
     EXPECT_EQ(tree->get_view("same").value().to_string(), "last");
 }
+
+#ifdef CROWDB_TREE_TEST_UTIL
+TEST_F(TreeApplyGrant, IndependentReadyBatchesRunOnDifferentWorkers)
+{
+    std::array<std::shared_ptr<TreeApplyOperation>, 2> operations;
+    for (size_t i = 0; i < operations.size(); ++i) {
+        const auto key = i == 0 ? Slice("first") : Slice("second");
+        ASSERT_TRUE(core->prepare_apply(
+                            1, [key](size_t) { return CoreWriteInput{.key = key, .value = Slice("value")}; },
+                            detail::BudgetClass::kAdmittedWriter, 0, &operations[i])
+                        .ok());
+        ASSERT_TRUE(operations[i]->arm().ok());
+    }
+
+    struct Pause
+    {
+        std::promise<void>    entered;
+        std::binary_semaphore resume{0};
+    } pause;
+
+    auto entered = pause.entered.get_future();
+    auto table   = core->capture()->sources->tables.back();
+    table->set_hook_for_tests(&pause, [](void *raw, ConcurrentSkipList::PausePoint point, Slice key) {
+        if (point == ConcurrentSkipList::PausePoint::kBeforePrepare && key == Slice("first")) {
+            auto &pause = *static_cast<Pause *>(raw);
+            pause.entered.set_value();
+            pause.resume.acquire();
+        }
+    });
+    std::array<std::promise<Status>, 2> completion;
+    auto                                first  = completion[0].get_future();
+    auto                                second = completion[1].get_future();
+    const auto                          done   = +[](void *raw, detail::CallbackSignal, Status status) noexcept {
+        static_cast<std::promise<Status> *>(raw)->set_value(std::move(status));
+    };
+    operations[0]->start(1, done, completion.data());
+    const auto first_entered = entered.wait_for(std::chrono::seconds(2));
+    operations[1]->start(2, done, &completion[1]);
+    const auto second_ready = second.wait_for(std::chrono::seconds(2));
+    const auto prefix       = core->contiguous_slot();
+    pause.resume.release();
+    EXPECT_TRUE(first.get().ok());
+    EXPECT_TRUE(second.get().ok());
+    table->set_hook_for_tests(nullptr, nullptr);
+
+    EXPECT_EQ(first_entered, std::future_status::ready);
+    EXPECT_EQ(second_ready, std::future_status::ready);
+    EXPECT_EQ(prefix, 0U);
+    EXPECT_EQ(core->contiguous_slot(), 2U);
+}
+#endif
 } // namespace
 } // namespace crowdb::tree

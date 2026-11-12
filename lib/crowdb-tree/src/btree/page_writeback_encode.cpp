@@ -34,14 +34,21 @@ void PageWriteOperation::State::prepare()
         finish(Status::invalid_argument("overflow write requires captured extent dependencies"));
         return;
     }
-    auto status = encode_durable_page_into(input.frame, limits.compression, aligned, scratch, &report.logical_bytes);
-    if (!status.ok()) {
-        finish(std::move(status));
-        return;
+    if (input.raw_blob.empty()) {
+        auto status =
+            encode_durable_page_into(input.frame, limits.compression, aligned, scratch, &report.logical_bytes);
+        if (!status.ok()) {
+            finish(std::move(status));
+            return;
+        }
+        report.physical_bytes = limits.padded_blob_bytes(report.logical_bytes - kDurableBlobHeader);
+        auto padding          = aligned.subspan(report.logical_bytes, report.physical_bytes - report.logical_bytes);
+        std::fill(padding.begin(), padding.end(), uint8_t{0});
     }
-    report.physical_bytes = ((uint64_t{report.logical_bytes} + limits.iu_size - 1) / limits.iu_size) * limits.iu_size;
-    auto padding          = aligned.subspan(report.logical_bytes, report.physical_bytes - report.logical_bytes);
-    std::fill(padding.begin(), padding.end(), uint8_t{0});
+    else {
+        report.logical_bytes  = static_cast<uint32_t>(kDurableBlobHeader + input.frame.size());
+        report.physical_bytes = input.raw_blob.size();
+    }
     try {
         reserve(report.physical_bytes, [self = shared_from_this()](Status status, ReservedWriteExtent extent) {
             self->reserved(std::move(status), std::move(extent));
@@ -54,7 +61,7 @@ void PageWriteOperation::State::prepare()
         finish(Status::io_error());
     }
     if ((reservation_events.fetch_or(2, std::memory_order_acq_rel) & 1U) != 0) {
-        queue_write();
+        queue_write(true);
     }
 }
 
@@ -70,14 +77,14 @@ void PageWriteOperation::State::reserved(Status status, ReservedWriteExtent exte
     }
 }
 
-void PageWriteOperation::State::queue_write() noexcept
+void PageWriteOperation::State::queue_write(bool on_worker) noexcept
 {
     if (finished.load(std::memory_order_acquire)) {
         reserved_extent.owner.reset();
         return;
     }
-    if (budget.cpu_progress) {
-        budget.cpu_progress->request(write_node, pending);
+    if (on_worker) {
+        write(this);
         return;
     }
     Status status;
@@ -141,11 +148,13 @@ void PageWriteOperation::State::submit_write()
         finish(Status::unavailable());
         return;
     }
-    auto self = shared_from_this();
-    io_resources.begin(blob.capacity());
+    auto                           self = shared_from_this();
+    const std::span<const uint8_t> bytes =
+        input.raw_blob.empty() ? std::span<const uint8_t>(aligned).first(report.physical_bytes) : input.raw_blob;
+    io_resources.begin(input.raw_blob.empty() ? blob.capacity() : bytes.size());
     io_submitted = true;
     if (chunk) {
-        submit_chunk_write(*store, std::move(chunk), aligned.first(report.physical_bytes), chunk_credit,
+        submit_chunk_write(*store, std::move(chunk), bytes, chunk_credit,
                            {.context     = this,
                             .complete_fn = &State::written,
                             .owner       = std::move(self),
@@ -153,7 +162,7 @@ void PageWriteOperation::State::submit_write()
                             .cause       = budget.cause});
         return;
     }
-    store->submit_typed_write(PagePurpose::kBtreePage, backing->address, aligned.data(), report.physical_bytes,
+    store->submit_typed_write(PagePurpose::kBtreePage, backing->address, bytes.data(), bytes.size(),
                               {.context     = this,
                                .complete_fn = &State::written,
                                .owner       = std::move(self),

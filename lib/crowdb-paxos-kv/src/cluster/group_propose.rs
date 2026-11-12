@@ -7,6 +7,8 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use crate::paxos::roles::ProposalPayload;
+use bytes::Bytes;
 use tokio::time::sleep;
 use tracing::{debug, error, trace, warn};
 
@@ -30,9 +32,9 @@ impl PxGroup {
     /// receives `ProposeResult::Chosen { slot }` for the shared slot.
     /// When coalescing is disabled (`coalesce_max_keys = 0`), this is the
     /// legacy one-proposal-per-key path.
-    #[tracing::instrument(level = "debug", name = "propose", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id))]
     pub async fn propose(&self, payload: Vec<u8>, client_id: Option<u64>, seq: Option<u64>) -> ProposeResult {
-        self.propose_with_tenure(payload, client_id, seq, None).await
+        self.propose_with_tenure(payload.into(), client_id, seq, None)
+            .await
     }
 
     /// Propose only while this group remains leader in `required_term`.
@@ -48,13 +50,14 @@ impl PxGroup {
         seq: Option<u64>,
         required_term: u64,
     ) -> ProposeResult {
-        self.propose_with_tenure(payload, client_id, seq, Some(required_term))
+        self.propose_with_tenure(payload.into(), client_id, seq, Some(required_term))
             .await
     }
 
-    async fn propose_with_tenure(
+    #[tracing::instrument(level = "debug", name = "propose", skip_all, fields(s = self.log_store_id().unwrap_or(0), g = self.group_id, replica = self.local_replica().id))]
+    pub(super) async fn propose_with_tenure(
         &self,
-        payload: Vec<u8>,
+        payload: Bytes,
         client_id: Option<u64>,
         seq: Option<u64>,
         required_term: Option<u64>,
@@ -119,9 +122,7 @@ impl PxGroup {
             self.coalesce_enqueue(payload, identity).await
         } else {
             let identities: Vec<RequestIdentity> = identity.into_iter().collect();
-            // `Bytes::from(Vec<u8>)` reuses the allocation (no copy) and
-            // gives cheap `Clone` for the slot-retry loop and Accept fanout.
-            self.propose_inner_impl(bytes::Bytes::from(payload), &identities, None, required_term)
+            self.propose_inner_impl(payload.into(), &identities, None, required_term)
                 .await
         }
     }
@@ -134,7 +135,7 @@ impl PxGroup {
     /// `NotLeader` instead of racing into Paxos with stale identity.
     pub(super) async fn propose_inner(
         &self,
-        payload: bytes::Bytes,
+        payload: ProposalPayload,
         request_identities: &[RequestIdentity],
     ) -> ProposeResult {
         let e2e_start = std::time::Instant::now();
@@ -155,8 +156,13 @@ impl PxGroup {
         key: &[u8],
         expected_revision: u64,
     ) -> ProposeResult {
-        self.propose_inner_impl(payload, request_identities, Some((key, expected_revision)), None)
-            .await
+        self.propose_inner_impl(
+            payload.into(),
+            request_identities,
+            Some((key, expected_revision)),
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn propose_inner_conditional_in_tenure(
@@ -168,7 +174,7 @@ impl PxGroup {
         required_term: u64,
     ) -> ProposeResult {
         self.propose_inner_impl(
-            payload,
+            payload.into(),
             request_identities,
             Some((key, expected_revision)),
             Some(required_term),
@@ -178,7 +184,7 @@ impl PxGroup {
 
     async fn propose_inner_impl(
         &self,
-        payload: bytes::Bytes,
+        payload: ProposalPayload,
         request_identities: &[RequestIdentity],
         condition: Option<(&[u8], u64)>,
         required_term: Option<u64>,
@@ -366,7 +372,7 @@ impl PxGroup {
                             "paxos entry chosen and learned locally"
                         );
 
-                        if adopted_foreign_value || entry.payload != payload {
+                        if !own_payload {
                             last_error = PxPaxosError::ForeignValueChosen { slot }.keyword().to_string();
                             warn!(
                                 group_id,
@@ -508,7 +514,7 @@ impl PxGroup {
         let mut min_round = 0_u64;
         for attempt in 0..PaxosConfig::DEFAULT.max_paxos_retries {
             let entry = match self
-                .run_prepare_phase(replica, slot, bytes::Bytes::new(), quorum, min_round)
+                .run_prepare_phase(replica, slot, bytes::Bytes::new().into(), quorum, min_round)
                 .await
             {
                 PrepareAttempt::Proceed { entry, .. } => entry,

@@ -15,6 +15,11 @@ struct PageWriteLimits
     size_t        buffer_alignment = 4096;
     compress_algo compression      = compress_algo::kLz4;
     bool          chunk_backed     = false;
+
+    [[nodiscard]] size_t padded_blob_bytes(size_t frame_bytes) const noexcept
+    {
+        return ((frame_bytes + kDurableBlobHeader + iu_size - 1) / iu_size) * iu_size;
+    }
 };
 
 struct PageWriteInput
@@ -26,6 +31,8 @@ struct PageWriteInput
     // The encoder's PID reservation alone does not protect those byte ranges.
     // This is retained by the resulting backing, independently of raw input.
     std::shared_ptr<const void> reload_dependencies;
+    // A new raw frame may already occupy its final aligned write buffer.
+    std::span<const uint8_t> raw_blob;
 };
 
 struct ReservedWriteExtent

@@ -75,7 +75,7 @@ class MaintenanceBuilder
 
 Status build_flush_leaf_outputs(MaintenanceBuilder &builder, uint64_t pid,
                                 const std::shared_ptr<const PublishedPage> &old, const struct SplitWindowLayout &layout,
-                                MaintenanceChildren *children);
+                                bool keep_loaded_bases, MaintenanceChildren *children);
 
 Status next_page_version(const PageState &left, const PageState *right, PageVersion *version);
 Status summarize_leaf(const std::shared_ptr<const PageState> &page, const PageMaintenanceLimits &limits,

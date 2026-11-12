@@ -35,9 +35,10 @@ struct CapturedWriteResult
 {
     Status                                      status;
     std::shared_ptr<const CapturedDurablePages> pages;
-    uint64_t                                    written_frames = 0;
-    uint64_t                                    written_bytes  = 0;
-    uint64_t                                    reused_frames  = 0;
+    uint64_t                                    written_frames    = 0;
+    uint64_t                                    written_bytes     = 0;
+    uint64_t                                    reused_frames     = 0;
+    bool                                        primary_io_failed = false;
 };
 
 // Materializes a captured view into protected, independently readable page

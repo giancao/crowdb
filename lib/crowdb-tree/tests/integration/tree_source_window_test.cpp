@@ -77,6 +77,7 @@ TEST(TreeSourceWindow, WriterCreditReturnsOnlyAfterPhysicalRetirement)
         std::latch entered{1}, release{1};
     } gate;
 
+    const std::string   payload(32 * 1024, 'v');
     std::future<Status> writes;
 
     auto unblock = [binding](Gate *gate) {
@@ -97,7 +98,7 @@ TEST(TreeSourceWindow, WriterCreditReturnsOnlyAfterPhysicalRetirement)
     gate.entered.wait();
     writes                  = std::async(std::launch::async, [&] {
         for (uint64_t slot = 1; slot <= 128; ++slot) {
-            Batch batch{.ops = {{.key = "key", .kind = OpKind::kPut, .value = std::to_string(slot)}}};
+            Batch batch{.ops = {{.key = "key", .kind = OpKind::kPut, .value = std::to_string(slot) + payload}}};
             auto  status = tree.apply(slot, batch);
             if (!status.ok()) {
                 return status;
@@ -123,7 +124,7 @@ TEST(TreeSourceWindow, WriterCreditReturnsOnlyAfterPhysicalRetirement)
     binding->account()->drain_retirements();
     EXPECT_LT(binding->account()->snapshot().allocated[category], held / 2);
     EXPECT_EQ(tree.contiguous_slot(), 128U);
-    EXPECT_EQ(tree.get_view("key").value().to_string(), "128");
+    EXPECT_EQ(tree.get_view("key").value().to_string(), "128" + payload);
     const Batch next{.ops = {{.key = "key", .kind = OpKind::kPut, .value = "continued"}}};
     ASSERT_TRUE(tree.apply(129, next).ok());
     EXPECT_EQ(tree.contiguous_slot(), 129U);

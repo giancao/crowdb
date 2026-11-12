@@ -4,20 +4,16 @@
 
 namespace crowdb::tree
 {
-MemTable::PreparedWrite MemTable::prepare_write(Slice key, buffer cell, uint8_t flags, AllocationLease payload,
-                                                uint64_t bound, size_t max_versions,
-                                                const std::shared_ptr<AllocationBudget> &budget)
+MemTable::PreparedWrite MemTable::prepare_write(Slice key, buffer &&cell, uint8_t flags, AllocationLease payload,
+                                                uint64_t bound, const std::shared_ptr<AllocationBudget> &budget)
 {
-    auto version =
-        CellVersion::create(std::move(cell), 0, flags, epoch_->memtable_allocation(), std::move(payload), budget);
-    return list_.prepare_write(key, std::move(version), bound, max_versions, budget);
+    return list_.prepare_write(key, std::move(cell), flags, std::move(payload), bound, budget);
 }
 
 MemTable::PreparedWrite MemTable::prepare_reference(Slice key, std::shared_ptr<const CellVersion> cell, uint64_t bound,
-                                                    size_t                                   max_versions,
                                                     const std::shared_ptr<AllocationBudget> &budget)
 {
-    return list_.prepare_reference(key, std::move(cell), bound, max_versions, budget);
+    return list_.prepare_reference(key, std::move(cell), bound, budget);
 }
 
 bool MemTable::commit_write(PreparedWrite write, uint64_t slot) noexcept

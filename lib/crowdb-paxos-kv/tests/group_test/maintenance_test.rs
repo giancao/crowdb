@@ -114,7 +114,7 @@ async fn apply_through_with_engine(replica: &PxLocalReplica, upto: u64) {
                     slot,
                     ballot: PxBallot::new(0, 1),
                     term: 1,
-                    payload: Bytes::from(encode_put_payload(format!("k{slot}").as_bytes(), b"v")),
+                    payload: Bytes::from(encode_put_payload(format!("k{slot}").as_bytes(), b"v")).into(),
                 },
                 &[],
             )
@@ -138,7 +138,7 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from("data"),
+            payload: Bytes::from("data").into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }
@@ -336,7 +336,7 @@ async fn maintenance_pass_does_not_gc_wal_when_safe_slot_lags_snapshot() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from("data"),
+            payload: Bytes::from("data").into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }

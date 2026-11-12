@@ -5,6 +5,7 @@
 #include "flush_batch_internal.h"
 #include "maintenance_publication_internal.h"
 #include "maintenance_split_layout.h"
+#include "page_load.h"
 
 namespace crowdb::tree
 {
@@ -13,6 +14,7 @@ namespace crowdb::tree
 struct FlushBatch::State::Subtree
 {
     struct Children;
+    struct Writes;
 
     struct Child
     {
@@ -20,6 +22,7 @@ struct FlushBatch::State::Subtree
         uint64_t                pid;
         std::optional<OwnedKey> lower;
         bool                    touched;
+        bool                    shrank = false;
     };
 
     Subtree(State &state, uint64_t page_id, PageKeyRange range, bool selected);
@@ -44,8 +47,7 @@ struct FlushBatch::State::Subtree
     void                                               prepare_builder();
     static size_t                                      fork_bytes() noexcept;
     void                                               reset_work();
-    void                                               request_load();
-    void                                               load() noexcept;
+    std::optional<Status>                              load() noexcept;
     Status collect(PublicationTransaction &transaction, uint64_t &handoff_bytes);
     [[nodiscard]] std::shared_ptr<const PublishedPage> lookup(uint64_t page_id) const;
 
@@ -55,35 +57,40 @@ struct FlushBatch::State::Subtree
     bool         active;
     bool         finished   = false;
     bool         handed_off = false;
+    bool         shrank     = false;
 #ifdef CROWDB_TREE_TEST_UTIL
     bool handoff_test_waited = false;
 #endif
     bool     children_ready = false;
     bool     joined         = false;
-    bool     writing        = false;
     size_t   persist_at     = 0;
     uint64_t final_root     = kInvalidPageId;
 
     struct FinalPage
     {
-        Subtree *task;
-        uint64_t pid;
+        Subtree                             *task;
+        uint64_t                             pid;
+        uint32_t                             level;
+        Writes                              *writes      = nullptr;
+        std::shared_ptr<const PublishedPage> replacement = nullptr;
     };
 
     detail::ReservedVector<FinalPage>                  final_pages;
+    std::shared_ptr<Writes>                            page_writes;
     std::optional<TreeMetricsOperation>                layout_metrics;
     Status                                             status;
     std::shared_ptr<const PublishedPage>               expected;
     std::shared_ptr<const InnerPageState>              inner;
+    InnerDecode                                        decode_index;
+    std::atomic<unsigned>                              index_load_events{0};
     std::shared_ptr<PageState>                         loaded_leaf;
-    size_t                                             next_base = 0;
+    LeafDecode                                         decode_bases;
     std::shared_ptr<Range>                             range;
     detail::ReservedUnique<detail::SplitWindowCursor>  layout;
     detail::ReservedUnique<detail::MaintenanceBuilder> builder;
     detail::MaintenanceChildren                        output;
     detail::ReservedVector<std::shared_ptr<Subtree>>   children;
     detail::ReservedUnique<Children>                   child_join;
-    ApplyDispatcher::Node                              cpu_node{&Subtree::run, this};
     detail::CallbackComplete                           done    = nullptr;
     void                                              *context = nullptr;
 };

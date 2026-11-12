@@ -4,6 +4,7 @@
 
 #include "apply_frontier.h"
 #include "crowdb-tree/btree/tree.h"
+#include "crowdb-tree/external_allocation.h"
 #include "inline_function.h"
 #include "runtime/tree_operation_lifetime.h"
 #include "source_admission.h"
@@ -20,6 +21,51 @@ struct CoreWriteInput
     buffer *movable = nullptr;
     uint8_t flags   = 0;
     bool    encoded = false;
+};
+
+struct ExternalValue
+{
+    Slice  initialized;
+    size_t capacity = 0;
+
+    [[nodiscard]] bool contains(Slice bytes) const noexcept
+    {
+        const auto base  = reinterpret_cast<uintptr_t>(initialized.data());
+        const auto start = reinterpret_cast<uintptr_t>(bytes.data());
+        return bytes.empty() || (base != 0 && start >= base && start - base <= initialized.size() &&
+                                 bytes.size() <= initialized.size() - (start - base));
+    }
+};
+
+struct ApplyInputOwner
+{
+    ApplyInputOwner(void (*release)(void *), void *argument) : drop(release), context(argument)
+    {
+    }
+
+    ApplyInputOwner(ApplyInputOwner &&other) noexcept
+        : control(std::move(other.control)),
+          drop(std::exchange(other.drop, nullptr)),
+          context(other.context)
+    {
+    }
+
+    ~ApplyInputOwner()
+    {
+        if (drop != nullptr) {
+            drop(context);
+        }
+    }
+
+    ExternalAllocation::Owner take() noexcept
+    {
+        control.reset();
+        return {context, std::exchange(drop, nullptr)};
+    }
+
+    AllocationLease control;
+    void (*drop)(void *);
+    void *context;
 };
 
 using CoreWriteReader = detail::InlineFunction<CoreWriteInput(size_t)>;

@@ -34,7 +34,7 @@ async fn send_accept_to_unreachable_endpoint_returns_error() {
         slot: 1,
         ballot: PxBallot::new(1, 0),
         term: 0,
-        payload: bytes::Bytes::from_static(b"test"),
+        payload: bytes::Bytes::from_static(b"test").into(),
     };
 
     let result = remote.send_accept(&entry, 1, 0).await;

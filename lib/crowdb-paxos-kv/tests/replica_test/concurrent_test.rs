@@ -32,7 +32,7 @@ fn make_entry(slot: u64, term: u64, value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, 1),
         term,
-        payload: bytes::Bytes::from(payload),
+        payload: bytes::Bytes::from(payload).into(),
     }
 }
 

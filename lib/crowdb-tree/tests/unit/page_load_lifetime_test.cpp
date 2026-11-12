@@ -94,14 +94,9 @@ struct Reads
     size_t                                                calls = 0;
     Code                                                  last  = Code::kOk;
 
-    explicit Reads(Kind kind, bool chain = false, bool prepaid = false)
+    explicit Reads(Kind kind, bool chain = false)
     {
         credits.credits.work_metrics = metrics;
-        if (prepaid) {
-            EXPECT_TRUE(
-                ApplyDispatcher::create(runtime, lane, 1, credits.credits.reservation(), &credits.credits.cpu_progress)
-                    .ok());
-        }
         if (kind == Kind::kLeaf) {
             auto leaf = base({
                 {.key = "key", .value = "data"}
@@ -164,30 +159,17 @@ struct Reads
     }
 };
 
-TEST(PageLoadLifetime, PrepaidDecodeContinuesAcrossColdReadsWithAllOrdinaryCpuSlotsOccupied)
+TEST(PageLoadLifetime, InlineCompletionsDecodeOnWorkerIncludingOverflowChain)
 {
     for (auto kind : {Kind::kLeaf, Kind::kInner, Kind::kOverflow}) {
-        Reads test(kind, true, true);
+        Reads test(kind, true);
         test.store->throw_after_accept = false;
         test.store->inline_completion  = true;
-        auto lane                      = std::make_shared<detail::FlushRuntime::Lane>(16);
-        std::vector<std::shared_ptr<detail::FlushRuntime::Progress>> occupied;
-        for (;;) {
-            std::shared_ptr<detail::FlushRuntime::Progress> slot;
-            const auto status = test.runtime->reserve_progress(lane, [](void *) noexcept {}, nullptr, {}, &slot);
-            if (!status.ok()) {
-                EXPECT_EQ(status.code(), Code::kResourceExhausted);
-                break;
-            }
-            occupied.push_back(std::move(slot));
-        }
-        EXPECT_FALSE(occupied.empty());
         test.start(kind, kind == Kind::kOverflow ? 2 : 1);
         EXPECT_EQ(test.calls, 1U);
         EXPECT_EQ(test.last, Code::kOk);
         EXPECT_EQ(test.store->reads, kind == Kind::kOverflow ? 2U : 1U);
         EXPECT_EQ(test.credits.budget.snapshot().allocated[LoadCredits::kIo], 0U);
-        test.credits.credits.cpu_progress->close_and_drain();
     }
 }
 
@@ -206,8 +188,9 @@ TEST(PageLoadLifetime, UnknownAcceptancePinsMemoryUntilLateCallbacksWithoutBlock
         test.loader.reset();
         test.credits.seal();
         EXPECT_GT(test.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);
+        const auto bytes = kind == Kind::kLeaf ? AllocationKind::kFrame : AllocationKind::kIo;
         EXPECT_EQ(test.credits.resources->snapshot().read_inflight_bytes,
-                  test.credits.account->snapshot().physical[static_cast<size_t>(AllocationKind::kIo)]);
+                  test.credits.account->snapshot().physical[static_cast<size_t>(bytes)]);
         EXPECT_GT(test.credits.resources->snapshot().read_inflight_bytes, 0U);
         test.store->finish();
         EXPECT_GT(test.credits.resources->snapshot().read_inflight_bytes, 0U);

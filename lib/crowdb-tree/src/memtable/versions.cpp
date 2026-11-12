@@ -1,211 +1,159 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "btree/retirement_queue.h"
 #include "crowdb-tree/memtable/skip_list.h"
 
 #include <algorithm>
-#include <chrono>
-#include <memory>
 
 namespace crowdb::tree
 {
-VersionSet::VersionSet(AllocationLease credit, std::shared_ptr<AllocationBudget> budget)
-    : descriptor_credit(std::move(credit)),
-      retirement(budget ? budget->retirement_queue() : nullptr),
-      history(MetadataAllocator<std::shared_ptr<const CellVersion>>(budget))
-{
-    destroy           = [](EpochManager::Deferred *entry) noexcept { Deleter{}(static_cast<VersionSet *>(entry)); };
-    retirement_budget = std::move(budget);
-    dispose           = [](detail::RetirementNode *entry) noexcept {
-        auto *versions = static_cast<VersionSet *>(entry);
-        for (size_t i = 0; i < 64 && !versions->history.empty(); ++i) {
-            versions->history.pop_back();
-        }
-        if (!versions->history.empty()) {
-            return false;
-        }
-        auto credit = std::move(versions->descriptor_credit);
-        delete versions;
-        return true;
-    };
-}
+static_assert(alignof(CellVersion) >= 4);
 
-void VersionSet::Deleter::operator()(VersionSet *versions) const noexcept
+const CellVersion *CellVersion::version_at(uint64_t frontier) const
 {
-    if (versions != nullptr && versions->retirement) {
-        versions->retirement->retire(versions);
-    }
-    else if (versions != nullptr) {
-        auto credit = std::move(versions->descriptor_credit);
-        delete versions;
-    }
-}
-
-VersionSet::Owner VersionSet::create(const std::shared_ptr<AllocationBudget> &budget)
-{
-    AllocationLease credit(budget, sizeof(VersionSet), AllocationKind::kMetadata);
-    auto            result = Owner(new VersionSet(std::move(credit), budget));
-    return result;
-}
-
-const CellVersion *VersionSet::at(uint64_t frontier) const
-{
-    const auto *owner = owner_at(frontier);
-    return owner != nullptr ? owner->get() : nullptr;
-}
-
-const std::shared_ptr<const CellVersion> *VersionSet::owner_at(uint64_t frontier) const
-{
-    if (current->slot <= frontier) {
-        return &current;
-    }
-    for (const auto &version : history) {
+    for (const auto *version = this; version != nullptr; version = version->next()) {
         if (version->slot <= frontier) {
-            return &version;
+            return version;
         }
     }
     return nullptr;
 }
 
-namespace
+bool ConcurrentSkipList::unlink_version(std::atomic<uintptr_t> &link, CellVersion &version, uintptr_t next,
+                                        MutationStats *stats) noexcept
 {
-struct CopyTimer
-{
-    using Clock = std::chrono::steady_clock;
-    MutationStats    *stats;
-    Clock::time_point started;
-
-    explicit CopyTimer(MutationStats *sample)
-        : stats(sample != nullptr && sample->measure_copy ? sample : nullptr),
-          started(stats != nullptr ? Clock::now() : Clock::time_point{})
-    {
+    auto expected  = reinterpret_cast<uintptr_t>(&version);
+    auto successor = reinterpret_cast<uintptr_t>(CellVersion::pointer(next));
+    if (!link.compare_exchange_strong(expected, successor, std::memory_order_acq_rel)) {
+        return false;
     }
+    account_version(version, &version, true);
+    if (stats != nullptr) {
+        ++stats->merged;
+    }
+    epoch_->defer(&version);
+    return true;
+}
 
-    ~CopyTimer()
-    {
-        if (stats != nullptr) {
-            const auto ns = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - started).count());
-            ++stats->copy_count;
-            stats->copy_ns += ns;
-            stats->copy_max_ns = std::max(stats->copy_max_ns, ns);
+void ConcurrentSkipList::prune_versions(Node &node, uint64_t bound, MutationStats *stats) noexcept
+{
+    auto effective = node.pruning_bound_.load(std::memory_order_seq_cst);
+    while (effective < bound &&
+           !node.pruning_bound_.compare_exchange_weak(effective, bound, std::memory_order_seq_cst)) {
+    }
+    for (;;) {
+        effective    = node.pruning_bound_.load(std::memory_order_seq_cst);
+        auto *anchor = CellVersion::pointer(node.versions_.load(std::memory_order_seq_cst));
+        while (anchor != nullptr && anchor->slot > effective) {
+            anchor = CellVersion::pointer(anchor->next_bits.load(std::memory_order_seq_cst));
         }
-    }
-};
-
-VersionSet::Owner merged_versions(const VersionSet &old, const std::shared_ptr<const CellVersion> &incoming,
-                                  uint64_t bound, MutationStats *stats, const std::shared_ptr<AllocationBudget> &budget)
-{
-    CopyTimer timer(stats);
-    auto      fresh = VersionSet::create(budget);
-    fresh->bound    = std::max(bound, old.bound);
-    fresh->current  = incoming != nullptr && incoming->slot > old.current->slot ? incoming : old.current;
-    bool anchor     = fresh->current->slot <= fresh->bound;
-    auto retain     = [&](const auto &version) {
-        if (version == fresh->current) {
+        if (anchor == nullptr) {
             return;
         }
-        if (version->slot <= fresh->bound) {
-            if (anchor) {
-                return;
+        for (;;) {
+            auto tail = anchor->next_bits.load(std::memory_order_acquire);
+            if ((tail & CellVersion::kRemoved) != 0) {
+                break;
             }
-            anchor = true;
+            auto *obsolete = CellVersion::pointer(tail);
+            if (obsolete == nullptr) {
+                // A delayed insert cannot reopen a trimmed suffix, even if it was empty.
+                if (tail == CellVersion::kEnd ||
+                    anchor->next_bits.compare_exchange_strong(tail, CellVersion::kEnd, std::memory_order_acq_rel)) {
+                    return;
+                }
+                continue;
+            }
+            auto next = obsolete->next_bits.load(std::memory_order_acquire);
+            // Mark the obsolete node's own link before detaching it. An inserter
+            // paused at that link must retry against the live chain.
+            if ((next & CellVersion::kRemoved) != 0 ||
+                obsolete->next_bits.compare_exchange_strong(next, next | CellVersion::kRemoved,
+                                                            std::memory_order_acq_rel)) {
+                unlink_version(anchor->next_bits, *obsolete, next, stats);
+            }
         }
-        if (fresh->history.empty()) {
-            // The immutable input bounds this candidate. Keep common one-cell
-            // descriptors allocation-free, and allocate one history capacity
-            // once a second retained version is actually needed.
-            fresh->history.reserve(old.history.size() + 1);
-        }
-        fresh->history.push_back(version);
-    };
-    bool pending = incoming != nullptr && incoming != fresh->current;
-    auto visit   = [&](const auto &version) {
-        if (pending && incoming->slot > version->slot) {
-            retain(incoming);
-            pending = false;
-        }
-        retain(version);
-    };
-    visit(old.current);
-    for (const auto &version : old.history) {
-        visit(version);
     }
-    if (pending) {
-        retain(incoming);
-    }
-    fresh->bytes = fresh->current->cell.size();
-    for (const auto &v : fresh->history) {
-        fresh->bytes += v->cell.size();
-    }
-    return fresh;
 }
-} // namespace
 
-bool ConcurrentSkipList::replace(Node *node, std::shared_ptr<const CellVersion> cv, uint64_t bound,
-                                 MutationStats *stats, const std::shared_ptr<AllocationBudget> &budget)
+bool ConcurrentSkipList::insert_version(Node &node, CellVersion::Owner &version, uint64_t bound,
+                                        MutationStats *stats) noexcept
 {
-    auto *old = node->versions_.load(std::memory_order_acquire);
+    const auto slot = version->slot;
     for (;;) {
-        if (cv != nullptr) {
-            const auto *same = old->at(cv->slot);
-            if (same != nullptr && same->slot == cv->slot) {
-                return false;
+        auto        *link     = &node.versions_;
+        CellVersion *previous = nullptr;
+        auto         next     = link->load(std::memory_order_acquire);
+        for (auto *current = CellVersion::pointer(next); current != nullptr; current = CellVersion::pointer(next)) {
+            const auto following = current->next_bits.load(std::memory_order_acquire);
+            if ((following & CellVersion::kRemoved) != 0) {
+                if (!unlink_version(*link, *current, following, stats)) {
+                    next = CellVersion::kRemoved;
+                    break;
+                }
+                next = reinterpret_cast<uintptr_t>(CellVersion::pointer(following));
+                continue;
             }
+            if (current->slot <= slot) {
+                if (current->slot == slot) {
+                    return false;
+                }
+                break;
+            }
+            previous = current;
+            link     = &current->next_bits;
+            next     = following;
         }
-        auto       fresh    = merged_versions(*old, cv, bound, stats, budget);
-        const bool accepted = cv != nullptr && fresh->at(cv->slot) == cv.get();
-        if (!accepted && fresh->history.size() == old->history.size() && fresh->bound == old->bound) {
+        if (next == CellVersion::kRemoved) {
+            continue;
+        }
+
+        const auto effective = std::max(bound, node.pruning_bound_.load(std::memory_order_acquire));
+        if (previous != nullptr && previous->slot <= effective) {
+            prune_versions(node, bound, stats);
             return false;
         }
-        fresh->allocation.set(epoch_->memtable_allocation(),
-                              sizeof(VersionSet) + (fresh->history.capacity() * sizeof(fresh->current)));
-        auto *published = fresh.get();
+        version->next_bits.store(next, std::memory_order_relaxed);
 #ifdef CROWDB_TREE_TEST_UTIL
         if (test_hook_ != nullptr) {
-            test_hook_(test_context_, PausePoint::kBeforeVersionCas, node->key_slice());
+            test_hook_(test_context_, PausePoint::kBeforeVersionCas, node.key_slice());
         }
 #endif
-        if (!node->versions_.compare_exchange_weak(old, published, std::memory_order_acq_rel)) {
+        // Together with the bound load below and the pruner's ordered scan,
+        // either this insertion sees the new bound or the scan sees this link.
+        if (!link->compare_exchange_strong(next, reinterpret_cast<uintptr_t>(version.get()),
+                                           std::memory_order_seq_cst)) {
             if (stats != nullptr) {
                 ++stats->cas_retries;
             }
             continue;
         }
-        published = fresh.release();
-        // Unsigned add/sub deltas commute even when a later CAS accounts first.
-        bytes_.fetch_add(published->bytes - old->bytes, std::memory_order_relaxed);
-        account_versions(old, *published);
+
+        auto       *published = version.release();
+        const auto *history   = previous != nullptr ? published : CellVersion::pointer(next);
+        account_version(*published, history);
+        const auto current_bound = node.pruning_bound_.load(std::memory_order_seq_cst);
+        if (bound > current_bound || slot <= current_bound) {
+            prune_versions(node, bound, stats);
+        }
         if (stats != nullptr) {
-            stats->overwrite += static_cast<uint64_t>(accepted && cv->slot > old->current->slot);
-            const auto retained_incoming = static_cast<size_t>(accepted && cv->slot < published->current->slot);
-            const auto retained_previous = static_cast<size_t>(published->current != old->current &&
-                                                               published->at(old->current->slot) == old->current.get());
-            const auto removed =
-                old->history.size() + retained_incoming + retained_previous - published->history.size();
-            stats->merged += removed;
-            if (accepted) {
-                const bool kept =
-                    cv->slot < published->current->slot || published->at(old->current->slot) == old->current.get();
-                if (kept) {
-                    ++stats->keep;
-                    const bool closed =
-                        stats->admission != nullptr && (stats->admission->load(std::memory_order_acquire) >> 63) != 0;
-                    if (closed) {
-                        ++stats->keep_boundary;
-                    }
-                    else if (stats->gap) {
-                        ++stats->keep_gap;
-                    }
-                    else {
-                        ++stats->keep_pending;
-                    }
+            stats->overwrite += static_cast<uint64_t>(previous == nullptr);
+            if (previous != nullptr || slot > std::max(bound, current_bound)) {
+                ++stats->keep;
+                const bool closed =
+                    stats->admission != nullptr && (stats->admission->load(std::memory_order_acquire) >> 63) != 0;
+                if (closed) {
+                    ++stats->keep_boundary;
+                }
+                else if (stats->gap) {
+                    ++stats->keep_gap;
+                }
+                else {
+                    ++stats->keep_pending;
                 }
             }
         }
-        epoch_->defer(old);
-        return accepted;
+        return true;
     }
 }
 
@@ -215,26 +163,8 @@ bool ConcurrentSkipList::upsert(Slice key, std::shared_ptr<const CellVersion> cv
     if (epoch_->source_sealed()) {
         return false;
     }
-    if (!budget) {
-        budget = budget_;
-    }
-    auto  guard    = epoch_->enter(budget);
-    auto *existing = find_ge(key, nullptr);
-    if (existing != nullptr && existing->key_slice().compare(key) == 0) {
-        return replace(existing, std::move(cv), bound, stats, budget);
-    }
-    auto initial     = VersionSet::create(budget);
-    initial->current = cv;
-    initial->bound   = bound;
-    initial->bytes   = cv->cell.size();
-    initial->allocation.set(epoch_->memtable_allocation(), sizeof(VersionSet));
-    bool  inserted = false;
-    auto *node     = find_or_insert(key, initial.get(), &inserted);
-    if (inserted) {
-        [[maybe_unused]] auto *published = initial.release();
-        return true;
-    }
-    return replace(node, std::move(cv), bound, stats, budget);
+    const auto slot = cv->slot;
+    return commit_write(prepare_reference(key, std::move(cv), bound, budget ? budget : budget_), slot, stats);
 }
 
 void ConcurrentSkipList::prune(Slice key, uint64_t bound, MutationStats *stats)
@@ -244,8 +174,8 @@ void ConcurrentSkipList::prune(Slice key, uint64_t bound, MutationStats *stats)
     }
     auto  guard = epoch_->enter();
     auto *node  = find_ge(key, nullptr);
-    if (node != nullptr && node->key_slice().compare(key) == 0) {
-        replace(node, nullptr, bound, stats, budget_);
+    if (node != nullptr && node->key_slice() == key) {
+        prune_versions(*node, bound, stats);
     }
 }
 
@@ -255,17 +185,19 @@ VersionMemory ConcurrentSkipList::scan_memory_for_tests() const
     auto          guard = epoch_->enter();
     VersionMemory result;
     for (auto *node = head_->next(0); node != nullptr; node = node->next(0)) {
-        auto *versions = node->versions_.load(std::memory_order_acquire);
-        result.history_count += versions->history.size();
-        result.payload_bytes += versions->bytes + ((versions->history.size() + 1) * sizeof(CellVersion));
-        for (const auto &version : versions->history) {
-            result.history_bytes += version->cell.size();
+        auto *current = CellVersion::pointer(node->versions_.load(std::memory_order_acquire));
+        for (auto *version = current; version != nullptr; version = version->next()) {
+            const auto size = version->cell.size();
+            result.descriptor_bytes += sizeof(CellVersion);
+            result.payload_bytes += size;
+            if (version != current) {
+                ++result.history_count;
+                result.history_bytes += size;
+            }
         }
-        result.descriptor_bytes += sizeof(VersionSet) + (versions->history.capacity() * sizeof(versions->current));
         result.node_bytes += Node::alloc_size(node->height_, node->key_len_);
     }
     return result;
 }
 #endif
-
 } // namespace crowdb::tree

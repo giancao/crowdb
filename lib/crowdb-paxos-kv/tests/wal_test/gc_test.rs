@@ -33,7 +33,7 @@ async fn gc_preserves_election_state_in_a_mixed_old_segment() {
             slot,
             ballot: PxBallot::new(9, 42),
             term: 9,
-            payload: Bytes::from_static(b"data"),
+            payload: Bytes::from_static(b"data").into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }
@@ -95,7 +95,7 @@ async fn multi_disk_restart_preserves_index_and_election_state_across_gc() {
                     slot,
                     ballot: PxBallot::new(9, 42),
                     term: 9,
-                    payload: Bytes::copy_from_slice(&slot.to_le_bytes()),
+                    payload: Bytes::copy_from_slice(&slot.to_le_bytes()).into(),
                 },
             ))
             .await
@@ -131,7 +131,7 @@ async fn multi_disk_restart_preserves_index_and_election_state_across_gc() {
         assert!(recovered
             .records
             .iter()
-            .any(|record| record.slot == tip && record.payload.as_ref() == tip.to_le_bytes()));
+            .any(|record| record.slot == tip && record.payload.to_bytes().as_ref() == tip.to_le_bytes()));
         assert!(recovered.records.len() < replay.records.len());
     }
 }
@@ -154,7 +154,7 @@ async fn gc_removes_segments_below_watermark() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from("data"),
+            payload: Bytes::from("data").into(),
         };
         let record = WALRecord::from_accepted(1, &entry);
         wal.append(&record).await.unwrap();
@@ -209,7 +209,7 @@ async fn replay_after_gc_is_correct() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from("data"),
+            payload: Bytes::from("data").into(),
         };
         let record = WALRecord::from_accepted(1, &entry);
         wal.append(&record).await.unwrap();
@@ -244,7 +244,7 @@ async fn gc_snapshot_slot_covered_prefix_is_removed() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from("data"),
+            payload: Bytes::from("data").into(),
         };
         let record = WALRecord::from_accepted(1, &entry);
         wal.append(&record).await.unwrap();
@@ -293,16 +293,25 @@ async fn gc_pass_is_bounded_by_safe_slot_not_just_snapshot_slot() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from("data"),
+            payload: Bytes::from("data").into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }
     // Snapshot slot covers everything, but a lagging peer has only applied
-    // through slot 3 -- `safe_slot` must be the limiting factor.
+    // through the last slot in the first segment. The boundary record
+    // is still needed, so even that segment cannot be reclaimed yet.
     wal.set_snapshot_slot(20);
     wal.seal_all().await.unwrap();
 
-    let unlinked_at_low_safe_slot = run_gc_pass(&wal, 3).await.unwrap();
+    let first_segment_max_slot = wal
+        .index()
+        .lock()
+        .segments()
+        .filter(|segment| segment.record_count > 0)
+        .map(|segment| segment.max_slot)
+        .min()
+        .unwrap();
+    let unlinked_at_low_safe_slot = run_gc_pass(&wal, first_segment_max_slot).await.unwrap();
     assert_eq!(
         unlinked_at_low_safe_slot, 0,
         "a low safe_slot must hold GC back even though snapshot_slot covers everything"

@@ -77,7 +77,8 @@ void CapturedWriteOperation::State::received_relocated_read()
                                 .bytes   = resident_dependency.frame_bytes},
         .frame               = raw->bytes,
         .owner               = raw->owner,
-        .reload_dependencies = dependencies
+        .reload_dependencies = dependencies,
+        .raw_blob            = {},
     };
     auto status = PageWriteOperation::create(store, runtime, lane, std::move(input), limits.write, budget,
                                              reserve_page(true), &write);

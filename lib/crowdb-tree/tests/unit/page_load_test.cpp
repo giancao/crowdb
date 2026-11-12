@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "backend/local/scheduled_page_store.h"
 #include "crowdb-tree/maptable/compressor.h"
 #include "load_budget_test_support.h"
 #include "published_read_test_support.h"
@@ -16,14 +17,16 @@ namespace
 class TestAsyncStore final : public AsyncPageStore
 {
   public:
-    bool                        deferred = false;
-    size_t                      reads    = 0;
+    bool                        deferred         = false;
+    size_t                      reads            = 0;
+    const uint8_t              *read_destination = nullptr;
     std::vector<uint8_t>        blob;
     std::deque<AsyncCompletion> pending;
 
     uint64_t submit_read(PageAddr /*addr*/, void *destination, size_t size, AsyncCompletion complete) override
     {
         ++reads;
+        read_destination = static_cast<const uint8_t *>(destination);
         EXPECT_EQ(size, blob.size());
         EXPECT_EQ(reinterpret_cast<uintptr_t>(destination) % 4096, 0U);
         std::memcpy(destination, blob.data(), std::min(size, blob.size()));
@@ -87,12 +90,147 @@ TEST(PageLoad, InlineTransportDecodesAndCompletesOnCpuPool)
         EXPECT_TRUE(status.ok()) << status.to_string();
         EXPECT_NE(std::this_thread::get_id(), caller);
         ASSERT_NE(leaf, nullptr);
+        EXPECT_EQ(leaf->frame(), store->read_destination + kDurableBlobHeader);
         EXPECT_EQ(CellView(leaf->cell(0)).value().to_string(), "disk");
         ++calls;
     });
     runtime->drain();
     EXPECT_EQ(calls.load(), 1U);
     EXPECT_EQ(store->reads, 1U);
+}
+
+TEST(PageLoad, ColdLeafBasesJoinReverseCompletions)
+{
+    LoadCredits credits;
+    auto        runtime = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto        lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto        store   = std::make_shared<TestAsyncStore>();
+    store->deferred     = true;
+    auto      backing   = test_backing(store);
+    PageState leaf;
+    leaf.bases.push_back(backing);
+    backing.identity = 2;
+    leaf.bases.push_back(backing);
+    AsyncStorePageLoader loader(store, runtime, lane);
+    size_t               calls = 0;
+    LeafDecode           decode;
+    read_leaf_bases(loader, leaf, credits.credits.bytes, [&](Status status, LeafDecode ready) noexcept {
+        EXPECT_TRUE(status.ok()) << status.to_string();
+        decode = std::move(ready);
+        ++calls;
+    });
+    ASSERT_EQ(store->pending.size(), 2U);
+    auto second = std::move(store->pending.back());
+    store->pending.pop_back();
+    second.complete(Status::Ok());
+    runtime->drain();
+    EXPECT_EQ(calls, 0U);
+    EXPECT_EQ(runtime->snapshot().submitted, 0U);
+    EXPECT_FALSE(leaf.bases[1].resident);
+    EXPECT_FALSE(leaf.bases[0].resident);
+    store->finish();
+    EXPECT_EQ(calls, 1U);
+    EXPECT_EQ(runtime->snapshot().submitted, 0U);
+    EXPECT_FALSE(leaf.bases[0].resident);
+    EXPECT_FALSE(leaf.bases[1].resident);
+    ASSERT_TRUE(decode);
+    ASSERT_TRUE(runtime
+                    ->try_submit(
+                        lane,
+                        +[](void *context) noexcept {
+                            try {
+                                auto ready  = std::move(*static_cast<LeafDecode *>(context));
+                                auto result = ready();
+                                EXPECT_TRUE(result.ok()) << result.to_string();
+                            }
+                            catch (...) {
+                                ADD_FAILURE() << "deferred leaf decode threw";
+                            }
+                        },
+                        &decode)
+                    .ok());
+    runtime->drain();
+    EXPECT_EQ(runtime->snapshot().submitted, 1U);
+    EXPECT_TRUE(leaf.bases[0].resident);
+    EXPECT_TRUE(leaf.bases[1].resident);
+}
+
+TEST(PageLoad, MemBlockLeafReadCompletesWithoutAnotherWorkerJob)
+{
+    auto encoded = std::make_shared<TestAsyncStore>();
+    auto backing = test_backing(encoded);
+    auto memory  = std::make_shared<MemPageStore>();
+    ASSERT_TRUE(memory->write_at(0, encoded->blob.data(), encoded->blob.size()).ok());
+    auto ref        = std::make_shared<BackingRef>(*backing.backing);
+    ref->owner      = memory;
+    backing.backing = std::move(ref);
+
+    std::shared_ptr<TreeRuntime>        runtime;
+    std::shared_ptr<TreeRuntimeBinding> binding;
+    std::shared_ptr<AsyncPageStore>     store;
+    ASSERT_TRUE(TreeRuntime::create({.workers = 1, .backend_workers = 1}, &runtime).ok());
+    ASSERT_TRUE(TreeRuntimeBinding::create(runtime, {}, &binding).ok());
+    ASSERT_TRUE(ScheduledPageStore::create(memory.get(), nullptr, memory, binding, binding->lifecycle_budget(),
+                                           binding->backend_lane(), &store)
+                    .ok());
+    LoadCredits          credits;
+    AsyncStorePageLoader loader(store, binding->cpu(), binding->lane(), {}, {}, credits.credits);
+    PageState            leaf;
+    leaf.bases.push_back(std::move(backing));
+    auto result = read_leaf_bases(loader, leaf, credits.credits.bytes, [](Status, LeafDecode) noexcept {
+        ADD_FAILURE() << "memory read unexpectedly scheduled a continuation";
+    });
+    if (!result) {
+        FAIL() << "memory read must complete inline";
+    }
+    ASSERT_TRUE(result->ok()) << result->to_string();
+    ASSERT_TRUE(leaf.bases.front().resident);
+    EXPECT_EQ(CellView(leaf.bases.front().resident->cell(0)).value().to_string(), "disk");
+    auto invalid = leaf.bases.front();
+    invalid.resident.reset();
+    auto missing       = std::make_shared<BackingRef>(*invalid.backing);
+    missing->address   = memory->size();
+    invalid.backing    = std::move(missing);
+    leaf.bases.front() = std::move(invalid);
+    result             = read_leaf_bases(loader, leaf, credits.credits.bytes, [](Status, LeafDecode) noexcept {
+        ADD_FAILURE() << "memory read failure unexpectedly scheduled a continuation";
+    });
+    if (!result) {
+        FAIL() << "memory read failure must complete inline";
+    }
+    EXPECT_EQ(result->code(), Code::kIoError);
+    EXPECT_FALSE(leaf.bases.front().resident);
+    EXPECT_EQ(runtime->snapshot().cpu.submitted, 0U);
+    EXPECT_EQ(runtime->snapshot().backend.submitted, 0U);
+}
+
+TEST(PageLoad, ColdLeafReadFailureDrainsBeforeReturning)
+{
+    LoadCredits credits;
+    auto        runtime = std::make_shared<detail::FlushRuntime>(1, 8);
+    auto        lane    = std::make_shared<detail::FlushRuntime::Lane>(8);
+    auto        store   = std::make_shared<TestAsyncStore>();
+    store->deferred     = true;
+    auto      backing   = test_backing(store);
+    PageState leaf;
+    leaf.bases.push_back(backing);
+    backing.identity = 2;
+    leaf.bases.push_back(backing);
+    AsyncStorePageLoader loader(store, runtime, lane);
+    size_t               calls = 0;
+    read_leaf_bases(loader, leaf, credits.credits.bytes, [&](Status status, LeafDecode decode) noexcept {
+        EXPECT_EQ(status.code(), Code::kIoError);
+        EXPECT_FALSE(decode);
+        ++calls;
+    });
+    ASSERT_EQ(store->pending.size(), 2U);
+    store->finish(Status::io_error());
+    EXPECT_EQ(calls, 0U);
+    store->finish();
+    EXPECT_EQ(calls, 1U);
+    EXPECT_EQ(runtime->snapshot().submitted, 0U);
+    EXPECT_FALSE(leaf.bases[0].resident);
+    EXPECT_FALSE(leaf.bases[1].resident);
 }
 
 TEST(PageLoad, DecodedLeafRetainsItsActualFrameChargeAfterLoaderAndReserveAreReleased)

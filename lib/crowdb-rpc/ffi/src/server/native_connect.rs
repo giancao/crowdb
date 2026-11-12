@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{unix::AsyncFd, Interest};
 
-use super::{Connection, RpcError, RpcServer};
+use super::{Connection, ConnectionOwnership, RpcError, RpcServer};
 use crate::owned_route::{begin_transport_retirement, finish_transport_retirement};
 use crate::{sys, OwnedClientRoute};
 
@@ -88,6 +88,29 @@ unsafe extern "C" fn resume_retirement(context: *mut c_void, fired: i32) {
 }
 
 impl RpcServer {
+    /// Connect and use this server's dispatch for both directions.
+    /// Install the request client before starting the server.
+    ///
+    /// # Errors
+    /// Returns an error if transport setup fails.
+    ///
+    /// # Panics
+    /// Panics if native setup publishes a connection that already has a Rust wrapper.
+    pub async fn connect_for_requests(
+        self: &Arc<Self>,
+        addr: &str,
+        port: i32,
+    ) -> Result<Connection, RpcError> {
+        let mut connection = self.connect_native_route(addr, port).await?;
+        Arc::get_mut(&mut connection.inner)
+            .expect("new connection is not shared")
+            .ownership = ConnectionOwnership::Outbound {
+            _server: Some(Arc::clone(self)),
+        };
+        unsafe { sys::crowdb_rpc_server_route_connection(self.handle, connection.handle()) };
+        Ok(connection)
+    }
+
     /// Drives a dedicated native route's preflight and CM readiness on Tokio.
     /// Keep the server started until its connection attempts and routes retire.
     pub async fn connect_native_route(

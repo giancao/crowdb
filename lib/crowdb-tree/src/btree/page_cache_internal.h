@@ -32,6 +32,7 @@ struct SharedPageCache::State : std::enable_shared_from_this<SharedPageCache::St
         Request                          *next     = nullptr;
         PageLoadPriority                  priority = PageLoadPriority::Read;
         std::shared_ptr<State>            owner;
+        std::shared_ptr<Request>          allocation;
         std::shared_ptr<Reservation>      reservation;
         std::shared_ptr<PageLoader>       upstream;
         std::shared_ptr<AllocationBudget> metadata;
@@ -79,7 +80,7 @@ struct SharedPageCache::State : std::enable_shared_from_this<SharedPageCache::St
           std::shared_ptr<TreeResourceMetrics> resources, detail::FlushRuntime *runtime,
           std::shared_ptr<detail::FlushRuntime::Lane> lane);
     static Key make_key(Kind kind, const BaseRef &base);
-    Request   *claim(bool accept = true) noexcept;
+    Request   *claim(const std::shared_ptr<AllocationBudget> &metadata, bool accept = true) noexcept;
     void       submit(Request *request) noexcept;
     void       enqueue(Command *command) noexcept;
     void       wake() noexcept;

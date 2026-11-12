@@ -11,7 +11,7 @@ namespace crowdb::rpc
 {
 bool RdmaTransport::release_completed_receive(WorkRequest *work, const ibv_wc &wc)
 {
-    if (work->prefix != nullptr) {
+    if (work->prefix != nullptr || config_.wire_layout == RdmaWireLayout::ControlData) {
         return release_completed_direct_receive(work, wc);
     }
     auto fail = [&] {

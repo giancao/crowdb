@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 
-#include "btree/apply_dispatcher.h"
 #include "captured_frames.h"
 
 namespace crowdb::tree
@@ -65,7 +64,6 @@ struct CapturedFrameStream::State : std::enable_shared_from_this<State>
     std::shared_ptr<Load>                       load;
     std::shared_ptr<State>                      lifetime;
     std::shared_ptr<State>                      queued_owner;
-    ApplyDispatcher::Node                       cpu_node{&State::run, this};
     CapturedFrameResult                         report;
     CapturedFrameStats                          counters;
     uint64_t                                    overflow_end = 0;

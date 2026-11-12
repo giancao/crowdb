@@ -8,7 +8,9 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace crowdb::tree
 {
@@ -183,7 +185,8 @@ class AllocationLease
 
 // The allocator sees the actual control-block/container capacity requested by
 // the standard library, including growth and simultaneous old/new buffers.
-template <class T, class Budget = AllocationBudget, AllocationKind Kind = AllocationKind::kUnknown>
+template <class T, class Budget = AllocationBudget, AllocationKind Kind = AllocationKind::kUnknown,
+          bool ValueInitialize = true>
 class BudgetAllocator
 {
   public:
@@ -192,7 +195,7 @@ class BudgetAllocator
 
     template <class U> struct rebind
     {
-        using other = BudgetAllocator<U, Budget, Kind>;
+        using other = BudgetAllocator<U, Budget, Kind, ValueInitialize>;
     };
 
     BudgetAllocator() = default;
@@ -201,8 +204,17 @@ class BudgetAllocator
     {
     }
 
-    template <class U> BudgetAllocator(const BudgetAllocator<U, Budget, Kind> &other) noexcept : owner_(other.owner())
+    template <class U>
+    BudgetAllocator(const BudgetAllocator<U, Budget, Kind, ValueInitialize> &other) noexcept : owner_(other.owner())
     {
+    }
+
+    // Only byte buffers whose consumers require a complete producer write
+    // opt out of value initialization. Explicit fill/copy construction is unchanged.
+    void construct(uint8_t *pointer) noexcept
+        requires(!ValueInitialize && std::is_same_v<T, uint8_t>)
+    {
+        ::new (static_cast<void *>(pointer)) uint8_t;
     }
 
     [[nodiscard]] T *allocate(size_t count)
@@ -247,7 +259,7 @@ class BudgetAllocator
         return owner_;
     }
 
-    template <class U> bool operator==(const BudgetAllocator<U, Budget, Kind> &other) const noexcept
+    template <class U> bool operator==(const BudgetAllocator<U, Budget, Kind, ValueInitialize> &other) const noexcept
     {
         return owner_ == other.owner();
     }
@@ -255,6 +267,10 @@ class BudgetAllocator
   private:
     std::shared_ptr<Budget> owner_;
 };
+
+template <AllocationKind Kind>
+using OverwriteByteVector = std::vector<uint8_t, BudgetAllocator<uint8_t, AllocationBudget, Kind, false>>;
+
 template <class T, class Budget = AllocationBudget>
 using MetadataAllocator = BudgetAllocator<T, Budget, AllocationKind::kMetadata>;
 } // namespace crowdb::tree

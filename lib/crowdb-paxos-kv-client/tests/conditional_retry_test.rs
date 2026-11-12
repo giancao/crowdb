@@ -4,9 +4,37 @@
 #[path = "common/conditional_servers.rs"]
 mod conditional_servers;
 
+use bytes::Bytes;
 use conditional_servers::TestServers;
 use crowdb_paxos_kv::cluster::paxos_kv_server::PaxosKvServer;
-use crowdb_paxos_kv_client::{BatchOp, Error, PaxosKvClient, PaxosKvRpcTransport};
+use crowdb_paxos_kv_client::{BatchOp, Error, GetOutcome, PaxosKvClient, PaxosKvRpcTransport, ReadMode};
+
+#[tokio::test]
+async fn owned_put_uses_the_ordinary_write_wire_and_request_identity() {
+    let servers = TestServers::start(true).await;
+    let client = servers.client();
+    let value = Bytes::from(vec![0x5a; 128 * 1024 + 17]);
+    let identity = Some((91724, 1));
+    let written = client
+        .put_owned(1, 1, b"owned", value.clone(), identity)
+        .await
+        .unwrap();
+    let duplicate = client.put(1, 1, b"owned", b"different", identity).await.unwrap();
+    assert_eq!(duplicate.revision, written.revision);
+    assert!(matches!(
+        client.get(1, 1, b"owned", ReadMode::Linearizable, None).await.unwrap(),
+        GetOutcome::Found { value: stored, .. } if stored == value
+    ));
+
+    client
+        .put_owned(1, 1, b"empty", Bytes::new(), None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        client.get(1, 1, b"empty", ReadMode::Linearizable, None).await.unwrap(),
+        GetOutcome::Found { value, .. } if value.is_empty()
+    ));
+}
 
 #[tokio::test]
 async fn a_removed_replica_refreshes_its_stale_route_before_reading_or_writing() {

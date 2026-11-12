@@ -16,12 +16,12 @@ RdmaConfig test_control_config(uint32_t capacity, uint32_t max_control_bytes)
     config.use_environment = false;
     config.sq_depth = config.rq_depth = config.posted_receive_target = 2;
     config.cq_depth                                                  = 4;
-    config.send_arena_bytes                                          = uint64_t{2} * capacity;
-    config.receive_arena_bytes                                       = uint64_t{2} * config.wire_slot_capacity;
-    config.max_control_message_bytes                                 = max_control_bytes;
-    config.control_send_budget_bytes                                 = uint64_t{3} * max_control_bytes;
-    config.control_receive_budget_bytes                              = max_control_bytes;
-    config.poll_empty_budget                                         = 1;
+    config.send_arena_bytes    = uint64_t{2} * (config.combined_control_data() ? config.wire_slot_capacity : capacity);
+    config.receive_arena_bytes = uint64_t{2} * config.wire_slot_capacity;
+    config.max_control_message_bytes    = max_control_bytes;
+    config.control_send_budget_bytes    = uint64_t{3} * max_control_bytes;
+    config.control_receive_budget_bytes = max_control_bytes;
+    config.poll_empty_budget            = 1;
     if (const auto *address = std::getenv("CROWDB_RDMA_E2E_LISTEN_ADDR")) {
         config.source_address = address;
     }

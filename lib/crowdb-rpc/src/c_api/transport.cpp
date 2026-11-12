@@ -11,6 +11,12 @@ extern "C" int crowdb_rpc_conn_is_rdma(crowdb_rpc_conn_t connection)
     return connection != nullptr && connection->conn != nullptr && connection->conn->path() == ConnectionPath::Rdma;
 }
 
+extern "C" uint32_t crowdb_rpc_conn_rdma_single_send_control_capacity(crowdb_rpc_conn_t connection)
+{
+    return connection == nullptr || connection->conn == nullptr ? 0
+                                                                : connection->conn->rdma_single_send_control_capacity();
+}
+
 #define CONFIG_NUMBERS(X)    \
     X(cq_count)              \
     X(cq_depth)              \

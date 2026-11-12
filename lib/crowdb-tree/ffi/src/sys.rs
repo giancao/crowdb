@@ -269,6 +269,7 @@ pub struct ct_tree_tuning {
     pub maintenance_max_steps: usize,
     pub maintenance_metadata_bytes: usize,
     pub cache_max_pages: usize,
+    pub memtable_flush_count: u32,
 }
 
 extern "C" {

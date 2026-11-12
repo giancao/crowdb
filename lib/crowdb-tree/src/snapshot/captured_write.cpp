@@ -34,7 +34,6 @@ Status CapturedWriteOperation::create(std::shared_ptr<const PublishedTreeState> 
     }
     try {
         limits.frames.encode.metadata = budget.bytes;
-        limits.frames.cpu_progress    = budget.cpu_progress;
         if (budget.work_metrics) {
             limits.frames.encode.work_metrics = budget.work_metrics;
             limits.frames.encode.cause        = budget.cause;
@@ -77,7 +76,6 @@ Status CapturedWriteOperation::create(std::shared_ptr<CapturedFrameStream>      
     }
     try {
         limits.frames.encode.metadata = budget.bytes;
-        limits.frames.cpu_progress    = budget.cpu_progress;
         if (budget.work_metrics) {
             limits.frames.encode.work_metrics = budget.work_metrics;
             limits.frames.encode.cause        = budget.cause;
@@ -194,6 +192,8 @@ void CapturedWriteOperation::State::finish(Status status) noexcept
     }
     const bool cancelled = stopped.load(std::memory_order_acquire);
     report.status        = cancelled ? Status::unavailable() : std::move(status);
+    report.primary_io_failed =
+        report.status.code() == Code::kIoError && stage == Stage::Write && descriptor.type != page_type::kOverflowFrame;
     if (report.status.ok()) {
         report.status = pages->initialize_overflow_counts();
     }

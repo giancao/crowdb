@@ -76,6 +76,21 @@ TEST(RdmaConfigTest, EnvironmentRejectsUnknownWireLayout)
     EXPECT_FALSE(config.apply_environment());
 }
 
+TEST(RdmaConfigTest, CombinedControlDataUsesOneRegisteredClassPerReceive)
+{
+    auto config     = RdmaConfig::for_layout(crowdb::rpc::RdmaWireLayout::ControlData, 255 * 1024);
+    config.sq_depth = config.rq_depth = config.posted_receive_target = 256;
+    config.receive_arena_bytes                                       = 64ULL << 20;
+    EXPECT_TRUE(config.valid());
+    EXPECT_TRUE(config.combined_control_data());
+    EXPECT_EQ(config.wire_slot_capacity, 256U << 10);
+    EXPECT_EQ(config.data_slot_capacity(), 255U << 10);
+    EXPECT_EQ(config.receive_control_bytes(), 0U);
+    EXPECT_EQ(config.connection_send_arena_bytes(), 256U << 10);
+    --config.receive_arena_bytes;
+    EXPECT_FALSE(config.valid());
+}
+
 TEST(RdmaConfigTest, LogicalControlsRequireNonzeroLimitWithinEachDirectionalBudget)
 {
     RdmaConfig config;

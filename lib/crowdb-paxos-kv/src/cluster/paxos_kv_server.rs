@@ -84,9 +84,6 @@ impl PaxosKvServer for Arc<PxKvStore> {
                 error!(s = self.store_id, listen_addr = %bound_addr, error = ?e, "{msg}");
                 msg
             })?;
-        server.start();
-        server.register_conn_count_gauge("rpc.server.connections");
-
         let rt = tokio::runtime::Handle::current();
         let px_service = Arc::new(PxRpcService::new(self.clone(), rt.clone()));
         px_service.register_handlers(&server);
@@ -95,14 +92,9 @@ impl PaxosKvServer for Arc<PxKvStore> {
         let kv_service = Arc::new(PaxosKvRpcService::new(self.clone(), rt, forwarder));
         kv_service.register_handlers(&server);
 
-        let transport = Arc::new(PxRpcTransport::with_pool_size(
-            self.peer_pool_size,
-            self.enable_nagle,
-            self.quickack,
-            self.event_write,
-            self.send_queue_capacity,
-            self.rpc_workers,
-        ));
+        let transport = PxRpcTransport::on_listener(Arc::clone(&server), self);
+        server.start();
+        server.register_conn_count_gauge("rpc.server.connections");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let server_clone = Arc::clone(&server);
@@ -256,6 +248,12 @@ impl PxKvStore {
             .server
             .as_ref()
             .map(|s| s.transport_stats())
+    }
+
+    /// Sample the native transport and live connections for diagnostics.
+    pub fn rpc_transport_status(&self) -> Option<Vec<u8>> {
+        let server = self.rpc_server_state.lock().server.clone()?;
+        server.transport_status_json().ok()
     }
 
     /// Wire the shared `PxRpcTransport` into all existing remote

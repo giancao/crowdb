@@ -19,7 +19,7 @@ TEST(MemoryBacking, FailedGrowthReleasesEveryPreparedPageAndPreservesStoredBytes
     const auto           before = store.resident_bytes();
     std::vector<uint8_t> payload(3 * 64 * 1024, 0x55);
     set_memory_backing_failure_after_for_tests(1);
-    const auto failed = store.write_at(64 * 1024, payload.data(), payload.size());
+    const auto failed = store.write_at(0, payload.data(), payload.size());
     set_memory_backing_failure_after_for_tests(std::nullopt);
     ASSERT_EQ(failed.code(), Code::kResourceExhausted);
     EXPECT_EQ(store.resident_bytes(), before);

@@ -3,6 +3,7 @@
 #include "tree_runtime_binding.h"
 
 #include "binding_metrics.h"
+#include "btree/allocation_account.h"
 #include "btree/tree_metrics.h"
 #include "tree_runtime_internal.h"
 
@@ -48,8 +49,8 @@ void TreeRuntimeBinding::drain() const noexcept
 ResourceUsageSnapshot TreeRuntimeBinding::resource_usage() const noexcept
 {
     auto result = account_->resource_usage();
-    result[6]   = {.limit = options_.cpu_queue_limit, .used = lane_->queue_permits()};
-    result[7]   = {.limit = options_.backend_queue_limit, .used = backend_lane_->queue_permits()};
+    result[6]   = {.limit = lane_->queue_target(), .used = lane_->queued()};
+    result[7]   = {.limit = backend_lane_->queue_target(), .used = backend_lane_->queued()};
     return result;
 }
 
@@ -92,9 +93,15 @@ try {
     if (!credit) {
         return runtime->stopped() ? Status::unavailable() : Status::resource_exhausted();
     }
-    auto lifecycle    = detail::AllocationReservation::create(std::move(*credit));
-    auto lane         = detail::reserved_shared<detail::FlushRuntime::Lane>(lifecycle, options.cpu_queue_limit);
-    auto backend_lane = detail::reserved_shared<detail::FlushRuntime::Lane>(lifecycle, options.backend_queue_limit);
+    std::shared_ptr<detail::AllocationAccount> allocations;
+    status = detail::AllocationAccount::create_ongoing(account, detail::BudgetClass::kRouting, &allocations);
+    if (!status.ok()) {
+        return status;
+    }
+    auto lifecycle = detail::AllocationReservation::create(std::move(*credit));
+    auto lane = detail::reserved_shared<detail::FlushRuntime::Lane>(lifecycle, options.cpu_queue_limit, allocations);
+    auto backend_lane = detail::reserved_shared<detail::FlushRuntime::Lane>(lifecycle, options.backend_queue_limit,
+                                                                            std::move(allocations));
     auto result       = detail::reserved_construct<TreeRuntimeBinding>(lifecycle, [&](TreeRuntimeBinding *value) {
         ::new (static_cast<void *>(value))
             TreeRuntimeBinding(runtime, options, account, lifecycle, std::move(lane), std::move(backend_lane));

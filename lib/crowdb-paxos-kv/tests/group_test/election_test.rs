@@ -445,7 +445,7 @@ async fn stalled_gap_repair_cannot_stop_the_leader_heartbeat_ticker() {
             slot: 2,
             ballot: PxBallot::new(1, 31),
             term: group.local_replica().current_term_snapshot(),
-            payload: bytes::Bytes::new(),
+            payload: bytes::Bytes::new().into(),
         },
         &[],
     );

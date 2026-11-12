@@ -97,6 +97,64 @@ TEST(MemTableBudget, PayloadCapacityStaysChargedThroughIndependentCellOwner)
     EXPECT_EQ(credit.allocated(), 0U);
 }
 
+TEST(MemTableBudget, FirstKeyAndOverwriteEachAllocateOnceAndReleaseTheOldPayload)
+{
+    TestCredit   credit;
+    EpochManager epoch;
+    auto         budget = std::make_shared<TestFailBudget>(credit.reservation);
+    {
+        auto registration = epoch.enter();
+    }
+    auto            table    = std::make_unique<MemTable>(1, &epoch, budget);
+    const auto      value    = std::string(4096, 'a');
+    auto            cell     = encode_cell_buf(1, OpKind::kPut, value);
+    const auto      capacity = cell.capacity();
+    const auto     *backing  = cell.data();
+    AllocationLease payload(budget, capacity, AllocationKind::kPayload);
+
+    budget->fail_after = 1;
+    auto first         = table->prepare_write("key", std::move(cell), 0, std::move(payload), 0, budget);
+    EXPECT_EQ(budget->fail_after, 0U);
+    ASSERT_TRUE(table->commit_write(std::move(first), 1));
+    std::shared_ptr<const CellVersion> owner;
+    const char                        *key_storage = nullptr;
+    {
+        auto guard  = table->read_guard();
+        auto cursor = table->prefix_cursor(1);
+        ASSERT_TRUE(cursor.valid());
+        owner = cursor.cell_owner();
+        EXPECT_EQ(owner->cell.data(), backing);
+        key_storage = cursor.key().data();
+    }
+
+    const auto  next_value   = std::string(4096, 'b');
+    auto        next_cell    = encode_cell_buf(2, OpKind::kPut, next_value);
+    const auto *next_backing = next_cell.data();
+    budget->fail_after       = 1;
+    AllocationLease next_payload(budget, next_cell.capacity(), AllocationKind::kPayload);
+    budget->fail_after = 1;
+    auto second        = table->prepare_write("key", std::move(next_cell), 0, std::move(next_payload), 2, budget);
+    EXPECT_EQ(budget->fail_after, 0U);
+    ASSERT_TRUE(table->commit_write(std::move(second), 2));
+    epoch.try_reclaim();
+    const auto before_release = credit.allocated();
+    EXPECT_EQ(CellView(owner->cell.slice()).value().to_string(), value);
+    owner.reset();
+    EXPECT_EQ(credit.allocated() + capacity, before_release);
+    {
+        auto guard  = table->read_guard();
+        auto cursor = table->prefix_cursor(2);
+        ASSERT_TRUE(cursor.valid());
+        EXPECT_EQ(cursor.key().data(), key_storage);
+        EXPECT_EQ(cursor.cell_version()->cell.data(), next_backing);
+        EXPECT_EQ(CellView(cursor.cell_version()->cell.slice()).value().to_string(), next_value);
+    }
+    table.reset();
+    epoch.try_reclaim();
+    credit.reservation->seal();
+    EXPECT_EQ(credit.allocated(), 0U);
+}
+
 TEST(MemTableBudget, FrozenReaderNeedsNoNewAllocationAndRetainsItsChargedPayload)
 {
     std::shared_ptr<TreeRuntime> runtime;
@@ -208,7 +266,8 @@ TEST(MemTableBudget, EveryOverwriteAllocationFailureKeepsPublishedVersionAndRetu
         credit.reservation->seal();
         EXPECT_EQ(credit.allocated(), 0U);
     }
-    EXPECT_GE(failures, 4U);
+    // Overwriting an existing key claims payload and combined version storage.
+    EXPECT_EQ(failures, 2U);
 }
 
 TEST(MemTableBudget, RetiredHistoryRemainsChargedUntilReadGuardLeaves)

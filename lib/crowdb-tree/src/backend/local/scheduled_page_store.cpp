@@ -9,16 +9,21 @@
 #include "crowdb-common/log.h"
 #include "crowdb-tree/backend/block_page_store.h"
 
+#include <cassert>
+#include <typeinfo>
+
 namespace crowdb::tree
 {
 struct ScheduledPageStore::State
 {
-    PageStore                                  *sync  = nullptr;
-    AsyncPageStore                             *async = nullptr;
+    PageStore                                  *sync         = nullptr;
+    AsyncPageStore                             *async        = nullptr;
+    MemPageStore                               *memory       = nullptr;
+    bool                                        direct_block = false;
     std::shared_ptr<const void>                 backend_owner;
     std::shared_ptr<TreeRuntimeBinding>         binding;
     std::shared_ptr<detail::FlushRuntime::Lane> lane;
-    std::shared_ptr<ApplyDispatcher>            fallback;
+    std::shared_ptr<ApplyDispatcher>            extent_owner;
     std::shared_ptr<AllocationBudget>           jobs;
     std::shared_ptr<AllocationBudget>           backend_allocations;
     std::shared_ptr<ChunkWriteQueue>            chunks;
@@ -178,19 +183,27 @@ Status ScheduledPageStore::create(PageStore *sync, AsyncPageStore *async, std::s
                                   std::shared_ptr<TreeRuntimeBinding>                   binding,
                                   const std::shared_ptr<detail::AllocationReservation> &metadata,
                                   std::shared_ptr<detail::FlushRuntime::Lane>           lane,
-                                  std::shared_ptr<AsyncPageStore> *out, std::shared_ptr<ApplyDispatcher> fallback,
+                                  std::shared_ptr<AsyncPageStore> *out, std::shared_ptr<ApplyDispatcher> extent_owner,
                                   MakeChunkWrites make_chunk_writes)
 try {
     if ((sync == nullptr && async == nullptr) || !binding || !metadata || !lane || out == nullptr || *out) {
         return Status::invalid_argument();
     }
-    auto state           = detail::reserved_shared<State>(metadata);
-    state->lane          = std::move(lane);
-    state->sync          = sync;
-    state->async         = async;
+    auto state   = detail::reserved_shared<State>(metadata);
+    state->lane  = std::move(lane);
+    state->sync  = sync;
+    state->async = async;
+#ifdef CROWDB_HAVE_LIBURING
+    state->direct_block = async != nullptr && typeid(*async) == typeid(BlockAsyncPageStore);
+#endif
+    // Only the concrete memory store promises that reads never wait. An
+    // injected subclass can override read_at with a different contract.
+    if (async == nullptr && sync != nullptr && typeid(*sync) == typeid(MemPageStore)) {
+        state->memory = static_cast<MemPageStore *>(sync);
+    }
     state->backend_owner = std::move(backend_owner);
     state->binding       = std::move(binding);
-    state->fallback      = fallback ? std::move(fallback) : state->binding->backend_progress();
+    state->extent_owner  = extent_owner ? std::move(extent_owner) : state->binding->backend_progress();
     std::shared_ptr<detail::AllocationAccount> actual;
     auto                                       status =
         detail::AllocationAccount::create_ongoing(state->binding->account(), detail::BudgetClass::kRouting, &actual);
@@ -221,6 +234,26 @@ PageStore *ScheduledPageStore::synchronous_store() const noexcept
 bool ScheduledPageStore::uses_async_transport() const noexcept
 {
     return state_->async != nullptr;
+}
+
+bool ScheduledPageStore::reads_inline() const noexcept
+{
+    return state_->memory != nullptr;
+}
+
+Status ScheduledPageStore::read_inline(PageAddr address, void *buffer, size_t length,
+                                       TreeWorkCause cause) const noexcept
+try {
+    assert(state_->memory != nullptr);
+    const auto &metrics = state_->binding->work_metrics();
+    record_work(metrics, TreeWorkCounter::ReadOperations, 1, cause);
+    auto status = state_->memory->read_at(address, static_cast<uint8_t *>(buffer), length);
+    record_work(metrics, status.ok() ? TreeWorkCounter::ReadBytes : TreeWorkCounter::ReadErrors,
+                status.ok() ? length : 1, cause);
+    return status;
+}
+catch (const std::bad_alloc &) {
+    return Status::resource_exhausted();
 }
 
 size_t ScheduledPageStore::allocation_workers() const noexcept
@@ -256,11 +289,25 @@ try {
     job->purpose      = purpose;
     job->admitted     = true;
     job->queued_owner = job;
-    auto status       = state_->binding->backend_cpu()->try_submit(state_->lane, &Job::execute, job.get());
-    if (!status.ok()) {
-        state_->fallback->request(job->node, job);
+    if (job->async_step || (state_->direct_block && !job->step)) {
+        Job::execute(job.get());
+        return Status::Ok();
     }
-    return Status::Ok();
+    // The synchronous compatibility directory has one extent creator. The
+    // io_uring path shares first-open completion without serializing writes.
+    if (write != nullptr && state_->async == nullptr) {
+        const auto *block = dynamic_cast<const BlockPageStore *>(state_->sync);
+        if (block != nullptr && block->block_size() != 0) {
+            state_->extent_owner->request(job->node, job);
+            return Status::Ok();
+        }
+    }
+    auto status = state_->binding->backend_cpu()->try_submit(state_->lane, &Job::execute, job.get());
+    if (!status.ok()) {
+        job->admitted = false;
+        job->queued_owner.reset();
+    }
+    return status;
 }
 catch (const std::bad_alloc &) {
     return Status::resource_exhausted();
@@ -270,6 +317,12 @@ uint64_t ScheduledPageStore::submit_read(PageAddr address, void *buffer, size_t 
 {
     if (length == 0) {
         complete.complete(Status::Ok());
+        return 0;
+    }
+    if (reads_inline()) {
+        if (complete) {
+            complete.complete(read_inline(address, buffer, length, complete.cause));
+        }
         return 0;
     }
     auto status = submit(address, buffer, nullptr, length, PagePurpose::kBtreePage, complete);
@@ -291,6 +344,28 @@ uint64_t ScheduledPageStore::submit_typed_write(PagePurpose purpose, PageAddr ad
         complete.complete(Status::Ok());
         return 0;
     }
+    if (state_->memory != nullptr) {
+        if (!complete) {
+            return 0;
+        }
+        if (buffer == nullptr || address > UINT64_MAX - length) {
+            complete.complete(Status::invalid_argument());
+            return 0;
+        }
+        const auto &metrics = state_->binding->work_metrics();
+        record_work(metrics, TreeWorkCounter::WriteOperations, 1, complete.cause);
+        Status status;
+        try {
+            status = state_->memory->write_typed_at(purpose, address, static_cast<const uint8_t *>(buffer), length);
+        }
+        catch (const std::bad_alloc &) {
+            status = Status::resource_exhausted();
+        }
+        record_work(metrics, status.ok() ? TreeWorkCounter::WriteBytes : TreeWorkCounter::WriteErrors,
+                    status.ok() ? length : 1, complete.cause);
+        complete.complete(std::move(status));
+        return 0;
+    }
     auto status = submit(address, nullptr, buffer, length, purpose, complete);
     if (!status.ok()) {
         complete.complete(std::move(status));
@@ -300,6 +375,13 @@ uint64_t ScheduledPageStore::submit_typed_write(PagePurpose purpose, PageAddr ad
 
 Status ScheduledPageStore::submit_fsync(AsyncCompletion complete)
 {
+    if (state_->memory != nullptr) {
+        if (!complete) {
+            return Status::invalid_argument();
+        }
+        complete.complete(state_->memory->sync());
+        return Status::Ok();
+    }
     return submit(0, nullptr, nullptr, 0, PagePurpose::kBtreePage, std::move(complete));
 }
 

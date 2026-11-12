@@ -34,7 +34,8 @@ void ct_tree_tuning_default(ct_tree_tuning *out)
             .maintenance_max_candidates  = defaults.execution.maintenance_max_candidates,
             .maintenance_max_steps       = defaults.execution.maintenance_max_steps,
             .maintenance_metadata_bytes  = defaults.execution.maintenance_metadata_bytes,
-            .cache_max_pages             = defaults.execution.cache_max_pages};
+            .cache_max_pages             = defaults.execution.cache_max_pages,
+            .memtable_flush_count        = defaults.memtable_flush_count};
 }
 
 Status crowdb::tree::validate_tree_execution(const TreeExecutionOptions &options) noexcept
@@ -65,6 +66,7 @@ Status crowdb::tree::configure_tree_tuning(const ct_tree_tuning *options, Config
     out->memtable_flush_bytes                  = options->memtable_flush_bytes;
     out->memtable_flush_entries                = options->memtable_flush_entries;
     out->max_memtable_count                    = options->max_memtable_count;
+    out->memtable_flush_count                  = options->memtable_flush_count;
     out->leaf_split_bytes                      = options->leaf_split_bytes;
     out->leaf_merge_bytes                      = options->leaf_merge_bytes;
     out->inner_max_keys                        = options->inner_max_keys;

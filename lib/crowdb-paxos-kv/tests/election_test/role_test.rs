@@ -175,7 +175,7 @@ async fn new_inheriting_election_state_shares_acceptor_and_learner() {
         slot: 1,
         ballot: PxBallot::new(0, 3),
         term: 1,
-        payload: Bytes::new(),
+        payload: Bytes::new().into(),
     };
     prior.learner.learn(entry, &[]).await;
 

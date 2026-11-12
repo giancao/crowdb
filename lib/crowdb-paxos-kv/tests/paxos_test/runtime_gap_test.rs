@@ -40,7 +40,7 @@ fn entry(slot: u64) -> PxLogEntry {
         slot,
         term: 1,
         ballot: PxBallot::new(1, 2),
-        payload: Bytes::from(payload),
+        payload: Bytes::from(payload).into(),
     }
 }
 
@@ -177,7 +177,7 @@ async fn sparse_durable_replay_stops_at_gap_and_preserves_the_accepted_suffix() 
 #[tokio::test(flavor = "current_thread")]
 async fn malformed_durable_runtime_replay_returns_the_real_apply_failure() {
     let mut invalid = entry(1);
-    invalid.payload = Bytes::from_static(&[1, 0]);
+    invalid.payload = Bytes::from_static(&[1, 0]).into();
     let recovered = replay(&[invalid]).await;
     let error = PxLocalReplica::restore_from_replay_with_engine(
         1,

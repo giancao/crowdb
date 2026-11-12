@@ -138,10 +138,12 @@ impl PxRpcService {
             FBMsgType::EPrepareRequest.0 as u16,
             Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_prepare),
         );
-        server.register_handler(
-            FBMsgType::EAcceptRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_accept),
-        );
+        let accept_service = Arc::clone(self);
+        server.register_owned_handler(FBMsgType::EAcceptRequest.0 as u16, move |req| {
+            if accept_service.target_matches(&req) {
+                accept_service.handle_accept(req);
+            }
+        });
         server.register_handler(
             FBMsgType::EPreVoteRequest.0 as u16,
             Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_pre_vote),

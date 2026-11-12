@@ -26,7 +26,7 @@ void TreeApplyOperation::State::start(uint64_t chosen_slot, detail::CallbackComp
     complete = callback;
     context  = argument;
     self     = weak_from_this().lock();
-    dispatcher->request(node, self);
+    schedule();
 }
 
 void TreeApplyOperation::State::run(void *context) noexcept
@@ -46,7 +46,13 @@ void TreeApplyOperation::State::run(void *context) noexcept
 void TreeApplyOperation::State::wake(Status status) noexcept
 {
     resumed = std::move(status);
-    dispatcher->request(node, self);
+    schedule();
+}
+
+void TreeApplyOperation::State::schedule() noexcept
+{
+    auto owner = self;
+    ready->request(owner);
 }
 
 void TreeApplyOperation::State::step()
@@ -106,6 +112,10 @@ void TreeApplyOperation::State::step()
         return;
     }
     if (frontier->contiguous().load(std::memory_order_acquire) <= sources->catalog()->floor) {
+        await_progress(observed);
+        return;
+    }
+    if (source_rotation->request_for_apply()) {
         await_progress(observed);
         return;
     }

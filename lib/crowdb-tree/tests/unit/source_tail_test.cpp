@@ -69,7 +69,7 @@ TEST(SourceTail, MovingAndOverwritingAnEnteredWriteReleasesExactlyOneTicket)
     auto     metadata = detail::AllocationReservation::create(std::move(credit.value()));
     auto     tail     = detail::reserved_shared<SourceTail>(metadata, metadata, 8, 128);
     MemTable parent(1, nullptr, metadata);
-    auto     prepared = parent.prepare_write("k", encode_cell_buf(1, OpKind::kPut, "v"), 0, {}, 0, 8, metadata);
+    auto     prepared = parent.prepare_write("k", encode_cell_buf(1, OpKind::kPut, "v"), 0, {}, 0, metadata);
     auto     first    = SourceTail::prepare(tail, prepared);
     auto     second   = SourceTail::prepare(tail, prepared);
     EXPECT_FALSE(tail->freeze());

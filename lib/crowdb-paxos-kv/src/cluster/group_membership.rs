@@ -223,6 +223,8 @@ impl PxGroup {
         self.cas_transient_map = Arc::clone(&prior.cas_transient_map);
         self.cas_request_nonce = Arc::clone(&prior.cas_request_nonce);
         self.local_replica = PxLocalReplica::new_inheriting_election_state(prior.local_replica());
+        // The inherited learner and its Tree already use this maintenance wake.
+        self.flush_notify = Arc::clone(&prior.flush_notify);
         // Preserve the caller's bootstrap demotion after the last state handoff.
         // An elected tenure acquired meanwhile must always be inherited.
         if elect_bootstrap && self.local_replica.current_term_snapshot() == 0 {

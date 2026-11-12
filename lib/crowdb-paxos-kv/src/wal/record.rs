@@ -29,7 +29,7 @@
 use bytes::Bytes;
 use std::fmt::Write;
 
-use crate::paxos::roles::{PxBallot, PxLogEntry, SlotIndex};
+use crate::paxos::roles::{ProposalPayload, PxBallot, PxLogEntry, SlotIndex};
 use crate::paxos::{PxGroupId, PxTerm};
 
 /// Magic number: ASCII "CROW" in little-endian (historical — value kept
@@ -126,41 +126,43 @@ pub struct WALRecord {
     pub term: PxTerm,
     pub slot: SlotIndex,
     pub ballot: PxBallot,
-    pub payload: Bytes,
+    pub payload: ProposalPayload,
 }
 
 /// Zero-copy binary frame for a single WAL record.
 ///
-/// The fixed-size header pieces are stored inline; the payload is borrowed via
-/// `Bytes`, so no data copy is needed when the frame is built or cloned.
+/// The fixed-size header pieces are stored inline; the payload retains its immutable owners
+/// without copying.
 #[derive(Clone, Debug)]
 pub struct RecordFrame {
-    frame_len: [u8; 4],
-    header: [u8; HEADER_BODY_LEN],
-    payload: Bytes,
+    prefix: [u8; 4 + HEADER_BODY_LEN],
+    payload: ProposalPayload,
     crc: [u8; 4],
 }
 
 impl RecordFrame {
+    pub(crate) fn io_slice_count(&self) -> usize {
+        2 + self.payload.part_count()
+    }
+
     /// Total on-disk size of the framed record (`frame_len` + header + payload + crc).
     #[must_use]
     pub fn total_len(&self) -> usize {
-        4 + HEADER_BODY_LEN + self.payload.len() + 4
+        self.prefix.len() + self.payload.len() + self.crc.len()
     }
 
     /// Append this record's slices to `slices` so the whole batch can be written
     /// with a single vectored write.
     pub fn append_io_slices<'a>(&'a self, slices: &mut Vec<std::io::IoSlice<'a>>) {
-        slices.push(std::io::IoSlice::new(&self.frame_len));
-        slices.push(std::io::IoSlice::new(&self.header));
-        slices.push(std::io::IoSlice::new(&self.payload));
+        slices.push(std::io::IoSlice::new(&self.prefix));
+        slices.extend(self.payload.parts().map(std::io::IoSlice::new));
         slices.push(std::io::IoSlice::new(&self.crc));
     }
 }
 
 /// Write the fixed-size header body (everything after `frame_len` and before
 /// the payload) into `buf`.
-fn write_header_body(buf: &mut [u8; HEADER_BODY_LEN], record: &WALRecord, payload_len: usize) {
+fn write_header_body(buf: &mut [u8], record: &WALRecord, payload_len: usize) {
     let mut off = 0;
     buf[off..off + 4].copy_from_slice(&WAL_MAGIC.to_le_bytes());
     off += 4;
@@ -200,25 +202,25 @@ impl WALRecord {
     pub fn encode_frame(&self) -> RecordFrame {
         let payload_len = self.payload.len();
         let frame_len_value = HEADER_BODY_LEN + payload_len + 4; // +4 for crc
-        let mut frame_len = [0u8; 4];
+        let mut prefix = [0u8; 4 + HEADER_BODY_LEN];
+        let (frame_len, header) = prefix.split_at_mut(4);
         frame_len.copy_from_slice(
             &u32::try_from(frame_len_value)
                 .expect("frame_len exceeds u32")
                 .to_le_bytes(),
         );
 
-        let mut header = [0u8; HEADER_BODY_LEN];
-        write_header_body(&mut header, self, payload_len);
+        write_header_body(header, self, payload_len);
 
-        let crc = crowdb_tree_ffi::crc32c_update(crowdb_tree_ffi::crc32c(&header), &self.payload);
-        let mut crc_bytes = [0u8; 4];
-        crc_bytes.copy_from_slice(&crc.to_le_bytes());
+        let crc = self
+            .payload
+            .parts()
+            .fold(crowdb_tree_ffi::crc32c(header), crowdb_tree_ffi::crc32c_update);
 
         RecordFrame {
-            frame_len,
-            header,
+            prefix,
             payload: self.payload.clone(),
-            crc: crc_bytes,
+            crc: crc.to_le_bytes(),
         }
     }
 
@@ -233,9 +235,10 @@ impl WALRecord {
     pub fn encode(&self) -> Vec<u8> {
         let frame = self.encode_frame();
         let mut buf = Vec::with_capacity(frame.total_len());
-        buf.extend_from_slice(&frame.frame_len);
-        buf.extend_from_slice(&frame.header);
-        buf.extend_from_slice(&frame.payload);
+        buf.extend_from_slice(&frame.prefix);
+        for part in frame.payload.parts() {
+            buf.extend_from_slice(part);
+        }
         buf.extend_from_slice(&frame.crc);
         buf
     }
@@ -308,7 +311,7 @@ impl WALRecord {
                 term,
                 slot,
                 ballot: PxBallot::new(ballot_round, ballot_leader),
-                payload,
+                payload: payload.into(),
             },
             total,
         ))
@@ -401,7 +404,8 @@ impl WALRecord {
             ),
             payload: Bytes::from(
                 payload.ok_or_else(|| RecordError::BadText("missing payload_hex field".to_string()))?,
-            ),
+            )
+            .into(),
         })
     }
 
@@ -416,7 +420,7 @@ impl WALRecord {
             term: entry.term,
             slot: entry.slot,
             ballot: entry.ballot,
-            payload: encode_accepted_payload(entry),
+            payload: entry.payload.clone(),
         }
     }
 
@@ -429,7 +433,7 @@ impl WALRecord {
             term,
             slot,
             ballot,
-            payload: Bytes::new(),
+            payload: Bytes::new().into(),
         }
     }
 
@@ -442,7 +446,7 @@ impl WALRecord {
             term,
             slot: 0,
             ballot: PxBallot::new(0, 0),
-            payload: Bytes::copy_from_slice(&voted_for_id.to_le_bytes()),
+            payload: Bytes::copy_from_slice(&voted_for_id.to_le_bytes()).into(),
         }
     }
 
@@ -455,7 +459,12 @@ impl WALRecord {
         if self.record_type != RecordType::Accepted {
             return None;
         }
-        Some(decode_accepted_payload(self))
+        Some(PxLogEntry {
+            slot: self.slot,
+            ballot: self.ballot,
+            term: self.term,
+            payload: self.payload.clone(),
+        })
     }
 
     /// For `VoteGranted` records, extract the `voted_for` node id.
@@ -464,42 +473,10 @@ impl WALRecord {
         if self.record_type != RecordType::VoteGranted {
             return None;
         }
-        if self.payload.len() < 8 {
-            return None;
-        }
-        Some(u64::from_le_bytes([
-            self.payload[0],
-            self.payload[1],
-            self.payload[2],
-            self.payload[3],
-            self.payload[4],
-            self.payload[5],
-            self.payload[6],
-            self.payload[7],
-        ]))
+        let payload = self.payload.contiguous()?;
+        Some(u64::from_le_bytes(payload.get(..8)?.try_into().ok()?))
     }
 }
-
-// ── Accepted payload (de)serialization ──────────────────────
-
-/// Accepted payload layout:
-/// ```text
-/// [inner : rest]  — PxLogEntry.payload bytes
-/// ```
-fn encode_accepted_payload(entry: &PxLogEntry) -> Bytes {
-    entry.payload.clone()
-}
-
-fn decode_accepted_payload(rec: &WALRecord) -> PxLogEntry {
-    PxLogEntry {
-        slot: rec.slot,
-        ballot: rec.ballot,
-        term: rec.term,
-        payload: rec.payload.clone(),
-    }
-}
-
-// ── Primitive read helpers ──────────────────────────────────
 
 fn parse_u16(value: &str, field: &str) -> Result<u16, RecordError> {
     value
@@ -517,9 +494,9 @@ pub(super) fn parse_hex_u32(value: &str) -> Result<u32, RecordError> {
     u32::from_str_radix(value, 16).map_err(|e| RecordError::BadText(format!("invalid crc32c: {e}")))
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
+fn encode_hex(payload: &ProposalPayload) -> String {
+    let mut out = String::with_capacity(payload.len() * 2);
+    for byte in payload.parts().flatten() {
         out.push(nibble_to_hex(byte >> 4));
         out.push(nibble_to_hex(byte & 0x0f));
     }

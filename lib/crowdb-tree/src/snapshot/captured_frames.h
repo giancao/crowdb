@@ -4,6 +4,7 @@
 
 #include "btree/page_encode.h"
 #include "btree/page_load.h"
+#include "btree/page_writeback.h"
 #include "btree/resource_observation.h"
 
 namespace crowdb::tree
@@ -22,8 +23,9 @@ struct CapturedFrameLimits
     uint64_t max_pages = MappingView::kPageLimit;
     // Traverse and prepare final layouts without copying payload or reserving
     // overflow PIDs. Each result owns the returned dependency descriptors.
-    bool plan_only               = false;
-    bool retain_overflow_buffers = false;
+    bool                           plan_only               = false;
+    bool                           retain_overflow_buffers = false;
+    std::optional<PageWriteLimits> raw_write               = std::nullopt;
     // Staged writeback can materialize one primary while retaining the complete
     // captured mapping for routing and immutable overflow ownership proofs.
     std::optional<uint64_t> selected_page = std::nullopt;
@@ -31,20 +33,43 @@ struct CapturedFrameLimits
     uint64_t                          reuse_backend_id = 0;
     BackingExclusion                  exclusion{};
     std::shared_ptr<WritebackMetrics> writeback_metrics = nullptr;
-    std::shared_ptr<ApplyDispatcher>  cpu_progress      = nullptr;
 };
 
 struct CapturedFrameBuffer
 {
-    explicit CapturedFrameBuffer(const PageEncodeLimits &limits)
-        : resources(limits.metadata, TreeResourceMetric::MaterializeInflightBytes),
-          bytes(limits.frame_bytes, detail::ReservationAllocator<uint8_t, AllocationKind::kFrame>(limits.metadata))
+    explicit CapturedFrameBuffer(const CapturedFrameLimits &limits);
+    static size_t storage_bytes(const CapturedFrameLimits &limits) noexcept;
+
+    [[nodiscard]] std::span<uint8_t> bytes() noexcept
     {
-        resources.begin(bytes.capacity());
+        return frame_;
     }
 
-    ResourceObservation                                     resources;
-    detail::ReservedVector<uint8_t, AllocationKind::kFrame> bytes;
+    [[nodiscard]] std::span<const uint8_t> bytes() const noexcept
+    {
+        return frame_;
+    }
+
+    [[nodiscard]] std::span<uint8_t> raw_blob() noexcept
+    {
+        return raw_blob_;
+    }
+
+    [[nodiscard]] std::span<const uint8_t> raw_blob() const noexcept
+    {
+        return raw_blob_;
+    }
+
+    [[nodiscard]] size_t capacity() const noexcept
+    {
+        return storage_.capacity();
+    }
+
+  private:
+    ResourceObservation                         resources_;
+    OverwriteByteVector<AllocationKind::kFrame> storage_;
+    std::span<uint8_t>                          frame_;
+    std::span<uint8_t>                          raw_blob_;
 };
 
 struct CapturedFrame

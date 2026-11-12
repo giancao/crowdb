@@ -35,6 +35,25 @@ enum FBKvRetCode : int16 {
     SnapshotIntegrity = 10,
 }
 
+// Sent once on each new connection in a peer pool.
+table FBPeerConnectionRegistration {
+    id:uint64;
+    rpc_create_nano:uint64;
+    group_id:uint64;
+    source_replica_id:uint64;
+    target_replica_id:uint64;
+    target_cluster_id:string;
+    pool_sequence:uint64;
+}
+
+table FBPeerConnectionResponse {
+    id:uint64;
+    rpc_create_nano:uint64;
+    pool_sequence:uint64;
+    target_replica_id:uint64;
+    accepted:bool;
+}
+
 // ── Accepted value (table — has a payload vector) ────────────────
 table FBAcceptedValue {
     slot:uint64;

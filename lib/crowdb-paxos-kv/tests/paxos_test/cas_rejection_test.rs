@@ -39,7 +39,10 @@ impl KVEngine for TestEngine {
         self.inner.apply(slot, batch)
     }
 
-    fn admit_proposal(&self, payload: Bytes) -> KVFuture<ApplyAdmissionResult> {
+    fn admit_proposal(
+        &self,
+        payload: crowdb_paxos_kv::paxos::roles::ProposalPayload,
+    ) -> KVFuture<ApplyAdmissionResult> {
         if self.failures.proposal.load(Ordering::Acquire) {
             KVFuture::ready(Err(ApplyAdmissionError::Rejected(
                 "test proposal rejection".into(),

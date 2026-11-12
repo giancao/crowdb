@@ -16,7 +16,7 @@ fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> PxLogEntry {
         slot,
         ballot,
         term: ballot.round,
-        payload: bytes::Bytes::copy_from_slice(payload),
+        payload: bytes::Bytes::copy_from_slice(payload).into(),
     }
 }
 
@@ -199,7 +199,7 @@ async fn reclaimed_prefix_rejects_late_requests_and_preserves_owned_payloads() {
     assert!(acc.accepted_at(1).is_none());
     assert!(acc.accepted_at(2048).is_some());
     assert_eq!(acc.accepted_log_tip(), Some((2049, 1)));
-    assert_eq!(held.payload.as_ref(), b"retained");
+    assert_eq!(held.payload.to_bytes().as_ref(), b"retained");
     assert!(matches!(
         acc.prepare(1, PxBallot::new(9, 9)).await,
         PxPrepareReply::Rejected { .. }
@@ -231,7 +231,7 @@ async fn concurrent_readers_and_reclaimers_keep_live_slots_and_owned_payloads() 
                     acc.reclaim();
                 } else {
                     if let Some(value) = acc.accepted_at(slot) {
-                        assert_eq!(value.payload.as_ref(), b"retained");
+                        assert_eq!(value.payload.to_bytes().as_ref(), b"retained");
                     }
                     acc.prepare(slot, PxBallot::new(2, worker)).await;
                     acc.accept(&entry(slot, PxBallot::new(2, worker), b"retained"))
@@ -249,7 +249,7 @@ async fn concurrent_readers_and_reclaimers_keep_live_slots_and_owned_payloads() 
     assert_eq!(acc.trim_slot(), 2048);
     assert_eq!(acc.retained_slots(), 2);
     assert_eq!(acc.accepted_log_tip(), Some((2049, 1)));
-    assert_eq!(held.payload.as_ref(), b"retained");
+    assert_eq!(held.payload.to_bytes().as_ref(), b"retained");
 }
 
 #[tokio::test]
@@ -269,7 +269,8 @@ async fn reclaimed_slots_release_payload_owners_while_acceptor_stays_live() {
             payload: bytes::Bytes::from_owner(TestPayload {
                 bytes: vec![42; 1024],
                 dropped: dropped.clone(),
-            }),
+            })
+            .into(),
         })
         .await;
         if slot % 128 == 0 {

@@ -164,8 +164,12 @@ void SharedPageCache::State::loaded(Entry *entry)
     if (entry->status.ok() && entry->frame && size) {
         entry->frame->activate(*size, entry->leaf, entry->inner);
     }
-    const bool keep = entry->status.ok() && size && *size <= limits.max_resident_bytes && !entry->drop_when_ready &&
-                      !closed.load(std::memory_order_acquire);
+    // Flush-only reads of split views join in flight. Retaining the ready
+    // frame here would keep obsolete extents pinned after publication.
+    const bool flush_split = entry->key.kind == Kind::Leaf && entry->priority == PageLoadPriority::Maintenance &&
+                             entry->waiters->base.clipped;
+    const bool keep        = !flush_split && entry->status.ok() && size && *size <= limits.max_resident_bytes &&
+                             !entry->drop_when_ready && !closed.load(std::memory_order_acquire);
     if (keep) {
         if (resident_bytes.load(std::memory_order_relaxed) > limits.max_resident_bytes - *size) {
             const auto low    = limits.low_resident_bytes != 0
@@ -234,6 +238,7 @@ void SharedPageCache::State::deliver(Request *request, const Status &status, std
     request->shared_wait.finish(outcome.ok() ? TreeWaitOutcome::Granted : TreeWaitOutcome::Error,
                                 tree_metrics_now_ns());
     auto owner       = std::move(request->owner);
+    auto allocation  = std::move(request->allocation);
     auto reservation = std::move(request->reservation);
     auto leaf_done   = std::move(request->leaf_done);
     auto inner_done  = std::move(request->inner_done);
@@ -247,7 +252,9 @@ void SharedPageCache::State::deliver(Request *request, const Status &status, std
     }
     else {
         ordinary_waiters.fetch_sub(1, std::memory_order_relaxed);
-        request->occupied.store(false, std::memory_order_release);
+        if (!allocation) {
+            request->occupied.store(false, std::memory_order_release);
+        }
     }
     if (leaf_done) {
         complete_page_load(leaf_done, std::move(outcome), std::move(leaf));

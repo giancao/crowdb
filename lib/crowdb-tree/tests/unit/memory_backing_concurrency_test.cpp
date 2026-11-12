@@ -41,6 +41,9 @@ TEST(MemoryBacking, ConcurrentSparseGrowthAndDisjointRangesShareOnePhysicalPage)
     EXPECT_EQ(store.resident_bytes(), (workers + 1) * MemPageStore::kBackingPageBytes);
     std::array<uint8_t, 4096> hole;
     hole.fill(0xff);
+    ASSERT_TRUE(store.read_at(workers * hole.size(), hole.data(), hole.size()).ok());
+    EXPECT_EQ(hole, (std::array<uint8_t, 4096>{}));
+    hole.fill(0xff);
     ASSERT_TRUE(store.read_at(uint64_t{1} << 43, hole.data(), hole.size()).ok());
     EXPECT_EQ(hole, (std::array<uint8_t, 4096>{}));
 }

@@ -2,7 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 #include "crowdb-common/crc32c.h"
 #include "crowdb-tree/maptable/compressor.h"
+#include "crowdb-tree/maptable/frame_page.h"
 
+#include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <memory>
 
@@ -21,6 +24,19 @@ void put_u32(uint8_t *out, uint32_t value)
     }
 }
 } // namespace
+
+void finish_raw_durable_page(std::span<uint8_t> output, uint32_t frame_bytes) noexcept
+{
+    assert(frame_bytes >= kFrameTrailerSize && output.size() >= kDurableBlobHeader + frame_bytes);
+    const auto *trailer  = output.data() + kDurableBlobHeader + frame_bytes - kFrameTrailerSize;
+    const auto  body_crc = frame_u32(trailer, sizeof(uint32_t));
+    output[0]            = static_cast<uint8_t>(compress_algo::kNone);
+    put_u32(output.data() + 1, frame_bytes);
+    put_u32(output.data() + 5, frame_bytes);
+    put_u32(output.data() + 9, crowdb::common::crc32c_update(body_crc, trailer, kFrameTrailerSize));
+    const auto padding = output.subspan(kDurableBlobHeader + frame_bytes);
+    std::fill(padding.begin(), padding.end(), uint8_t{0});
+}
 
 size_t durable_encode_scratch_bytes(compress_algo prefer) noexcept
 {

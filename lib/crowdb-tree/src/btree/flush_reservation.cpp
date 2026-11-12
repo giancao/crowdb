@@ -89,10 +89,9 @@ Status bind_flush_reservations(PublicationCoordinator &publisher, const FlushPre
             return backend_status;
         }
     }
-    batch->cpu_progress = preparation.cpu_progress;
-    batch->publication  = preparation.publication;
-    batch->persistent   = preparation.persistent;
-    batch->persistence  = preparation.persistence;
+    batch->publication = preparation.publication;
+    batch->persistent  = preparation.persistent;
+    batch->persistence = preparation.persistence;
     if (preparation.persistent) {
         auto persistence = preparation.persistence;
         if (!persistence) {

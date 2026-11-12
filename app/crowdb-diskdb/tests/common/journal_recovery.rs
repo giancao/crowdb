@@ -79,7 +79,7 @@ impl TestReclaimedJournal {
                     slot: 3,
                     ballot: PxBallot::new(0, 1),
                     term: 1,
-                    payload: Bytes::new(),
+                    payload: Bytes::new().into(),
                 },
             )],
             index: SegmentIndex::new(),

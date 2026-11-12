@@ -348,6 +348,7 @@ TreeCore::TreeCore(detail::ReservedUnique<State> state) : state_(std::move(state
         SourceRotationOptions{.bytes         = state_->config.memtable_flush_bytes,
                               .entries       = state_->config.memtable_flush_entries,
                               .tables        = state_->config.max_memtable_count,
+                              .flush_tables  = state_->config.memtable_flush_count,
                               .source_window = std::min(state_->reads.max_memtables, state_->flush->source_window())});
     state_->source_rotation->set_flush(
         [this](std::shared_ptr<FlushOperation> *out) { return prepare_flush(out); },
@@ -378,7 +379,8 @@ Status TreeCore::create(Config config, std::shared_ptr<TreeRuntimeBinding> bindi
 try {
     if (!binding || out == nullptr || *out || !config.runtime || config.frame_bytes < 512 ||
         config.frame_bytes > kMaxPhysicalPageBytes || config.buffer_pool_bytes < config.frame_bytes ||
-        config.inner_max_keys == 0) {
+        config.inner_max_keys == 0 ||
+        (config.memtable_flush_count != 0 && config.memtable_flush_count >= config.max_memtable_count)) {
         return Status::invalid_argument("Tree core requires runtime, bounded frames and empty output");
     }
     if (config.page_store != nullptr && !bootstrap.local && !bootstrap.chunk) {

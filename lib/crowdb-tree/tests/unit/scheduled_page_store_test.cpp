@@ -148,6 +148,32 @@ TEST(ScheduledPageStore, FullBackendCpuQueueRetainsEveryAcceptedOperation)
     }
 }
 
+TEST(ScheduledPageStore, AsyncSubmissionDoesNotQueueBehindSynchronousWork)
+{
+    TestBlockingStore  device;
+    TestScheduledStore test;
+    ASSERT_TRUE(test.create(&device).ok());
+    std::array<uint8_t, 4> bytes{};
+    ASSERT_TRUE(device.write_at(0, bytes.data(), bytes.size()).ok());
+    TestCompletion read;
+    test.scheduled->submit_read(0, bytes.data(), bytes.size(), read.callback());
+    device.wait();
+
+    TestCompletion async;
+    const auto     before    = test.runtime->snapshot().backend.submitted;
+    auto          &scheduled = static_cast<ScheduledPageStore &>(*test.scheduled);
+    const auto status = scheduled.submit_async_step([](AsyncCompletion complete) { complete.complete(Status::Ok()); },
+                                                    async.callback());
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(async.calls.load(), 1U);
+    EXPECT_EQ(test.runtime->snapshot().backend.submitted, before);
+    EXPECT_EQ(read.calls.load(), 0U);
+    device.release();
+    read.wait();
+    EXPECT_TRUE(read.status.ok());
+    test.binding->drain();
+}
+
 struct TestUncertainStore : AsyncPageStore
 {
     AsyncCompletion retained;
@@ -236,8 +262,12 @@ TEST(ScheduledPageStore, CountersIncludeMetadataAndCountOnlyFirstRealTerminal)
     auto                   callback = write.callback();
     callback.cause                  = TreeWorkCause::Checkpoint;
     test.scheduled->submit_typed_write(PagePurpose::kPageIndex, 0, bytes.data(), bytes.size(), callback);
-    write.wait();
+    ASSERT_EQ(write.calls.load(), 1U);
     ASSERT_TRUE(write.status.ok());
+    TestCompletion sync;
+    ASSERT_TRUE(test.scheduled->submit_fsync(sync.callback()).ok());
+    ASSERT_EQ(sync.calls.load(), 1U);
+    ASSERT_TRUE(sync.status.ok());
     TestCompletion read;
     callback       = read.callback();
     callback.cause = TreeWorkCause::Snapshot;

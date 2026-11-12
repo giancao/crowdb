@@ -48,7 +48,7 @@ async fn engine_get_resolves_correctly_across_both_ready_and_pending() {
         slot: 1,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: bytes::Bytes::from(encode_put_payload(b"k", b"v")),
+        payload: bytes::Bytes::from(encode_put_payload(b"k", b"v")).into(),
     };
     learner.learn(entry, &[]).await;
 

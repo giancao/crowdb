@@ -198,6 +198,9 @@ struct FlushPersistence::Commit : std::enable_shared_from_this<Commit>
         }
         if (status.ok()) {
             owner->report_.durable_committed = true;
+            // The checkpoint still owns publication, so a later ordinary
+            // flush cannot publish before this reset.
+            owner->preparation_->core->publisher().note_persistent_flush();
             if (auto *diagnostics = owner->preparation_->options.diagnostics) {
                 diagnostics->written_frames.store(owner->report_.written_frames, std::memory_order_release);
                 diagnostics->total_written_frames.fetch_add(owner->report_.written_frames, std::memory_order_relaxed);

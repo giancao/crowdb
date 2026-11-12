@@ -369,7 +369,7 @@ bool frame_validate_key_range(const uint8_t *f, uint32_t page_bytes, const KeyRa
 
 LeafFrameBuilder::LeafFrameBuilder(uint8_t *f, uint32_t page_bytes) : f_(f), page_bytes_(page_bytes)
 {
-    std::memset(f_, 0, page_bytes_);
+    std::memset(f_, 0, kFrameHeaderSize);
     frame_put_u32(f_, fh::kMagic, kFrameMagicLeaf);
     f_[fh::kType]          = static_cast<uint8_t>(page_type::kLeafBase);
     f_[fh::kFormatVersion] = static_cast<uint8_t>(kFrameVersion);
@@ -404,6 +404,7 @@ bool LeafFrameBuilder::try_append_sorted(Slice key, Slice cell)
 
 void LeafFrameBuilder::finish(uint64_t self_page_id, uint64_t right_sibling)
 {
+    std::memset(f_ + free_lo_, 0, free_hi_ - free_lo_);
     frame_put_u32(f_, fh::kSlotCount, count_);
     frame_put_u32(f_, fh::kFreeLo, free_lo_);
     frame_put_u32(f_, fh::kFreeHi, free_hi_);
@@ -543,7 +544,7 @@ bool leaf_frame_append_deltas(const uint8_t *src, uint32_t page_bytes, const std
 void overflow_frame_build(uint8_t *f, uint32_t page_bytes, uint64_t self_page_id, uint64_t next_page_id,
                           const uint8_t *payload, uint32_t chunk_len)
 {
-    std::memset(f, 0, page_bytes);
+    std::memset(f, 0, kFrameHeaderSize);
     frame_put_u32(f, fh::kMagic, kFrameMagicOverflow);
     f[fh::kType]          = static_cast<uint8_t>(page_type::kOverflowFrame);
     f[fh::kFormatVersion] = static_cast<uint8_t>(kFrameVersion);
@@ -553,6 +554,7 @@ void overflow_frame_build(uint8_t *f, uint32_t page_bytes, uint64_t self_page_id
     if (chunk_len > 0) {
         std::memcpy(f + kFrameHeaderSize, payload, chunk_len);
     }
+    std::memset(f + kFrameHeaderSize + chunk_len, 0, overflow_chunk_cap(page_bytes) - chunk_len);
     stamp_trailer(f, page_bytes);
 }
 

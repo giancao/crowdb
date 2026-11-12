@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -257,6 +258,10 @@ class BlockPageStore : public PageStore
     // Retain the actual fd incarnation through an asynchronous operation.
     [[nodiscard]] std::shared_ptr<FileMedium>
     file_for_offset(uint64_t off, uint64_t *out_local, const std::shared_ptr<AllocationBudget> &budget = {}) const;
+
+    // Start a GC window at the next published file, skipping sparse holes.
+    [[nodiscard]] std::optional<uint32_t> next_file_index(uint64_t                                 first,
+                                                          const std::shared_ptr<AllocationBudget> &budget) const;
 
     // Ensures block files are allocated for the byte range [off, off+len),
     // mirroring write_at_extents' allocation logic without writing any data.

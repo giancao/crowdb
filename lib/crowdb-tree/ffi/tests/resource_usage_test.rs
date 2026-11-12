@@ -129,7 +129,7 @@ fn native_host_and_tree_resource_samples_keep_distinct_limits_and_scopes() {
     assert_ne!(first.scope_id, 0);
     assert!(first.resources[1].used > 0);
     assert!(host.resources[1].used >= first.resources[1].used);
-    assert!(first.resources[6].used > 0);
+    assert_eq!(first.resources[6].used, 0);
     assert_eq!(host.resources[8].limit, 4);
     assert_eq!(first.resources[0].denied_host, second.resources[0].denied_host);
 }

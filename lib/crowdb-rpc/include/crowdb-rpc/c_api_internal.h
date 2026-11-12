@@ -47,8 +47,8 @@ namespace crowdb::rpc
 
 // Convert a response Frame into C ABI buffer handles. Takes ownership of
 // the frame (deletes it). The data buffer is ref_clone'd so the handle
-// owns its own reference. Budget-owned controls move their exact storage and
-// admission; ordinary controls preserve their copied response handle.
+// owns its own reference. Budget-owned controls move their exact storage
+// and release admission; ordinary controls preserve their copied handle.
 // On error (frame == nullptr), both handles are set to nullptr.
 void frame_to_c_handles(Frame *frame, crowdb_rpc_buffer_t *out_ctrl, crowdb_rpc_buffer_t *out_data);
 

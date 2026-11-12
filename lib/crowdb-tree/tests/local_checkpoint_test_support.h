@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <functional>
+#include <mutex>
 
 namespace crowdb::tree::test_write
 {
@@ -20,14 +21,11 @@ class TestCheckpointStore final : public AsyncPageStore
     std::vector<std::string>                                         events;
     size_t                                                           defer_at        = 0;
     size_t                                                           fail_at         = 0;
+    size_t                                                           fail_count      = 1;
     size_t                                                           throw_at        = 0;
     size_t                                                           inline_throw_at = 0;
     AsyncCompletion                                                  pending;
     std::atomic<bool>                                                deferred{false};
-    uint64_t                                                         address = 0;
-    const uint8_t                                                   *input   = nullptr;
-    size_t                                                           bytes   = 0;
-    bool                                                             barrier = false;
 
     [[nodiscard]] bool write_completion_is_reloadable() const noexcept override
     {
@@ -50,20 +48,13 @@ class TestCheckpointStore final : public AsyncPageStore
         EXPECT_EQ(reinterpret_cast<uintptr_t>(data) % 4096, 0U);
         EXPECT_EQ(at % 4096, 0U);
         EXPECT_EQ(size % 4096, 0U);
-        events.emplace_back(at < 8192 ? "anchor" : "metadata");
-        address = at;
-        input   = static_cast<const uint8_t *>(data);
-        bytes   = size;
-        barrier = false;
-        accept(std::move(callback));
-        return events.size();
+        return submit(at < 8192 ? "anchor" : "metadata",
+                      {.address = at, .input = static_cast<const uint8_t *>(data), .bytes = size}, std::move(callback));
     }
 
     Status submit_fsync(AsyncCompletion callback) override
     {
-        events.emplace_back("barrier");
-        barrier = true;
-        accept(std::move(callback));
+        submit("barrier", {.barrier = true}, std::move(callback));
         return Status::Ok();
     }
 
@@ -71,42 +62,18 @@ class TestCheckpointStore final : public AsyncPageStore
     {
     }
 
-    void accept(AsyncCompletion callback)
-    {
-        ASSERT_FALSE(pending);
-        pending = std::move(callback);
-        if (events.size() == throw_at) {
-            throw std::runtime_error("unknown acceptance");
-        }
-        if (events.size() != defer_at) {
-            finish();
-        }
-        else {
-            deferred.store(true, std::memory_order_release);
-            deferred.notify_all();
-        }
-        if (events.size() == inline_throw_at) {
-            throw std::runtime_error("inline completion then failed submission");
-        }
-    }
-
     void finish()
     {
-        deferred.store(false, std::memory_order_release);
-        auto callback = std::exchange(pending, {});
-        ASSERT_TRUE(callback);
-        auto status = Status::io_error();
-        if (events.size() != fail_at) {
-            auto *block = dynamic_cast<BlockPageStore *>(device.get());
-            if (block != nullptr) {
-                status = barrier ? block->sync(callback.allocations)
-                                 : block->write_at(address, input, bytes, callback.allocations);
-            }
-            else {
-                status = barrier ? device->sync() : device->write_at(address, input, bytes);
-            }
+        AsyncCompletion callback;
+        Write           work;
+        {
+            const std::scoped_lock lock(mutex_);
+            callback = std::exchange(pending, {});
+            work     = pending_write_;
+            deferred.store(false, std::memory_order_release);
         }
-        callback.complete(status);
+        ASSERT_TRUE(callback);
+        complete_write(work, callback);
     }
 
     void wait_deferred() const
@@ -115,6 +82,65 @@ class TestCheckpointStore final : public AsyncPageStore
             deferred.wait(false, std::memory_order_acquire);
         }
     }
+
+  private:
+    struct Write
+    {
+        uint64_t       address = 0;
+        const uint8_t *input   = nullptr;
+        size_t         bytes   = 0;
+        bool           barrier = false;
+        bool           fail    = false;
+    };
+
+    uint64_t submit(const char *event, Write work, AsyncCompletion callback)
+    {
+        size_t ordinal;
+        bool   throw_after;
+        {
+            const std::scoped_lock lock(mutex_);
+            events.emplace_back(event);
+            ordinal     = events.size();
+            work.fail   = fail_at != 0 && ordinal >= fail_at && ordinal - fail_at < fail_count;
+            throw_after = ordinal == inline_throw_at;
+            if (ordinal == defer_at || ordinal == throw_at) {
+                EXPECT_FALSE(pending);
+                pending_write_ = work;
+                pending        = std::exchange(callback, {});
+                if (ordinal == throw_at) {
+                    throw std::runtime_error("unknown acceptance");
+                }
+                deferred.store(true, std::memory_order_release);
+                deferred.notify_all();
+            }
+        }
+        if (callback) {
+            complete_write(work, callback);
+        }
+        if (throw_after) {
+            throw std::runtime_error("inline completion then failed submission");
+        }
+        return ordinal;
+    }
+
+    void complete_write(const Write &work, const AsyncCompletion &callback)
+    {
+        auto status = Status::io_error();
+        if (!work.fail) {
+            auto *block = dynamic_cast<BlockPageStore *>(device.get());
+            if (block != nullptr) {
+                status = work.barrier ? block->sync(callback.allocations)
+                                      : block->write_at(work.address, work.input, work.bytes, callback.allocations);
+            }
+            else {
+                status = work.barrier ? device->sync() : device->write_at(work.address, work.input, work.bytes);
+            }
+        }
+        callback.complete(status);
+    }
+
+    std::mutex mutex_;
+    Write      pending_write_;
 };
 
 struct TestCheckpoint

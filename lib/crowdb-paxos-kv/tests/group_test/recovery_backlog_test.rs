@@ -69,7 +69,7 @@ async fn follower_fetches_a_backlog_above_the_unimplemented_snapshot_threshold()
             slot,
             ballot: PxBallot::new(1, 1),
             term: 0,
-            payload: bytes::Bytes::new(),
+            payload: bytes::Bytes::new().into(),
         };
         leader.local_replica().acceptor.accept(&entry).await;
         leader.local_replica().learner.learn(entry, &[]).await;

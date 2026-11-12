@@ -83,7 +83,10 @@ mod bytes;
 mod bytes_mut;
 mod fmt;
 mod loom;
-pub use crate::bytes::{Bytes, OwnerAllocation, OwnerAllocationContext, OwnerAllocationError, OwnerAllocationLease};
+pub use crate::bytes::{
+    Bytes, OwnerAllocation, OwnerAllocationContext, OwnerAllocationError, OwnerAllocationLease,
+    RetainedAllocation,
+};
 pub use crate::bytes_mut::BytesMut;
 
 // Optional Serde support

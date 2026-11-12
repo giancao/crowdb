@@ -157,7 +157,7 @@ async fn accept(group: &PxGroup, slot: u64) {
         slot,
         term: 0,
         ballot: PxBallot::new(1, 1),
-        payload: Bytes::from(payload),
+        payload: Bytes::from(payload).into(),
     };
     assert!(matches!(
         group.local_replica().on_accept(&entry).await,

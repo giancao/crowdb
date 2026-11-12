@@ -103,9 +103,9 @@ impl PxLocalReplica {
         // `propose` returning `Chosen` for read-your-writes).
         learner.update_chosen_frontier(entry.slot, entry.term);
         learner.record_request_results(request_identities, entry.slot);
-        // Deferred: engine apply + applied frontier (the FFI/memtable insert
-        // moved off the write critical path; the apply fence gates reads).
-        // Gap 2: only advance `contiguous_applied` if the apply succeeded.
+        let started = admission.map(|permit| learner.start_admitted_apply(slot, permit));
+        // Native admission is already submitted. Defer completion and the
+        // compatibility apply path without holding up the Chosen response.
         let span = info_span!(
             "learn_chosen",
             s = self.log_store_id.load(Ordering::Acquire),
@@ -120,7 +120,7 @@ impl PxLocalReplica {
                 // apply inside the proposal window through frontier advance.
                 let _window = window;
                 if learner
-                    .apply_entry_admitted(entry.slot, &entry.payload, admission)
+                    .finish_apply_entry(entry.slot, &entry.payload, started)
                     .await
                     .is_ok()
                 {

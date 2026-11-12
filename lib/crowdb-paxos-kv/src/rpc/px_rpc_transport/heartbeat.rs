@@ -22,7 +22,7 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint).await?;
         let mut builder = FlatBufferBuilder::new();
         let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
         let args = FBHeartbeatRequestArgs {

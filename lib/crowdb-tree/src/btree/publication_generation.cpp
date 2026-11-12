@@ -94,6 +94,7 @@ void PublicationCoordinator::install_replacement(std::shared_ptr<Replacement> re
     assert(replacement->state->generation == current->state->generation + 1);
     replacement->state->commit_seq = current->state->commit_seq + 1;
     requested_gc_floor_.store(0, std::memory_order_release);
+    note_persistent_flush();
     checkpoint_ = std::move(replacement->checkpoint);
     auto *next  = std::exchange(replacement->root, nullptr);
     auto *old   = root_.exchange(next, std::memory_order_acq_rel);

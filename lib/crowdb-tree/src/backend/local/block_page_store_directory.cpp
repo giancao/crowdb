@@ -398,6 +398,17 @@ std::shared_ptr<FileMedium> BlockPageStore::file_for_offset(uint64_t off, uint64
     return blocks_->get(static_cast<uint32_t>(off / block_size_), budget);
 }
 
+std::optional<uint32_t> BlockPageStore::next_file_index(uint64_t                                 first,
+                                                        const std::shared_ptr<AllocationBudget> &budget) const
+{
+    uint32_t                    index = 0;
+    std::shared_ptr<FileMedium> file;
+    if (blocks_ && blocks_->next(&first, &index, &file, budget)) {
+        return index;
+    }
+    return std::nullopt;
+}
+
 Status BlockPageStore::sync()
 {
     return sync({});

@@ -14,9 +14,6 @@ detail::ResourceBudget::Limits resource_limits(TreeResourceLimits limits) noexce
 
 namespace
 {
-constexpr size_t kHostCpuProgressSlots     = 2;
-constexpr size_t kHostBackendProgressSlots = 1;
-
 detail::ResourceBudget::Limits operation_limits(const TreeRuntimeOptions &options) noexcept
 {
     auto limits = resource_limits(options.limits);
@@ -41,16 +38,13 @@ TreeRuntime::State::State(TreeRuntimeOptions options, std::shared_ptr<detail::Bo
       budget(operation_limits(options), options.max_waiters_per_class, lifecycle)
 {
     const auto storage = detail::AllocationBound()
-                             .add(detail::FlushRuntime::allocation_bound(options.workers, options.cpu_queue_limit +
-                                                                                              kHostCpuProgressSlots))
-                             .add(detail::FlushRuntime::allocation_bound(
-                                 options.backend_workers, options.backend_queue_limit + kHostBackendProgressSlots))
+                             .add(detail::FlushRuntime::allocation_bound(options.workers))
+                             .add(detail::FlushRuntime::allocation_bound(options.backend_workers))
                              .add(2 * detail::shared_allocation_bound<detail::FlushRuntime>())
                              .add(detail::shared_allocation_bound<TreeRuntime>())
                              .add(detail::RetirementQueue::allocation_bound())
                              .add(2 * ApplyDispatcher::allocation_bound())
-                             .add((kHostCpuProgressSlots + kHostBackendProgressSlots) *
-                                  detail::shared_allocation_bound<detail::FlushRuntime::Lane>())
+                             .add(3 * detail::shared_allocation_bound<detail::FlushRuntime::Lane>())
                              .value();
     if (!storage) {
         throw std::invalid_argument("runtime storage size overflow");
@@ -58,12 +52,11 @@ TreeRuntime::State::State(TreeRuntimeOptions options, std::shared_ptr<detail::Bo
     if (*storage > lifecycle->available()) {
         throw std::bad_alloc();
     }
-    cpu =
-        std::allocate_shared<detail::FlushRuntime>(MetadataAllocator<detail::FlushRuntime>(lifecycle), options.workers,
-                                                   options.cpu_queue_limit + kHostCpuProgressSlots, lifecycle);
-    backend = std::allocate_shared<detail::FlushRuntime>(
-        MetadataAllocator<detail::FlushRuntime>(lifecycle), options.backend_workers,
-        options.backend_queue_limit + kHostBackendProgressSlots, lifecycle);
+    cpu = std::allocate_shared<detail::FlushRuntime>(MetadataAllocator<detail::FlushRuntime>(lifecycle),
+                                                     options.workers, options.cpu_queue_limit, lifecycle);
+    backend =
+        std::allocate_shared<detail::FlushRuntime>(MetadataAllocator<detail::FlushRuntime>(lifecycle),
+                                                   options.backend_workers, options.backend_queue_limit, lifecycle);
     auto view_lane =
         std::allocate_shared<detail::FlushRuntime::Lane>(MetadataAllocator<detail::FlushRuntime::Lane>(lifecycle), 1);
     auto status = ApplyDispatcher::create(cpu, std::move(view_lane), 16, lifecycle, &view_cpu_progress);
@@ -104,10 +97,8 @@ TreeRuntime::State::~State()
 
 Status TreeRuntime::create(TreeRuntimeOptions options, std::shared_ptr<TreeRuntime> *out)
 try {
-    if (out == nullptr || options.workers == 0 || options.cpu_queue_limit == 0 ||
-        options.cpu_queue_limit > SIZE_MAX - kHostCpuProgressSlots || options.max_waiters_per_class == 0 ||
-        options.backend_workers == 0 || options.backend_queue_limit == 0 ||
-        options.backend_queue_limit > SIZE_MAX - kHostBackendProgressSlots || options.lifecycle_bytes == 0 ||
+    if (out == nullptr || options.workers == 0 || options.cpu_queue_limit == 0 || options.max_waiters_per_class == 0 ||
+        options.backend_workers == 0 || options.backend_queue_limit == 0 || options.lifecycle_bytes == 0 ||
         options.lifecycle_bytes > options.limits.routing_bytes) {
         return Status::invalid_argument();
     }
@@ -204,14 +195,14 @@ ResourceUsageSnapshot TreeRuntime::resource_usage() const noexcept
     result[1].used += bootstrap.reserved + bootstrap.allocated;
     const auto cpu     = state_->cpu->snapshot();
     const auto backend = state_->backend->snapshot();
-    result[6]          = {.limit       = state_->options.cpu_queue_limit + kHostCpuProgressSlots,
-                          .used        = state_->cpu->queue_permits(),
+    result[6]          = {.limit       = state_->cpu->queue_target(),
+                          .used        = cpu.queued,
                           .denied_host = cpu.rejected,
                           .waits       = cpu.submitted,
                           .wait_ns     = cpu.queue_ns,
                           .waiters     = cpu.queued};
-    result[7]          = {.limit       = state_->options.backend_queue_limit + kHostBackendProgressSlots,
-                          .used        = state_->backend->queue_permits(),
+    result[7]          = {.limit       = state_->backend->queue_target(),
+                          .used        = backend.queued,
                           .denied_host = backend.rejected,
                           .waits       = backend.submitted,
                           .wait_ns     = backend.queue_ns,

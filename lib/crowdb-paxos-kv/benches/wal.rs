@@ -37,7 +37,7 @@ fn make_record(group: u64, slot: u64, payload_size: usize) -> WALRecord {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::from(vec![0u8; payload_size]),
+        payload: Bytes::from(vec![0u8; payload_size]).into(),
     };
     WALRecord::from_accepted(group, &entry)
 }

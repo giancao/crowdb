@@ -8,7 +8,7 @@ Status SourceWriteReservation::bind_prepaid(const SourceWriteOptions &options, W
                                             detail::BudgetClass category, detail::ResourceBudget::Credit credit,
                                             SourceWriteReservation *out)
 {
-    const auto bound   = SourceWriteBudget::allocation_bound(options, footprint);
+    const auto bound   = SourceWriteBudget::allocation_bound(footprint);
     const bool gap     = category == detail::BudgetClass::kGapRepair;
     const auto largest = footprint.max_key_size == 0 ? footprint.key_bytes : footprint.max_key_size;
     if (out == nullptr || out->valid() || footprint.entries == 0 || !bound ||

@@ -71,6 +71,14 @@ int32_t ct_future_poll_compaction(ct_future *future, int32_t *done, ct_compactio
 // Returns zero for a null handle or a Tree with no durable checkpoint.
 uint64_t ct_durable_coverage(ct_tree *tree);
 
+// Successful ordinary flush publications since the last durable root commit.
+uint64_t ct_flushes_since_persistent(ct_tree *tree);
+// Bind a wake owner or reuse it with an updated threshold. Success consumes
+// the caller's context reference. The first reference lives with the Tree.
+// wake must be thread-safe and non-blocking. A registration race can coalesce wakes.
+int32_t ct_bind_flush_threshold(ct_tree *tree, uint64_t threshold, void (*wake)(void *), void (*drop_context)(void *),
+                                void *context);
+
 // Runtime Trees only. A successful start returns an owned future, including
 // immediate operation failures. Admission failures return no future.
 int32_t ct_flush_report_async(ct_tree *tree, ct_future **out);

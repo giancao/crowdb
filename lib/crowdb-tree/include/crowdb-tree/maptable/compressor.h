@@ -46,6 +46,10 @@ void encode_durable_page(const uint8_t *frame, uint32_t page_bytes, compress_alg
 Status encode_durable_page_into(std::span<const uint8_t> frame, compress_algo prefer, std::span<uint8_t> output,
                                 std::span<uint8_t> scratch, uint32_t *logical_bytes);
 
+// Finish the raw envelope around a freshly encoded, checksummed frame
+// already present at kDurableBlobHeader. The remaining bytes are IU padding.
+void finish_raw_durable_page(std::span<uint8_t> output, uint32_t frame_bytes) noexcept;
+
 // Read the logical (raw, uncompressed) frame length recorded in a durable
 // blob's header, so a reader can size the decode buffer without knowing the
 // frame geometry up front. Returns 0 if the blob is shorter than the header.
@@ -55,6 +59,9 @@ Status encode_durable_page_into(std::span<const uint8_t> frame, compress_algo pr
 // This is the value the manifest records and store_unloaded re-tags. Returns 0
 // if the blob is shorter than the header.
 [[nodiscard]] uint32_t durable_blob_logical_len(const uint8_t *blob, size_t blob_len);
+
+// Validate a raw envelope and borrow its frame bytes from the caller's buffer.
+Status view_raw_durable_page(std::span<const uint8_t> blob, uint32_t page_bytes, std::span<const uint8_t> *frame);
 
 // Decode a durable blob back into exactly `page_bytes` at `frame_out`. Verifies
 // the stored-bytes CRC and the decompressed length. Returns corruption on any

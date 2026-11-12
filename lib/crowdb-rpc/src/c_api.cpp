@@ -475,6 +475,70 @@ uint8_t crowdb_rpc_max_data_views(void)
     return crowdb::rpc::MAX_DATA_VIEWS;
 }
 
+crowdb_rpc_status crowdb_rpc_client_send_control_tail(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
+                                                      crowdb_rpc_conn_t conn, uint64_t request_id,
+                                                      crowdb_rpc_buffer_t prefix, crowdb_rpc_buffer_t tail,
+                                                      uint16_t msg_type, crowdb_rpc_on_complete on_complete,
+                                                      void *user_data)
+try {
+    std::unique_ptr<crowdb_rpc_buffer_s, decltype(&crowdb_rpc_buffer_release)> prefix_owner(prefix,
+                                                                                            crowdb_rpc_buffer_release);
+    std::unique_ptr<crowdb_rpc_buffer_s, decltype(&crowdb_rpc_buffer_release)> tail_owner(tail,
+                                                                                          crowdb_rpc_buffer_release);
+    if (client == nullptr || server == nullptr || conn == nullptr || prefix == nullptr || tail == nullptr ||
+        prefix->buf == nullptr || tail->buf == nullptr || on_complete == nullptr ||
+        uint64_t{prefix->buf->len} + tail->buf->len + crowdb::rpc::HEADER_SIZE > UINT32_MAX) {
+        return CROWDB_RPC_ERR_INVALID_ARG;
+    }
+    const auto connection = conn->conn;
+    const auto transport = server->server->shared_transport();
+    const auto caller    = client->client;
+    const bool ok = caller->send_control_tail(transport.get(), connection.get(), request_id, prefix->buf->ref_clone(),
+                                              tail->buf->ref_clone(), msg_type, on_complete, user_data);
+    return submit_status(ok, connection.get());
+}
+catch (...) {
+    return CROWDB_RPC_ERR_CONN_ERROR;
+}
+
+crowdb_rpc_status crowdb_rpc_client_send_control_chain(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
+                                                       crowdb_rpc_conn_t conn, uint64_t request_id,
+                                                       crowdb_rpc_buffer_t prefix, crowdb_rpc_buffer_t const *tails,
+                                                       uint8_t tail_count, uint16_t msg_type,
+                                                       crowdb_rpc_on_complete on_complete, void *user_data)
+try {
+    if (client == nullptr || server == nullptr || conn == nullptr || prefix == nullptr || prefix->buf == nullptr ||
+        tails == nullptr || tail_count == 0 || tail_count > crowdb::rpc::MAX_DATA_VIEWS || on_complete == nullptr) {
+        return CROWDB_RPC_ERR_INVALID_ARG;
+    }
+    const auto                                                     connection = conn->conn;
+    std::array<crowdb::rpc::Buffer *, crowdb::rpc::MAX_DATA_VIEWS> buffers;
+    uint64_t                                                       tail_len = 0;
+    for (uint8_t index = 0; index < tail_count; ++index) {
+        if (tails[index] == nullptr || tails[index]->buf == nullptr) {
+            return CROWDB_RPC_ERR_INVALID_ARG;
+        }
+        buffers[index] = tails[index]->buf;
+        tail_len += buffers[index]->len;
+    }
+    if (uint64_t{prefix->buf->len} + tail_len + crowdb::rpc::HEADER_SIZE > UINT32_MAX) {
+        return CROWDB_RPC_ERR_INVALID_ARG;
+    }
+
+    const auto transport = server->server->shared_transport();
+    const auto caller    = client->client;
+    for (uint8_t index = 0; index < tail_count; ++index) {
+        buffers[index]->ref_clone();
+    }
+    const bool ok = caller->send_control_chain(transport.get(), connection.get(), request_id, prefix->buf->ref_clone(),
+                                               buffers.data(), tail_count, static_cast<uint32_t>(tail_len), msg_type,
+                                               on_complete, user_data);
+    return submit_status(ok, connection.get());
+}
+catch (...) {
+    return CROWDB_RPC_ERR_CONN_ERROR;
+}
+
 crowdb_rpc_status crowdb_rpc_client_send_chain(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
                                                crowdb_rpc_conn_t conn, uint64_t request_id, crowdb_rpc_buffer_t control,
                                                crowdb_rpc_buffer_t const *data_views, uint8_t data_view_count,

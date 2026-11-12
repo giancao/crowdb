@@ -49,6 +49,8 @@ void encode_leaf(FinalPageEncodeState &state, uint8_t *output)
     frame_put_u32(output, fh::kFreeLo,
                   static_cast<uint32_t>(kFrameHeaderSize + (state.entries.size() * kLeafSlotSize)));
     frame_put_u32(output, fh::kFreeHi, hi);
+    const auto free_lo = frame_u32(output, fh::kFreeLo);
+    std::memset(output + free_lo, 0, hi - free_lo);
     if (!state.entries.empty()) {
         LeafFrameView view(output, bytes);
         const auto    lower = view.key(0);
@@ -84,13 +86,14 @@ void encode_inner(FinalPageEncodeState &state, uint8_t *output)
     frame_put_u32(output, fh::kSlotCount, static_cast<uint32_t>(inner.separators.size()));
     frame_put_u32(output, fh::kFreeLo, lo);
     frame_put_u32(output, fh::kFreeHi, hi);
+    std::memset(output + lo, 0, hi - lo);
     frame_set_inner_fence_pages(output, state.limits.frame_bytes, state.fences.lower_leaf, state.fences.upper_leaf);
 }
 } // namespace
 
 void encode_primary(FinalPageEncodeState &state, uint8_t *output)
 {
-    std::memset(output, 0, state.limits.frame_bytes);
+    std::memset(output, 0, kFrameHeaderSize);
     output[fh::kFormatVersion] = static_cast<uint8_t>(kFrameVersion);
     frame_put_u64(output, fh::kSelfpage_id, state.pid);
     if (state.page->level == 0) {

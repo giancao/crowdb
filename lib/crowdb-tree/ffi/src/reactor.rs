@@ -79,7 +79,6 @@ pub(crate) struct RawOutcome {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FutureKind {
     Get,
-    Flush,
     ScanOwned,
 }
 

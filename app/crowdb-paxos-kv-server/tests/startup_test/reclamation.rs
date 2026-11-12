@@ -23,7 +23,7 @@ async fn restored_wal_keeps_old_segments_visible_to_safe_reclamation() {
             slot,
             ballot: PxBallot::new(3, 1),
             term: 3,
-            payload: Bytes::from(encode_put_payload(b"key", &slot.to_le_bytes())),
+            payload: Bytes::from(encode_put_payload(b"key", &slot.to_le_bytes())).into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }

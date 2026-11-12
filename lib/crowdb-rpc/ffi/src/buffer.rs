@@ -12,8 +12,21 @@ use std::ptr;
 /// A pool-allocated byte buffer. The buffer is ref-counted; `Drop` calls
 /// `release` which decrements the refcount and recycles to the pool when
 /// it hits zero.
+#[repr(transparent)]
 pub struct Buffer {
     handle: sys::crowdb_rpc_buffer_t,
+}
+
+// A taken control only exposes the initialized bytes and immutable allocation metadata.
+struct FrozenControl(Buffer);
+
+// SAFETY: only the read-only native getters are available through this wrapper.
+unsafe impl Sync for FrozenControl {}
+
+impl AsRef<[u8]> for FrozenControl {
+    fn as_ref(&self) -> &[u8] {
+        self.0.bytes()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -70,6 +83,10 @@ pub struct BufferChain {
     buffers: Vec<Buffer>,
     len: u32,
 }
+
+// The chain exclusively owns its wrappers and exposes only immutable views.
+// Shared TCP submissions retain the underlying buffers by atomic refcount.
+unsafe impl Sync for BufferChain {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BufferChainError {
@@ -159,6 +176,10 @@ impl BufferChain {
     pub(crate) fn into_raw_handles(self) -> Vec<sys::crowdb_rpc_buffer_t> {
         self.buffers.into_iter().map(Buffer::into_raw).collect()
     }
+
+    pub(crate) fn raw_handles(&self) -> *const sys::crowdb_rpc_buffer_t {
+        self.buffers.as_ptr().cast()
+    }
 }
 
 impl std::fmt::Debug for BufferChain {
@@ -179,6 +200,21 @@ impl std::fmt::Debug for Buffer {
 }
 
 impl Buffer {
+    pub(crate) fn into_control_bytes(self) -> bytes::Bytes {
+        bytes::Bytes::from_owner(FrozenControl(self))
+    }
+
+    /// Returns the initialized root and actual allocation capacity of a taken
+    /// independent control. Receive-credit-backed controls are ineligible.
+    #[must_use]
+    pub fn control_allocation(bytes: &bytes::Bytes) -> Option<bytes::RetainedAllocation<'_>> {
+        let owner = &bytes.owner::<FrozenControl>()?.0;
+        let capacity = unsafe { sys::crowdb_rpc_buffer_allocation_capacity(owner.handle) };
+        // The moved native vector owns this initialized range and reports its
+        // actual allocation size. Bytes retains that vector across slices.
+        (capacity != 0)
+            .then(|| unsafe { bytes::RetainedAllocation::new(bytes, owner.bytes(), capacity as usize) })
+    }
     pub(crate) fn handle(&self) -> sys::crowdb_rpc_buffer_t {
         self.handle
     }

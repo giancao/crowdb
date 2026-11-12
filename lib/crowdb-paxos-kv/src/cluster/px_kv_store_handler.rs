@@ -96,6 +96,45 @@ fn operation_error_response(
     }
 }
 
+impl PxKvStore {
+    pub(crate) fn reserved_put_response(
+        key: &[u8],
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> Option<crate::rpc::KvResponse> {
+        crowdb_protocol::owner_fence::is_owner_fence_key(key).then(|| {
+            crate::rpc::KvResponse::cas_error(
+                crate::rpc::KvErrorCode::KvErrorCasFailed,
+                0,
+                "ownership changes require a conditional write",
+                request_id,
+                request_create_ms,
+            )
+        })
+    }
+
+    pub(crate) async fn propose_write_and_respond(
+        &self,
+        group_id: u64,
+        payload: Bytes,
+        client_id: u64,
+        seq: u64,
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> crate::rpc::KvResponse {
+        let Some(operations) = self.group_operations(group_id) else {
+            return missing_group_response(request_id, request_create_ms);
+        };
+        match operations
+            .write_encoded(payload, request_identity(client_id, seq))
+            .await
+        {
+            Ok(write) => crate::rpc::KvResponse::ok_chosen(write.chosen_slot, request_id, request_create_ms),
+            Err(error) => operation_error_response(error, request_id, request_create_ms),
+        }
+    }
+}
+
 impl KvStore for PxKvStore {
     async fn kv_get(
         &self,
@@ -153,13 +192,15 @@ impl KvStore for PxKvStore {
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvResponse {
-        write_and_respond(
-            self.group_operations(group_id),
-            vec![KvGroupMutation::Put {
-                key: Bytes::copy_from_slice(key),
-                value: Bytes::copy_from_slice(value),
-            }],
-            request_identity(client_id, seq),
+        if let Some(response) = Self::reserved_put_response(key, request_id, request_create_ms) {
+            return response;
+        }
+        let payload = Self::encode_kv_payload(&[(key, Some(value))]);
+        self.propose_write_and_respond(
+            group_id,
+            payload.into(),
+            client_id,
+            seq,
             request_id,
             request_create_ms,
         )
@@ -621,7 +662,7 @@ impl KvStore for PxKvStore {
         let mut last_op_slot = 0u64;
         let limit_usize = limit as usize;
         for (slot, entry) in entries {
-            let batch = Batch::decode(&entry.payload);
+            let batch = Batch::decode(&entry.payload.to_bytes());
             for op in batch.ops {
                 if !key_prefix.is_empty() && !op.key.starts_with(key_prefix) {
                     continue;

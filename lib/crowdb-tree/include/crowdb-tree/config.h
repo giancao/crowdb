@@ -92,6 +92,10 @@ struct Config
     // failed persistence preserves the old durable root and replay frontier.
     uint32_t max_memtable_count = 10;
 
+    // Automatic ordinary flush target, including the full active source.
+    // Zero keeps the existing rotation and flush policy.
+    uint32_t memtable_flush_count = 0;
+
     // Deprecated compatibility field. Immutable MappingView radix geometry
     // and checkpoint metadata layout are fixed by their format.
     uint32_t mapping_segment_slots = 1024;

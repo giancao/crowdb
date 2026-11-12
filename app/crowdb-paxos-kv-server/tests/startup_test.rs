@@ -144,7 +144,7 @@ async fn startup_passes_wal_segment_tuning_to_the_group_writer() {
             slot,
             ballot: PxBallot::new(slot, 1),
             term: slot,
-            payload: Bytes::from(vec![u8::try_from(slot).unwrap(); 1024]),
+            payload: Bytes::from(vec![u8::try_from(slot).unwrap(); 1024]).into(),
         };
         wal.append(&WALRecord::from_accepted(group.group_id(), &entry))
             .await
@@ -197,7 +197,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
             slot: 1,
             ballot: PxBallot::new(2, replica_id),
             term: 2,
-            payload: Bytes::new(),
+            payload: Bytes::new().into(),
         },
     ))
     .await
@@ -207,7 +207,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         slot: 2,
         ballot: PxBallot::new(3, replica_id),
         term: 3,
-        payload: Bytes::from(encode_put_payload(b"restore-key", b"restore-value")),
+        payload: Bytes::from(encode_put_payload(b"restore-key", b"restore-value")).into(),
     };
     wal.append(&WALRecord::from_accepted(group_id, &accepted_entry))
         .await

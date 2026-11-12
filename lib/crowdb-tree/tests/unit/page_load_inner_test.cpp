@@ -92,6 +92,31 @@ TEST(InnerLoad, ValidatesChecksumChildIdsAndMetadataBounds)
     }
 }
 
+TEST(InnerLoad, ReadReturnsDecodeToTheOriginalTaskWithoutQueueing)
+{
+    auto runtime                                  = std::make_shared<detail::FlushRuntime>(1, 1);
+    auto lane                                     = std::make_shared<detail::FlushRuntime::Lane>(1);
+    auto store                                    = std::make_shared<TestInnerStore>();
+    store->deferred                               = true;
+    auto                                  backing = inner_backing(store, 0, *inner({"m"}, {1, 2}));
+    AsyncStorePageLoader                  loader(store, runtime, lane);
+    std::shared_ptr<const InnerPageState> result;
+    InnerDecode                           decode;
+    const auto immediate = loader.read_inner(backing, &result, [&](Status status, InnerDecode ready) {
+        EXPECT_TRUE(status.ok()) << status.to_string();
+        decode = std::move(ready);
+    });
+    EXPECT_FALSE(immediate);
+    EXPECT_FALSE(decode);
+    store->finish(Status::Ok());
+    ASSERT_TRUE(decode);
+    EXPECT_EQ(runtime->snapshot().submitted, 0U);
+    EXPECT_EQ(result, nullptr);
+    ASSERT_TRUE(decode(&result).ok());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->children, (InnerPageState::Children{1, 2}));
+}
+
 TEST(InnerLoad, SlowIoDoesNotHoldCpuWorkerOrDelayOtherReads)
 {
     auto runtime                 = std::make_shared<detail::FlushRuntime>(1, 1);

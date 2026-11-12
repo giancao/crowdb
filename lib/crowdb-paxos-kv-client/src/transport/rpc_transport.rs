@@ -43,9 +43,9 @@ use crowdb_protocol::kv_client_fb::{
     FBKvBatchWriteRequest, FBKvBatchWriteRequestArgs, FBKvClientRetCode, FBKvDeleteRequest,
     FBKvDeleteRequestArgs, FBKvGetRequest, FBKvGetRequestArgs, FBKvJournalScanRequest,
     FBKvJournalScanRequestArgs, FBKvRevisionPrecondition, FBKvRevisionPreconditionArgs, FBKvScanDirection,
-    FBKvScanRequest, FBKvScanRequestArgs, FBKvSetRequest, FBKvSetRequestArgs, FBListSnapshotsRequest,
-    FBListSnapshotsRequestArgs, FBReadMode, FBReleaseSnapshotRequest, FBReleaseSnapshotRequestArgs,
-    FBSnapshotScanRequest, FBSnapshotScanRequestArgs,
+    FBKvScanRequest, FBKvScanRequestArgs, FBKvSetRequest, FBKvSetRequestArgs, FBKvWriteRequest,
+    FBKvWriteRequestArgs, FBListSnapshotsRequest, FBListSnapshotsRequestArgs, FBReadMode,
+    FBReleaseSnapshotRequest, FBReleaseSnapshotRequestArgs, FBSnapshotScanRequest, FBSnapshotScanRequestArgs,
 };
 use crowdb_rpc_ffi::{
     Buffer, Connection, ConnectionPoolError, ConnectionPoolIndex, RpcClient, RpcError, RpcServer,
@@ -95,40 +95,134 @@ impl PaxosKvRpcTransport {
         request_create_ms: u64,
         group_id: u64,
     ) -> Result<KvResponse> {
-        let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
-        let mut builder = FlatBufferBuilder::new();
-        let fb_key = builder.create_vector(key);
-        let fb_value = builder.create_vector(value);
-        let args = FBKvSetRequestArgs {
-            id: req_id,
-            rpc_create_nano: 0,
-            version: 1,
-            key: Some(fb_key),
-            value: Some(fb_value),
-            seq,
-            ttl_ms: 0,
+        self.send_write_payload(
+            rpc_endpoint,
+            std::iter::once((key, Some(value))),
             client_id,
+            seq,
             request_id,
             request_create_ms,
             group_id,
-            forwarded: false,
-            precondition: None,
-        };
-        let req = FBKvSetRequest::create(&mut builder, &args);
+            FBMsgType::EKvPutRequest.0 as u16,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn send_put_owned(
+        &self,
+        rpc_endpoint: &str,
+        key: &[u8],
+        value: &Bytes,
+        client_id: u64,
+        seq: u64,
+        request_id: u64,
+        request_create_ms: u64,
+        group_id: u64,
+    ) -> Result<KvResponse> {
+        self.send_write_payload(
+            rpc_endpoint,
+            std::iter::once((key, Some(value.as_ref()))),
+            client_id,
+            seq,
+            request_id,
+            request_create_ms,
+            group_id,
+            FBMsgType::EKvPutRequest.0 as u16,
+            Some(value),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
+    async fn send_write_payload<'a>(
+        &self,
+        rpc_endpoint: &str,
+        operations: impl ExactSizeIterator<Item = (&'a [u8], Option<&'a [u8]>)> + Clone,
+        client_id: u64,
+        seq: u64,
+        request_id: u64,
+        request_create_ms: u64,
+        group_id: u64,
+        msg_type: u16,
+        value_tail: Option<&Bytes>,
+    ) -> Result<KvResponse> {
+        const ENVELOPE_CAPACITY: usize = 128;
+        let req_id = self.next_id();
+        let conn = self.conn_for(rpc_endpoint)?;
+        let value_tail = value_tail.filter(|tail| !tail.is_empty() && !conn.is_rdma());
+        let count = u16::try_from(operations.len())
+            .map_err(|_| Error::Server("too many operations in write request".into()))?;
+        debug_assert!(value_tail.is_none() || count == 1);
+        let payload_len = operations
+            .clone()
+            .try_fold(2usize, |len, (key, value)| {
+                len.checked_add(9)?
+                    .checked_add(key.len())?
+                    .checked_add(value.map_or(0, <[u8]>::len))
+            })
+            .ok_or_else(|| Error::Server("write payload is too large".into()))?;
+        let capacity = payload_len
+            .checked_add(ENVELOPE_CAPACITY)
+            .filter(|&len| len <= flatbuffers::FLATBUFFERS_MAX_BUFFER_SIZE)
+            .ok_or_else(|| Error::Server("write request is too large".into()))?;
+
+        // The first vector ends at the tail of the finished envelope. Reserve
+        // its capacity once, then append the canonical payload in place.
+        let mut bytes = Vec::with_capacity(capacity - value_tail.map_or(0, Bytes::len));
+        let address = bytes.as_ptr() as usize;
+        bytes.resize(ENVELOPE_CAPACITY, 0);
+        let mut builder = FlatBufferBuilder::from_vec(bytes);
+        let payload = builder.create_vector::<u8>(&[]);
+        debug_assert_eq!(payload.value() as usize, std::mem::size_of::<u32>());
+        let req = FBKvWriteRequest::create(
+            &mut builder,
+            &FBKvWriteRequestArgs {
+                id: req_id,
+                rpc_create_nano: 0,
+                version: 1,
+                seq,
+                client_id,
+                request_id,
+                request_create_ms,
+                group_id,
+                payload: Some(payload),
+            },
+        );
         builder.finish(req, None);
-        let control = Buffer::from_bytes(builder.finished_data());
-        let msg_type = FBMsgType::EKvSetRequest.0 as u16;
-        let fut = self
-            .rpc
-            .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(|e| self.map_rpc_err(e, rpc_endpoint, conn.generation()))?;
+        let (mut bytes, head) = builder.collapse();
+        let payload_size_offset = bytes.len() - std::mem::size_of::<u32>();
+        bytes[payload_size_offset..].copy_from_slice(&(payload_len as u32).to_le_bytes());
+        bytes.extend_from_slice(&count.to_le_bytes());
+        for (key, value) in operations {
+            bytes.push(u8::from(value.is_none()));
+            bytes.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(key);
+            let value = value.unwrap_or_default();
+            bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            if value_tail.is_none() {
+                bytes.extend_from_slice(value);
+            }
+        }
+        debug_assert_eq!(bytes.as_ptr() as usize, address);
+        let control = Buffer::from_vec_offset(bytes, head);
+        let fut = if let Some(value) = value_tail {
+            let tail = Buffer::try_from_owned_bytes(value.clone())
+                .map_err(|error| Error::Server(error.to_string()))?;
+            self.rpc
+                .call_control_tail(&self.server, &conn, req_id, control, tail, msg_type)
+        } else {
+            self.rpc
+                .call(&self.server, &conn, req_id, control, None, msg_type)
+        }
+        .map_err(|e| self.map_rpc_err(e, rpc_endpoint, conn.generation()))?;
         let resp = fut
             .await
             .map_err(|e| self.map_rpc_err(e, rpc_endpoint, conn.generation()))?;
         let ctrl = resp.control.ok_or_else(|| Error::Transport {
             endpoint: rpc_endpoint.to_string(),
-            status: "put response missing control buffer".into(),
+            status: "write response missing control buffer".into(),
         })?;
         parse_kv_response(ctrl.bytes())
     }
@@ -259,55 +353,24 @@ impl PaxosKvRpcTransport {
         request_create_ms: u64,
         group_id: u64,
     ) -> Result<KvResponse> {
-        let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
-        let mut builder = FlatBufferBuilder::new();
-        let item_offsets: Vec<_> = items
-            .iter()
-            .map(|item| {
-                let key = builder.create_vector(&item.key);
-                let value = builder.create_vector(&item.value);
-                FBKvBatchItem::create(
-                    &mut builder,
-                    &FBKvBatchItemArgs {
-                        key: Some(key),
-                        value: Some(value),
-                        is_delete: item.is_delete,
-                    },
-                )
-            })
-            .collect();
-        let fb_items = builder.create_vector(&item_offsets);
-        let args = FBKvBatchWriteRequestArgs {
-            id: req_id,
-            rpc_create_nano: 0,
-            version: 1,
-            items: Some(fb_items),
-            seq,
+        let operations = items.iter().map(|item| {
+            (
+                item.key.as_ref(),
+                (!item.is_delete).then_some(item.value.as_ref()),
+            )
+        });
+        self.send_write_payload(
+            rpc_endpoint,
+            operations,
             client_id,
+            seq,
             request_id,
             request_create_ms,
             group_id,
-            forwarded: false,
-            precondition: None,
-            owner_fence: None,
-        };
-        let req = FBKvBatchWriteRequest::create(&mut builder, &args);
-        builder.finish(req, None);
-        let control = Buffer::from_bytes(builder.finished_data());
-        let msg_type = FBMsgType::EKvBatchWriteRequest.0 as u16;
-        let fut = self
-            .rpc
-            .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(|e| self.map_rpc_err(e, rpc_endpoint, conn.generation()))?;
-        let resp = fut
-            .await
-            .map_err(|e| self.map_rpc_err(e, rpc_endpoint, conn.generation()))?;
-        let ctrl = resp.control.ok_or_else(|| Error::Transport {
-            endpoint: rpc_endpoint.to_string(),
-            status: "batch_write response missing control buffer".into(),
-        })?;
-        parse_kv_response(ctrl.bytes())
+            FBMsgType::EKvBatchPayloadRequest.0 as u16,
+            None,
+        )
+        .await
     }
 
     /// Send a revision-conditional atomic batch.

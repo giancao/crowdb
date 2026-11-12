@@ -23,6 +23,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 
 namespace crowdb::rpc
@@ -286,6 +287,15 @@ void RpcServer::handle_accept(int listen_fd)
     }
 }
 
+void RpcServer::route_connection(Connection &connection)
+{
+    connection.set_on_rpc_close([this](Connection *conn) {
+        if (request_client_ != nullptr)
+            request_client_->fail_all(conn, RpcError::ConnectionClosed);
+    });
+    connection.set_on_frame([this](Frame *frame, Connection *conn) { dispatch(frame, conn); });
+}
+
 void RpcServer::dispatch(Frame *frame, Connection *conn)
 {
     uint16_t msg_type   = frame->header.msg_type;
@@ -315,14 +325,16 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
     // No handler for this msg_type — try response routing (ack to
     // a server-sent request). on_response consumes the frame if the
     // request_id is in the request client's pending map.
-    if ((frame->header.flags & FLAG_ONE_WAY) == 0 && request_client_ != nullptr &&
-        request_client_->on_response(frame->request_id, frame)) {
-        return; // ack routed, frame consumed
+    if (!is_one_way && request_client_ != nullptr) {
+        frame->release_admission_on_delivery = true;
+        if (request_client_->on_response(frame->request_id, frame))
+            return;
     }
 
-    // Unknown msg_type and not an ack — send UnknownMessage (if not
-    // one-way) or drop.
-    if (!is_one_way) {
+    // Unmatched replies can arrive after a timeout on a duplex connection.
+    // Replying to them with UnknownResponse would create a reply loop.
+    if (!is_one_way &&
+        !std::string_view(proto::EnumNameFBMsgType(static_cast<proto::FBMsgType>(msg_type))).ends_with("Response")) {
         OutFrame *response = handle_unknown(frame, conn);
         if (response != nullptr) {
             transport_->submit_inline(conn, response);

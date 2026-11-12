@@ -32,10 +32,13 @@ struct OutFrame
     Buffer                                  *control = nullptr; // pool-allocated; released after send
     Buffer                                  *data    = nullptr; // pool-allocated; nullptr if control-only
     std::array<Buffer *, MAX_DATA_VIEWS - 1> data_tail{};
-    uint8_t                                  data_view_count = 0; // zero preserves legacy direct `data` assignment
-    uint32_t                                 sent_offset     = 0; // bytes already sent (partial write tracking)
-    uint64_t                                 create_nano     = 0; // steady_clock ns at submit/submit_inline
-    OutFrame                                *next_aggregate  = nullptr; // SEND completion owns the full chain
+    uint8_t                                  data_view_count   = 0; // zero preserves legacy direct `data` assignment
+    bool                                     views_are_control = false;
+    uint32_t                                 sent_offset       = 0;       // bytes already sent (partial write tracking)
+    uint64_t                                 create_nano       = 0;       // steady_clock ns at submit/submit_inline
+    OutFrame                                *next_aggregate    = nullptr; // SEND completion owns the full chain
+    std::shared_ptr<void>                    request_cache;               // released when the response retires
+    uint64_t                                 tcp_request_cache_bytes = 0;
 
     [[nodiscard]] uint8_t data_views() const
     {
@@ -45,6 +48,11 @@ struct OutFrame
     [[nodiscard]] Buffer *data_view(uint8_t index) const
     {
         return index == 0 ? data : data_tail[index - 1];
+    }
+
+    [[nodiscard]] uint32_t control_size() const
+    {
+        return views_are_control ? header.msg_size : (control == nullptr ? 0 : control->len);
     }
 
     void release_data()

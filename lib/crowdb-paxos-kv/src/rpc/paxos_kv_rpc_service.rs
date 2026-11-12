@@ -33,6 +33,7 @@
 
 mod comparison;
 mod owner_fence;
+mod put;
 mod response_correlation;
 mod watch;
 
@@ -65,9 +66,7 @@ use crowdb_rpc_ffi::{
 use crate::cluster::kv_store::KvStore;
 use crate::cluster::px_kv_store::PxKvStore;
 use crate::metrics::{LatencyHistogram, MetricsRegistry};
-use crate::rpc::{
-    FBKvDeleteRequest, FBKvGetRequest, FBKvGetRequestArgs, FBKvSetRequest, KvBatchItem, ReadMode,
-};
+use crate::rpc::{FBKvDeleteRequest, FBKvGetRequest, FBKvGetRequestArgs, KvBatchItem, ReadMode};
 
 // ── PaxosKvRpcForwarder ─────────────────────────────────────────
 
@@ -313,9 +312,18 @@ impl PaxosKvRpcService {
 
     /// Register all client-facing request handlers into the `RpcServer`.
     pub(crate) fn register_handlers(self: &Arc<Self>, server: &Arc<RpcServer>) {
+        for msg_type in [FBMsgType::EKvPutRequest, FBMsgType::EKvBatchPayloadRequest] {
+            let service = Arc::clone(self);
+            server.register_owned_handler(
+                u16::try_from(msg_type.0).expect("positive KV message type"),
+                move |req| {
+                    service.handle_write_payload(req);
+                },
+            );
+        }
         server.register_handler(
             FBMsgType::EKvSetRequest.0 as u16,
-            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_put),
+            Self::make_handler(Arc::clone(self), Arc::clone(server), Self::handle_put_cas),
         );
         server.register_handler(
             FBMsgType::EKvGetRequest.0 as u16,
@@ -380,97 +388,6 @@ impl PaxosKvRpcService {
         move |req| {
             f(&this, req, &server);
         }
-    }
-
-    // ── Put ───────────────────────────────────────────────────────
-
-    fn handle_put(&self, req: crowdb_rpc_ffi::ServerRequest, server: &Arc<RpcServer>) {
-        let req_id = req.request_id;
-        let create_nano = req.rpc_create_nano;
-        let conn_handle_usize = req.conn_handle as usize;
-        let msg_type = FBMsgType::EKvResponse.0 as u16;
-
-        let store = Arc::clone(&self.store);
-        let server = Arc::clone(server);
-        let hist = self.latency.as_ref().map(|l| Arc::clone(&l.put));
-        spawn_request(&self.rt, "put", store.store_id, async move {
-            let start = Instant::now();
-            let Ok(fb_req) = flatbuffers::root::<FBKvSetRequest>(req.control()) else {
-                submit_kv_error(
-                    &server,
-                    conn_handle_usize as *mut std::ffi::c_void,
-                    req_id,
-                    create_nano,
-                    msg_type,
-                    FBKvClientRetCode::InvalidArgument,
-                    "invalid request flatbuffer",
-                );
-                return;
-            };
-            let group_id = fb_req.group_id();
-            record_group_context(&store, group_id);
-            let key = fb_req.key().map(|v| v.bytes()).unwrap_or_default();
-            let value = fb_req.value().map(|v| v.bytes()).unwrap_or_default();
-            let client_id = fb_req.client_id();
-            let seq = fb_req.seq();
-            let request_id = fb_req.request_id();
-            let request_create_ms = fb_req.request_create_ms();
-            let precondition = fb_req.precondition().map(|condition| {
-                (
-                    bytes::Bytes::copy_from_slice(condition.key().map_or(&[], |key| key.bytes())),
-                    condition.expected_revision(),
-                )
-            });
-            let resp = if let Some((precondition_key, expected_revision)) = precondition {
-                if owner_fence::valid_conditional_put(group_id, client_id, key, &precondition_key, value) {
-                    let payload = PxKvStore::encode_kv_payload(&[(key, Some(value))]);
-                    store
-                        .propose_cas_and_respond(
-                            group_id,
-                            payload,
-                            precondition_key,
-                            expected_revision,
-                            client_id,
-                            seq,
-                            request_id,
-                            request_create_ms,
-                        )
-                        .await
-                } else {
-                    crate::rpc::KvResponse::cas_error(
-                        crate::rpc::KvErrorCode::KvErrorCasFailed,
-                        0,
-                        "invalid conditional put precondition",
-                        request_id,
-                        request_create_ms,
-                    )
-                }
-            } else {
-                store
-                    .kv_put(
-                        group_id,
-                        key,
-                        value,
-                        client_id,
-                        seq,
-                        request_id,
-                        request_create_ms,
-                    )
-                    .await
-            };
-            let ctrl = build_kv_response(req_id, create_nano, &resp);
-            submit_fb_response(
-                &server,
-                conn_handle_usize as *mut std::ffi::c_void,
-                ctrl,
-                msg_type,
-                req_id,
-            );
-            if let Some(h) = hist {
-                h.observe(start.elapsed().as_nanos() as u64);
-            }
-            // req dropped here, frame released
-        });
     }
 
     // ── Get ───────────────────────────────────────────────────────
@@ -691,6 +608,18 @@ impl PaxosKvRpcService {
                 );
                 return;
             };
+            if fb_req.precondition().is_none() && fb_req.owner_fence().is_none() {
+                submit_kv_error(
+                    &server,
+                    conn_handle_usize as *mut std::ffi::c_void,
+                    req_id,
+                    create_nano,
+                    msg_type,
+                    FBKvClientRetCode::InvalidArgument,
+                    "conditional batch requires a precondition or ownership fence",
+                );
+                return;
+            }
             let group_id = fb_req.group_id();
             record_group_context(&store, group_id);
             let items: Vec<KvBatchItem> = fb_req
@@ -721,7 +650,8 @@ impl PaxosKvRpcService {
             });
             let resp = if let Some(response) = owner_fence::write(&store, &fb_req, &items).await {
                 response
-            } else if let Some((precondition_key, expected_revision)) = precondition {
+            } else {
+                let (precondition_key, expected_revision) = precondition.expect("checked conditional batch");
                 if owner_fence::valid_conditional_batch(group_id, client_id, &precondition_key, &items) {
                     let payload = PxKvStore::encode_kv_batch_items(&items);
                     store
@@ -745,10 +675,6 @@ impl PaxosKvRpcService {
                         request_create_ms,
                     )
                 }
-            } else {
-                store
-                    .kv_batch_write(group_id, items, client_id, seq, request_id, request_create_ms)
-                    .await
             };
             let ctrl = build_kv_response(req_id, create_nano, &resp);
             submit_fb_response(
@@ -1804,6 +1730,11 @@ fn submit_kv_error(
     code: FBKvClientRetCode,
     msg: &str,
 ) {
+    let ctrl = build_kv_error(req_id, create_nano, code, msg);
+    submit_fb_response(server, conn_handle, ctrl, msg_type, req_id);
+}
+
+fn build_kv_error(req_id: u64, create_nano: u64, code: FBKvClientRetCode, msg: &str) -> (Vec<u8>, usize) {
     let mut builder = FlatBufferBuilder::new();
     let error_msg = builder.create_string(msg);
     let args = FBKvResponseArgs {
@@ -1825,8 +1756,7 @@ fn submit_kv_error(
     };
     let resp = FBKvResponse::create(&mut builder, &args);
     builder.finish(resp, None);
-    let (vec, head) = builder.collapse();
-    submit_fb_response(server, conn_handle, (vec, head), msg_type, req_id);
+    builder.collapse()
 }
 
 fn submit_scan_error(

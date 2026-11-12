@@ -80,7 +80,8 @@ bool RdmaConfig::valid() const
            cq_depth <= static_cast<uint32_t>(INT32_MAX) && cq_count > 0 && cq_count <= 256 &&
            static_cast<uint64_t>(cq_count) * cq_depth < UINT32_MAX && poll_batch > 0 &&
            poll_batch <= static_cast<uint32_t>(INT32_MAX) && verbs_poll_batch > 0 && verbs_poll_batch <= 256 &&
-           poll_empty_budget > 0 && send_arena_bytes >= data_slot_capacity() &&
+           poll_empty_budget > 0 &&
+           send_arena_bytes >= (combined_control_data() ? wire_slot_capacity : data_slot_capacity()) &&
            receive_arena_bytes >= static_cast<uint64_t>(posted_receive_target) * wire_slot_capacity &&
            min_rnr_timer <= 31 && retry_count <= 7 && rnr_retry_count <= 7 && registration_budget() != 0 &&
            aggregation_max_bytes >= HEADER_SIZE && aggregation_max_bytes <= RDMA_DATAPATH_CAPACITY &&
@@ -93,13 +94,14 @@ bool RdmaConfig::valid() const
 
 uint64_t RdmaConfig::registration_budget() const
 {
-    const uint64_t entries = static_cast<uint64_t>(sq_depth) + posted_receive_target;
-    const uint64_t maximum = std::numeric_limits<uint64_t>::max();
+    const uint64_t entries               = static_cast<uint64_t>(sq_depth) + posted_receive_target;
+    const uint64_t maximum               = std::numeric_limits<uint64_t>::max();
+    const auto     connection_send_bytes = connection_send_arena_bytes();
     if (entries == 0 || cq_depth < entries || send_arena_bytes > maximum / 2 ||
-        receive_arena_bytes > maximum - send_arena_bytes)
+        receive_arena_bytes > maximum - connection_send_bytes)
         return 0;
     const uint64_t compatibility = 2 * send_arena_bytes;
-    const uint64_t per_qp        = send_arena_bytes + receive_arena_bytes;
+    const uint64_t per_qp        = connection_send_bytes + receive_arena_bytes;
     if (per_qp == 0 || per_qp > maximum - compatibility)
         return 0;
     if (registered_memory_budget_bytes != 0)

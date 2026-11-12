@@ -42,7 +42,7 @@ async fn binary_replay_keeps_small_record_history_within_one_gibibyte() {
             slot,
             ballot: PxBallot::new(7, 1),
             term: 7,
-            payload: Bytes::from(vec![u8::try_from(slot % 251).unwrap(); PAYLOAD]),
+            payload: Bytes::from(vec![u8::try_from(slot % 251).unwrap(); PAYLOAD]).into(),
         };
         file.write_all(&WALRecord::from_accepted(1, &entry).encode())
             .unwrap();
@@ -75,6 +75,8 @@ async fn binary_replay_keeps_small_record_history_within_one_gibibyte() {
         assert_eq!(record.payload.len(), PAYLOAD);
         assert!(record
             .payload
+            .contiguous()
+            .unwrap()
             .iter()
             .all(|byte| *byte == u8::try_from(slot % 251).unwrap()));
     }

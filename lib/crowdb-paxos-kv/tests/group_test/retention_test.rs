@@ -21,7 +21,7 @@ async fn local(id: u64, role: PxLocalReplicaRole, applied: u64, durable: u64) ->
             slot,
             ballot: PxBallot::new(0, 0),
             term: 0,
-            payload: bytes::Bytes::new(),
+            payload: bytes::Bytes::new().into(),
         };
         replica.acceptor.accept(&entry).await;
         replica.learner.learn(entry, &[]).await;

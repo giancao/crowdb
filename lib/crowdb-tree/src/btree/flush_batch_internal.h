@@ -89,15 +89,13 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
         Work(std::shared_ptr<State> state, Range &range, RangeComplete completion)
             : owner(std::move(state)),
               range(range),
-              done(std::move(completion)),
-              node(&Work::execute, this)
+              done(std::move(completion))
         {
         }
 
         std::shared_ptr<State> owner;
         Range                 &range;
         RangeComplete          done;
-        ApplyDispatcher::Node  node;
         static void            execute(void *context) noexcept;
     };
 
@@ -107,8 +105,7 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
             : owner(std::move(state)),
               status(std::move(result)),
               loaded(std::move(inner)),
-              resume(resume),
-              node(&PlanWork::execute, this)
+              resume(resume)
         {
         }
 
@@ -116,7 +113,6 @@ struct FlushBatch::State : std::enable_shared_from_this<State>
         Status                                status;
         std::shared_ptr<const InnerPageState> loaded;
         bool                                  resume = false;
-        ApplyDispatcher::Node                 node;
         static void                           execute(void *context) noexcept;
     };
 

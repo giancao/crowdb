@@ -240,8 +240,14 @@ TEST(LocalBlockGc, PublicAsyncCheckpointCleanupDrainsBeforeRawBackendClose)
     tree_test::TempDir              dir("async_checkpoint_gc_");
     std::unique_ptr<BlockPageStore> device;
     ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 4, 5, 8192, 4096, &device).ok());
-    const uint8_t orphan = 23;
-    ASSERT_TRUE(device->write_at((31 * 8192) - 1, &orphan, 1).ok());
+    constexpr uint64_t first_orphan_block = 64;
+    constexpr uint64_t last_dense_block   = 130;
+    constexpr uint64_t sparse_block       = 1 << 20;
+    const uint8_t      orphan             = 23;
+    for (auto block = first_orphan_block; block <= last_dense_block; ++block) {
+        ASSERT_TRUE(device->write_at(((block + 1) * 8192) - 1, &orphan, 1).ok());
+    }
+    ASSERT_TRUE(device->write_at(((sparse_block + 1) * 8192) - 1, &orphan, 1).ok());
     Config             config;
     TreeRuntimeOptions runtime;
     runtime.workers         = 1;
@@ -263,7 +269,10 @@ TEST(LocalBlockGc, PublicAsyncCheckpointCleanupDrainsBeforeRawBackendClose)
     ASSERT_TRUE(status.ok()) << status.to_string();
     core.reset();
     uint64_t offset = 0;
-    EXPECT_FALSE(device->file_for_offset(30 * 8192, &offset));
+    for (auto block = first_orphan_block; block <= last_dense_block; ++block) {
+        EXPECT_FALSE(device->file_for_offset(block * 8192, &offset)) << block;
+    }
+    EXPECT_FALSE(device->file_for_offset(sparse_block * 8192, &offset));
     ASSERT_TRUE(TreeCore::open(config, &core).ok());
     GetView value;
     ASSERT_TRUE(core->get("a", &value).ok());

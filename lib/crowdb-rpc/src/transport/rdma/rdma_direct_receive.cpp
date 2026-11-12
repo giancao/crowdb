@@ -16,23 +16,31 @@ bool RdmaTransport::post_direct_receive(Connection *connection, Buffer *slot)
     if (!operation || connection == nullptr || slot == nullptr || slot->data == nullptr)
         return false;
     auto *pools = pools_for(connection);
-    if (pools == nullptr || pools->recv_control == nullptr || slot->capacity < pools->effective_data_capacity)
+    if (pools == nullptr)
+        return false;
+    const bool combined    = pools->recv_control == nullptr;
+    const auto data_offset = combined ? RDMA_CONTROL_CAPACITY : 0;
+    if (slot->capacity < data_offset + pools->effective_data_capacity)
         return false;
     Operation posting(pools->posting_state);
     if (!posting || !connection->is_open() || connection->transport_handle == 0)
         return false;
     auto                                       release = [](Buffer *buffer) { buffer->release(); };
-    std::unique_ptr<Buffer, decltype(release)> prefix(pools->recv_control->alloc(RDMA_CONTROL_CAPACITY), release);
-    if (prefix == nullptr || !prefix->transition(BufferOwnership::Available, BufferOwnership::PostedReceive))
+    std::unique_ptr<Buffer, decltype(release)> prefix(
+        combined ? nullptr : pools->recv_control->alloc(RDMA_CONTROL_CAPACITY), release);
+    if (!combined &&
+        (prefix == nullptr || !prefix->transition(BufferOwnership::Available, BufferOwnership::PostedReceive)))
         return false;
     if (!slot->transition(BufferOwnership::Available, BufferOwnership::PostedReceive) &&
         !slot->transition(BufferOwnership::CallerOwned, BufferOwnership::PostedReceive)) {
-        (void)prefix->transition(BufferOwnership::PostedReceive, BufferOwnership::Available);
+        if (prefix)
+            (void)prefix->transition(BufferOwnership::PostedReceive, BufferOwnership::Available);
         return false;
     }
     auto rollback = [&] {
         (void)slot->transition(BufferOwnership::PostedReceive, BufferOwnership::Available);
-        (void)prefix->transition(BufferOwnership::PostedReceive, BufferOwnership::Available);
+        if (prefix)
+            (void)prefix->transition(BufferOwnership::PostedReceive, BufferOwnership::Available);
     };
     if (slot->ref_clone() == nullptr) {
         rollback();
@@ -45,8 +53,10 @@ bool RdmaTransport::post_direct_receive(Connection *connection, Buffer *slot)
         return false;
     }
     std::array<ibv_sge, 2> regions{};
-    regions[0] = {reinterpret_cast<uintptr_t>(prefix->data), RDMA_CONTROL_CAPACITY, prefix->registration_key};
-    regions[1] = {reinterpret_cast<uintptr_t>(slot->data), pools->effective_data_capacity, slot->registration_key};
+    const auto            *control = combined ? slot : prefix.get();
+    regions[0] = {reinterpret_cast<uintptr_t>(control->data), RDMA_CONTROL_CAPACITY, control->registration_key};
+    regions[1] = {reinterpret_cast<uintptr_t>(slot->data + data_offset), pools->effective_data_capacity,
+                  slot->registration_key};
     if (config_.receive_batch_size > 1) {
         (void)prefix.release();
         return stage_receive(work, regions);
@@ -70,12 +80,14 @@ bool RdmaTransport::post_direct_receive(Connection *connection, Buffer *slot)
 
 bool RdmaTransport::release_completed_direct_receive(WorkRequest *work, const ibv_wc &completion)
 {
-    auto  *slot   = work->slot;
-    auto  *prefix = work->prefix;
-    Header header;
-    bool   valid = completion.status == IBV_WC_SUCCESS && work->conn->is_open() &&
-                   parse_rdma_direct_control(std::span(prefix->data, RDMA_CONTROL_CAPACITY),
-                                             work->pools->effective_data_capacity, completion.byte_len, header);
+    auto       *slot        = work->slot;
+    auto       *prefix      = work->prefix;
+    const auto *control     = prefix == nullptr ? slot->data : prefix->data;
+    const auto  data_offset = prefix == nullptr ? RDMA_CONTROL_CAPACITY : 0;
+    Header      header;
+    bool        valid = completion.status == IBV_WC_SUCCESS && work->conn->is_open() &&
+                        parse_rdma_direct_control(std::span(control, RDMA_CONTROL_CAPACITY),
+                                                  work->pools->effective_data_capacity, completion.byte_len, header);
     if (valid && header.msg_type == RDMA_PACKED_MSG_TYPE) {
         return release_completed_packed_receive(work, completion);
     }
@@ -88,11 +100,12 @@ bool RdmaTransport::release_completed_direct_receive(WorkRequest *work, const ib
     if (fragment) {
         ControlFragment metadata;
         valid = header.flags == FLAG_ONE_WAY && work->pools->control_receive != nullptr &&
-                parse_control_fragment(std::span(prefix->data + HEADER_SIZE, header.msg_size), metadata);
+                parse_control_fragment(std::span(control + HEADER_SIZE, header.msg_size), metadata);
         if (valid) {
             ControlStreamResult result = ControlStreamResult::Invalid;
             try {
-                result = work->pools->control_receive->accept(metadata, std::span(slot->data, header.data_size),
+                result = work->pools->control_receive->accept(metadata,
+                                                              std::span(slot->data + data_offset, header.data_size),
                                                               ControlStreamReceiver::Clock::now(), logical);
             }
             catch (const std::bad_alloc &) {
@@ -111,7 +124,7 @@ bool RdmaTransport::release_completed_direct_receive(WorkRequest *work, const ib
         valid = false;
     }
     valid = valid && slot->transition(BufferOwnership::PostedReceive, BufferOwnership::ReceiveInFlight) &&
-            prefix->transition(BufferOwnership::PostedReceive, BufferOwnership::Available) &&
+            (prefix == nullptr || prefix->transition(BufferOwnership::PostedReceive, BufferOwnership::Available)) &&
             slot->transition(BufferOwnership::ReceiveInFlight, BufferOwnership::CallerOwned);
     if (!valid) {
         if (completion.status != IBV_WC_SUCCESS)
@@ -120,15 +133,17 @@ bool RdmaTransport::release_completed_direct_receive(WorkRequest *work, const ib
             stats_.protocol_errors.fetch_add(1, std::memory_order_relaxed);
         auto connection = work->conn;
         (void)slot->quarantine();
-        (void)prefix->quarantine();
+        if (prefix != nullptr)
+            (void)prefix->quarantine();
         release_work(work);
         connection->close();
         slot->release();
-        prefix->release();
+        if (prefix != nullptr)
+            prefix->release();
         return true;
     }
     queue.charge_receive(completion.byte_len);
-    slot->len              = header.data_size;
+    slot->len              = data_offset + header.data_size;
     auto connection        = std::move(work->conn);
     auto pools             = std::move(work->pools);
     slot->last_release_cb  = &RdmaTransport::repost_frame_release;
@@ -136,13 +151,14 @@ bool RdmaTransport::release_completed_direct_receive(WorkRequest *work, const ib
     if (!fragment) {
         logical         = std::make_unique<Frame>();
         logical->header = header;
-        logical->control.assign(prefix->data + HEADER_SIZE, prefix->data + RDMA_CONTROL_CAPACITY);
+        logical->control.assign(control + HEADER_SIZE, control + HEADER_SIZE + header.msg_size);
         extract_control_fields(logical->control.data(), header.msg_size, logical->request_id, logical->rpc_create_nano,
                                logical->response_create_nano);
-        logical->data_buf = slot->slice(0, header.data_size);
+        logical->data_buf = slot->slice(data_offset, header.data_size);
     }
     release_work(work);
-    prefix->release();
+    if (prefix != nullptr)
+        prefix->release();
     stats_.receives.fetch_add(1, std::memory_order_relaxed);
     if (fragment) {
         stats_.control_fragments_received.fetch_add(1, std::memory_order_relaxed);

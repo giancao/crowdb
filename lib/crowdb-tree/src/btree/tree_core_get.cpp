@@ -39,7 +39,6 @@ struct CoreGet : std::enable_shared_from_this<CoreGet>
     std::function<void(Status, GetView)> complete;
     std::shared_ptr<Operation>           operation;
     std::shared_ptr<CoreGet>             owner;
-    ApplyDispatcher::Node                cpu_node{&CoreGet::start, this};
 
     void finish(Status status) noexcept
     {
@@ -128,10 +127,7 @@ void TreeCore::get_impl(Slice key, std::function<void(Status, GetView)> complete
     }
     status = operation->prepared.binding->cpu()->try_submit(operation->prepared.binding->lane(), &CoreGet::start,
                                                             operation.get());
-    if (status.code() == Code::kResourceExhausted) {
-        state_->apply_dispatcher->request(operation->cpu_node, operation);
-    }
-    else if (!status.ok()) {
+    if (!status.ok()) {
         operation->finish(std::move(status));
     }
 }

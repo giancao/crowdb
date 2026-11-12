@@ -213,12 +213,16 @@ void CapturedFrameStream::State::prepare_encoder()
         overflow_end = end;
     }
     encoder_ready = true;
+    if (single_page && !limits.plan_only) {
+        emit();
+        return;
+    }
     wake();
 }
 
 void CapturedFrameStream::State::emit()
 {
-    auto output = encoder->next(buffer->bytes);
+    auto output = encoder->next(buffer->bytes());
     if (!output.status.ok()) {
         finish(std::move(output.status), true);
         return;
@@ -226,6 +230,9 @@ void CapturedFrameStream::State::emit()
     if (!output.frame) {
         finish(Status::corruption("snapshot encoder produced no frame"), true);
         return;
+    }
+    if (!buffer->raw_blob().empty()) {
+        finish_raw_durable_page(buffer->raw_blob(), output.frame->bytes);
     }
     report.frame = CapturedFrame{.info = std::move(*output.frame), .buffer = buffer, .reused_overflow = {}};
     ++counters.frames;

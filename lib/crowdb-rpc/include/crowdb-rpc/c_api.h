@@ -315,6 +315,22 @@ crowdb_rpc_status crowdb_rpc_client_send_chain(crowdb_rpc_client_t client, crowd
                                                crowdb_rpc_buffer_t const *data_views, uint8_t data_view_count,
                                                uint16_t msg_type, crowdb_rpc_on_complete on_complete, void *user_data);
 
+// Send prefix and tail as one TCP control or an oversized RDMA ControlData
+// control stream. Consumes both handles on every return path.
+crowdb_rpc_status crowdb_rpc_client_send_control_tail(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
+                                                      crowdb_rpc_conn_t conn, uint64_t request_id,
+                                                      crowdb_rpc_buffer_t prefix, crowdb_rpc_buffer_t tail,
+                                                      uint16_t msg_type, crowdb_rpc_on_complete on_complete,
+                                                      void *user_data);
+
+// Send an immutable prefix and views as one TCP control or an oversized RDMA
+// ControlData control stream. A queued frame retains its own references.
+crowdb_rpc_status crowdb_rpc_client_send_control_chain(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
+                                                       crowdb_rpc_conn_t conn, uint64_t request_id,
+                                                       crowdb_rpc_buffer_t prefix, crowdb_rpc_buffer_t const *tails,
+                                                       uint8_t tail_count, uint16_t msg_type,
+                                                       crowdb_rpc_on_complete on_complete, void *user_data);
+
 // Strictly bounded callback call. Unlike crowdb_rpc_client_send, this never
 // falls back to the pending map when the indexed completion slot is occupied.
 crowdb_rpc_status crowdb_rpc_client_send_slab(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
@@ -372,6 +388,8 @@ void crowdb_rpc_conn_destroy(crowdb_rpc_conn_t conn);
 int crowdb_rpc_conn_is_open(crowdb_rpc_conn_t conn);
 // Selected path remains readable after the connection closes.
 int crowdb_rpc_conn_is_rdma(crowdb_rpc_conn_t conn);
+// Returns the negotiated RDMA data bytes per SEND, or zero for TCP.
+uint32_t crowdb_rpc_conn_rdma_single_send_control_capacity(crowdb_rpc_conn_t conn);
 // True only for a TCP refusal before peer acceptance; resets remain ambiguous.
 int crowdb_rpc_conn_connect_refused(crowdb_rpc_conn_t conn);
 
@@ -422,6 +440,15 @@ typedef void (*crowdb_rpc_handler_release_fn)(void *user_data);
 // Release a frame_handle previously passed to a crowdb_rpc_handler_fn.
 // Must be called exactly once per frame_handle. Passing nullptr is a no-op.
 void crowdb_rpc_frame_release(void *frame_handle);
+
+// Take the frame's control bytes without retaining its data or connection.
+// On failure the original frame retains the control bytes.
+crowdb_rpc_buffer_t crowdb_rpc_frame_take_control(void *frame_handle);
+// Take request control storage while keeping its receive admission on the
+// request Frame for crowdb_rpc_server_reply.
+crowdb_rpc_buffer_t crowdb_rpc_frame_take_request_control(void *frame_handle);
+// Retain the handler's connection. Release the new handle with conn_destroy.
+crowdb_rpc_conn_t crowdb_rpc_frame_retain_connection(void *frame_handle);
 // Close the retained connection of a live handler Frame without releasing it.
 void crowdb_rpc_frame_close_connection(void *frame_handle);
 #ifdef CROWDB_RPC_TEST_UTIL
@@ -454,6 +481,12 @@ crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t s
                                                            crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
                                                            uint16_t msg_type, uint64_t request_id);
 
+// Submit a response using the connection and correlation of a live request
+// Frame. The response takes ownership of the supplied buffers and the request
+// cache admission. The caller still owns the request Frame.
+crowdb_rpc_status crowdb_rpc_server_reply(crowdb_rpc_server_t server, void *frame_handle, crowdb_rpc_buffer_t control,
+                                          crowdb_rpc_buffer_t data, uint16_t msg_type);
+
 // ── Client-side request handler dispatch (R114) ───────────────────
 
 // Register a custom dispatch callback on the CLIENT side for the given
@@ -483,6 +516,8 @@ void crowdb_rpc_client_set_transport(crowdb_rpc_client_t client, crowdb_rpc_serv
 // route ack responses); if no match, dispatches as a request (existing
 // behavior). The server sends requests via crowdb_rpc_client_send.
 void crowdb_rpc_server_set_request_client(crowdb_rpc_server_t server, crowdb_rpc_client_t client);
+// Route incoming frames on a connection created by this server through its dispatch.
+void crowdb_rpc_server_route_connection(crowdb_rpc_server_t server, crowdb_rpc_conn_t conn);
 
 // ── Logging (mirrors crowdb-tree ct_*_logging) ──────────────────────
 // Initialize the C++ spdlog async file logger. Call once at process

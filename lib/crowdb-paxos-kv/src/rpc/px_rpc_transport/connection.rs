@@ -65,15 +65,17 @@ pub(super) fn check_snapshot_ret_code(
 
 // ── Endpoint parsing ─────────────────────────────────────────────
 
-/// Normalize a service-registry endpoint: prepend `http://` if no
-/// scheme, rewrite `0.0.0.0` to `127.0.0.1`.
-pub(super) fn normalize_endpoint(endpoint: &str) -> String {
-    let with_scheme = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        endpoint.to_string()
-    } else {
-        format!("http://{endpoint}")
-    };
-    with_scheme.replacen("://0.0.0.0:", "://127.0.0.1:", 1)
+/// Use the socket endpoint as the pool key. Unspecified local listeners
+/// are reached through loopback.
+pub(super) fn normalize_endpoint(endpoint: &str) -> std::borrow::Cow<'_, str> {
+    let endpoint = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint);
+    match endpoint.strip_prefix("0.0.0.0:") {
+        Some(port) => std::borrow::Cow::Owned(format!("127.0.0.1:{port}")),
+        None => std::borrow::Cow::Borrowed(endpoint),
+    }
 }
 
 /// Parse `http://host:port` into `(host, port)`.

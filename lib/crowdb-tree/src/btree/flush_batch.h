@@ -59,8 +59,7 @@ struct FlushBatchOptions
     std::shared_ptr<PageLoader>      loader                  = nullptr;
     std::shared_ptr<PageLoader>      consolidation_loader    = nullptr;
     PageKeyRange                     selection;
-    std::shared_ptr<ApplyDispatcher> cpu_progress = nullptr;
-    std::shared_ptr<PublicationLane> publication  = nullptr;
+    std::shared_ptr<PublicationLane> publication = nullptr;
     // A controller measures the complete attempt including source capture.
     bool measure_batch = true;
 #ifdef CROWDB_TREE_TEST_UTIL

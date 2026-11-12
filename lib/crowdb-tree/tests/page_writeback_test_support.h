@@ -96,7 +96,8 @@ inline PageWriteInput write_input(size_t bytes = 4096, bool overflow = false)
         .info                = {.page_id = 7, .type = page_type::kLeafBase, .bytes = static_cast<uint32_t>(bytes)},
         .frame               = *owner,
         .owner               = owner,
-        .reload_dependencies = {}
+        .reload_dependencies = {},
+        .raw_blob            = {},
     };
 }
 

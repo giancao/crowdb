@@ -118,18 +118,10 @@ void FlushOperation::State::dispatch(CpuStage stage) noexcept
         if (status.ok()) {
             return;
         }
-        if (options.cpu_progress) {
-            options.cpu_progress->request(cpu_node, queued_owner);
-            return;
-        }
         auto self = std::move(queued_owner);
         fail(std::move(status));
     }
     catch (const std::bad_alloc &) {
-        if (options.cpu_progress) {
-            options.cpu_progress->request(cpu_node, queued_owner);
-            return;
-        }
         auto self = std::move(queued_owner);
         fail(Status::resource_exhausted());
     }
@@ -278,6 +270,7 @@ void FlushOperation::State::begin()
         report.batch_id  = capture->batch_id();
         report.floor     = capture->floor();
         report.frontier  = capture->frontier();
+        input_tables     = capture->expected_catalog()->tables.size();
         expected_sources = tree_view->sources;
     }
     if (!capture->successor_active()) {
@@ -363,10 +356,11 @@ void FlushOperation::State::finish() noexcept
     const auto now = tree_metrics_now_ns();
     if (!capture_only) {
         CRB_LOG_INFO("flush end: tree={} start_ns={} end_ns={} persistent={} batch={} floor={} frontier={} "
-                     "coverage={} handoff_ok={} maintenance_ok={} admission_stale={} phase={}",
+                     "coverage={} handoff_ok={} maintenance_ok={} admission_stale={} phase={} input_tables={}",
                      static_cast<const void *>(&publisher), started_at_ns, now, options.persistent, report.batch_id,
                      report.floor, report.frontier, report.published_coverage, report.handoff_status.ok(),
-                     report.maintenance_status.ok(), report.admission_stale, static_cast<unsigned>(report.phase));
+                     report.maintenance_status.ok(), report.admission_stale, static_cast<unsigned>(report.phase),
+                     input_tables);
     }
     if (batch_metrics) {
         const auto batch_outcome =

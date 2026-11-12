@@ -256,6 +256,7 @@ TEST_F(PreparedSplit, InstallDoesNotRunCreditWaitCallbacks)
     else {
         token.reset();
     }
+    core->binding()->drain();
 }
 
 TEST_F(PreparedSplit, RecordOverflowExpiresTheTokenWithoutRejectingParentWrites)

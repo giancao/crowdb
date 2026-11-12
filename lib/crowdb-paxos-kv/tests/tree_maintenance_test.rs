@@ -7,6 +7,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crowdb_paxos_kv::cluster::group::PxGroup;
 use crowdb_paxos_kv::cluster::group_election::LeaderElection;
+use crowdb_paxos_kv::cluster::group_operations::{encode_mutations, KvGroupMutation};
 use crowdb_paxos_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowdb_paxos_kv::common::config::PxElectionConfig;
 use crowdb_paxos_kv::kv::{
@@ -17,7 +18,7 @@ use crowdb_paxos_kv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 use crowdb_paxos_kv::wal::replay::replay_group;
 use crowdb_paxos_kv::wal::wal_engine::WalEngine;
 use crowdb_paxos_kv::wal::{IoBackend, MemBlockDevice, WalConfig};
-use crowdb_tree_ffi::{PageStore, SyncMode, TreeRuntime, TreeRuntimeOptions};
+use crowdb_tree_ffi::{AsyncCrowdbtree, CtError, PageStore, SyncMode, TreeRuntime, TreeRuntimeOptions};
 
 #[derive(Default)]
 struct Calls {
@@ -144,7 +145,7 @@ async fn host_counts_only_new_handoffs_and_retains_post_commit_durability() {
                     slot,
                     ballot: PxBallot::new(0, 1),
                     term: 1,
-                    payload: Bytes::new(),
+                    payload: Bytes::new().into(),
                 },
                 &[],
             )
@@ -200,6 +201,8 @@ async fn native_idle_writeback_and_checkpoint_use_async_progress() {
     let handoff = engine.flush_async().unwrap().await.unwrap();
     assert!(handoff.handoff_advanced);
     assert_eq!(handoff.status(), Ok(()));
+    assert_ne!(handoff.deferred_pages, 0);
+    assert!(!engine.flush_pending());
     assert!(engine.writeback_pending());
     let written = engine.writeback_async().unwrap().await.unwrap();
     assert_eq!(written.status, Ok(()));
@@ -212,6 +215,163 @@ async fn native_idle_writeback_and_checkpoint_use_async_progress() {
     assert_eq!(durable.status, Ok(()));
     assert!(durable.durable_committed);
     assert_eq!(durable.durable_coverage, 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_automatic_flush_counts_toward_the_persistent_threshold() {
+    let runtime = Arc::new(TreeRuntime::new(TreeRuntimeOptions::default()).unwrap());
+    let mut config = CrowdbTreeConfig {
+        runtime: Some(runtime),
+        page_store: Some(Arc::new(PageStore::open_mem(4096).unwrap())),
+        ..Default::default()
+    };
+    config.tuning.memtable_flush_entries = 1;
+    config.tuning.memtable_flush_count = 2;
+    config.tuning.max_memtable_count = 4;
+    let engine = CrowdbTreeEngine::open(&config).unwrap();
+    let tree = engine.handle();
+    let wake = Arc::new(tokio::sync::Notify::new());
+    engine.bind_flush_threshold(1, Arc::clone(&wake)).unwrap();
+    drop(engine.flush_async().unwrap());
+    assert!(!engine.flush_pending());
+    let replica = shutdown_replica(Box::new(engine)).await;
+    for slot in 1_u64..=2 {
+        replica
+            .learn_chosen(
+                &PxLogEntry {
+                    slot,
+                    ballot: PxBallot::new(1, 1),
+                    term: 1,
+                    payload: encode_mutations(&[KvGroupMutation::Put {
+                        key: Bytes::copy_from_slice(&slot.to_be_bytes()),
+                        value: Bytes::from_static(b"value"),
+                    }])
+                    .into(),
+                },
+                &[],
+            )
+            .await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), wake.notified())
+        .await
+        .expect("automatic flush must wake maintenance on the count threshold");
+    assert_eq!(tree.flushes_since_persistent(), 1);
+    assert_eq!(tree.durable_coverage(), 0);
+
+    let mut group = PxGroup::new(1, replica);
+    group.set_election_config(PxElectionConfig {
+        snapshot_slot_threshold: u64::MAX,
+        snapshot_time_threshold_ms: u64::MAX,
+        snapshot_flush_count_threshold: 1,
+        ..PxElectionConfig::for_tests()
+    });
+    group.run_maintenance_pass_for_tests().await;
+    assert_eq!(tree.durable_coverage(), 2);
+    assert_eq!(tree.flushes_since_persistent(), 0);
+    group.run_maintenance_pass_for_tests().await;
+    assert_eq!(tree.flushes_since_persistent(), 0);
+
+    group
+        .local_replica()
+        .learn_chosen(
+            &PxLogEntry {
+                slot: 3,
+                ballot: PxBallot::new(1, 1),
+                term: 1,
+                payload: encode_mutations(&[KvGroupMutation::Put {
+                    key: Bytes::from_static(b"third"),
+                    value: Bytes::from_static(b"value"),
+                }])
+                .into(),
+            },
+            &[],
+        )
+        .await;
+    let async_tree = AsyncCrowdbtree::from_handle(Arc::clone(&tree));
+    let flush = || async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match async_tree.flush_report().await {
+                    Err(CtError::Unavailable) => tokio::task::yield_now().await,
+                    result => return result.expect("admit ordinary flush"),
+                }
+            }
+        })
+        .await
+        .expect("ordinary flush admission must reopen")
+    };
+    let handoff = flush().await;
+    assert_eq!(handoff.status, Ok(()));
+    assert!(handoff.handoff_advanced);
+    tokio::time::timeout(std::time::Duration::from_secs(5), wake.notified())
+        .await
+        .expect("explicit flush must wake maintenance after the persistent reset");
+    assert_eq!(tree.flushes_since_persistent(), 1);
+    let no_op = flush().await;
+    assert_eq!(no_op.status, Ok(()));
+    assert!(!no_op.handoff_advanced);
+    assert_eq!(tree.flushes_since_persistent(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rebuilt_group_keeps_the_native_flush_wake() {
+    let mut config = CrowdbTreeConfig {
+        runtime: Some(Arc::new(TreeRuntime::new(TreeRuntimeOptions::default()).unwrap())),
+        page_store: Some(Arc::new(PageStore::open_mem(4096).unwrap())),
+        ..Default::default()
+    };
+    config.tuning.memtable_flush_entries = 1;
+    config.tuning.memtable_flush_count = 2;
+    config.tuning.max_memtable_count = 4;
+    let engine = CrowdbTreeEngine::open(&config).unwrap();
+    let tree = engine.handle();
+    let election = PxElectionConfig {
+        maintenance_tick_ms: 60_000,
+        snapshot_slot_threshold: u64::MAX,
+        snapshot_time_threshold_ms: u64::MAX,
+        snapshot_flush_count_threshold: 1,
+        ..PxElectionConfig::for_tests()
+    };
+    let mut prior = PxGroup::new(1, shutdown_replica(Box::new(engine)).await);
+    prior.set_election_config(election);
+    let prior = Arc::new(prior);
+    prior.start_engine_maintenance_loop().await;
+    let mut rebuilt = PxGroup::new(
+        1,
+        PxLocalReplica::new_inheriting_election_state(prior.local_replica()),
+    );
+    rebuilt.inherit_local_state_from(&prior);
+    rebuilt.set_election_config(election);
+    let rebuilt = Arc::new(rebuilt);
+    prior.tenure_cancel().cancel();
+    rebuilt.start_engine_maintenance_loop().await;
+
+    for slot in 1_u64..=2 {
+        rebuilt
+            .local_replica()
+            .learn_chosen(
+                &PxLogEntry {
+                    slot,
+                    ballot: PxBallot::new(1, 1),
+                    term: 1,
+                    payload: encode_mutations(&[KvGroupMutation::Put {
+                        key: Bytes::copy_from_slice(&slot.to_be_bytes()),
+                        value: Bytes::from_static(b"value"),
+                    }])
+                    .into(),
+                },
+                &[],
+            )
+            .await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while tree.durable_coverage() < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("rebuilt group must persist on the native wake before the watchdog");
+    rebuilt.tenure_cancel().cancel();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -251,7 +411,7 @@ async fn volatile_runtime_shutdown_has_no_false_durable_frontier() {
                 slot: 1,
                 ballot: PxBallot::new(1, 1),
                 term: 1,
-                payload: Bytes::new(),
+                payload: Bytes::new().into(),
             },
             &[],
         )
@@ -277,7 +437,8 @@ async fn runtime_shutdown_waits_for_the_backend_checkpoint_before_returning() {
                 term: 1,
                 payload: Bytes::from_static(&[
                     1, 0, 0, 3, 0, 0, 0, b'k', b'e', b'y', 5, 0, 0, 0, b'v', b'a', b'l', b'u', b'e',
-                ]),
+                ])
+                .into(),
             },
             &[],
         )

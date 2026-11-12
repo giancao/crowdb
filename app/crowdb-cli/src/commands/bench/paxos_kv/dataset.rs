@@ -44,11 +44,11 @@ pub(super) async fn prepare(client: Arc<PaxosKvClient>, args: Arc<PaxosKvArgs>) 
             let args = args.clone();
             async move {
                 client
-                    .put(
+                    .put_owned(
                         args.store,
                         args.group,
                         key(id).as_bytes(),
-                        &value(&args, id),
+                        value(&args, id).into(),
                         None,
                     )
                     .await
@@ -97,7 +97,13 @@ pub(super) async fn operation(client: &PaxosKvClient, args: &PaxosKvArgs, id: u6
     match args.operation {
         Operation::Write => {
             client
-                .put(args.store, args.group, key(id).as_bytes(), &value(args, id), None)
+                .put_owned(
+                    args.store,
+                    args.group,
+                    key(id).as_bytes(),
+                    value(args, id).into(),
+                    None,
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(size(args, id) as u64)

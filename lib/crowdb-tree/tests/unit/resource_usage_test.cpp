@@ -65,7 +65,7 @@ TEST(ResourceUsage, VersionedHostAndTreeSnapshotsAreNonDraining)
     EXPECT_NE(local.scope_id, 0U);
     EXPECT_GT(local.resources[1].used, 0U);
     EXPECT_GE(host.resources[1].used, local.resources[1].used);
-    EXPECT_GT(local.resources[6].used, 0U);
+    EXPECT_EQ(local.resources[6].used, 0U);
     EXPECT_GT(host.resources[8].limit, 0U);
     EXPECT_EQ(local.resources[13].limit, 0U);
     EXPECT_EQ(local.resources[14].limit, 0U);

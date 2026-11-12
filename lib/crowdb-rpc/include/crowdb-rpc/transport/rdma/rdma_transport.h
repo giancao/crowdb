@@ -158,7 +158,8 @@ class RdmaTransport : public Transport
         return config_;
     }
 
-    [[nodiscard]] std::string status_json() const;
+    [[nodiscard]] std::string        status_json() const;
+    [[nodiscard]] static std::string connection_cache_status_json(const Connection &connection);
 
     [[nodiscard]] const std::string &source_address() const
     {
@@ -433,7 +434,7 @@ class RdmaTransport : public Transport
 
     std::shared_ptr<RepostState>         repost_state_;
     std::shared_ptr<ControlStreamBudget> control_send_budget_;
-    std::shared_ptr<ControlStreamBudget> control_receive_budget_;
+    std::shared_ptr<ControlStreamBudget> control_receive_totals_;
 
     struct ConnectionPools : std::enable_shared_from_this<ConnectionPools>
     {

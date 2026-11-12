@@ -15,7 +15,7 @@ use crate::cluster::group::{PxGroup, RemoteFoldCtx, RemoteReplicaKind, ReplyFold
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::replica::{PxReplicaError, Replica, ReplicaClient, ReplicaHandler};
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
-use crate::paxos::roles::{PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::roles::{ProposalPayload, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 
 /// Outcome of a prepare-phase attempt for one slot.
@@ -55,7 +55,7 @@ impl PxGroup {
         &self,
         replica: &PxLocalReplica,
         slot: u64,
-        payload: bytes::Bytes,
+        payload: ProposalPayload,
         quorum: usize,
         min_round: u64,
     ) -> PrepareAttempt {
@@ -74,7 +74,7 @@ impl PxGroup {
         &self,
         replica: &PxLocalReplica,
         slot: u64,
-        payload: bytes::Bytes,
+        payload: ProposalPayload,
         quorum: usize,
         min_round: u64,
     ) -> PrepareAttempt {
@@ -346,8 +346,8 @@ impl PxGroup {
                     adopted_leader_id = prev.ballot.leader_id,
                     "prepare adopted foreign value"
                 );
+                entry.payload = prev.payload;
             }
-            entry.payload = prev.payload;
         }
         PrepareAttempt::Proceed { entry, foreign_value }
     }

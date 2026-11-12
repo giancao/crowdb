@@ -92,8 +92,8 @@ void TreeApplyOperation::State::credit_ready()
     if (!status.ok()) {
         if (status.code() == Code::kUnavailable) {
             // A changed immutable plan is a concrete publication transition.
-            // Re-enter once through the bounded dispatcher to capture its new bound.
-            dispatcher->request(node, self);
+            // Resume on the CPU pool to capture its new bound.
+            schedule();
         }
         else {
             finish(std::move(status));

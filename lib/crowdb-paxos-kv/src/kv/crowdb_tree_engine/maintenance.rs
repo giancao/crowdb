@@ -43,11 +43,8 @@ impl CrowdbTreeEngine {
         let attempt = begin(&pending);
         KVFuture::Pending(Box::pin(async move {
             let report = tree.flush_report().await.map_err(|error| error.to_string())?;
-            complete(
-                &pending,
-                attempt,
-                report.status.is_ok() && report.deferred_pages == 0,
-            );
+            // Dirty pages remain eligible for writeback after a successful handoff.
+            complete(&pending, attempt, report.status.is_ok());
             Ok(EngineFlushReport {
                 handoff_status: report.handoff_status.map_err(|error| error.to_string()),
                 maintenance_status: report.maintenance_status.map_err(|error| error.to_string()),
@@ -82,11 +79,7 @@ impl CrowdbTreeEngine {
                 tree.writeback_report().await
             }
             .map_err(|error| error.to_string())?;
-            complete(
-                &pending,
-                attempt,
-                report.status.is_ok() && report.rebase_deferred == 0,
-            );
+            complete(&pending, attempt, report.status.is_ok());
             Ok(checkpoint_report(report))
         }))
     }

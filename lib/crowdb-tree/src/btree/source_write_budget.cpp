@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "source_write_budget.h"
 
+#include "allocation_bound.h"
 #include "crowdb-tree/memtable/skip_list.h"
 
 namespace crowdb::tree
@@ -29,39 +30,16 @@ bool reserve_count(std::atomic<size_t> &counter, size_t amount, size_t maximum)
     return false;
 }
 
-std::optional<size_t> write_allocation_bound(WriteFootprint footprint, size_t max_versions)
-{
-    // Includes the old/new buffers during vector growth, an unpublished
-    // insert descriptor losing to another writer, cell control block, node
-    // tower and descriptor owners. Payload capacity is supplied separately.
-    constexpr size_t history_entry = 3 * sizeof(std::shared_ptr<const CellVersion>);
-    constexpr size_t descriptors   = 4096;
-    if (max_versions > (SIZE_MAX - descriptors) / history_entry) {
-        return {};
-    }
-    const auto per_entry = descriptors + (max_versions * history_entry);
-    if (footprint.entries > SIZE_MAX / per_entry) {
-        return {};
-    }
-    auto bytes = footprint.entries * per_entry;
-    if (footprint.key_bytes > SIZE_MAX - bytes) {
-        return {};
-    }
-    bytes += footprint.key_bytes;
-    if (footprint.payload_bytes > SIZE_MAX - bytes) {
-        return {};
-    }
-    return bytes + footprint.payload_bytes;
-}
 } // namespace
 
-std::optional<size_t> SourceWriteBudget::allocation_bound(const SourceWriteOptions &options,
-                                                          WriteFootprint            footprint) noexcept
+std::optional<size_t> SourceWriteBudget::allocation_bound(WriteFootprint footprint) noexcept
 {
-    if (options.max_gap_entries > SIZE_MAX - options.max_entries) {
-        return {};
-    }
-    return write_allocation_bound(footprint, options.max_entries + options.max_gap_entries);
+    const auto per_entry = Node::alloc_size(ConcurrentSkipList::kMaxHeight, 0) + CellVersion::allocation_bound();
+    return detail::AllocationBound(EpochManager::participant_allocation_bytes())
+        .add_product(footprint.entries, per_entry)
+        .add(footprint.key_bytes)
+        .add(footprint.payload_bytes)
+        .value();
 }
 
 Status SourceWriteReservation::create(const SourceWriteOptions &options, WriteFootprint footprint,
@@ -80,7 +58,7 @@ Status SourceWriteReservation::create(const SourceWriteOptions &options, WriteFo
         footprint.key_bytes > (gap ? options.max_gap_key_bytes : options.max_key_bytes)) {
         return Status::resource_exhausted("writer footprint exceeds one source progress window");
     }
-    const auto bytes = SourceWriteBudget::allocation_bound(options, footprint);
+    const auto bytes = SourceWriteBudget::allocation_bound(footprint);
     if (!bytes) {
         return Status::resource_exhausted("writer allocation bound overflow");
     }
@@ -161,16 +139,12 @@ Status SourceWriteBudget::bind(SourceWriteReservation *reservation, std::shared_
     auto &entries = gap ? gap_entries_ : entries_;
     auto &keys    = gap ? gap_key_bytes_ : key_bytes_;
     if (!reserve_count(entries, footprint.entries, gap ? options_.max_gap_entries : options_.max_entries)) {
-        if (!gap) {
-            capacity_rejected_.store(true, std::memory_order_release);
-        }
+        capacity_rejected_.store(true, std::memory_order_release);
         return Status::unavailable("source version admission limit reached");
     }
     if (!reserve_count(keys, footprint.key_bytes, gap ? options_.max_gap_key_bytes : options_.max_key_bytes)) {
         entries.fetch_sub(footprint.entries, std::memory_order_acq_rel);
-        if (!gap) {
-            capacity_rejected_.store(true, std::memory_order_release);
-        }
+        capacity_rejected_.store(true, std::memory_order_release);
         return Status::unavailable("source key admission limit reached");
     }
     *out = std::move(reservation->credit_);

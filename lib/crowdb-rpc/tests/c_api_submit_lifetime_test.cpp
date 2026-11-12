@@ -15,7 +15,7 @@ namespace
 {
 using namespace crowdb::rpc;
 
-enum class TestSubmit : uint8_t { Call, Chain, Slab };
+enum class TestSubmit : uint8_t { Call, Chain, ControlChain, Slab };
 
 struct TestCompletion
 {
@@ -78,11 +78,20 @@ void check_submit(TestSubmit method, bool pooled)
     constexpr std::array<uint8_t, 7> payload{1, 2, 3, 4, 5, 6, 7};
     auto *const                      control = crowdb_rpc_buffer_create(payload.data(), payload.size());
     crowdb_rpc_status                status  = CROWDB_RPC_ERR_INVALID_ARG;
-    if (method == TestSubmit::Chain) {
+    if (method == TestSubmit::Chain || method == TestSubmit::ControlChain) {
         const std::array<crowdb_rpc_buffer_t, 2> data{crowdb_rpc_buffer_create(payload.data(), 3),
                                                       crowdb_rpc_buffer_create(payload.data() + 3, 3)};
-        status = crowdb_rpc_client_send_chain(state.client, state.server, state.connection, 1, control, data.data(),
-                                              data.size(), 42, complete, &state);
+        if (method == TestSubmit::ControlChain) {
+            status = crowdb_rpc_client_send_control_chain(state.client, state.server, state.connection, 1, control,
+                                                          data.data(), data.size(), 42, complete, &state);
+            crowdb_rpc_buffer_release(control);
+            for (auto *view : data)
+                crowdb_rpc_buffer_release(view);
+        }
+        else {
+            status = crowdb_rpc_client_send_chain(state.client, state.server, state.connection, 1, control, data.data(),
+                                                  data.size(), 42, complete, &state);
+        }
     }
     else if (method == TestSubmit::Slab) {
         status = crowdb_rpc_client_send_slab(state.client, state.server, state.connection, 1, control, nullptr, 42,
@@ -116,6 +125,11 @@ TEST(CApiSubmitLifetimeTest, SlabCompletionMayDestroyWrappersBeforeSendReturns)
 TEST(CApiSubmitLifetimeTest, ChainCompletionMayDestroyWrappersBeforeSendReturns)
 {
     check_submit(TestSubmit::Chain, true);
+}
+
+TEST(CApiSubmitLifetimeTest, ControlChainCompletionMayDestroyWrappersBeforeSendReturns)
+{
+    check_submit(TestSubmit::ControlChain, true);
 }
 
 TEST(CApiSubmitLifetimeTest, SlabOnlyCompletionMayDestroyWrappersBeforeSendReturns)

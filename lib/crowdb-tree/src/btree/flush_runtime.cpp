@@ -43,11 +43,8 @@ void FlushRuntime::State::Receiver::set_value() const noexcept
     auto                                                started = flush_runtime_now_ns();
     state->inflight.fetch_add(1, std::memory_order_relaxed);
     state->queued.fetch_sub(1, std::memory_order_relaxed);
-    if (!owned->progress) {
-        owned->lane->queued_.fetch_sub(1, std::memory_order_relaxed);
-        state->queue_permits.fetch_sub(1, std::memory_order_relaxed);
-    }
-    else {
+    owned->lane->queued_.fetch_sub(1, std::memory_order_relaxed);
+    if (owned->progress) {
         owned->progress->requested.exchange(false, std::memory_order_acq_rel);
     }
     state->queue_ns.fetch_add(started - owned->queued_at, std::memory_order_relaxed);
@@ -138,38 +135,35 @@ void FlushRuntime::Lane::complete_drain() noexcept
     }
 }
 
-std::optional<size_t> FlushRuntime::allocation_bound(size_t workers, size_t queue_limit) noexcept
+std::optional<size_t> FlushRuntime::allocation_bound(size_t workers) noexcept
 {
-    if (workers == 0 || workers > UINT16_MAX || queue_limit == 0 || workers > SIZE_MAX - queue_limit) {
+    if (workers == 0 || workers > UINT16_MAX) {
         return {};
     }
     return AllocationBound(sizeof(State))
         .add(exec::static_thread_pool::allocation_bound(static_cast<uint32_t>(workers)))
         .add_product(workers, PoolStorage::worker_bytes())
-        .add_product(workers + queue_limit, sizeof(State::Slot))
         .add_product(workers, sizeof(exec::static_thread_pool::scheduler))
         .add(shared_allocation_bound<State::Activity>())
         .value();
 }
 
-FlushRuntime::FlushRuntime(size_t workers, size_t queue_limit, std::shared_ptr<AllocationBudget> budget)
+FlushRuntime::FlushRuntime(size_t workers, size_t queue_target, std::shared_ptr<AllocationBudget> budget)
 {
-    if (!allocation_bound(workers, queue_limit)) {
-        throw std::invalid_argument("flush runtime requires workers and queue capacity");
+    if (!allocation_bound(workers)) {
+        throw std::invalid_argument("invalid flush runtime worker count");
     }
     state_credit_ = AllocationLease(budget, sizeof(State), AllocationKind::kMetadata);
-    state_        = std::make_unique<State>(workers, queue_limit, budget);
+    state_        = std::make_unique<State>(workers, queue_target, budget);
 }
 
 FlushRuntime::~FlushRuntime()
 {
     close();
     drain();
-    assert(state_->queue_permits.load(std::memory_order_acquire) == 0 &&
-           "host must release progress registrations before runtime destruction");
 }
 
-Status FlushRuntime::try_submit(std::shared_ptr<Lane> lane, Task task, void *context)
+Status FlushRuntime::try_submit(std::shared_ptr<Lane> lane, Task task, void *context, std::shared_ptr<const void> owner)
 {
     if (!lane || task == nullptr) {
         return Status::invalid_argument("flush runtime requires a lane and task");
@@ -187,29 +181,19 @@ Status FlushRuntime::try_submit(std::shared_ptr<Lane> lane, Task task, void *con
         state_->finish();
         return Status::unavailable("flush runtime lane closed");
     }
-    bool lane_acquired = flush_runtime_acquire(lane->queued_, lane->limit_);
-    if (!lane_acquired || !flush_runtime_acquire(state_->queue_permits, state_->queue_limit)) {
-        if (lane_acquired) {
-            lane->queued_.fetch_sub(1, std::memory_order_relaxed);
-        }
+    try {
+        MetadataAllocator<State::Job> allocator(lane->allocations_);
+        auto                         *job = std::construct_at(allocator.allocate(1), state_.get(), lane, task, context,
+                                                              std::shared_ptr<ProgressState>{}, std::move(owner));
+        state_->submit(*job);
+        return Status::Ok();
+    }
+    catch (const std::bad_alloc &) {
         state_->rejected.fetch_add(1, std::memory_order_relaxed);
         lane->finish_job();
         state_->finish();
-        return Status::resource_exhausted("flush runtime queue full");
+        return Status::resource_exhausted();
     }
-    auto *job = state_->prepare_job(lane, task, context);
-    if (job == nullptr) {
-        state_->queue_permits.fetch_sub(1, std::memory_order_relaxed);
-        lane->queued_.fetch_sub(1, std::memory_order_relaxed);
-        state_->rejected.fetch_add(1, std::memory_order_relaxed);
-        lane->finish_job();
-        state_->finish();
-        return Status::resource_exhausted("flush runtime job slots unavailable");
-    }
-    state_->queued.fetch_add(1, std::memory_order_relaxed);
-    state_->submitted.fetch_add(1, std::memory_order_relaxed);
-    stdexec::start(job->operation);
-    return Status::Ok();
 }
 
 void FlushRuntime::close() noexcept
@@ -242,7 +226,6 @@ void FlushRuntime::stop_workers(AsyncCompletion complete) noexcept
 {
     assert(!on_worker_thread());
     assert(state_->lifecycle->jobs.load(std::memory_order_acquire) == (State::kClosed | State::kDrain));
-    assert(queue_permits() == 0);
     state_->pool_storage.notify_on_exit(std::move(complete));
     state_->pool.request_stop();
 }
@@ -263,9 +246,9 @@ size_t FlushRuntime::worker_count() const noexcept
     return state_->worker_count;
 }
 
-size_t FlushRuntime::queue_permits() const noexcept
+size_t FlushRuntime::queue_target() const noexcept
 {
-    return state_->queue_permits.load(std::memory_order_relaxed);
+    return state_->queue_target;
 }
 
 } // namespace crowdb::tree::detail

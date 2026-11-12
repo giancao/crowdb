@@ -270,6 +270,7 @@ TEST(Gc, CompactSparseBlocksRespectsByteBudget)
     store->set_sync_mode(SyncMode::kSkip);
     Config opt;
     opt.page_store       = store.get();
+    opt.frame_bytes      = 4096;
     opt.leaf_split_bytes = 256;
     // Keep surviving pages in their original extents to create sparse blocks.
     opt.leaf_merge_bytes              = 0;
@@ -340,7 +341,10 @@ TEST(Gc, CompactSparseBlocksMaintainsDataIntegrity)
     ASSERT_TRUE(BlockPageStore::open_blocks(tmp.path, 0, 0, blk, 1, &store).ok());
     store->set_sync_mode(SyncMode::kSkip);
     Config opt;
-    opt.page_store       = store.get();
+    opt.page_store = store.get();
+    // Several primary frames must fit in each block so deleting keys leaves
+    // mixed live and free extents regardless of page write completion order.
+    opt.frame_bytes      = 4096;
     opt.leaf_split_bytes = 256;
     // Keep surviving pages in their original extents to create sparse blocks.
     opt.leaf_merge_bytes              = 0;

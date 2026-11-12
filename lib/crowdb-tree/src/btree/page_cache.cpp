@@ -101,7 +101,7 @@ class SharedPageCache::Binding final : public PageLoader
     State::Request *claim() noexcept
     {
         if (!reservation_) {
-            return state_->claim();
+            return state_->claim(metadata_);
         }
         bool idle = false;
         if (state_->closed.load(std::memory_order_acquire) ||
@@ -201,7 +201,7 @@ Status SharedPageCache::bind_reserved(std::shared_ptr<PageLoader>              u
     if (!upstream || out == nullptr) {
         return Status::invalid_argument("reserved cache binding requires upstream and output");
     }
-    auto *slot = state_->claim(false);
+    auto *slot = state_->claim({}, false);
     if (slot == nullptr) {
         if (state_->closed.load(std::memory_order_acquire)) {
             return Status::unavailable("cache is closed");

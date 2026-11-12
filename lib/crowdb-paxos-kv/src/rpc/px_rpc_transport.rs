@@ -8,9 +8,10 @@
 //! zero-copy `Ref` wrappers.
 
 mod heartbeat;
+mod peer;
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use flatbuffers::FlatBufferBuilder;
 
@@ -33,10 +34,11 @@ use crowdb_rpc_ffi::{
     Buffer, ConnectionPoolError, ConnectionPoolIndex, RpcClient, RpcError, RpcServer, SelectedConnection,
 };
 
+use crate::cluster::px_kv_store::PxKvStore;
 use crate::cluster::replica::{
     FetchGapReply, PxReplicaError, StepDownReply, StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, MIN_PAYLOAD_VIEW_BYTES};
 
 /// crowdb-rpc transport for the KV consensus service. Holds the
 /// client-side `RpcServer` (manages connections), `RpcClient`
@@ -46,8 +48,34 @@ pub struct PxRpcTransport {
     server: Arc<RpcServer>,
     rpc: Arc<RpcClient>,
     connections: ConnectionPoolIndex,
+    peer_store: Option<Weak<PxKvStore>>,
     next_req_id: AtomicU64,
     cluster_id: Option<String>,
+    rdma_accept_prefix_bytes: usize,
+}
+
+fn finish_accept_prefix<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cluster_id: Option<&str>,
+    mut args: FBAcceptRequestArgs<'a>,
+) {
+    // The empty vector's length field is the last word of the prefix.
+    // Its bytes are appended as immutable views or as a contiguous suffix.
+    let payload = builder.create_vector::<u8>(&[]);
+    debug_assert_eq!(payload.value() as usize, std::mem::size_of::<u32>());
+    args.value = Some(FBAcceptedValue::create(
+        builder,
+        &FBAcceptedValueArgs {
+            slot: args.slot,
+            round: args.round,
+            leader_id: args.leader_id,
+            term: args.term,
+            payload: Some(payload),
+        },
+    ));
+    args.target_cluster_id = cluster_id.map(|id| builder.create_string(id));
+    let request = FBAcceptRequest::create(builder, &args);
+    builder.finish(request, None);
 }
 
 impl std::fmt::Debug for PxRpcTransport {
@@ -87,15 +115,30 @@ impl PxRpcTransport {
         server.set_send_queue_capacity(send_queue_capacity);
         server.start();
         server.register_conn_count_gauge("rpc.consensus.connections");
+        Self::with_server(server, pool_size, None)
+    }
+
+    fn with_server(server: Arc<RpcServer>, pool_size: usize, peer_store: Option<Weak<PxKvStore>>) -> Self {
         let rpc = Arc::new(RpcClient::new());
         rpc.set_completion_pool_size(1024);
         rpc.start_reaper(3_000_000_000, 500_000_000);
+        let cluster_id = std::env::var("CROWDB_PAXOS_KV_CLUSTER_ID").ok();
+        let mut builder = FlatBufferBuilder::new();
+        builder.force_defaults(true);
+        finish_accept_prefix(
+            &mut builder,
+            cluster_id.as_deref(),
+            FBAcceptRequestArgs::default(),
+        );
+        let rdma_accept_prefix_bytes = builder.finished_data().len();
         Self {
             server,
             rpc,
             connections: ConnectionPoolIndex::new(pool_size, None),
+            peer_store,
             next_req_id: AtomicU64::new(1),
-            cluster_id: std::env::var("CROWDB_PAXOS_KV_CLUSTER_ID").ok(),
+            cluster_id,
+            rdma_accept_prefix_bytes,
         }
     }
 
@@ -103,15 +146,41 @@ impl PxRpcTransport {
         self.next_req_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Get or create a `Connection` for the given endpoint, round-
-    /// robining across the pool. The crowdb-rpc server listens on the
-    /// same port as the crowdb-rpc endpoint (no port derivation).
-    fn conn_for(&self, rpc_endpoint: &str) -> Result<SelectedConnection, PxReplicaError> {
+    pub(crate) fn rdma_accept_payload_target(&self, endpoint: &str) -> Option<usize> {
+        let connection = self.connections.get_first(&normalize_endpoint(endpoint))?;
+        let capacity = usize::try_from(connection.rdma_single_send_control_capacity()).ok()?;
+        capacity
+            .checked_sub(self.rdma_accept_prefix_bytes)
+            .filter(|target| *target != 0)
+    }
+
+    async fn conn_for(&self, rpc_endpoint: &str) -> Result<SelectedConnection, PxReplicaError> {
         let normalized = normalize_endpoint(rpc_endpoint);
-        let (host, port) = parse_endpoint(&normalized)
+        if let Some(connection) = self.connections.get(&normalized) {
+            return Ok(connection);
+        }
+        if self.peer_store.is_some() {
+            return self.connect_peer(&normalized).await;
+        }
+        self.connect_standalone(&normalized)
+    }
+
+    fn notification_connection(&self, endpoint: &str) -> Result<SelectedConnection, PxReplicaError> {
+        let normalized = normalize_endpoint(endpoint);
+        if self.peer_store.is_some() {
+            return self
+                .connections
+                .get(&normalized)
+                .ok_or_else(|| rpc_error_to_px(RpcError::ConnectionClosed));
+        }
+        self.connect_standalone(&normalized)
+    }
+
+    fn connect_standalone(&self, normalized: &str) -> Result<SelectedConnection, PxReplicaError> {
+        let (host, port) = parse_endpoint(normalized)
             .map_err(|e| PxReplicaError::Internal(format!("rpc connect parse endpoint: {e}")))?;
         self.connections
-            .get_or_try_install(&normalized, || {
+            .get_or_try_install(normalized, || {
                 let conn = self
                     .server
                     .connect(&host, port)
@@ -134,7 +203,7 @@ impl PxRpcTransport {
     /// connections only when the connection itself failed. Timeout and
     /// queue pressure do not prove that the selected generation is dead.
     fn map_rpc_err(&self, e: RpcError, endpoint: &str, generation: u64) -> PxReplicaError {
-        if rpc_error_invalidates_connection(e) {
+        if self.peer_store.is_none() && rpc_error_invalidates_connection(e) {
             self.connections
                 .invalidate(&normalize_endpoint(endpoint), generation);
         }
@@ -154,7 +223,7 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint).await?;
         let mut builder = FlatBufferBuilder::new();
         let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
         let args = FBPrepareRequestArgs {
@@ -210,7 +279,7 @@ impl PxRpcTransport {
                 slot: av.slot,
                 ballot: PxBallot::new(av.round, av.leader_id),
                 term: av.term,
-                payload: av.payload,
+                payload: av.payload.into(),
             });
             Ok(PxPrepareReply::Promised {
                 slot: r.slot(),
@@ -230,49 +299,90 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
-        let mut builder = FlatBufferBuilder::new();
-        let payload = builder.create_vector(entry.payload.as_ref());
-        let value = FBAcceptedValue::create(
+        let conn = self.conn_for(rpc_endpoint).await?;
+        let payload_len = u32::try_from(entry.payload.len())
+            .map_err(|_| PxReplicaError::Internal("Accept payload exceeds its wire length".into()))?;
+        let segments = entry.payload.segments();
+        let split_control =
+            payload_len != 0 && (!conn.is_rdma() || entry.payload.len() >= MIN_PAYLOAD_VIEW_BYTES);
+        let control_capacity = 256 + self.cluster_id.as_deref().map_or(0, str::len);
+        let operation_count: &[u8] = entry
+            .payload
+            .operation_count_bytes()
+            .map_or(&[], |count| count.as_slice());
+        let contiguous_payload_len = if split_control {
+            operation_count.len()
+        } else {
+            entry.payload.len()
+        };
+        let capacity = control_capacity
+            .checked_add(contiguous_payload_len)
+            .filter(|&len| len <= flatbuffers::FLATBUFFERS_MAX_BUFFER_SIZE)
+            .ok_or_else(|| PxReplicaError::Internal("Accept control exceeds its buffer size".into()))?;
+        let mut bytes = Vec::with_capacity(capacity);
+        bytes.resize(control_capacity, 0);
+        let mut builder = FlatBufferBuilder::from_vec(bytes);
+        builder.force_defaults(conn.is_rdma());
+        finish_accept_prefix(
             &mut builder,
-            &FBAcceptedValueArgs {
+            self.cluster_id.as_deref(),
+            FBAcceptRequestArgs {
+                id: req_id,
+                rpc_create_nano: 0,
+                version: 1,
                 slot: entry.slot,
                 round: entry.ballot.round,
                 leader_id: entry.ballot.leader_id,
                 term: entry.term,
-                payload: Some(payload),
+                group_id,
+                membership_epoch,
+                target_replica_id,
+                ..FBAcceptRequestArgs::default()
             },
         );
-        let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
-        let args = FBAcceptRequestArgs {
-            id: req_id,
-            rpc_create_nano: 0,
-            version: 1,
-            slot: entry.slot,
-            round: entry.ballot.round,
-            leader_id: entry.ballot.leader_id,
-            term: entry.term,
-            value: Some(value),
-            group_id,
-            membership_epoch,
-            target_replica_id,
-            target_cluster_id,
-        };
-        let req = FBAcceptRequest::create(&mut builder, &args);
-        builder.finish(req, None);
-        let control = Buffer::from_bytes(builder.finished_data());
+        debug_assert!(!conn.is_rdma() || builder.finished_data().len() == self.rdma_accept_prefix_bytes);
+        let (mut bytes, head) = builder.collapse();
+        let length_offset = bytes.len() - std::mem::size_of::<u32>();
+        bytes[length_offset..].copy_from_slice(&payload_len.to_le_bytes());
+        if split_control {
+            bytes.extend_from_slice(operation_count);
+        } else {
+            for part in entry.payload.parts() {
+                bytes.extend_from_slice(part);
+            }
+        }
+        let control = Buffer::from_vec_offset(bytes, head);
         let msg_type = FBMsgType::EAcceptRequest.0 as u16;
-        let fut = self
-            .rpc
-            .call(&self.server, &conn, req_id, control, None, msg_type)
-            .map_err(|e| self.map_rpc_err(e, rpc_endpoint, conn.generation()))?;
+        let fut = if split_control {
+            if let Some(parts) = segments {
+                self.rpc
+                    .call_control_chain(&self.server, &conn, req_id, control, &parts.tails, msg_type)
+            } else {
+                let payload = entry
+                    .payload
+                    .contiguous()
+                    .ok_or_else(|| PxReplicaError::Internal("missing contiguous Accept payload".into()))?;
+                let tail = Buffer::try_from_owned_bytes(payload.clone())
+                    .map_err(|error| PxReplicaError::Internal(error.to_string()))?;
+                self.rpc
+                    .call_control_tail(&self.server, &conn, req_id, control, tail, msg_type)
+            }
+        } else {
+            self.rpc
+                .call(&self.server, &conn, req_id, control, None, msg_type)
+        }
+        .map_err(|e| self.map_rpc_err(e, rpc_endpoint, conn.generation()))?;
         let resp = fut
             .await
             .map_err(|e| self.map_rpc_err(e, rpc_endpoint, conn.generation()))?;
         let ctrl = resp
             .control
             .ok_or_else(|| PxReplicaError::Internal("accept response missing control buffer".into()))?;
-        let r = FBAcceptedResponseRef::new(ctrl.bytes());
+        Self::decode_accept_response(ctrl.bytes())
+    }
+
+    fn decode_accept_response(bytes: &[u8]) -> Result<PxAcceptReply, PxReplicaError> {
+        let r = FBAcceptedResponseRef::new(bytes);
         if !r.valid() {
             return Err(PxReplicaError::Internal("accept response malformed".into()));
         }
@@ -309,7 +419,7 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint).await?;
         let mut builder = FlatBufferBuilder::new();
         let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
         let args = FBPreVoteRequestArgs {
@@ -362,7 +472,7 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint).await?;
         let mut builder = FlatBufferBuilder::new();
         let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
         let args = FBRequestVoteRequestArgs {
@@ -415,7 +525,7 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint).await?;
         let mut builder = FlatBufferBuilder::new();
         let reason = builder.create_string(&req.reason);
         let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
@@ -468,7 +578,7 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint).await?;
         let mut builder = FlatBufferBuilder::new();
         let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
         let args = FBFetchGapRequestArgs {
@@ -526,7 +636,7 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.notification_connection(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
         let args = FBChosenNotificationArgs {
@@ -565,7 +675,7 @@ impl PxRpcTransport {
         let rpc_endpoint = destination.endpoint;
         let target_replica_id = destination.replica_id;
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.notification_connection(rpc_endpoint)?;
         let mut builder = FlatBufferBuilder::new();
         let target_cluster_id = self.cluster_id.as_deref().map(|id| builder.create_string(id));
         let args = FBBatchChosenNotificationArgs {
@@ -599,6 +709,7 @@ impl PxRpcTransport {
         let req_id = self.next_id();
         let conn = self
             .conn_for(rpc_endpoint)
+            .await
             .map_err(SnapshotTransferError::Transport)?;
         let mut builder = FlatBufferBuilder::new();
         let request = FBSnapshotBeginRequest::create(
@@ -663,6 +774,7 @@ impl PxRpcTransport {
         let req_id = self.next_id();
         let conn = self
             .conn_for(rpc_endpoint)
+            .await
             .map_err(SnapshotTransferError::Transport)?;
         let mut builder = FlatBufferBuilder::new();
         let request = FBSnapshotReadRequest::create(
@@ -724,6 +836,7 @@ impl PxRpcTransport {
         let req_id = self.next_id();
         let conn = self
             .conn_for(rpc_endpoint)
+            .await
             .map_err(SnapshotTransferError::Transport)?;
         let mut builder = FlatBufferBuilder::new();
         let request = FBSnapshotFinishRequest::create(
@@ -770,7 +883,7 @@ impl PxRpcTransport {
     }
 
     pub(crate) async fn snapshot_abort(&self, rpc_endpoint: &str, identity: SnapshotIdentity) {
-        let Ok(conn) = self.conn_for(rpc_endpoint) else {
+        let Ok(conn) = self.conn_for(rpc_endpoint).await else {
             return;
         };
         let req_id = self.next_id();
@@ -819,7 +932,7 @@ impl PxRpcTransport {
         control: Buffer,
     ) -> Result<crowdb_rpc_ffi::Response, PxReplicaError> {
         let req_id = self.next_id();
-        let conn = self.conn_for(rpc_endpoint)?;
+        let conn = self.conn_for(rpc_endpoint).await?;
         let fut = self
             .rpc
             .call(&self.server, &conn, req_id, control, None, msg_type)

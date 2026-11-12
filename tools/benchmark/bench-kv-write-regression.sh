@@ -220,3 +220,26 @@ finish_cases
 # zero errors/incomplete, full verification passed. Before rename:129753.35 TPS (-0.748%).
 # One comparison only, not a statistical equivalence claim.
 # Earlier attempt:122869.55 TPS, p99=843775ns; clippy overlapped, excluded from perf comparison.
+
+# 2026-11-12: current Release server and CLI, 100k keys and 512B values.
+# Fresh three-node host-network MemBlock Tree/WAL cluster per case, 20GiB/node,
+# no CPU quota or cpuset, Tokio32, server RPC2, window32/coalesce16, peer pool4.
+# Default election profile, 5/20/5s, 95% cgroup and 4GiB host memory guards.
+# All three cases completed full verification with zero failed or incomplete PUTs.
+# 64T/4C: 108258.45 TPS, P99 2.474ms, sampled max node memory 3.88GiB.
+# 128T/4C: 131793.00 TPS, P99 4.358ms, sampled max node memory 8.61GiB.
+# 256T/8C: 146438.50 TPS, P99 8.126ms, sampled max node memory 11.89GiB.
+# Raw reports, deployment evidence and binary hashes:
+# .crowdb-runtime/artifacts/bench/paxos-write-512b-20261112-111426/
+
+# 2026-11-12: 128T/4C, 512B, default election profile, 5/60/5s.
+# Fresh three-node MemBlock, 28GiB/node and 6GiB per-Tree writer in both runs.
+# Baseline: 114767.23 successful PUT/s, 43658 measurement failures (Busy),
+# Leader 764 ordinary flush batches. Dataset verification skipped after failure.
+# With memtable_flush_count=8 and max_memtable_count=16: 169754.77 PUT/s,
+# P99 3.555ms, zero failures/incomplete, full verification passed.
+# Leader 275 ordinary flush batches (93 with eight inputs). Followers 140/141
+# ordinary batches (136/137 with eight inputs). The fresh deployment elected
+# replica 2, whereas baseline elected replica 3.
+# .crowdb-runtime/artifacts/bench/paxos-write-512b-128t-60s-28g-20261112-112458/
+# .crowdb-runtime/artifacts/bench/paxos-write-512b-128t-60s-mt8-20261112-113718/

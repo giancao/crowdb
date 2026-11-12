@@ -47,7 +47,7 @@ async fn restored_journal_rejects_missing_durable_history_before_maintenance() {
         slot: 3,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::new(),
+        payload: Bytes::new().into(),
     };
     let replay = ReplayResult {
         records: vec![WALRecord::from_accepted(1, &entry)],

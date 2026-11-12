@@ -46,13 +46,13 @@ Status PublishedNativeCursor::State::generated_frame(const SnapshotReadWindow   
     generated          = result.complete;
     if (result.frame) {
         const auto &frame = *result.frame;
-        if (!frame.buffer || frame.info.bytes == 0 || frame.info.bytes > frame.buffer->bytes.size()) {
+        if (!frame.buffer || frame.info.bytes == 0 || frame.info.bytes > frame.buffer->bytes().size()) {
             return Status::corruption("native encoder returned an invalid byte window");
         }
         // The encoder deliberately reuses one buffer. Copy only this frame
         // into an independently charged owner before advancing that buffer.
         auto bytes = detail::reserved_shared<NativeOutput>(
-            window.budget.reservation(), std::span<const uint8_t>(frame.buffer->bytes.data(), frame.info.bytes),
+            window.budget.reservation(), std::span<const uint8_t>(frame.buffer->bytes().data(), frame.info.bytes),
             window.budget.reservation());
         *out = NativeFrameView{.page_id      = frame.info.page_id,
                                .bytes        = bytes->bytes,

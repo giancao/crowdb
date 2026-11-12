@@ -5,10 +5,13 @@
 #include "tree_apply_operation.h"
 #include "tree_core_internal.h"
 
+#include <array>
+
 namespace crowdb::tree
 {
 Status TreeCore::prepare_apply(size_t count, const CoreWriteReader &read, detail::BudgetClass category,
-                               size_t retained_metadata_bytes, std::shared_ptr<TreeApplyOperation> *out)
+                               size_t retained_metadata_bytes, std::shared_ptr<TreeApplyOperation> *out,
+                               const ExternalValue *external, ApplyInputOwner *owner)
 try {
     if (out == nullptr || *out ||
         (category != detail::BudgetClass::kAdmittedWriter && category != detail::BudgetClass::kGapRepair)) {
@@ -18,10 +21,12 @@ try {
     if (ingress.owner == nullptr) {
         return Status::unavailable("apply admission is closed");
     }
-    const auto          sources = state_->sources->catalog();
-    const auto         &limits  = sources->active_budget->options();
-    AdmittedBatch::Plan plan;
-    auto status = AdmittedBatch::plan(config(), limits, state_->loads.max_value_bytes, count, read, &plan);
+    const auto                                             sources = state_->sources->catalog();
+    const auto                                            &limits  = sources->active_budget->options();
+    AdmittedBatch::Plan                                    plan;
+    std::array<size_t, AdmittedBatch::kMaxPlanningEntries> order;
+    auto                                                   status =
+        AdmittedBatch::plan(config(), limits, state_->loads.max_value_bytes, count, read, order, &plan, external);
     if (!status.ok()) {
         return status;
     }
@@ -47,7 +52,8 @@ try {
     }
     std::shared_ptr<AdmittedBatch> batch;
     status = AdmittedBatch::bind_prepaid(limits, count, read, category, plan, std::move(*staging),
-                                         source ? std::move(*source) : detail::ResourceBudget::Credit{}, &batch);
+                                         source ? std::move(*source) : detail::ResourceBudget::Credit{}, &batch,
+                                         std::span(order).first(plan.footprint.entries), owner);
     if (!status.ok()) {
         return status;
     }

@@ -15,6 +15,17 @@ size_t Crowdbtree::leaf_count() const
     return core_->capture()->stats.leaf_pages;
 }
 
+uint64_t Crowdbtree::flushes_since_persistent() const noexcept
+{
+    return core_->publisher().flushes_since_persistent();
+}
+
+bool Crowdbtree::bind_flush_threshold(uint64_t threshold, void (*wake)(void *), void (*drop_context)(void *),
+                                      void    *context) noexcept
+{
+    return core_->publisher().bind_flush_threshold(threshold, wake, drop_context, context);
+}
+
 EngineStats Crowdbtree::stats() const
 {
     const auto  state  = core_->state_stats();

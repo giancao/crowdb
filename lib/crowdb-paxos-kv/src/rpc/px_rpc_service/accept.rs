@@ -1,34 +1,32 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
+use super::responses::build_error_response;
 use super::{
-    build_accepted_response, px_error_to_ret_code, record_group_context, spawn_request, submit_error,
-    submit_fb_response, warn, Arc, FBAcceptRequest, FBKvRetCode, FBMsgType, PxAcceptReply, PxBallot,
-    PxLocalReplica, PxLogEntry, PxRpcService, ReplicaHandler, RpcServer, ServerRequest,
+    build_accepted_response, px_error_to_ret_code, record_group_context, spawn_request, warn, Arc, Buffer,
+    FBAcceptRequest, FBKvRetCode, FBMsgType, PxAcceptReply, PxBallot, PxLocalReplica, PxLogEntry,
+    PxRpcService, ReplicaHandler, ServerRequest,
 };
+use bytes::Bytes;
 
 impl PxRpcService {
     // ── Accept ───────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn handle_accept(&self, req: ServerRequest, server: &Arc<RpcServer>) {
+    pub(super) fn handle_accept(&self, mut req: ServerRequest) {
         let req_id = req.request_id;
         let create_nano = req.rpc_create_nano;
-        let conn_handle_usize = req.conn_handle as usize;
         let msg_type = FBMsgType::EAcceptedResponse.0 as u16;
         let store = Arc::clone(&self.store);
-        let server = Arc::clone(server);
         spawn_request(&self.rt, "accept", store.store_id, async move {
+            let reply = |request: ServerRequest, (bytes, head)| {
+                let _ = request.reply(Buffer::from_vec_offset(bytes, head), None, msg_type);
+            };
+            let reply_error = |request, code, message: &str| {
+                reply(request, build_error_response(req_id, create_nano, code, message));
+            };
             let Ok(fb_req) = flatbuffers::root::<FBAcceptRequest>(req.control()) else {
-                submit_error(
-                    &server,
-                    conn_handle_usize as *mut std::ffi::c_void,
-                    req_id,
-                    create_nano,
-                    msg_type,
-                    FBKvRetCode::InvalidArgument,
-                    "invalid request flatbuffer",
-                );
+                reply_error(req, FBKvRetCode::InvalidArgument, "invalid request flatbuffer");
                 return;
             };
             let group_id = fb_req.group_id();
@@ -40,35 +38,17 @@ impl PxRpcService {
             let membership_epoch = fb_req.membership_epoch();
 
             let Some(fb_value) = fb_req.value() else {
-                submit_error(
-                    &server,
-                    conn_handle_usize as *mut std::ffi::c_void,
-                    req_id,
-                    create_nano,
-                    msg_type,
-                    FBKvRetCode::InvalidArgument,
-                    "missing value",
-                );
+                reply_error(req, FBKvRetCode::InvalidArgument, "missing value");
                 return;
             };
-            let payload_bytes: Vec<u8> = fb_value.payload().map(|v| v.bytes().to_vec()).unwrap_or_default();
-            let entry = PxLogEntry {
-                slot,
-                ballot: PxBallot { round, leader_id },
-                term,
-                payload: payload_bytes.into(),
-            };
+            let payload_range = fb_value.payload().map(|value| {
+                let bytes = value.bytes();
+                let offset = bytes.as_ptr() as usize - req.control().as_ptr() as usize;
+                offset..offset + bytes.len()
+            });
 
             let Some(group) = store.get_group(group_id) else {
-                submit_error(
-                    &server,
-                    conn_handle_usize as *mut std::ffi::c_void,
-                    req_id,
-                    create_nano,
-                    msg_type,
-                    FBKvRetCode::NotFound,
-                    "px group not found",
-                );
+                reply_error(req, FBKvRetCode::NotFound, "px group not found");
                 return;
             };
             let responder_epoch = group.membership_epoch();
@@ -103,19 +83,26 @@ impl PxRpcService {
                     responder_epoch,
                     true,
                 );
-                submit_fb_response(
-                    &server,
-                    conn_handle_usize as *mut std::ffi::c_void,
-                    ctrl,
-                    msg_type,
-                    req_id,
-                );
+                reply(req, ctrl);
                 return;
             }
 
+            let payload = match payload_range {
+                Some(range) if !range.is_empty() => match req.take_control_bytes() {
+                    Some(control) => control.slice(range),
+                    None => Bytes::copy_from_slice(&req.control()[range]),
+                },
+                _ => Bytes::new(),
+            };
+            let entry = PxLogEntry {
+                slot,
+                ballot: PxBallot { round, leader_id },
+                term,
+                payload: payload.into(),
+            };
             let replica = group.local_replica();
-            let reply = <PxLocalReplica as ReplicaHandler>::on_accept(replica, &entry, group_id).await;
-            let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {
+            let result = <PxLocalReplica as ReplicaHandler>::on_accept(replica, &entry, group_id).await;
+            let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match result {
                 Ok(PxAcceptReply::Accepted { .. }) => (false, 0, 0, false, replica.current_term_snapshot()),
                 Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
                     warn!(
@@ -162,13 +149,7 @@ impl PxRpcService {
                         responder_epoch,
                         false,
                     );
-                    submit_fb_response(
-                        &server,
-                        conn_handle_usize as *mut std::ffi::c_void,
-                        ctrl,
-                        msg_type,
-                        req_id,
-                    );
+                    reply(req, ctrl);
                     return;
                 }
             };
@@ -189,14 +170,7 @@ impl PxRpcService {
                 responder_epoch,
                 false,
             );
-            submit_fb_response(
-                &server,
-                conn_handle_usize as *mut std::ffi::c_void,
-                ctrl,
-                msg_type,
-                req_id,
-            );
-            // req dropped here, frame released
+            reply(req, ctrl);
         });
     }
 }

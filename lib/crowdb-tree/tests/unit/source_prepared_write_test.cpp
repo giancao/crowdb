@@ -85,7 +85,7 @@ TEST(SourcePreparedWrite, NewKeyPreparationCanLoseInsertionWithoutAnotherAllocat
 }
 
 #ifdef CROWDB_TREE_TEST_UTIL
-TEST(SourcePreparedWrite, SealedCommitRetriesVersionCasWithTheOriginalCapacity)
+TEST(SourcePreparedWrite, SealedCommitReusesThePreparedVersionAfterLosingCas)
 {
     TestBudget              budget;
     SourceAdmission         sources(0, 1, budget.options(3));

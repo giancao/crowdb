@@ -10,32 +10,18 @@ namespace crowdb::tree::detail
 FlushRuntime::ProgressState::~ProgressState()
 {
     assert(!active.load(std::memory_order_acquire));
-    detach();
-}
-
-void FlushRuntime::ProgressState::detach() noexcept
-{
-    if (detached.exchange(true, std::memory_order_acq_rel)) {
-        return;
-    }
-    runtime->slots[slot].occupied.store(false, std::memory_order_release);
-    lane->queued_.fetch_sub(1, std::memory_order_relaxed);
-    runtime->queue_permits.fetch_sub(1, std::memory_order_relaxed);
 }
 
 void FlushRuntime::ProgressState::schedule(const std::shared_ptr<const void> &owner) noexcept
 {
-    // The registration owns the cell and its queue permits for its lifetime.
-    // Connecting a static-pool scheduler constructs only the inline operation.
+    // The single owner reuses its operation after the previous task exits.
     runtime->lifecycle->jobs.fetch_add(1, std::memory_order_acq_rel);
     work.fetch_add(1, std::memory_order_acq_rel);
     [[maybe_unused]] const auto previous = lane->jobs_.fetch_add(1, std::memory_order_acq_rel);
     assert((previous & Lane::kClosing) == 0 && "progress must join before closing its lane");
-    auto *job = ::new (static_cast<void *>(runtime->slots[slot].storage.data()))
-        State::Job(runtime, slot, lane, task, context, weak_from_this().lock(), owner);
-    runtime->queued.fetch_add(1, std::memory_order_relaxed);
-    runtime->submitted.fetch_add(1, std::memory_order_relaxed);
-    stdexec::start(job->operation);
+    auto *job = ::new (static_cast<void *>(operation_storage.data()))
+        State::Job(runtime, lane, task, context, weak_from_this().lock(), owner);
+    runtime->submit(*job);
 }
 
 void FlushRuntime::ProgressState::request(const std::shared_ptr<const void> &owner) noexcept
@@ -113,7 +99,6 @@ void FlushRuntime::ProgressState::finish_close(uint64_t idle) noexcept
         !work.compare_exchange_strong(idle, idle | State::kClosed, std::memory_order_acq_rel)) {
         return;
     }
-    detach();
     auto done = std::move(on_drained);
     done.complete(Status::Ok());
 }
@@ -122,7 +107,6 @@ void FlushRuntime::ProgressState::close_and_drain() noexcept
 {
     work.fetch_or(State::kClosed, std::memory_order_acq_rel);
     drain();
-    detach();
 }
 
 FlushRuntime::Progress::Progress(std::shared_ptr<ProgressState> state) : state_(std::move(state))
@@ -176,36 +160,15 @@ Status FlushRuntime::reserve_progress(std::shared_ptr<Lane> lane, Task task, voi
             return Status::unavailable("flush runtime closed");
         }
     } while (!state_->lifecycle->jobs.compare_exchange_weak(value, value + 1, std::memory_order_acq_rel));
-    const bool lane_acquired = flush_runtime_acquire(lane->queued_, lane->limit_);
-    if (!lane_acquired || !flush_runtime_acquire(state_->queue_permits, state_->queue_limit)) {
-        if (lane_acquired) {
-            lane->queued_.fetch_sub(1, std::memory_order_relaxed);
-        }
-        state_->finish();
-        return Status::resource_exhausted("runtime progress queue credit unavailable");
-    }
-    const auto                     slot = state_->claim_slot();
-    std::shared_ptr<ProgressState> progress;
-    Status                         status = Status::Ok();
+    Status status = Status::Ok();
     try {
-        if (slot == SIZE_MAX) {
-            throw std::bad_alloc();
-        }
-        progress = std::allocate_shared<ProgressState>(MetadataAllocator<ProgressState>(budget), state_.get(), slot,
-                                                       lane, task, context);
-        *out     = std::allocate_shared<Progress>(MetadataAllocator<Progress>(budget), progress);
+        auto progress = std::allocate_shared<ProgressState>(MetadataAllocator<ProgressState>(budget), state_.get(),
+                                                            std::move(lane), task, context);
+        *out          = std::allocate_shared<Progress>(MetadataAllocator<Progress>(budget), progress);
     }
     catch (const std::bad_alloc &) {
-        if (!progress) {
-            if (slot != SIZE_MAX) {
-                state_->slots[slot].occupied.store(false, std::memory_order_release);
-            }
-            lane->queued_.fetch_sub(1, std::memory_order_relaxed);
-            state_->queue_permits.fetch_sub(1, std::memory_order_relaxed);
-        }
-        status = Status::resource_exhausted("runtime progress allocation rejected");
+        status = Status::resource_exhausted();
     }
-    progress.reset();
     state_->finish();
     return status;
 }

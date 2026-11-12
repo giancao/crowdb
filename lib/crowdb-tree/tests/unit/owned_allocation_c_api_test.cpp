@@ -238,12 +238,8 @@ TEST(OwnedAllocationCAbi, ExactWriterCreditPreparesOwnersBeforeCommit)
     const auto baseline = account->snapshot().allocated[static_cast<size_t>(category)];
     buffer     value;
     ASSERT_TRUE(owner->bridge->slice(0, 128, &value).ok());
-    SourceWriteOptions options;
-    options.account         = account;
-    options.max_entries     = 4;
-    options.max_gap_entries = 1;
     const WriteFootprint footprint{.entries = 1, .key_bytes = 3, .payload_bytes = 0};
-    const auto           bound = SourceWriteBudget::allocation_bound(options, footprint);
+    const auto           bound = SourceWriteBudget::allocation_bound(footprint);
     if (!bound) {
         FAIL() << "writer allocation bound overflow";
     }
@@ -254,7 +250,7 @@ TEST(OwnedAllocationCAbi, ExactWriterCreditPreparesOwnersBeforeCommit)
     auto metadata = detail::AllocationReservation::create(std::move(*reserved));
     {
         MemTable table(1, nullptr, host.core()->binding()->lifecycle_budget());
-        auto     prepared = table.prepare_write("key", std::move(value), 0, {}, 0, 5, metadata);
+        auto     prepared = table.prepare_write("key", std::move(value), 0, {}, 0, metadata);
         metadata->seal();
         ASSERT_TRUE(table.commit_write(std::move(prepared), 1));
         auto guard = table.read_guard();

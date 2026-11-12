@@ -104,7 +104,7 @@ impl PxRpcService {
                 Ok(PxPrepareReply::Promised { slot, accepted }) => {
                     let mut builder = FlatBufferBuilder::new();
                     let prev_accepted_off = accepted.as_ref().map(|entry| {
-                        let payload = builder.create_vector(&entry.payload);
+                        let payload = builder.create_vector(&entry.payload.to_bytes());
                         FBAcceptedValue::create(
                             &mut builder,
                             &FBAcceptedValueArgs {

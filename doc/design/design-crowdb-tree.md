@@ -3,7 +3,7 @@
 
 # CROWDB - Design: Tree Storage Engine
 
-`crowdb-tree` combines concurrent skiplist write buffers, immutable pages behind a mapping table, and slot-aware version selection in one ordered key-value engine. Flush distributes work across independent subtrees and joins their results toward the root. A checkpoint persists those results to local disks or shared Chunk storage.
+`crowdb-tree` combines concurrent skiplist write buffers, immutable pages behind a mapping table, and slot-aware version selection in one ordered key-value engine. Flush distributes work across independent subtrees and joins their results toward the root. A flush with persistent writes the resulting changes to local disks or shared Chunk storage.
 
 These choices connect foreground concurrency, ordered reads, and background persistence. Paxos-KV uses the engine on each replica's local disks; Chunk-KV uses its Chunk backend to keep range state independent of the serving node. CROWDB can optimize the same engine for both storage models.
 
@@ -11,9 +11,9 @@ These choices connect foreground concurrency, ordered reads, and background pers
 
 ![Concurrent skiplist tables use CAS; a Bw-tree mapping table resolves immutable pages, with ordinary and persistent flush modes and local-disk or Chunk backends.](../assets/tree.svg)
 
-Each write buffer, or MemTable, is an ordered concurrent skiplist. Compare-and-swap (CAS) publishes new nodes and immutable version sets, while epoch protection delays reclamation until readers are finished. Multiple writers can update independent keys without putting every insertion behind a shared MemTable mutex. The skiplist also gives flush jobs ordered range cursors without sorting the entire input batch again.
+Each write buffer, or MemTable, is an ordered concurrent skiplist. Compare-and-swap (CAS) publishes new nodes and links new versions, while epoch protection delays reclamation until readers are finished. Multiple writers can update independent keys without putting every insertion behind a shared MemTable mutex. The skiplist also gives flush jobs ordered range cursors without sorting the entire input batch again.
 
-The page tree uses mapping indirection: a logical page ID resolves to an immutable page version through a versioned mapping table. This follows the indirection principle described in the [Bw-tree paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/bw-tree-icde2013-final.pdf); CROWDB combines it with its own MemTables, ordered overlays, and checkpoint flow. A page's overlays hold updates above its base data. Readers retain a consistent mapping and source view while writers prepare newer state, and a split can share base ranges without immediately copying every value.
+The page tree resolves each logical page ID to an immutable page version through a versioned mapping table. CROWDB combines this indirection with MemTables, ordered overlays, and incremental persistence. A page's overlays hold updates above its base data. Readers retain a consistent mapping and source view while writers prepare newer state, and a split can share base ranges without immediately copying every value. [Bw-tree paper](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/bw-tree-icde2013-final.pdf)
 
 This keeps several expensive operations off the ordinary update path. Inserting a value need not rewrite a disk page; publishing a new page need not invalidate a reader's view; moving entries into the tree can transfer or share their existing allocation owners. Consolidation combines overlays and adjusts page boundaries when the structure needs it.
 
@@ -33,25 +33,25 @@ Join follows the reverse dependencies. A parent consumes its children's ordered 
 
 This is where the tree structure becomes a scheduling advantage. Parallelism follows key ranges and page dependencies, with bounded CPU and I/O work. Waiting for a child or storage completion yields the worker, allowing the shared runtime to advance other ranges and other Trees.
 
-## Flush and flush with snapshot share the same work
+## Flush and flush with persistent share the same work
 
-Ordinary flush publishes the resulting pages and mapping in memory. Flush with snapshot selects persistent output for that same fork/join round; this is the checkpoint path. Final pages are encoded and written as their dependencies become ready, parents join those results, and changed mapping segments are persisted. The durable root commits only after the required output and storage barriers complete.
+Ordinary flush publishes the resulting pages and mapping in memory. A flush with persistent selects persistent output at the start of the same fork/join flow. Final pages are encoded and written as their dependencies become ready, parents join those results, and changed mapping segments are persisted. The durable root commits after the required output and storage barriers complete.
 
-The design shares consolidation, split/merge decisions, and final page layout between memory maintenance and persistence. Snapshot output therefore reuses the work already needed to organize the tree. Unchanged durable pages and mapping segments keep their existing backing, while a persistent round also includes dirty state left by earlier ordinary flushes.
+Both modes share consolidation, split/merge decisions, and final page layout. Unchanged durable pages and mapping segments keep their existing backing. A persistent round also includes dirty state left by earlier ordinary flushes.
 
-Incremental persistence lets unchanged backing be reused across checkpoints. Ordinary flush and page writeback can reduce memory pressure, but neither advances the durable replay point on its own. Only a committed checkpoint reports the covered operation prefix that the caller can use in its journal retention policy.
+A committed durable root reports the covered operation prefix that the caller can use in its journal retention policy. The engine can pause admission of new writes when MemTable capacity or memory is exhausted. Work already accepted keeps the resources it needs to finish and release space.
 
 ## Recovery is part of the engine contract
 
-Tree relies on its caller's recoverable journal rather than creating a separate mutation redo write-ahead log (WAL). Paxos-KV supplies consensus-selected operations from its replica-local WAL; Chunk-KV supplies ordered mutations from its partition journal. The engine materializes those operations, preserves their version information, and reports the durable progress covered by a committed checkpoint. An in-memory Tree update alone is not crash-durable.
+Tree recovers from its durable root and the caller's journal. Paxos-KV supplies consensus-selected operations from its replica-local write-ahead log (WAL), and Chunk-KV supplies ordered mutations from its partition journal. The engine materializes those operations, preserves their version information, and reports the coverage of the committed root.
 
-This removes a second recording of the same mutation inside the engine. The larger benefit is that application, persistence, and recovery share explicit progress boundaries. If a snapshot covers a prefix and later writes exist only in memory, recovery replays the required external journal suffix. A high observed slot or a completed page write cannot substitute for a committed root and its coverage.
+Using the caller's journal avoids recording the same mutation twice. Recovery opens the last durable root and replays the required journal suffix.
 
 For example, suppose the caller has completed operations through 120, while the last durable Tree root covers 100. Operations 101–120 must remain recoverable from the caller's journal. After a crash, the caller opens that root and supplies the valid suffix to Tree. In Paxos-KV, consensus determines which operations were chosen; Tree restores their materialized state using the supplied slots. Version selection, including tombstones, prevents an older replayed update from replacing a newer value.
 
-Now suppose a snapshot starts persisting state through 120. Its page writes can finish at different times, but the recoverable boundary advances only when the root and its dependencies are committed. Until then, the previous root and required journal history remain the recovery path. This makes checkpoint publication the point where the caller learns that more state can be recovered from Tree itself.
+Now suppose a flush with persistent starts writing state through 120. Its page writes can finish at different times. The recoverable boundary advances when the new root and its dependencies are committed. Until then, the previous root and required journal history remain the recovery path.
 
-The caller uses that durable coverage together with its replication and retention obligations to decide which journal history can be released. Tree manages the lifetime of its own pages and retained views. Each part supplies the evidence needed by the other, so memory maintenance, checkpointing, and log reclamation can be optimized together without confusing their completion points.
+The caller uses durable coverage together with its replication and retention obligations to decide which journal history can be released. Tree reclaims its own backing after the protected roots and readers release it.
 
 ## One engine, local disks or shared Chunks
 

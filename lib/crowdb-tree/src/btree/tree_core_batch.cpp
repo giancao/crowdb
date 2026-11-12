@@ -239,7 +239,7 @@ Status write_inputs(SourceAdmission &sources, ApplyFrontier &frontier, uint64_t 
         }
     }
     // The source permit covers every prepared write through completion. All
-    // payloads, node towers and maximum-size COW descriptors already exist.
+    // payloads and MemTable nodes already exist.
     for (auto &write : prepared) {
         writer.commit_write(std::move(write), slot);
     }

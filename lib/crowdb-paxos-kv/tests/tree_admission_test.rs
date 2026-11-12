@@ -55,7 +55,10 @@ impl AdmittedApply for TestPermit {
 }
 
 impl KVEngine for TestEngine {
-    fn admit_proposal(&self, _: Bytes) -> KVFuture<ApplyAdmissionResult> {
+    fn admit_proposal(
+        &self,
+        _: crowdb_paxos_kv::paxos::roles::ProposalPayload,
+    ) -> KVFuture<ApplyAdmissionResult> {
         if self.0.busy.load(Ordering::Acquire) {
             return KVFuture::ready(Err(ApplyAdmissionError::Busy));
         }
@@ -160,7 +163,7 @@ async fn adopted_foreign_value_does_not_consume_the_client_reservation() {
         slot: 1,
         ballot: PxBallot::new(10, 99),
         term: 0,
-        payload: Bytes::from(payload(b'f')),
+        payload: Bytes::from(payload(b'f')).into(),
     };
     assert!(matches!(
         group.local_replica().on_accept(&entry).await,
@@ -224,7 +227,7 @@ async fn failed_noop_cannot_advance_the_applied_frontier() {
                 slot: 1,
                 ballot: PxBallot::new(0, 1),
                 term: 0,
-                payload: Bytes::new(),
+                payload: Bytes::new().into(),
             },
             &[],
         )
@@ -245,7 +248,7 @@ async fn malformed_chosen_payload_cannot_become_a_noop_or_partial_apply() {
                 slot: 1,
                 ballot: PxBallot::new(0, 1),
                 term: 0,
-                payload: Bytes::from_static(&[1, 0]),
+                payload: Bytes::from_static(&[1, 0]).into(),
             },
             &[],
         )

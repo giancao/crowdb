@@ -24,7 +24,9 @@ use crate::paxos::PxGroupId;
 use super::index::{SegmentIndex, ShardedSegmentIndex, SlotLocation};
 use super::pipeline::WalPipeline;
 use super::pipeline_backend::{WalBlockAlignment, WalPipelineBackend};
-use super::pipeline_writer::{spawn_pipeline_writer, EncodedRecord, PendingWrite, WriterCommand};
+use super::pipeline_writer::{
+    spawn_pipeline_writer, EncodedRecord, PendingWrite, WriteCompletion, WriteRequest, WriterCommand,
+};
 use super::record::{WALRecord, WalRecordFormat};
 use super::IoBackend;
 
@@ -205,6 +207,12 @@ impl WalEngine {
         let watchdog = Duration::from_millis(config.wal_flush_watchdog_ms);
         let batch_bytes = config.wal_flush_batch_bytes;
         let segment_size = config.wal_segment_size;
+        let backend = match backend.as_ref() {
+            IoBackend::MemBlock(device) => {
+                Arc::new(IoBackend::MemBlock(device.with_segment_size(segment_size)?))
+            }
+            _ => backend,
+        };
 
         let mut pipelines = Vec::with_capacity(pipeline_count);
         let mut writer_tasks = Vec::with_capacity(pipeline_count);
@@ -303,11 +311,7 @@ impl WalEngine {
 
         // Encode the record using the format resolved for this pipeline. Binary
         // uses the zero-copy frame; text-line keeps the formatted line.
-        let encoded = match pipeline.record_format {
-            WalRecordFormat::Binary => EncodedRecord::Binary(record.encode_frame()),
-            WalRecordFormat::TextLine => EncodedRecord::TextLine(record.encode_text_line().into_bytes()),
-            WalRecordFormat::Auto => unreachable!("Auto must be resolved at pipeline creation"),
-        };
+        let encoded = EncodedRecord::encode(record, pipeline.record_format);
 
         // Enqueue to the writer task and await the durable-flush ack.
         //
@@ -322,12 +326,12 @@ impl WalEngine {
             slot: record.slot,
             term: record.term,
             is_vote: record.record_type == super::record::RecordType::VoteGranted,
-            ack: ack_tx,
+            completion: WriteCompletion::Ack(ack_tx),
         };
 
         pipeline
             .writer_tx
-            .send(WriterCommand::Write(pending))
+            .send(WriterCommand::Write(WriteRequest::Encoded(pending)))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer stopped"))?;
 
         // Ack contract (W3/W6): resolve only after durable flush.
@@ -349,6 +353,27 @@ impl WalEngine {
         }
 
         Ok(loc)
+    }
+
+    /// Enqueue the leader's local Accepted record after the early-ack decision.
+    /// The pipeline owns encoding, persistence, and reporting write failures.
+    pub(crate) fn enqueue_accepted(&self, record: WALRecord) -> io::Result<()> {
+        debug_assert_eq!(record.record_type, super::record::RecordType::Accepted);
+        if self.failed.load(Ordering::Acquire) {
+            return Err(io::Error::other("WAL disk failed"));
+        }
+        let pipeline = &self.pipelines[self.select_pipeline(&record)];
+        let timing = self
+            .append_summary
+            .get()
+            .map(|summary| (Instant::now(), Arc::clone(summary)));
+        pipeline
+            .writer_tx
+            .send(WriterCommand::Write(WriteRequest::EarlyAccepted {
+                record,
+                completion: WriteCompletion::Early(timing),
+            }))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer stopped"))
     }
 
     /// Select pipeline via deterministic slot affinity.

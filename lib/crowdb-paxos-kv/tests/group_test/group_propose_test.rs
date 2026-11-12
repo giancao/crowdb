@@ -54,7 +54,7 @@ async fn single_local_propose_learns_entry() {
     let replica = group.local_replica();
     let accepted = replica.accepted_at(1).await.expect("slot 1 accepted");
     assert_eq!(
-        accepted.payload.as_ref(),
+        accepted.payload.to_bytes().as_ref(),
         encode_put_payload(b"key", b"test-value")
     );
 }
@@ -98,7 +98,7 @@ async fn single_local_classic_propose_succeeds() {
     let replica = group.local_replica();
     let accepted = replica.accepted_at(1).await.expect("slot 1 accepted");
     assert_eq!(
-        accepted.payload.as_ref(),
+        accepted.payload.to_bytes().as_ref(),
         encode_put_payload(b"key", b"classic-payload")
     );
 }

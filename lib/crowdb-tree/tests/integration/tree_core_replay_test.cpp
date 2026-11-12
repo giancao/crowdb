@@ -213,7 +213,7 @@ TEST_F(TreeCoreReplay, WholeGapGrantWaitsForActualQuotaRelease)
     EXPECT_EQ(core->contiguous_slot(), 1U);
 }
 
-TEST_F(TreeCoreReplay, PersistentFlushReleasesGapPayloadUnderFullOrdinaryCpuAndSingleIo)
+TEST_F(TreeCoreReplay, PersistentFlushReleasesGapPayloadWithResourceWaitersAndSingleIo)
 {
     // Fill every spare registration after the replay and source rotation paths.
     // Chosen pressure must use its startup-reserved path even when all classes are full.
@@ -228,23 +228,10 @@ TEST_F(TreeCoreReplay, PersistentFlushReleasesGapPayloadUnderFullOrdinaryCpuAndS
     ASSERT_FALSE(slots.empty());
     // Only the third write should need a persistent flush to admit its payload.
     const std::string initial_value(192 * 1024, 'v');
-    const std::string pressure_value(320 * 1024, 'p');
+    const std::string pressure_value(768 * 1024, 'p');
     ASSERT_TRUE(apply(1, "a", initial_value).ok());
     ASSERT_TRUE(apply(2, "b", initial_value).ok());
     ASSERT_EQ(core->durable_coverage(), 0U);
-    auto runtime = core->binding()->cpu();
-    auto other   = std::make_shared<detail::FlushRuntime::Lane>(1024);
-    std::vector<std::shared_ptr<detail::FlushRuntime::Progress>> occupied;
-    for (;;) {
-        std::shared_ptr<detail::FlushRuntime::Progress> slot;
-        auto status = runtime->reserve_progress(other, [](void *) noexcept {}, nullptr, {}, &slot);
-        if (!status.ok()) {
-            ASSERT_EQ(status.code(), Code::kResourceExhausted);
-            break;
-        }
-        occupied.push_back(std::move(slot));
-    }
-    ASSERT_FALSE(occupied.empty());
     const auto status = apply(3, "c", pressure_value);
     ASSERT_TRUE(status.ok()) << status.to_string();
     EXPECT_EQ(core->contiguous_slot(), 3U);
@@ -252,7 +239,6 @@ TEST_F(TreeCoreReplay, PersistentFlushReleasesGapPayloadUnderFullOrdinaryCpuAndS
     EXPECT_GT(core->publisher().work_metrics()->counters.snapshot()[static_cast<size_t>(
                   TreeWorkCause::CachePressure)][static_cast<size_t>(TreeWorkCounter::WriteOperations)],
               0U);
-    occupied.clear();
     for (const auto &[key, expected] : std::array{
              std::pair{"a", &initial_value },
              std::pair{"b", &initial_value },

@@ -85,6 +85,9 @@ impl TreeEngineConfig {
         if t.max_memtable_count < 2 || t.max_memtable_count > 64 {
             return Err("tree.tuning.max_memtable_count must be in 2..=64 (source window)".to_owned());
         }
+        if t.memtable_flush_count >= t.max_memtable_count {
+            return Err("tree.tuning.memtable_flush_count must be below max_memtable_count".to_owned());
+        }
         if t.run_key_block_bytes > t.run_max_key_bytes
             || t.maintenance_visits_per_step > t.maintenance_max_visits
         {

@@ -313,6 +313,31 @@ extern "C" {
         user_data: *mut c_void,
     ) -> crowdb_rpc_status;
 
+    pub fn crowdb_rpc_client_send_control_tail(
+        client: crowdb_rpc_client_t,
+        server: crowdb_rpc_server_t,
+        conn: crowdb_rpc_conn_t,
+        request_id: u64,
+        prefix: crowdb_rpc_buffer_t,
+        tail: crowdb_rpc_buffer_t,
+        msg_type: u16,
+        on_complete: crowdb_rpc_on_complete,
+        user_data: *mut c_void,
+    ) -> crowdb_rpc_status;
+
+    pub fn crowdb_rpc_client_send_control_chain(
+        client: crowdb_rpc_client_t,
+        server: crowdb_rpc_server_t,
+        conn: crowdb_rpc_conn_t,
+        request_id: u64,
+        prefix: crowdb_rpc_buffer_t,
+        tails: *const crowdb_rpc_buffer_t,
+        tail_count: u8,
+        msg_type: u16,
+        on_complete: crowdb_rpc_on_complete,
+        user_data: *mut c_void,
+    ) -> crowdb_rpc_status;
+
     pub fn crowdb_rpc_client_send_one_way(
         client: crowdb_rpc_client_t,
         server: crowdb_rpc_server_t,
@@ -390,12 +415,16 @@ extern "C" {
     pub fn crowdb_rpc_conn_destroy(conn: crowdb_rpc_conn_t);
     pub fn crowdb_rpc_conn_is_open(conn: crowdb_rpc_conn_t) -> c_int;
     pub fn crowdb_rpc_conn_is_rdma(conn: crowdb_rpc_conn_t) -> c_int;
+    pub fn crowdb_rpc_conn_rdma_single_send_control_capacity(conn: crowdb_rpc_conn_t) -> u32;
     pub fn crowdb_rpc_conn_connect_refused(conn: crowdb_rpc_conn_t) -> c_int;
     pub fn crowdb_rpc_conn_close(conn: crowdb_rpc_conn_t);
 
     pub fn crowdb_rpc_server_register_echo_handler(server: crowdb_rpc_server_t, msg_type: u16);
 
     pub fn crowdb_rpc_frame_release(frame_handle: *mut c_void);
+    pub fn crowdb_rpc_frame_take_control(frame_handle: *mut c_void) -> crowdb_rpc_buffer_t;
+    pub fn crowdb_rpc_frame_take_request_control(frame_handle: *mut c_void) -> crowdb_rpc_buffer_t;
+    pub fn crowdb_rpc_frame_retain_connection(frame_handle: *mut c_void) -> crowdb_rpc_conn_t;
     pub fn crowdb_rpc_frame_close_connection(frame_handle: *mut c_void);
     #[cfg(feature = "test-util")]
     pub fn crowdb_rpc_server_limit_control_fragments_for_tests(
@@ -431,6 +460,14 @@ extern "C" {
         request_id: u64,
     ) -> crowdb_rpc_status;
 
+    pub fn crowdb_rpc_server_reply(
+        server: crowdb_rpc_server_t,
+        frame_handle: *mut c_void,
+        control: crowdb_rpc_buffer_t,
+        data: crowdb_rpc_buffer_t,
+        msg_type: u16,
+    ) -> crowdb_rpc_status;
+
     // ── Client-side request handler dispatch (R114) ───────────────
     pub fn crowdb_rpc_client_register_handler(
         client: crowdb_rpc_client_t,
@@ -445,6 +482,7 @@ extern "C" {
 
     // ── Server-side request-response correlation (R114) ───────────
     pub fn crowdb_rpc_server_set_request_client(server: crowdb_rpc_server_t, client: crowdb_rpc_client_t);
+    pub fn crowdb_rpc_server_route_connection(server: crowdb_rpc_server_t, conn: crowdb_rpc_conn_t);
 
     // ── Logging (mirrors crowdb-tree ct_*_logging) ─────────────────
     pub fn crowdb_rpc_init_logging(

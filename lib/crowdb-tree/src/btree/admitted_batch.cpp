@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstring>
 #include <numeric>
 
 namespace crowdb::tree
@@ -31,9 +30,6 @@ Status validate(const Config &config, const SourceWriteOptions &options, size_t 
             return Status::invalid_argument("proposal key/cell cannot fit a primary leaf or inner separator");
         }
         bound.add(input.key.size());
-        if ((input.flags & kFlagTombstone) == 0) {
-            bound.add(input.value.size());
-        }
     }
     const auto size = bound.value();
     if (!size) {
@@ -52,7 +48,7 @@ size_t encoded_capacity(size_t value_bytes, uint8_t flags)
 
 AdmittedBatch::AdmittedBatch(std::shared_ptr<detail::AllocationReservation> metadata)
     : metadata_(std::move(metadata)),
-      bytes_(decltype(bytes_)::allocator_type(metadata_)),
+      keys_(decltype(keys_)::allocator_type(metadata_)),
       cells_(detail::ReservationAllocator<Cell>(metadata_)),
       prepared_(detail::ReservationAllocator<SourceAdmission::Writer::Prepared>(metadata_))
 {
@@ -66,15 +62,15 @@ try {
         (category != detail::BudgetClass::kAdmittedWriter && category != detail::BudgetClass::kGapRepair)) {
         return Status::invalid_argument("proposal admission requires an empty output and apply partition");
     }
-    size_t incoming_bytes = 0;
-    auto   status         = validate(config, options, max_value_bytes, count, read, &incoming_bytes);
+    size_t key_bytes = 0;
+    auto   status    = validate(config, options, max_value_bytes, count, read, &key_bytes);
     if (!status.ok()) {
         return status;
     }
     const auto bound =
         detail::AllocationBound(detail::shared_allocation_bound<AdmittedBatch>())
             .add(detail::shared_allocation_bound<detail::AllocationReservation>())
-            .add(incoming_bytes)
+            .add(key_bytes)
             .add_product(count, sizeof(Cell) + sizeof(size_t) + sizeof(SourceAdmission::Writer::Prepared))
             .value();
     auto reserved = bound ? detail::ResourceBudget::try_reserve(options.account, category, *bound) : std::nullopt;
@@ -84,7 +80,7 @@ try {
     auto credit = detail::AllocationReservation::create(std::move(*reserved));
     auto batch  = detail::reserved_construct<AdmittedBatch>(
         credit, [&](auto *storage) { ::new (static_cast<void *>(storage)) AdmittedBatch(credit); });
-    status = batch->initialize(options, count, read, category, incoming_bytes);
+    status = batch->initialize(options, count, read, category);
     if (!status.ok()) {
         return status;
     }
@@ -97,7 +93,7 @@ catch (const std::bad_alloc &) {
 }
 
 Status AdmittedBatch::initialize(const SourceWriteOptions &options, size_t count, const CoreWriteReader &read,
-                                 detail::BudgetClass category, size_t incoming_bytes, SourceWriteReservation prepaid)
+                                 detail::BudgetClass category, SourceWriteReservation prepaid)
 {
     detail::ReservedVector<size_t> order(count, detail::ReservationAllocator<size_t>(metadata_));
     std::iota(order.begin(), order.end(), size_t{0});
@@ -139,45 +135,56 @@ Status AdmittedBatch::initialize(const SourceWriteOptions &options, size_t count
             return status;
         }
     }
-    bytes_.resize(incoming_bytes);
-    cells_.reserve(selected);
-    prepared_.reserve(selected);
-    size_t offset = 0;
-    for (const auto index : order) {
-        const auto input      = read(index);
-        const auto value_size = (input.flags & kFlagTombstone) != 0 ? 0 : input.value.size();
-        cells_.push_back({.key_offset   = offset,
-                          .key_size     = input.key.size(),
-                          .value_offset = offset + input.key.size(),
-                          .value_size   = value_size,
-                          .flags        = input.flags});
-        if (!input.key.empty()) {
-            std::memcpy(bytes_.data() + offset, input.key.data(), input.key.size());
-        }
-        offset += input.key.size();
-        if (value_size != 0) {
-            std::memcpy(bytes_.data() + offset, input.value.data(), value_size);
-        }
-        offset += value_size;
-    }
+    initialize_cells(order, read);
     return Status::Ok();
+}
+
+void AdmittedBatch::initialize_cells(std::span<const size_t> order, const CoreWriteReader &read)
+{
+    keys_.reserve(source_.footprint().key_bytes);
+    cells_.reserve(order.size());
+    prepared_.reserve(order.size());
+    for (const auto index : order) {
+        const auto      input = read(index);
+        const auto      kind  = (input.flags & kFlagTombstone) != 0 ? OpKind::kDelete : OpKind::kPut;
+        AllocationLease charge(source_.credit_, encoded_capacity(input.value.size(), input.flags),
+                               AllocationKind::kPayload);
+        cells_.push_back({.charge     = std::move(charge),
+                          .value      = encode_cell_buf(0, kind, input.value),
+                          .key_offset = keys_.size(),
+                          .key_size   = input.key.size(),
+                          .flags      = input.flags});
+        if (!input.key.empty()) {
+            const auto *begin = reinterpret_cast<const uint8_t *>(input.key.data());
+            keys_.insert(keys_.end(), begin, begin + input.key.size());
+        }
+    }
+}
+
+void AdmittedBatch::initialize_owned_cell(const CoreWriteInput &input, const ExternalValue &external,
+                                          ExternalAllocation::Owner owner)
+{
+    cells_.reserve(1);
+    prepared_.reserve(1);
+    if (!input.key.empty()) {
+        const auto *begin = reinterpret_cast<const uint8_t *>(input.key.data());
+        keys_.assign(begin, begin + input.key.size());
+    }
+    const auto *base       = reinterpret_cast<const uint8_t *>(external.initialized.data());
+    auto        allocation = ExternalAllocation::create(base, external.capacity, std::move(owner), source_.credit_);
+    const auto  offset     = reinterpret_cast<uintptr_t>(input.value.data()) - reinterpret_cast<uintptr_t>(base);
+    cells_.push_back({.charge   = {},
+                      .value    = buffer::share_external(std::move(allocation), offset, input.value.size()),
+                      .key_size = input.key.size()});
 }
 
 Status AdmittedBatch::prepare_cells(SourceAdmission::Writer &writer)
 {
-    for (const auto &cell : cells_) {
-        AllocationLease charge(writer.allocation_budget(), encoded_capacity(cell.value_size, cell.flags),
-                               AllocationKind::kPayload);
-        auto            value = buffer::alloc(cell.value_size, kCellHeaderSize);
-        std::memset(value.data(), 0, kCellHeaderSize);
-        value.data()[sizeof(uint64_t)] = cell.flags;
-        if (cell.value_size != 0) {
-            std::memcpy(value.data() + kCellHeaderSize, bytes_.data() + cell.value_offset, cell.value_size);
-        }
+    for (auto &cell : cells_) {
         prepared_.emplace_back();
-        charge          = {};
-        const auto *key = cell.key_size == 0 ? nullptr : bytes_.data() + cell.key_offset;
-        auto status = writer.prepare_write(Slice(key, cell.key_size), cell.flags, std::move(value), &prepared_.back());
+        const auto *key    = cell.key_size == 0 ? nullptr : keys_.data() + cell.key_offset;
+        auto        status = writer.prepare_write(Slice(key, cell.key_size), cell.flags, std::move(cell.value),
+                                                  &prepared_.back(), std::move(cell.charge));
         if (!status.ok()) {
             return status;
         }

@@ -115,6 +115,49 @@ async fn replay_noop_advances_the_same_frontier() {
     tree.flush().unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn completing_one_apply_does_not_wake_another_and_submitted_apply_survives_drop() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let tree = tree();
+    let mut later = Box::pin(tree.apply_replay(
+        3,
+        vec![crowdb_tree_ffi::ExtOp::Put {
+            key: bytes::Bytes::from_static(b"later"),
+            value: bytes::Bytes::from_static(b"value"),
+        }],
+    ));
+    let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
+    assert!(later.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    tree.apply_replay(1, Vec::new()).await.unwrap();
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+
+    let armed = tree
+        .prepare_proposal(&[BatchOp::Put {
+            key: b"submitted",
+            value: b"owned",
+        }])
+        .unwrap()
+        .arm()
+        .unwrap();
+    drop(armed.start(2).unwrap());
+    tokio::time::timeout(std::time::Duration::from_secs(2), later)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tree.get(b"submitted").unwrap(), Some((2, b"owned".to_vec())));
+}
+
 #[tokio::test]
 async fn standalone_tree_uses_the_same_prepared_admission() {
     let tree = Arc::new(Crowdbtree::open(&Config::default()).unwrap());

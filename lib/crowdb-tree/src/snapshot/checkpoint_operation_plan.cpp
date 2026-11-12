@@ -107,7 +107,6 @@ void CheckpointOperation::State::begin_layout()
     limits.max_depth                      = depth;
     limits.plan_only                      = true;
     limits.encode.metadata                = budget.bytes;
-    limits.cpu_progress                   = budget.cpu_progress;
     planner     = detail::reserved_unique<CapturedLayoutPlanner>(budget.bytes, view->next_page_id, backend_identity(),
                                                                  options.write, options.metadata.max_segments,
                                                                  inherited_pages(), budget.bytes);

@@ -64,10 +64,6 @@ void FlushBatch::State::schedule_plan(Status status, std::shared_ptr<const Inner
     if (submitted.ok()) {
         [[maybe_unused]] auto *scheduled = work.release();
     }
-    else if (options.cpu_progress) {
-        auto *ready = work.release();
-        options.cpu_progress->request(ready->node, ready->owner);
-    }
     else {
         joined(std::move(submitted));
     }

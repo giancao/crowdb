@@ -41,7 +41,7 @@ fn write_entry(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::from(encode_put(key, value)),
+        payload: Bytes::from(encode_put(key, value)).into(),
     }
 }
 
@@ -50,7 +50,7 @@ fn delete_entry(slot: u64, key: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::from(encode_delete(key)),
+        payload: Bytes::from(encode_delete(key)).into(),
     }
 }
 

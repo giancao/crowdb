@@ -10,16 +10,6 @@
 
 namespace crowdb::tree
 {
-namespace
-{
-size_t padded_blob_bound(PageWriteLimits limits) noexcept
-{
-    const auto raw = limits.max_frame_bytes + kDurableBlobHeader;
-    return ((raw + limits.iu_size - 1) / limits.iu_size) * limits.iu_size;
-}
-
-} // namespace
-
 std::optional<size_t> PageWriteOperation::allocation_bound(PageWriteLimits limits) noexcept
 {
     if (limits.max_frame_bytes < kFrameHeaderSize + kFrameTrailerSize ||
@@ -32,11 +22,12 @@ std::optional<size_t> PageWriteOperation::allocation_bound(PageWriteLimits limit
     return detail::AllocationBound(
                detail::shared_allocation_bound<State>() + detail::shared_allocation_bound<PageWriteOperation>() +
                detail::shared_allocation_bound<BackingRef>() + detail::shared_allocation_bound<State::Protection>())
-        .add(padded_blob_bound(limits))
+        .add(limits.padded_blob_bytes(limits.max_frame_bytes))
         .add(limits.buffer_alignment - 1)
         .add(durable_encode_scratch_bytes(limits.compression))
-        .add(limits.chunk_backed ? detail::ChunkFixedPackStore::write_allocation_bound(padded_blob_bound(limits))
-                                 : std::optional<size_t>{0})
+        .add(limits.chunk_backed
+                 ? detail::ChunkFixedPackStore::write_allocation_bound(limits.padded_blob_bytes(limits.max_frame_bytes))
+                 : std::optional<size_t>{0})
         .add(limits.chunk_backed ? detail::shared_allocation_bound<detail::AllocationReservation>() : 0)
         .add(limits.chunk_backed ? chunk_backing_allocation_bound() : 0)
         .value();
@@ -52,23 +43,25 @@ PageWriteOperation::State::State(PageWriteInput source, PageWriteLimits bounds, 
       limits(bounds),
       budget(std::move(credits)),
       io_resources(budget.bytes, TreeResourceMetric::WriteInflightBytes),
-      blob(padded_blob_bound(limits) + limits.buffer_alignment - 1,
-           detail::ReservationAllocator<uint8_t, AllocationKind::kIo>(budget.bytes)),
+      blob(input.raw_blob.empty() ? limits.padded_blob_bytes(limits.max_frame_bytes) + limits.buffer_alignment - 1 : 0,
+           decltype(blob)::allocator_type(budget.bytes)),
       scratch(durable_encode_scratch_bytes(limits.compression),
               detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(budget.bytes)),
       backing(detail::reserved_shared<BackingRef>(budget.bytes)),
       protection(detail::reserved_shared<Protection>(budget.bytes))
 {
-    void      *data     = blob.data();
-    auto       capacity = blob.size();
-    const auto bytes    = padded_blob_bound(limits);
-    auto      *address  = std::align(limits.buffer_alignment, bytes, data, capacity);
-    assert(address != nullptr);
-    aligned                  = {static_cast<uint8_t *>(address), bytes};
+    const auto bytes = limits.padded_blob_bytes(limits.max_frame_bytes);
+    if (input.raw_blob.empty()) {
+        void *data     = blob.data();
+        auto  capacity = blob.size();
+        auto *address  = std::align(limits.buffer_alignment, bytes, data, capacity);
+        assert(address != nullptr);
+        aligned = {static_cast<uint8_t *>(address), bytes};
+    }
     protection->dependencies = input.reload_dependencies;
     backing->owner           = protection;
     if (limits.chunk_backed && budget.reservation()) {
-        const auto bound = detail::ChunkFixedPackStore::write_allocation_bound(padded_blob_bound(limits));
+        const auto bound = detail::ChunkFixedPackStore::write_allocation_bound(bytes);
         if (!bound || !budget.bytes) {
             throw std::bad_alloc();
         }
@@ -96,6 +89,12 @@ Status PageWriteOperation::create(std::shared_ptr<AsyncPageStore> store, std::sh
     if (limits.chunk_backed ? dynamic_cast<ScheduledPageStore *>(store.get()) == nullptr
                             : !store->write_completion_is_reloadable()) {
         return Status::not_supported("backend write needs checkpoint/seal before it is independently reloadable");
+    }
+    if (!input.raw_blob.empty() && (limits.compression != compress_algo::kNone ||
+                                    input.raw_blob.size() != limits.padded_blob_bytes(input.frame.size()) ||
+                                    reinterpret_cast<uintptr_t>(input.raw_blob.data()) % limits.buffer_alignment != 0 ||
+                                    input.raw_blob.data() + kDurableBlobHeader != input.frame.data())) {
+        return Status::invalid_argument("raw write buffer must contain the aligned input frame");
     }
     try {
         auto state     = detail::reserved_shared<State>(budget.bytes, std::move(input), limits, budget);
@@ -149,10 +148,7 @@ void PageWriteOperation::State::start(detail::CallbackComplete callback, void *c
     catch (...) {
         status = Status::resource_exhausted();
     }
-    if (!status.ok() && budget.cpu_progress) {
-        budget.cpu_progress->request(encode_node, pending);
-    }
-    else if (!status.ok()) {
+    if (!status.ok()) {
         finish(std::move(status));
     }
 }

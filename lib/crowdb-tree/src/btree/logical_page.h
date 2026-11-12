@@ -161,6 +161,7 @@ struct BaseRef
     // A resident owner can be an aliasing shared_ptr backed by a page pin.
     std::shared_ptr<const LeafBase>   resident = nullptr;
     std::shared_ptr<const BackingRef> backing  = nullptr;
+    bool                              clipped  = false;
     [[nodiscard]] bool                valid() const;
 };
 

@@ -57,35 +57,34 @@ struct TestBudget
     }
 };
 
-TEST(SourceWriterBudget, PartialCapacityRejectionRequestsOrdinaryRolloverButGapPressureDoesNot)
+TEST(SourceWriterBudget, SourceCapacityRejectionRequestsRolloverForEitherPartition)
 {
     TestBudget budget;
-    for (bool key_limited : {false, true}) {
-        auto options          = budget.options(key_limited ? 8 : 5);
-        options.max_key_bytes = key_limited ? 128 : 1024;
-        SourceWriteBudget                              source(options);
-        std::shared_ptr<detail::AllocationReservation> first;
-        const WriteFootprint                           footprint{.entries = 3, .key_bytes = key_limited ? 96U : 3U};
-        ASSERT_TRUE(source.admit(footprint, detail::BudgetClass::kAdmittedWriter, &first).ok());
-        EXPECT_FALSE(source.full());
-        std::shared_ptr<detail::AllocationReservation> second;
-        EXPECT_EQ(source.admit(footprint, detail::BudgetClass::kAdmittedWriter, &second).code(), Code::kUnavailable);
-        EXPECT_TRUE(source.full());
+    for (const auto category : {detail::BudgetClass::kAdmittedWriter, detail::BudgetClass::kGapRepair}) {
+        for (bool key_limited : {false, true}) {
+            auto options              = budget.options(key_limited ? 8 : 5);
+            options.max_key_bytes     = key_limited ? 128 : 1024;
+            options.max_gap_entries   = options.max_entries;
+            options.max_gap_key_bytes = options.max_key_bytes;
+            SourceWriteBudget                              source(options);
+            std::shared_ptr<detail::AllocationReservation> first;
+            const WriteFootprint                           footprint{.entries = 3, .key_bytes = key_limited ? 96U : 3U};
+            ASSERT_TRUE(source.admit(footprint, category, &first).ok());
+            EXPECT_FALSE(source.full());
+            std::shared_ptr<detail::AllocationReservation> second;
+            EXPECT_EQ(source.admit(footprint, category, &second).code(), Code::kUnavailable);
+            EXPECT_TRUE(source.full());
+        }
     }
-    SourceWriteBudget                              source(budget.options());
-    std::shared_ptr<detail::AllocationReservation> first;
-    ASSERT_TRUE(source.admit({.entries = 2, .key_bytes = 2}, detail::BudgetClass::kGapRepair, &first).ok());
-    std::shared_ptr<detail::AllocationReservation> second;
-    EXPECT_EQ(source.admit({.entries = 1, .key_bytes = 1}, detail::BudgetClass::kGapRepair, &second).code(),
-              Code::kUnavailable);
-    EXPECT_FALSE(source.full());
 }
 
 TEST(SourceWriterBudget, AdmittedWriterCompletesWhenUnreservedHostBudgetIsExhausted)
 {
     TestBudget budget;
     {
-        SourceAdmission         sources(0, 1, budget.options());
+        auto options            = budget.options(8192);
+        options.max_gap_entries = 1024;
+        SourceAdmission         sources(0, 1, options);
         SourceAdmission::Writer writer;
         ASSERT_TRUE(sources.try_admit(0, {4, 12, 4096}, &writer).ok());
         auto snapshot  = budget.budget.snapshot();

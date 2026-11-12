@@ -54,15 +54,19 @@ TEST(AdmittedBatch, OwnsInputsAndLastDuplicateBeforeConsensusWithoutSourceEntry)
     std::shared_ptr<ApplyFrontier> frontier;
     ASSERT_TRUE(ApplyFrontier::create(0, 8, {}, &frontier).ok());
     std::shared_ptr<AdmittedBatch> admitted;
+    const std::string              chosen(16 * 1024, 'v');
+    constexpr auto                 payload = static_cast<size_t>(AllocationKind::kPayload);
+    const auto                     before  = fixture.account->snapshot().physical[payload];
     {
         Batch input;
         input.ops.push_back({.key = "k", .kind = OpKind::kPut, .value = "old"});
-        input.ops.push_back({.key = "k", .kind = OpKind::kPut, .value = "chosen"});
+        input.ops.push_back({.key = "k", .kind = OpKind::kPut, .value = chosen});
         input.ops.push_back({.key = "z", .kind = OpKind::kPut, .value = "tail"});
         ASSERT_TRUE(fixture.admit(input, &admitted).ok());
     }
     EXPECT_EQ(sources.catalog()->active->count(), 0U);
     EXPECT_EQ(admitted->size(), 2U);
+    EXPECT_EQ(fixture.account->snapshot().physical[payload], before + kCellHeaderSize + chosen.size());
     auto blocker = detail::ResourceBudget::try_reserve(fixture.account, kWriter,
                                                        TestAdmittedInputs::limits()[kWriterIndex] - fixture.usage());
     ASSERT_TRUE(blocker);
@@ -73,7 +77,8 @@ TEST(AdmittedBatch, OwnsInputsAndLastDuplicateBeforeConsensusWithoutSourceEntry)
     auto        guard = table->read_guard();
     const auto *cell  = table->find("k");
     ASSERT_NE(cell, nullptr);
-    EXPECT_EQ(CellView(cell->cell.slice()).value(), Slice("chosen"));
+    EXPECT_EQ(CellView(cell->cell.slice()).value(), Slice(chosen));
+    EXPECT_EQ(fixture.account->snapshot().physical[payload], before + kCellHeaderSize + chosen.size());
     EXPECT_EQ(admitted->try_commit(sources, *frontier, 2).code(), Code::kInvalidArgument);
 }
 

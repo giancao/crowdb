@@ -61,6 +61,16 @@ pub(crate) async fn start(group: &Arc<PxGroup>) {
     if guard.is_some() {
         return;
     }
+    let threshold = group.config.election.snapshot_flush_count_threshold;
+    if threshold != 0 {
+        let engine = group.local_replica().learner.engine();
+        if let Err(error) = engine.bind_flush_threshold(threshold, Arc::clone(&group.flush_notify)) {
+            warn!(
+                error,
+                threshold, "maintenance: native flush threshold registration failed"
+            );
+        }
+    }
     let weak = Arc::downgrade(group);
     let tick = Duration::from_millis(group.config.election.maintenance_tick_ms);
     *guard = Some(spawn(weak, tick, group.tenure_cancel.clone()));
@@ -102,7 +112,11 @@ async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: Cancella
         // tick flush avoids force-freezing the active table and draining a
         // large batch, which would create big per-leaf deltas and trigger
         // excessive consolidation.
-        let do_flush = by_notify || last_flush.elapsed() >= tick;
+        let do_flush = if by_notify {
+            g.local_replica().learner.engine().flush_pending()
+        } else {
+            last_flush.elapsed() >= tick
+        };
         run_pass(&g, do_flush).await;
         if do_flush {
             last_flush = std::time::Instant::now();
@@ -213,14 +227,13 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
     //    is empty). Advances last_applied_slot in memory only. Skipped on
     //    tick wakes when a recent proactive flush already drained — avoids
     //    force-freezing the active table and draining a large batch.
+    let mut handoff_advanced = false;
     if do_flush {
         let flush_start = std::time::Instant::now();
         let engine_arc = group.local_replica().learner.engine_arc();
         match flush_engine(engine_arc).await {
             Ok(outcome) => {
-                if outcome.advances_flush_count() {
-                    group.flushes_since_snapshot.fetch_add(1, Ordering::Relaxed);
-                }
+                handoff_advanced = outcome.advances_flush_count();
                 if let Err(error) = outcome.status() {
                     error!(
                         error,
@@ -250,9 +263,14 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
         let prev = *group.last_snapshot_time.lock();
         std::time::Instant::now().duration_since(prev)
     };
-    let flush_count = group
-        .flushes_since_snapshot
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let native_flush_count = engine.flushes_since_persistent();
+    let flush_count = native_flush_count.unwrap_or_else(|| {
+        if handoff_advanced {
+            group.flushes_since_snapshot.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            group.flushes_since_snapshot.load(Ordering::Relaxed)
+        }
+    });
     let flush_threshold = group.config.election.snapshot_flush_count_threshold;
     let should_snapshot = slot_advance >= group.config.election.snapshot_slot_threshold
         || time_elapsed >= Duration::from_millis(group.config.election.snapshot_time_threshold_ms)
@@ -277,7 +295,7 @@ pub(crate) async fn run_pass(group: &PxGroup, do_flush: bool) {
     let engine_snapshot_at = if should_snapshot {
         let at = persist_snapshot(group, contiguous, slot_advance, time_elapsed).await;
         // Gap 5 step 4: reset the flush counter on a successful snapshot.
-        if at > 0 {
+        if at > 0 && native_flush_count.is_none() {
             group
                 .flushes_since_snapshot
                 .store(0, std::sync::atomic::Ordering::Relaxed);

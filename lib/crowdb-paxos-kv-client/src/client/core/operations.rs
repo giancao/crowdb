@@ -28,6 +28,35 @@ impl PaxosKvClient {
         value: &[u8],
         ids: Option<(u64, u64)>,
     ) -> Result<WriteOutcome> {
+        self.put_value(store_id, group_id, key, value, None, ids).await
+    }
+
+    /// Put a single value using its existing buffer on TCP.
+    /// The value is retained for retries and partial sends.
+    ///
+    /// # Errors
+    /// See [`Error`]. Uses the same retry and request identity rules as [`Self::put`].
+    pub async fn put_owned(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        key: &[u8],
+        value: Bytes,
+        ids: Option<(u64, u64)>,
+    ) -> Result<WriteOutcome> {
+        self.put_value(store_id, group_id, key, &value, Some(&value), ids)
+            .await
+    }
+
+    async fn put_value(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        key: &[u8],
+        value: &[u8],
+        owned_value: Option<&Bytes>,
+        ids: Option<(u64, u64)>,
+    ) -> Result<WriteOutcome> {
         let (client_id, seq) =
             ids.unwrap_or_else(|| (self.client_id, self.next_seq.fetch_add(1, Ordering::Relaxed)));
         let mut endpoint = self.resolve_leader(store_id, group_id).await?;
@@ -44,8 +73,8 @@ impl PaxosKvClient {
             let request_id = self.request_ids.next().as_u64();
             let request_create_ms = now_ms();
             let t0 = Instant::now();
-            let send_result: std::result::Result<crowdb_paxos_kv::rpc::KvResponse, String> = t
-                .send_put(
+            let send_result = if let Some(value) = owned_value {
+                t.send_put_owned(
                     &endpoint,
                     key,
                     value,
@@ -56,7 +85,19 @@ impl PaxosKvClient {
                     group_id,
                 )
                 .await
-                .map_err(|e| e.to_string());
+            } else {
+                t.send_put(
+                    &endpoint,
+                    key,
+                    value,
+                    client_id,
+                    seq,
+                    request_id,
+                    request_create_ms,
+                    group_id,
+                )
+                .await
+            };
             match send_result {
                 Ok(resp) => {
                     if resp.ok {
@@ -96,7 +137,7 @@ impl PaxosKvClient {
                         .await;
                     self.metrics
                         .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                    attempts = self.count_other(attempts, &msg)?;
+                    attempts = self.count_other(attempts, &msg.to_string())?;
                 }
             }
         }

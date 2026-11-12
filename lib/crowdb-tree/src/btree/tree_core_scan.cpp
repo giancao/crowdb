@@ -47,10 +47,7 @@ void CoreScan::schedule() noexcept
     catch (const std::bad_alloc &) {
         status = Status::resource_exhausted();
     }
-    if (status.code() == Code::kResourceExhausted) {
-        progress->request(cpu_node, std::move(keep));
-    }
-    else if (!status.ok()) {
+    if (!status.ok()) {
         finish(std::move(status), false);
     }
 }

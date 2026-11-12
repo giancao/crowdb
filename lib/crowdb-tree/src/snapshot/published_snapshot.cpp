@@ -192,7 +192,8 @@ try {
     }
     state->work_metrics = core->publisher().work_metrics();
     state->binding      = std::move(binding);
-    state->lane         = reserved_shared<FlushRuntime::Lane>(metadata, state->binding->options().cpu_queue_limit);
+    state->lane         = reserved_shared<FlushRuntime::Lane>(metadata, state->binding->options().cpu_queue_limit,
+                                                              state->binding->lane()->allocations());
     if (!captured) {
         captured = core->publisher().capture_complete();
     }
@@ -216,8 +217,8 @@ try {
             state->owner->domain = local->domain;
         }
         if (core->config().page_store != nullptr || state->backend != nullptr) {
-            state->backend_lane =
-                reserved_shared<FlushRuntime::Lane>(metadata, state->binding->options().backend_queue_limit);
+            state->backend_lane = reserved_shared<FlushRuntime::Lane>(
+                metadata, state->binding->options().backend_queue_limit, state->binding->backend_lane()->allocations());
             status = ScheduledPageStore::create(core->config().page_store, state->backend, core->config().backend_owner,
                                                 state->binding, metadata, state->backend_lane, &state->owner->scheduled,
                                                 state->binding->view_backend_progress());

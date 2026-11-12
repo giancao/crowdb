@@ -81,11 +81,10 @@ class MemTable
     using PreparedWrite = ConcurrentSkipList::PreparedWrite;
     // Inputs are already owned and charged by source admission. Preparation
     // stays on this thread until commit or destruction, with the table alive.
-    [[nodiscard]] PreparedWrite prepare_write(Slice key, buffer cell, uint8_t flags, AllocationLease payload,
-                                              uint64_t bound, size_t max_versions,
-                                              const std::shared_ptr<AllocationBudget> &budget);
+    [[nodiscard]] PreparedWrite prepare_write(Slice key, buffer &&cell, uint8_t flags, AllocationLease payload,
+                                              uint64_t bound, const std::shared_ptr<AllocationBudget> &budget);
     [[nodiscard]] PreparedWrite prepare_reference(Slice key, std::shared_ptr<const CellVersion> cell, uint64_t bound,
-                                                  size_t max_versions, const std::shared_ptr<AllocationBudget> &budget);
+                                                  const std::shared_ptr<AllocationBudget> &budget);
     bool                        commit_write(PreparedWrite write, uint64_t slot) noexcept;
 
     void set_durable_floor(uint64_t slot);

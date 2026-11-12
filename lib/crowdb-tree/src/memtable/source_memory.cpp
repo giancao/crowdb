@@ -8,18 +8,6 @@ namespace crowdb::tree
 {
 namespace
 {
-VersionMemory version_memory(const VersionSet *versions) noexcept
-{
-    if (versions == nullptr) {
-        return {};
-    }
-    return {.history_count    = versions->history.size(),
-            .history_bytes    = versions->bytes - versions->current->cell.size(),
-            .descriptor_bytes = sizeof(VersionSet) + (versions->history.capacity() * sizeof(versions->current)),
-            .node_bytes       = 0,
-            .payload_bytes    = versions->bytes + ((versions->history.size() + 1) * sizeof(CellVersion))};
-}
-
 uint64_t sample(const std::atomic<uint64_t> &counter) noexcept
 {
     const auto value = counter.load(std::memory_order_relaxed);
@@ -29,26 +17,44 @@ uint64_t sample(const std::atomic<uint64_t> &counter) noexcept
 }
 } // namespace
 
-void ConcurrentSkipList::account_versions(const VersionSet *previous, const VersionSet &next) noexcept
+void ConcurrentSkipList::account_version(const CellVersion &version, const CellVersion *history, bool removed) noexcept
 {
-    const auto before = version_memory(previous);
-    const auto after  = version_memory(&next);
-    // Deltas commute even when a later successful CAS finishes accounting
-    // first. The independent samples converge once accepted writers drain.
-    history_count_.fetch_add(after.history_count - before.history_count, std::memory_order_relaxed);
-    history_bytes_.fetch_add(after.history_bytes - before.history_bytes, std::memory_order_relaxed);
-    descriptor_bytes_.fetch_add(after.descriptor_bytes - before.descriptor_bytes, std::memory_order_relaxed);
-    payload_bytes_.fetch_add(after.payload_bytes - before.payload_bytes, std::memory_order_relaxed);
+    const auto          bytes = version.cell.size();
+    const VersionMemory change{.history_count    = history != nullptr ? 1U : 0U,
+                               .history_bytes    = history != nullptr ? history->cell.size() : 0,
+                               .descriptor_bytes = sizeof(CellVersion),
+                               .payload_bytes    = bytes};
+    // The deltas commute when an unlink accounts before its insertion.
+    const uint64_t sign = removed ? uint64_t{0} - 1 : 1;
+    if (bytes != 0) {
+        bytes_.fetch_add(sign * bytes, std::memory_order_relaxed);
+        payload_bytes_.fetch_add(sign * bytes, std::memory_order_relaxed);
+    }
+    if (history != nullptr) {
+        history_count_.fetch_add(sign, std::memory_order_relaxed);
+        if (change.history_bytes != 0) {
+            history_bytes_.fetch_add(sign * change.history_bytes, std::memory_order_relaxed);
+        }
+    }
+    descriptor_bytes_.fetch_add(sign * change.descriptor_bytes, std::memory_order_relaxed);
     if (source_ledger_) {
-        source_ledger_->replace({.logical_bytes = previous != nullptr ? previous->bytes : 0, .memory = before},
-                                {.logical_bytes = next.bytes, .memory = after});
+        const SourceMemoryStats delta{.logical_bytes = bytes, .memory = change};
+        if (removed) {
+            source_ledger_->replace(delta, {});
+        }
+        else {
+            source_ledger_->replace({}, delta);
+        }
     }
 }
 
-void ConcurrentSkipList::account_node(const Node &node, const VersionSet &versions) noexcept
+void ConcurrentSkipList::account_node(const Node &node, const CellVersion &version) noexcept
 {
     node_bytes_.fetch_add(Node::alloc_size(node.height_, node.key_len_), std::memory_order_relaxed);
-    account_versions(nullptr, versions);
+    if (node.key_len_ != 0) {
+        bytes_.fetch_add(node.key_len_, std::memory_order_relaxed);
+    }
+    account_version(version, nullptr);
     if (source_ledger_) {
         source_ledger_->replace({}, {.records       = 1,
                                      .logical_bytes = node.key_len_,

@@ -14,9 +14,11 @@ void clip_bases(PageState &page)
     for (auto &base : page.bases) {
         if (page.range.lower && (!base.range.lower || *page.range.lower > *base.range.lower)) {
             base.range.lower = page.range.lower;
+            base.clipped     = true;
         }
         if (page.range.upper && (!base.range.upper || *page.range.upper < *base.range.upper)) {
             base.range.upper = page.range.upper;
+            base.clipped     = true;
         }
     }
     std::erase_if(page.bases, [](const auto &base) { return base.range.empty(); });
@@ -41,13 +43,12 @@ void count_runs(PublishedPage &page)
 
 Status prepare_outputs(detail::MaintenanceBuilder &builder, const std::shared_ptr<const PublishedPage> &old,
                        const detail::MaintenanceChildren &children, const detail::SplitWindowLayout &layout,
-                       PageVersion version)
+                       const PageState &source, PageVersion version)
 {
     size_t prefix_bytes = 0;
     Status status;
     for (size_t i = 0; i < children.pids.size(); ++i) {
-        auto logical =
-            detail::reserved_shared<PageState>(builder.options.metadata, *old->leaf, builder.options.metadata);
+        auto logical = detail::reserved_shared<PageState>(builder.options.metadata, source, builder.options.metadata);
         logical->range.lower = i == 0 ? old->leaf->range.lower : std::optional(children.separators[i - 1]);
         logical->range.upper =
             i == children.separators.size() ? old->leaf->range.upper : std::optional(children.separators[i]);
@@ -145,7 +146,7 @@ Status prepare_step(detail::MaintenanceBuilder &builder, uint64_t pid, Maintenan
         }
         children.pids.push_back(output);
     }
-    status = prepare_outputs(builder, old, children, layout, version);
+    status = prepare_outputs(builder, old, children, layout, *old->leaf, version);
     if (!status.ok()) {
         return status;
     }
@@ -186,7 +187,7 @@ namespace crowdb::tree::detail
 {
 Status build_flush_leaf_outputs(MaintenanceBuilder &builder, uint64_t pid,
                                 const std::shared_ptr<const PublishedPage> &old, const SplitWindowLayout &layout,
-                                MaintenanceChildren *children)
+                                bool keep_loaded_bases, MaintenanceChildren *children)
 {
     if (!layout.source || layout.source->content_id != old->leaf->content_id ||
         layout.source->representation_id != old->leaf->representation_id ||
@@ -208,7 +209,8 @@ Status build_flush_leaf_outputs(MaintenanceBuilder &builder, uint64_t pid,
     }
     PageVersion version;
     auto        status = next_page_version(*old->leaf, nullptr, &version);
-    return status.ok() ? prepare_outputs(builder, old, *children, layout, version) : status;
+    const auto &source = keep_loaded_bases ? *layout.source : *old->leaf;
+    return status.ok() ? prepare_outputs(builder, old, *children, layout, source, version) : status;
 }
 
 MaintenancePublicationResult build_split_layout_publication(std::shared_ptr<const PublishedTreeState> view,

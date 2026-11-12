@@ -29,7 +29,15 @@ impl UringBackendFile {
     }
 
     pub async fn write_vectored_at(&self, bufs: &[io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
-        self.file.write_vectored_at(bufs, offset).await
+        let expected: usize = bufs.iter().map(|buf| buf.len()).sum();
+        let written = self.file.write_vectored_at(bufs, offset).await?;
+        if written != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "short WAL io_uring write",
+            ));
+        }
+        Ok(written)
     }
 
     pub async fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {

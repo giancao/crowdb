@@ -19,12 +19,19 @@ bool RdmaTransport::create_connection_pools(ConnectionPools &pools)
 {
     pools.prepared_sends.reserve(config_.send_batch_size);
     pools.prepared_receives.reserve(config_.receive_batch_size);
-    const auto     control_bytes = config_.receive_control_bytes();
-    const uint64_t data_bytes    = config_.wire_layout == RdmaWireLayout::ControlData
-                                     ? uint64_t{config_.posted_receive_target} * pools.effective_data_capacity
-                                     : config_.receive_arena_bytes;
-    pools.send                   = make_pool(config_.send_arena_bytes, config_.sq_depth);
-    pools.recv                   = make_pool(data_bytes, config_.rq_depth);
+    const auto control_bytes = config_.receive_control_bytes();
+    uint64_t   data_bytes    = config_.receive_arena_bytes;
+    if (config_.wire_layout == RdmaWireLayout::ControlData) {
+        auto slot_capacity = config_.wire_slot_capacity;
+        if (!config_.combined_control_data()) {
+            BufferCapacityClass capacity_class;
+            if (!classify_rdma_capacity(pools.effective_data_capacity, &capacity_class, &slot_capacity))
+                return false;
+        }
+        data_bytes = uint64_t{config_.posted_receive_target} * slot_capacity;
+    }
+    pools.send = make_pool(config_.connection_send_arena_bytes(), config_.sq_depth);
+    pools.recv = make_pool(data_bytes, config_.rq_depth);
     if (control_bytes != 0)
         pools.recv_control = make_pool(control_bytes, config_.posted_receive_target);
     return pools.send != nullptr && pools.recv != nullptr && (control_bytes == 0 || pools.recv_control != nullptr);
@@ -40,8 +47,15 @@ void RdmaTransport::configure_peer(ConnectionPools &pools, const RdmaCmOffer &pe
     if (config_.wire_layout == RdmaWireLayout::ControlData) {
         pools.effective_data_capacity = std::min(
             pools.effective_data_capacity, rdma_data_slot_capacity(peer.receive_slot_capacity, config_.wire_layout));
+        auto wake = [state = repost_state_, index = pools.cq_index] {
+            Operation operation(state);
+            if (operation)
+                state->transport->notify_queue(index);
+        };
+        ControlStreamBudget budget(config_.control_receive_budget_bytes, std::move(wake),
+                                   control_receive_totals_.get());
         pools.control_receive = std::make_shared<ControlStreamReceiver>(
-            *control_receive_budget_, pools.effective_data_capacity, peer.generation, config_.max_control_message_bytes,
+            std::move(budget), pools.effective_data_capacity, peer.generation, config_.max_control_message_bytes,
             std::chrono::milliseconds(config_.control_assembly_timeout_ms));
     }
 }
@@ -119,6 +133,8 @@ RdmaTransport::CmPublish RdmaTransport::try_publish_cm_connection(rdma_cm_id    
 
 void RdmaTransport::set_cm_connection_info(Connection *connection, const ConnectionPools &pools)
 {
+    const auto max_control = std::min(config_.max_control_message_bytes, pools.peer_max_control_message_bytes);
+    connection->rdma_single_send_control_capacity_ = std::min(pools.effective_data_capacity, max_control);
     StatusJson info;
     info.number("qpair_number", pools.qp_number);
     info.number("cq_index", pools.cq_index);
@@ -135,8 +151,7 @@ void RdmaTransport::set_cm_connection_info(Connection *connection, const Connect
     info.number("effective_data_capacity", pools.effective_data_capacity);
     info.number("peer_generation", pools.peer_generation);
     info.number("peer_max_control_message_bytes", pools.peer_max_control_message_bytes);
-    info.number("effective_max_control_message_bytes",
-                std::min(config_.max_control_message_bytes, pools.peer_max_control_message_bytes));
+    info.number("effective_max_control_message_bytes", max_control);
     connection->transport_info_json_ = info.finish();
 }
 

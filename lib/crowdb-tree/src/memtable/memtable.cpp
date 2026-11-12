@@ -87,9 +87,9 @@ bool MemTable::upsert(Slice key, uint64_t slot, buffer &&cell_payload, uint64_t 
     uint64_t entry_slot = cv.valid() ? cv.slot() : slot;
     uint8_t  flags      = cv.valid() ? cv.flags() : 0;
     auto     credit     = retain_payload(cell_payload, budget);
-    auto     ver        = CellVersion::create(std::move(cell_payload), entry_slot, flags, epoch_->memtable_allocation(),
-                                              std::move(credit), budget);
-    if (!list_.upsert(key, std::move(ver), bound, stats, std::move(budget))) {
+    auto     prepared =
+        list_.prepare_cell(key, std::move(cell_payload), entry_slot, flags, std::move(credit), bound, budget);
+    if (!list_.commit_write(std::move(prepared), entry_slot, stats)) {
         return false;
     }
     update_slot_range(entry_slot);
@@ -123,10 +123,9 @@ bool MemTable::upsert_external(Slice key, uint64_t slot, uint8_t flags, buffer &
         if (!value.empty()) {
             std::memcpy(encoded.data() + kCellHeaderSize, value.data(), value.size());
         }
-        value    = {};
-        auto ver = CellVersion::create(std::move(encoded), slot, flags, epoch_->memtable_allocation(),
-                                       std::move(credit), budget);
-        if (!list_.upsert(key, std::move(ver), bound, stats, std::move(budget))) {
+        value         = {};
+        auto prepared = list_.prepare_cell(key, std::move(encoded), slot, flags, std::move(credit), bound, budget);
+        if (!list_.commit_write(std::move(prepared), slot, stats)) {
             return false;
         }
         update_slot_range(slot);
@@ -145,8 +144,8 @@ bool MemTable::upsert_external(Slice key, uint64_t slot, uint8_t flags, buffer &
             value = buffer::wrap_external(nullptr, 0, nullptr, nullptr);
         }
     }
-    auto ver = CellVersion::create(std::move(value), slot, flags, epoch_->memtable_allocation(), {}, budget);
-    if (!list_.upsert(key, std::move(ver), bound, stats, std::move(budget))) {
+    auto prepared = list_.prepare_cell(key, std::move(value), slot, flags, {}, bound, budget);
+    if (!list_.commit_write(std::move(prepared), slot, stats)) {
         return false;
     }
     update_slot_range(slot);

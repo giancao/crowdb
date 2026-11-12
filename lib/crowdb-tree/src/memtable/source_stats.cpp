@@ -57,20 +57,23 @@ SourceMemoryStats SourceMemoryLedger::snapshot() const noexcept
 
 void SourceMemoryLedger::replace(const SourceMemoryStats &before, const SourceMemoryStats &after) noexcept
 {
-    tables_.fetch_add(after.tables - before.tables, std::memory_order_relaxed);
-    frozen_tables_.fetch_add(after.frozen_tables - before.frozen_tables, std::memory_order_relaxed);
-    writers_.fetch_add(after.writers - before.writers, std::memory_order_relaxed);
-    freezing_writers_.fetch_add(after.freezing_writers - before.freezing_writers, std::memory_order_relaxed);
-    frozen_retained_bytes_.fetch_add(after.frozen_retained_bytes - before.frozen_retained_bytes,
-                                     std::memory_order_relaxed);
-    records_.fetch_add(after.records - before.records, std::memory_order_relaxed);
-    logical_bytes_.fetch_add(after.logical_bytes - before.logical_bytes, std::memory_order_relaxed);
-    history_count_.fetch_add(after.memory.history_count - before.memory.history_count, std::memory_order_relaxed);
-    history_bytes_.fetch_add(after.memory.history_bytes - before.memory.history_bytes, std::memory_order_relaxed);
-    descriptor_bytes_.fetch_add(after.memory.descriptor_bytes - before.memory.descriptor_bytes,
-                                std::memory_order_relaxed);
-    node_bytes_.fetch_add(after.memory.node_bytes - before.memory.node_bytes, std::memory_order_relaxed);
-    payload_bytes_.fetch_add(after.memory.payload_bytes - before.memory.payload_bytes, std::memory_order_relaxed);
+    const auto update = [](std::atomic<uint64_t> &counter, uint64_t previous, uint64_t current) {
+        if (current != previous) {
+            counter.fetch_add(current - previous, std::memory_order_relaxed);
+        }
+    };
+    update(tables_, before.tables, after.tables);
+    update(frozen_tables_, before.frozen_tables, after.frozen_tables);
+    update(writers_, before.writers, after.writers);
+    update(freezing_writers_, before.freezing_writers, after.freezing_writers);
+    update(frozen_retained_bytes_, before.frozen_retained_bytes, after.frozen_retained_bytes);
+    update(records_, before.records, after.records);
+    update(logical_bytes_, before.logical_bytes, after.logical_bytes);
+    update(history_count_, before.memory.history_count, after.memory.history_count);
+    update(history_bytes_, before.memory.history_bytes, after.memory.history_bytes);
+    update(descriptor_bytes_, before.memory.descriptor_bytes, after.memory.descriptor_bytes);
+    update(node_bytes_, before.memory.node_bytes, after.memory.node_bytes);
+    update(payload_bytes_, before.memory.payload_bytes, after.memory.payload_bytes);
 }
 
 void SourceMemoryLedger::writer_enter() noexcept

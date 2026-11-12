@@ -63,6 +63,7 @@ class SourceWriteReservation
     }
 
   private:
+    friend class AdmittedBatch;
     friend class SourceWriteBudget;
     friend class SourceAdmission;
     SourceWriteOptions                             options_;
@@ -71,9 +72,8 @@ class SourceWriteReservation
     std::shared_ptr<detail::AllocationReservation> credit_;
 };
 
-// Each source caps the number of admitted versions, including writers that
-// have not applied yet. Every writer reserves its own worst-case COW history
-// before acceptance, so another writer cannot consume its apply allowance.
+// Each source counts admitted versions, including writers that have not
+// applied yet. A writer's grant covers only objects for its own mutations.
 class SourceWriteBudget
 {
   public:
@@ -90,8 +90,7 @@ class SourceWriteBudget
     // Consumes only source counters; memory was reserved before proposal.
     Status bind(SourceWriteReservation *reservation, std::shared_ptr<detail::AllocationReservation> *out,
                 std::optional<detail::BudgetClass> source_category = {});
-    [[nodiscard]] static std::optional<size_t> allocation_bound(const SourceWriteOptions &options,
-                                                                WriteFootprint            footprint) noexcept;
+    [[nodiscard]] static std::optional<size_t> allocation_bound(WriteFootprint footprint) noexcept;
     void return_unused(WriteFootprint footprint, detail::BudgetClass category) noexcept;
     // Active-source admission counts include accepted writers, not just
     // materialized records. Source contention counters are not sampled here.

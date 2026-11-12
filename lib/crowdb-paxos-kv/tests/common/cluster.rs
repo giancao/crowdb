@@ -318,7 +318,7 @@ pub async fn assert_all_accepted(cluster: &TestCluster, slot: u64, expected_payl
             match replica.accepted_at(slot).await {
                 Some(accepted) => {
                     assert_eq!(
-                        accepted.payload.as_ref(),
+                        accepted.payload.to_bytes().as_ref(),
                         expected_payload,
                         "replica {} has wrong payload at slot {}",
                         replica.id,

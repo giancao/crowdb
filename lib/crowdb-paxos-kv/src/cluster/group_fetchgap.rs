@@ -59,6 +59,10 @@ pub(crate) async fn run_fetchgap_driver(
         let Some(remote) = group.get_remote_replica(leader_id) else {
             continue;
         };
+        // Keep gaps pending until the leader's RPC transport is bound.
+        let Some(transport) = remote.rpc_transport() else {
+            continue;
+        };
         // Running replicas have no atomic snapshot replacement yet. Keep
         // draining large backlogs with the existing fixed inflight bound.
         let gap_count = group.local_replica().gap_slots.lock().len();
@@ -70,9 +74,6 @@ pub(crate) async fn run_fetchgap_driver(
             );
         }
         large_backlog = gap_count > threshold as usize;
-        // Clone the crowdb-rpc transport + endpoint so the spawned task
-        // can call `transport.send_fetch_gap()` directly.
-        let rpc_transport = remote.rpc_transport().cloned();
         let rpc_endpoint = remote.endpoint_str().to_string();
         let rpc_timeout = Duration::from_millis(group.config.election.peer_rpc_timeout_ms);
         let replica = group.local_replica();
@@ -99,7 +100,7 @@ pub(crate) async fn run_fetchgap_driver(
             .map(|h| h.fetchgap_failed.clone());
         // Spawn a task per gap to send FetchGap concurrently.
         for slot in gaps {
-            let rpc_transport_clone = rpc_transport.clone();
+            let transport = Arc::clone(transport);
             let rpc_endpoint_clone = rpc_endpoint.clone();
             let rpc_timeout_clone = rpc_timeout;
             let inflight = FetchGapInFlight(fetchgap_inflight.clone());
@@ -112,12 +113,6 @@ pub(crate) async fn run_fetchgap_driver(
             let fetchgap_failed_clone = fetchgap_failed.clone();
             tokio::spawn(async move {
                 let _inflight = inflight;
-                let Some(ref transport) = rpc_transport_clone else {
-                    if let Some(c) = &fetchgap_failed_clone {
-                        c.inc();
-                    }
-                    return;
-                };
                 let result = tokio::time::timeout(
                     rpc_timeout_clone,
                     transport.send_fetch_gap(
@@ -158,7 +153,7 @@ pub(crate) async fn run_fetchgap_driver(
                             slot: resp.slot,
                             ballot: crate::paxos::roles::PxBallot::new(resp.ballot_round, resp.leader_id),
                             term: resp.term,
-                            payload: resp.payload,
+                            payload: resp.payload.into(),
                         };
                         // Historical chosen values may belong to an older
                         // election term. Persist their original entry before

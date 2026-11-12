@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/flush_batch.h"
+#include "common/test_chunk_physical.h"
 
 #include <gtest/gtest.h>
 
@@ -124,7 +125,8 @@ TEST(FlushWindow, CancelAfterCommittedPrefixResumesPreparedSuffixExactlyOnce)
 TEST(FlushWindow, RejectedContinuationKeepsCommittedWindowAndStableNextRecord)
 {
     detail::FlushRuntime   runtime(1, 1);
-    auto                   lane = std::make_shared<detail::FlushRuntime::Lane>(1);
+    auto                   allocations = std::make_shared<test_chunk::TestPhysicalBudget>();
+    auto                   lane        = std::make_shared<detail::FlushRuntime::Lane>(1, allocations);
     PublicationCoordinator publisher;
     initialize_windows(publisher, 4);
     FlushBatchOptions options;
@@ -139,6 +141,7 @@ TEST(FlushWindow, RejectedContinuationKeepsCommittedWindowAndStableNextRecord)
                 runtime.try_submit(
                            lane, [](void *raw) noexcept { *static_cast<bool *>(raw) = true; }, &other_ran)
                     .ok());
+            allocations->reject.store(true);
         }
     };
     std::shared_ptr<FlushBatch> batch;
@@ -149,6 +152,7 @@ TEST(FlushWindow, RejectedContinuationKeepsCommittedWindowAndStableNextRecord)
     EXPECT_EQ(batch->result().phase, FlushPhase::kRepairRequired);
     verify_window_values(publisher.capture(), 1);
     EXPECT_EQ(publisher.capture()->coverage, 0U);
+    allocations->reject.store(false);
     ASSERT_TRUE(stdexec::sync_wait(batch->sender()));
     runtime.drain();
     ASSERT_TRUE(batch->result().handoff_status.ok());

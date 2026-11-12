@@ -199,8 +199,10 @@ bool RdmaTransport::prime_receive(const std::shared_ptr<Connection> &connection)
         static_cast<uint64_t>(depth) * config_.wire_slot_capacity > config_.receive_arena_bytes)
         return false;
     BufferPool *pool = pools->recv.get();
+    const auto  slot_capacity =
+        config_.combined_control_data() ? config_.wire_slot_capacity : pools->effective_data_capacity;
     for (uint32_t i = 0; i < depth; ++i) {
-        Buffer *slot = pool->alloc(pools->effective_data_capacity);
+        Buffer *slot = pool->alloc(slot_capacity);
         if (slot == nullptr) {
             return false;
         }

@@ -111,7 +111,7 @@ impl super::TreeRuntime {
 }
 
 impl Crowdbtree {
-    /// Reads Tree admission and queue permits without page walks or I/O.
+    /// Reads Tree admission and ready queue depth without page walks or I/O.
     pub fn resource_usage(&self) -> Result<ResourceUsageSnapshot, CtError> {
         sample(|out| unsafe { sys::ct_tree_resource_usage(self.as_ptr(), out) })
     }

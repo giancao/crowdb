@@ -101,8 +101,7 @@ Status prepare_scan(TreeCore &core, CoreScanOptions options, std::shared_ptr<Cor
     }
     status = prepare_scan(options, std::move(ready), std::move(range), core.load_limits().max_value_bytes, out);
     if (status.ok()) {
-        (*out)->lane     = core.binding()->lane();
-        (*out)->progress = core.cpu_progress();
+        (*out)->lane = core.binding()->lane();
     }
     return status;
 }

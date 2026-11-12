@@ -4,6 +4,7 @@
 #include "../src/transport/rdma/rdma_control_stream.h"
 #include "crowdb-rpc/c_api.h"
 #include "crowdb-rpc/c_api_internal.h"
+#include "crowdb-rpc/connection.h"
 
 #include <gtest/gtest.h>
 
@@ -62,4 +63,38 @@ TEST(CApiBufferTest, LogicalControlRetainsAdmissionAndOriginalStorageThroughClon
     EXPECT_EQ(crowdb_rpc_buffer_data(clone)[31], 0x5a);
     crowdb_rpc_buffer_release(clone);
     EXPECT_EQ(budget.used(), 0U);
+}
+
+TEST(CApiBufferTest, TakingRequestControlPreservesBytesAndReleasesConnectionWithFrame)
+{
+    auto frame = std::make_unique<crowdb::rpc::Frame>();
+    frame->control.resize(16 * 1024, 0x5a);
+    frame->control.reserve(32 * 1024);
+    const auto capacity     = frame->control.capacity();
+    frame->connection_owner = std::make_shared<crowdb::rpc::Connection>(1, "test", nullptr, 1 << 20, 8);
+    std::weak_ptr<crowdb::rpc::Connection> connection = frame->connection_owner;
+    const auto                            *original   = frame->control.data();
+
+    auto *control = crowdb_rpc_frame_take_control(frame.get());
+    ASSERT_NE(control, nullptr);
+    EXPECT_EQ(crowdb_rpc_buffer_data(control), original);
+    EXPECT_EQ(crowdb_rpc_buffer_len(control), 16U * 1024);
+    EXPECT_EQ(crowdb_rpc_buffer_allocation_capacity(control), capacity);
+    EXPECT_EQ(crowdb_rpc_frame_take_control(frame.get()), nullptr);
+    EXPECT_FALSE(connection.expired());
+    frame.reset();
+    EXPECT_TRUE(connection.expired());
+    EXPECT_EQ(crowdb_rpc_buffer_data(control)[(16 * 1024) - 1], 0x5a);
+    crowdb_rpc_buffer_release(control);
+}
+
+TEST(CApiBufferTest, TakenControlWithReceiveCreditHasNoTransferableAllocation)
+{
+    crowdb::rpc::Frame frame;
+    frame.control.resize(4096, 0x5a);
+    frame.control_owner = std::make_shared<int>(1);
+    auto *control       = crowdb_rpc_frame_take_control(&frame);
+    ASSERT_NE(control, nullptr);
+    EXPECT_EQ(crowdb_rpc_buffer_allocation_capacity(control), 0U);
+    crowdb_rpc_buffer_release(control);
 }

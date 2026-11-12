@@ -129,21 +129,25 @@ struct Cleanup : std::enable_shared_from_this<Cleanup>
                 return;
             }
             if (!free_blocks_collected) {
-                collect(*store, local->gc_cursor.load(std::memory_order_relaxed), {},
-                        [owner = shared_from_this()](LocalBlockGcResult result) {
-                            owner->local->gc_cursor.store(result.complete ? 0 : result.next_block,
-                                                          std::memory_order_relaxed);
-                            if (!result.status.ok()) {
-                                if (result.status.code() != Code::kResourceExhausted &&
-                                    result.status.code() != Code::kUnavailable) {
-                                    CRB_LOG_WARN("post-flush block cleanup deferred: {}", result.status.to_string());
-                                }
-                                return;
+                const auto cursor = local->gc_cursor.load(std::memory_order_relaxed);
+                if (const auto first = store->next_file_index(cursor, backend)) {
+                    collect(*store, *first, {}, [owner = shared_from_this()](LocalBlockGcResult result) {
+                        owner->local->gc_cursor.store(result.complete ? 0 : result.next_block,
+                                                      std::memory_order_relaxed);
+                        if (!result.status.ok()) {
+                            if (result.status.code() != Code::kResourceExhausted &&
+                                result.status.code() != Code::kUnavailable) {
+                                CRB_LOG_WARN("post-flush block cleanup deferred: {}", result.status.to_string());
                             }
-                            owner->free_blocks_collected = true;
-                            owner->completed(Status::Ok());
-                        });
-                return;
+                            return;
+                        }
+                        owner->free_blocks_collected = result.complete;
+                        owner->completed(Status::Ok());
+                    });
+                    return;
+                }
+                local->gc_cursor.store(0, std::memory_order_relaxed);
+                free_blocks_collected = true;
             }
             select_sparse_local_block_async(
                 *store, local->ledger, local->gc_cursor.load(std::memory_order_relaxed), metadata, 0.5, backend,

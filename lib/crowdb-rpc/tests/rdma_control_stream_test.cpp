@@ -47,7 +47,7 @@ TEST(ControlStreamTest, ClassesReassembleExactBytesAndRetainAdmissionThroughFina
             EXPECT_EQ(budget.used(), original.size());
         }
         ASSERT_NE(completed, nullptr);
-        EXPECT_EQ(completed->control, original);
+        EXPECT_TRUE(std::ranges::equal(completed->control, original));
         EXPECT_EQ(completed->request_id, 43U);
         EXPECT_EQ(completed->header.msg_type, 3701U);
         EXPECT_EQ(completed->header.msg_size, original.size());
@@ -86,6 +86,40 @@ TEST(ControlStreamTest, HeldCompletedControlBlocksTheNextMessageAndReleaseWakesA
     second.reset();
     EXPECT_EQ(budget.used(), 0U);
     EXPECT_EQ(wakes.load(), 2U);
+}
+
+TEST(ControlStreamTest, ReceiveLimitIsPerConnectionAndTransportTotalsIncludeBoth)
+{
+    constexpr uint32_t              size         = 32;
+    unsigned                        first_wakes  = 0;
+    unsigned                        second_wakes = 0;
+    ControlStreamBudget             totals(0);
+    ControlStreamBudget             first_budget(size, [&] { ++first_wakes; }, &totals);
+    ControlStreamBudget             second_budget(size, [&] { ++second_wakes; }, &totals);
+    ControlStreamReceiver           first(first_budget, RDMA_METADATA_CAPACITY, 7, size, 10ms);
+    ControlStreamReceiver           second(second_budget, RDMA_METADATA_CAPACITY, 7, size, 10ms);
+    const auto                      fragment = test_fragment(size, RDMA_METADATA_CAPACITY);
+    const std::array<uint8_t, size> bytes{};
+    std::unique_ptr<Frame>          first_frame;
+    std::unique_ptr<Frame>          second_frame;
+
+    ASSERT_EQ(first.accept(fragment, bytes, {}, first_frame), ControlStreamResult::Complete);
+    EXPECT_EQ(first.accept(test_fragment(size, RDMA_METADATA_CAPACITY, 0, 2), bytes, {}, second_frame),
+              ControlStreamResult::Backpressure);
+    ASSERT_EQ(second.accept(fragment, bytes, {}, second_frame), ControlStreamResult::Complete);
+    EXPECT_EQ(first_budget.used(), size);
+    EXPECT_EQ(second_budget.used(), size);
+    EXPECT_EQ(totals.used(), 2 * size);
+    EXPECT_EQ(totals.high_water(), 2 * size);
+    EXPECT_EQ(totals.stalls(), 1U);
+
+    first_frame.reset();
+    EXPECT_EQ(first_wakes, 1U);
+    EXPECT_EQ(second_wakes, 0U);
+    EXPECT_EQ(totals.used(), size);
+    second_frame.reset();
+    EXPECT_EQ(second_wakes, 1U);
+    EXPECT_EQ(totals.used(), 0U);
 }
 
 TEST(ControlStreamTest, MetadataDisagreementAndGapsNeverPublishPartialControl)

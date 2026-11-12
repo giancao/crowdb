@@ -34,7 +34,7 @@ fn accepted_record(group: u64, slot: u64, payload_len: usize) -> WALRecord {
         term: 1,
         slot,
         ballot: PxBallot::new(0, 1),
-        payload: Bytes::from(payload),
+        payload: Bytes::from(payload).into(),
     }
 }
 
@@ -95,7 +95,7 @@ async fn append_and_seal() {
         term: 1,
         slot: 20,
         ballot: PxBallot::new(0, 1),
-        payload: Bytes::from_static(b"test payload"),
+        payload: Bytes::from_static(b"test payload").into(),
     };
     let off2 = seg.append(&r2).await.unwrap();
     assert!(off2 > off1);

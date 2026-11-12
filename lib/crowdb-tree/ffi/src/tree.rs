@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::Once;
 
 use tokio::io::unix::AsyncFd;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 
 use crate::close::CloseState;
 use crate::config::{Config, KeyRange, PageStoreBackend};
@@ -662,6 +662,33 @@ impl Crowdbtree {
     /// advance this value. Volatile Trees remain at zero.
     pub fn durable_coverage(&self) -> u64 {
         unsafe { sys::ct_durable_coverage(self.as_ptr()) }
+    }
+
+    /// Successful ordinary flush publications since the last durable root commit.
+    pub fn flushes_since_persistent(&self) -> u64 {
+        unsafe { sys::ct_flushes_since_persistent(self.as_ptr()) }
+    }
+
+    /// Register or reuse the same wake on crossing the ordinary flush count threshold.
+    ///
+    /// # Errors
+    /// Returns an error if the threshold is zero or a different wake is bound.
+    pub fn bind_flush_threshold(&self, threshold: u64, notify: Arc<Notify>) -> Result<(), CtError> {
+        unsafe extern "C" fn wake(context: *mut c_void) {
+            unsafe { &*context.cast::<Notify>() }.notify_one();
+        }
+        unsafe extern "C" fn drop_context(context: *mut c_void) {
+            drop(unsafe { Arc::from_raw(context.cast::<Notify>()) });
+        }
+
+        let context = Arc::into_raw(notify).cast_mut().cast::<c_void>();
+        let result = check(unsafe {
+            sys::ct_bind_flush_threshold(self.as_ptr(), threshold, wake, drop_context, context)
+        });
+        if result.is_err() {
+            unsafe { drop_context(context) };
+        }
+        result
     }
 
     pub fn last_applied_slot(&self) -> u64 {

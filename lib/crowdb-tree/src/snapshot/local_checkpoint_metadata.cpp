@@ -47,7 +47,6 @@ void LocalCheckpointOperation::State::segment()
         finish(Status::invalid_argument());
         return;
     }
-    words.fill(0);
     if (previous && image->pages->frames.same_segment(previous->pages->frames, index)) {
         const auto &segments = previous->metadata->segments;
         const auto  found =
@@ -66,6 +65,7 @@ void LocalCheckpointOperation::State::segment()
             return;
         }
     }
+    words.fill(0);
     auto     old  = previous ? previous->pages->frames.lower_bound(index * kMappingSegmentSize)
                              : CapturedDurablePages::Frames::const_iterator{};
     bool     same = previous != nullptr;
@@ -109,7 +109,6 @@ void LocalCheckpointOperation::State::segment()
                                     .generation = image->anchor.snapshot_seq,
                                     .slot_count = kMappingSegmentSize,
                                     .live_count = live};
-    std::ranges::fill(window->bytes, uint8_t{0});
     segment_entry = {.seg_idx    = header.seg_idx,
                      .generation = header.generation,
                      .image_len  = static_cast<uint32_t>(segment_image_encoded_size(header.slot_count))};
@@ -118,6 +117,8 @@ void LocalCheckpointOperation::State::segment()
         finish(std::move(status));
         return;
     }
+    std::ranges::fill(window->bytes.subspan(segment_entry.image_len, segment_bytes - segment_entry.image_len),
+                      uint8_t{0});
     reserve(segment_bytes, Stage::SegmentReserved);
 }
 
@@ -155,7 +156,6 @@ void LocalCheckpointOperation::State::directory_window()
         finish(Status::internal_error());
         return;
     }
-    std::ranges::fill(window->bytes, uint8_t{0});
     size_t written = 0;
     auto   status  = encoder->next(window->bytes, &written);
     if (!status.ok() || written == 0) {
@@ -164,6 +164,7 @@ void LocalCheckpointOperation::State::directory_window()
     }
     const auto address = directory_address + directory_offset;
     const auto bytes   = round_up_to_iu(written, iu);
+    std::ranges::fill(window->bytes.subspan(written, bytes - written), uint8_t{0});
     directory_offset += bytes;
     io(false, address, bytes, Stage::DirectoryWritten);
 }

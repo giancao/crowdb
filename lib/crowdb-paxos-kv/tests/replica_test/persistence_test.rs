@@ -80,7 +80,7 @@ fn write_entry(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, REPLICA_ID),
         term: 1,
-        payload: Bytes::from(encode_put_payload(key, value)),
+        payload: Bytes::from(encode_put_payload(key, value)).into(),
     }
 }
 
@@ -89,7 +89,7 @@ fn delete_entry(slot: u64, key: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, REPLICA_ID),
         term: 1,
-        payload: Bytes::from(encode_delete_payload(key)),
+        payload: Bytes::from(encode_delete_payload(key)).into(),
     }
 }
 
@@ -98,7 +98,7 @@ fn batch_entry(slot: u64, ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, REPLICA_ID),
         term: 1,
-        payload: Bytes::from(encode_batch_payload(ops)),
+        payload: Bytes::from(encode_batch_payload(ops)).into(),
     }
 }
 

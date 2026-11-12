@@ -247,7 +247,7 @@ fn make_entry(slot: u64, ballot: PxBallot) -> PxLogEntry {
         slot,
         ballot,
         term: ballot.round,
-        payload: bytes::Bytes::from_static(&[1, 2, 3]),
+        payload: bytes::Bytes::from_static(&[1, 2, 3]).into(),
     }
 }
 

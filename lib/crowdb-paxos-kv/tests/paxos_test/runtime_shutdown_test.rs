@@ -56,7 +56,7 @@ fn entry(slot: u64) -> PxLogEntry {
         slot,
         term: 0,
         ballot: PxBallot::new(1, 1),
-        payload: Bytes::from(payload),
+        payload: Bytes::from(payload).into(),
     }
 }
 
@@ -97,7 +97,9 @@ async fn leader_shutdown_repairs_accepted_gap_before_cancelling_owned_tasks() {
     .await
     .unwrap();
     assert!(matches!(
-        group.propose(entry(3).payload.to_vec(), None, None).await,
+        group
+            .propose(entry(3).payload.to_bytes().to_vec(), None, None)
+            .await,
         ProposeResult::Busy
     ));
     assert!(group
@@ -195,7 +197,11 @@ async fn closing_runtime_proposal_window_wakes_queued_callers_without_panic() {
     let permit = group.inflight_semaphore().acquire().await.unwrap();
     let proposal = tokio::spawn({
         let group = group.clone();
-        async move { group.propose(entry(1).payload.to_vec(), None, None).await }
+        async move {
+            group
+                .propose(entry(1).payload.to_bytes().to_vec(), None, None)
+                .await
+        }
     });
     tokio::task::yield_now().await;
     let shutdown = tokio::spawn({

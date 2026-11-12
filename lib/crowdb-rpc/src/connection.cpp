@@ -79,16 +79,6 @@ inline ssize_t frame_total(OutFrame *frame)
     return total;
 }
 
-// Release an OutFrame's buffers and delete it.
-inline void release_frame(OutFrame *frame)
-{
-    if (frame->control != nullptr) {
-        frame->control->release();
-    }
-    frame->release_data();
-    delete frame;
-}
-
 // Restore pending frames to the frames array (cold path — partials
 // from a previous EAGAIN). Returns the number restored.
 int __attribute__((noinline)) restore_pending(OutFrame **pending, int pending_count, OutFrame **frames,
@@ -110,6 +100,16 @@ int __attribute__((noinline)) restore_pending(OutFrame **pending, int pending_co
 }
 
 } // namespace
+
+void Connection::release_frame(OutFrame *frame)
+{
+    if (frame->control != nullptr)
+        frame->control->release();
+    frame->release_data();
+    if (frame->tcp_request_cache_bytes != 0)
+        release_request_cache_bytes(frame->tcp_request_cache_bytes);
+    delete frame;
+}
 
 Connection::Connection(int64_t id, std::string name, BufferPool *pool, uint32_t max_data_size,
                        uint32_t send_queue_capacity)
@@ -263,12 +263,7 @@ retry:
                     stats->submit_to_writev.record(delta);
                 }
                 // Request payload bandwidth: data bytes per frame (no header).
-                uint64_t      payload    = 0;
-                const uint8_t data_views = batch[i]->data_views();
-                for (uint8_t index = 0; index < data_views; ++index) {
-                    payload += batch[i]->data_view(index)->len;
-                }
-                bw_request_payload().observe(payload);
+                bw_request_payload().observe(batch[i]->header.data_size);
             }
         }
         for (int i = 0; i < n; i++) {

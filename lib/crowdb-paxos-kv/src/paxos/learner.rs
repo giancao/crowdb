@@ -7,6 +7,7 @@ use accepted_apply::ApplyTasks;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -21,7 +22,7 @@ use crate::kv::{
     AdmittedApply, ApplyAdmissionResult, Batch, CrowdbTreeBackend, CrowdbTreeConfig, CrowdbTreeEngine,
     KVEngine, KVFuture,
 };
-use crate::paxos::roles::{Learner, PxLogEntry, RequestIdentity, SlotIndex};
+use crate::paxos::roles::{Learner, ProposalPayload, PxLogEntry, RequestIdentity, SlotIndex};
 use crate::paxos::PxTerm;
 
 /// Per-client result retention: the last `REQUEST_RESULT_WINDOW` committed
@@ -36,7 +37,7 @@ const REQUEST_RESULT_WINDOW: usize = 64;
 
 /// Per-client bounded request-result window. `VecDeque` (not a hash map): N is tiny
 /// and the common case is a retry of the most-recent seq, scanned first.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 struct DedupSnapshot {
     entries: VecDeque<(u64, SlotIndex)>,
 }
@@ -55,19 +56,27 @@ impl Default for RequestResultWindow {
 }
 
 impl RequestResultWindow {
-    fn record(&self, seq: u64, slot: SlotIndex) {
+    fn record(&self, identities: &[RequestIdentity], slot: SlotIndex) {
         loop {
             let current = self.snapshot.load_full();
-            // Idempotent re-`learn` of an already-recorded seq leaves the
-            // existing slot in place and does not consume another cell.
-            if current.entries.iter().any(|(recorded, _)| *recorded == seq) {
-                return;
+            let mut replacement: Option<DedupSnapshot> = None;
+            for identity in identities {
+                let window = replacement.as_ref().unwrap_or(&current);
+                if window.entries.iter().any(|(seq, _)| *seq == identity.seq) {
+                    continue;
+                }
+                let window = replacement.get_or_insert_with(|| {
+                    let capacity = current.entries.len().saturating_add(identities.len());
+                    let mut entries = VecDeque::with_capacity(capacity.min(REQUEST_RESULT_WINDOW));
+                    entries.extend(current.entries.iter().copied());
+                    DedupSnapshot { entries }
+                });
+                if window.entries.len() == REQUEST_RESULT_WINDOW {
+                    window.entries.pop_front();
+                }
+                window.entries.push_back((identity.seq, slot));
             }
-            let mut replacement = (*current).clone();
-            replacement.entries.push_back((seq, slot));
-            if replacement.entries.len() > REQUEST_RESULT_WINDOW {
-                replacement.entries.pop_front();
-            }
+            let Some(replacement) = replacement else { return };
             let previous = self.snapshot.compare_and_swap(&current, Arc::new(replacement));
             if Arc::ptr_eq(&previous, &current) {
                 return;
@@ -678,14 +687,30 @@ impl PxLearner {
     /// coalesced multi-key batch passes one identity per client operation;
     /// repair/election pass none. `client_id == 0` identities are skipped.
     pub(crate) fn record_request_results(&self, identities: &[RequestIdentity], slot: SlotIndex) {
-        for identity in identities {
-            if identity.client_id == 0 {
+        let sorted;
+        let mut identities = if identities
+            .windows(2)
+            .all(|pair| pair[0].client_id <= pair[1].client_id)
+        {
+            identities
+        } else {
+            let mut grouped = identities.to_vec();
+            grouped.sort_by_key(|identity| identity.client_id);
+            sorted = grouped;
+            &sorted
+        };
+        while let Some(first) = identities.first() {
+            let client_id = first.client_id;
+            let end = identities.partition_point(|identity| identity.client_id == client_id);
+            let (client, remaining) = identities.split_at(end);
+            identities = remaining;
+            if client_id == 0 {
                 continue;
             }
             let window = self
                 .request_results
-                .get_or_insert(identity.client_id, Arc::new(RequestResultWindow::default()));
-            window.value().record(identity.seq, slot);
+                .get_or_insert_with(client_id, || Arc::new(RequestResultWindow::default()));
+            window.value().record(client, slot);
         }
     }
 
@@ -726,7 +751,7 @@ impl PxLearner {
     }
 
     /// Reserves an engine apply owner before the proposer allocates a slot.
-    pub(crate) fn admit_proposal(&self, payload: Bytes) -> KVFuture<ApplyAdmissionResult> {
+    pub(crate) fn admit_proposal(&self, payload: ProposalPayload) -> KVFuture<ApplyAdmissionResult> {
         self.engine.admit_proposal(payload)
     }
 
@@ -750,7 +775,7 @@ impl PxLearner {
     }
 
     /// Applies follower/replay work through the engine's independent progress path.
-    pub(crate) async fn apply_entry(&self, slot: SlotIndex, payload: &Bytes) -> Result<(), String> {
+    pub(crate) async fn apply_entry(&self, slot: SlotIndex, payload: &ProposalPayload) -> Result<(), String> {
         self.apply_entry_admitted(slot, payload, None).await
     }
 
@@ -758,27 +783,57 @@ impl PxLearner {
     pub(crate) async fn apply_entry_admitted(
         &self,
         slot: SlotIndex,
-        payload: &Bytes,
+        payload: &ProposalPayload,
         admission: Option<Box<dyn AdmittedApply>>,
     ) -> Result<(), String> {
         let _accepted = self.track_apply_task();
-        // Test-only apply gate: park until the test releases, so the R35
-        // fence test can hold the spawned R17 apply deterministically. The
-        // guard is dropped at the `;` so the `Notify` is awaited without a
-        // non-Send lock guard held across the await.
+        let started = admission.map(|permit| self.start_admitted_apply(slot, permit));
+        self.finish_apply_entry(slot, payload, started).await
+    }
+
+    pub(crate) fn start_admitted_apply(
+        &self,
+        slot: SlotIndex,
+        permit: Box<dyn AdmittedApply>,
+    ) -> (Instant, KVFuture<Result<(), String>>) {
+        let start = Instant::now();
         #[cfg(feature = "test-util")]
-        let gate = self.apply_gate.lock().clone();
-        #[cfg(feature = "test-util")]
-        if let Some(gate) = gate {
-            gate.notified().await;
+        if let Some(gate) = self.apply_gate.lock().clone() {
+            return (
+                start,
+                KVFuture::Pending(Box::pin(async move {
+                    gate.notified().await;
+                    permit.apply(slot).await
+                })),
+            );
         }
-        let batch = Batch::try_decode(payload).map_err(str::to_owned)?;
-        let apply_start = std::time::Instant::now();
-        let applied = match admission {
-            Some(permit) => permit.apply(slot).await,
-            None if batch.ops.is_empty() => self.engine.apply_noop(slot).await,
-            None => self.engine.apply(slot, &batch).await,
+        (start, permit.apply(slot))
+    }
+
+    pub(crate) async fn finish_apply_entry(
+        &self,
+        slot: SlotIndex,
+        payload: &ProposalPayload,
+        started: Option<(Instant, KVFuture<Result<(), String>>)>,
+    ) -> Result<(), String> {
+        #[cfg(feature = "test-util")]
+        if started.is_none() {
+            let gate = self.apply_gate.lock().clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+        }
+        let batch = if started.is_none() {
+            Some(Batch::try_decode_proposal(payload).map_err(str::to_owned)?)
+        } else {
+            None
         };
+        let (apply_start, apply) = match (started, batch.as_ref()) {
+            (Some(started), _) => started,
+            (None, Some(batch)) if !batch.ops.is_empty() => (Instant::now(), self.engine.apply(slot, batch)),
+            (None, _) => (Instant::now(), self.engine.apply_noop(slot)),
+        };
+        let applied = apply.await;
         match applied {
             Ok(()) => {}
             Err(error) => {
@@ -810,14 +865,15 @@ impl PxLearner {
         }
         // Watch/notify apply-path hook: if a watch registry is wired
         // and has watchers, emit the changed keys as notify frames.
-        // Fires on ALL apply paths (learn, spawned apply, catch-up) —
-        // the etcd model. Followers have empty registries (cleared on
-        // step-down) so `has_watchers()` is false → zero overhead.
-        // The `ArcSwap` load is lock-free (a single atomic load) so
-        // the hot path pays no lock even when no registry is wired.
+        // Check after apply so a watch registered during apply can see it.
+        // A prepared permit already validated its immutable payload.
         if let Some(entry) = self.watch_registry.load().as_deref() {
             let (group_id, registry) = entry;
             if registry.has_watchers() {
+                let batch = match batch {
+                    Some(batch) => batch,
+                    None => Batch::try_decode_proposal(payload).map_err(str::to_owned)?,
+                };
                 registry.emit(*group_id, slot, &batch.ops);
             }
         }

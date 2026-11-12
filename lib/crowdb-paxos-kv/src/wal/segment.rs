@@ -46,6 +46,8 @@ const SEG_VERSION: u16 = 1;
 pub const SEG_HEADER_LEN: usize = 4 + 2 + 8 + 8; // 22
 const FOOTER_MAGIC: u32 = 0x464F_4F54;
 const FOOTER_LEN: usize = 4 + 8 + 8 + 4 + 4; // 28
+                                             // Also covers the text footer with maximal decimal slot and record count fields.
+pub(super) const MAX_FOOTER_LEN: usize = 128;
 
 /// Text prefix for text-format segment headers (mirrors `WALRecord::TEXT_PREFIX`).
 const SEG_TEXT_PREFIX: &str = "CROWDB_WAL_SEG";
@@ -256,13 +258,9 @@ impl WalSegment {
     /// Returns IO error if the write fails.
     pub(super) async fn write_raw_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> io::Result<()> {
         assert!(!self.sealed, "write_raw_vectored to sealed segment");
-        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
-        if total_len == 0 {
-            return Ok(());
-        }
         let offset = self.write_offset;
-        self.file.write_vectored_at(bufs, offset).await?;
-        self.write_offset += total_len as u64;
+        let written = self.file.write_vectored_at(bufs, offset).await?;
+        self.write_offset += written as u64;
         Ok(())
     }
 

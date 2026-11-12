@@ -5,7 +5,7 @@
 
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crowdb_paxos_kv::cluster::status::StoreStatus;
@@ -37,6 +37,16 @@ pub(crate) struct MetricsQuery {
     /// Metric name prefix filter (e.g. `s.1.g.2.`). Default empty = all.
     #[serde(default)]
     prefix: String,
+    /// Include a native RPC transport snapshot for each store.
+    #[serde(default)]
+    rpc_transport: bool,
+}
+
+#[derive(Serialize)]
+struct MetricsWithRpcTransport {
+    #[serde(flatten)]
+    metrics: MetricsResponse,
+    rpc_transport: std::collections::BTreeMap<u64, serde_json::Value>,
 }
 
 /// `GET /metrics` — structured snapshot of all registry metrics matching
@@ -46,7 +56,10 @@ pub(crate) struct MetricsQuery {
         get,
         path = "/metrics",
         tag = "management",
-        params(("prefix" = Option<String>, Query, description = "Metric name prefix filter")),
+        params(
+            ("prefix" = Option<String>, Query, description = "Metric name prefix filter"),
+            ("rpc_transport" = Option<bool>, Query, description = "Include native RPC transport status")
+        ),
         responses((status = 200, description = "Metric snapshot", body = MetricsResponse))
     )]
 pub(super) async fn metrics(
@@ -66,11 +79,27 @@ pub(super) async fn metrics(
                 .collect()
         })
         .unwrap_or_default();
-    let body = serde_json::to_string_pretty(&MetricsResponse {
+    let snapshot = MetricsResponse {
         window_secs,
         timestamp,
         metrics,
-    })
+    };
+    let body = if q.rpc_transport {
+        let rpc_transport = state
+            .stores_snapshot()
+            .iter()
+            .filter_map(|(&id, store)| {
+                let status = store.rpc_transport_status()?;
+                serde_json::from_slice(&status).ok().map(|status| (id, status))
+            })
+            .collect();
+        serde_json::to_string_pretty(&MetricsWithRpcTransport {
+            metrics: snapshot,
+            rpc_transport,
+        })
+    } else {
+        serde_json::to_string_pretty(&snapshot)
+    }
     .unwrap();
     ([("content-type", "application/json")], body)
 }

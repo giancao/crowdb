@@ -7,9 +7,9 @@
 
 namespace crowdb::tree
 {
-// Six budget partitions, CPU/backend queue permits, then host CPU/backend
-// workers. Tree samples omit the last two shared resources. Queue permits
-// include idle prepaid progress registrations, unlike runnable queue length.
+// Six budget partitions, CPU/backend ready queue depth, then host CPU/backend
+// workers. Tree samples omit the last two shared resources. Ready queue usage
+// counts waiting jobs, with the configured target reported in limit.
 struct ResourceUsage
 {
     uint64_t limit       = 0;

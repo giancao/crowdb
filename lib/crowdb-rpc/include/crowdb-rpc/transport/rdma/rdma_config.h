@@ -5,6 +5,7 @@
 
 #include "crowdb-rpc/transport/rdma/rdma_capability.h"
 
+#include <algorithm>
 #include <string>
 
 namespace crowdb::rpc
@@ -62,9 +63,21 @@ struct RdmaConfig
 
     [[nodiscard]] uint64_t receive_control_bytes() const
     {
-        return wire_layout == RdmaWireLayout::ControlData
+        return wire_layout == RdmaWireLayout::ControlData && !combined_control_data()
                  ? static_cast<uint64_t>(posted_receive_target) * RDMA_CONTROL_CAPACITY
                  : 0;
+    }
+
+    [[nodiscard]] bool combined_control_data() const
+    {
+        return rdma_combined_control_data(wire_slot_capacity, wire_layout);
+    }
+
+    [[nodiscard]] uint64_t connection_send_arena_bytes() const
+    {
+        if (wire_layout != RdmaWireLayout::ControlData)
+            return send_arena_bytes;
+        return std::min(send_arena_bytes, uint64_t{sq_depth} * RDMA_CONTROL_CAPACITY);
     }
 };
 

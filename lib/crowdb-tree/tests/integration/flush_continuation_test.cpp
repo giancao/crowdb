@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/flush_batch.h"
+#include "common/test_chunk_physical.h"
 
 #include <gtest/gtest.h>
 
@@ -109,7 +110,8 @@ TEST(FlushContinuation, OversizedKeyDoesNotPublishOrLoopAfterPreparedPrefix)
 TEST(FlushContinuation, RejectedContinuationRetainsPrefixAndYieldsWorkerBetweenRuns)
 {
     detail::FlushRuntime   runtime(1, 1);
-    auto                   lane = std::make_shared<detail::FlushRuntime::Lane>(1);
+    auto                   allocations = std::make_shared<test_chunk::TestPhysicalBudget>();
+    auto                   lane        = std::make_shared<detail::FlushRuntime::Lane>(1, allocations);
     PublicationCoordinator publisher;
     initialize(publisher, {make_source({"a", "b", "c"}, 1, "v")});
     FlushBatchOptions options;
@@ -128,6 +130,7 @@ TEST(FlushContinuation, RejectedContinuationRetainsPrefixAndYieldsWorkerBetweenR
                     .try_submit(
                         lane, [](void *context) noexcept { *static_cast<bool *>(context) = true; }, &other_work_ran)
                     .ok());
+            allocations->reject.store(true);
         }
     };
     std::shared_ptr<FlushBatch> batch;
@@ -138,6 +141,7 @@ TEST(FlushContinuation, RejectedContinuationRetainsPrefixAndYieldsWorkerBetweenR
     EXPECT_EQ(batch->result().handoff_status.code(), Code::kResourceExhausted);
     EXPECT_EQ(publisher.capture()->coverage, 0U);
     EXPECT_EQ(prepared, (std::vector<size_t>{1}));
+    allocations->reject.store(false);
     ASSERT_TRUE(stdexec::sync_wait(batch->sender()).has_value());
     runtime.drain();
     EXPECT_TRUE(batch->result().handoff_status.ok());

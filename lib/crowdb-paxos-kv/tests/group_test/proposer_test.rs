@@ -64,7 +64,7 @@ async fn repair_once_fills_gap_and_advances_frontier() {
             slot: 2,
             ballot: PxBallot::new(1, 1),
             term: 0,
-            payload: bytes::Bytes::from_static(b""),
+            payload: bytes::Bytes::from_static(b"").into(),
         },
         &[],
     );
@@ -154,7 +154,7 @@ async fn gap_backlog_drains_without_waiting_one_heartbeat_per_slot() {
             slot: 65,
             ballot: PxBallot::new(0, 1),
             term: group.local_replica().current_term_snapshot(),
-            payload: bytes::Bytes::new(),
+            payload: bytes::Bytes::new().into(),
         },
         &[],
     );

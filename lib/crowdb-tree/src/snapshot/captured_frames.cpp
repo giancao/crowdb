@@ -10,6 +10,31 @@
 
 namespace crowdb::tree
 {
+size_t CapturedFrameBuffer::storage_bytes(const CapturedFrameLimits &limits) noexcept
+{
+    const auto bytes = limits.encode.frame_bytes;
+    return limits.raw_write ? limits.raw_write->padded_blob_bytes(bytes) + limits.raw_write->buffer_alignment - 1
+                            : bytes;
+}
+
+CapturedFrameBuffer::CapturedFrameBuffer(const CapturedFrameLimits &limits)
+    : resources_(limits.encode.metadata, TreeResourceMetric::MaterializeInflightBytes),
+      storage_(storage_bytes(limits), decltype(storage_)::allocator_type(limits.encode.metadata)),
+      frame_(storage_)
+{
+    if (limits.raw_write) {
+        void       *data      = storage_.data();
+        auto        available = storage_.size();
+        const auto &write     = *limits.raw_write;
+        const auto  size      = write.padded_blob_bytes(limits.encode.frame_bytes);
+        auto       *aligned   = static_cast<uint8_t *>(std::align(write.buffer_alignment, size, data, available));
+        assert(aligned != nullptr);
+        raw_blob_ = {aligned, size};
+        frame_    = raw_blob_.subspan(kDurableBlobHeader, limits.encode.frame_bytes);
+    }
+    resources_.begin(storage_.capacity());
+}
+
 CapturedFrameStream::State::State(std::shared_ptr<const PublishedTreeState> captured,
                                   std::shared_ptr<PageLoader> transport, std::shared_ptr<detail::FlushRuntime> cpu,
                                   std::shared_ptr<detail::FlushRuntime::Lane> queue, CapturedFrameLimits bounds,
@@ -21,8 +46,7 @@ CapturedFrameStream::State::State(std::shared_ptr<const PublishedTreeState> capt
       limits(std::move(bounds)),
       reserve_overflow(std::move(reserve)),
       stack(detail::ReservationAllocator<Path>(limits.encode.metadata)),
-      buffer(limits.plan_only ? nullptr
-                              : detail::reserved_shared<CapturedFrameBuffer>(limits.encode.metadata, limits.encode))
+      buffer(limits.plan_only ? nullptr : detail::reserved_shared<CapturedFrameBuffer>(limits.encode.metadata, limits))
 {
     stack.reserve(limits.max_depth);
     overflow_end = view ? view->next_page_id : 0;
@@ -109,7 +133,9 @@ std::optional<size_t> CapturedFrameStream::allocation_bound(const CapturedFrameL
         .add(shared_allocation_bound<PrimaryReuseOutput>())
         .add(limits.encode.max_metadata_bytes)
         .add(LogicalPageCursor::allocation_bound(limits.encode.max_sources))
-        .add(limits.plan_only ? 0 : shared_allocation_bound<CapturedFrameBuffer>() + limits.encode.frame_bytes)
+        .add(limits.plan_only
+                 ? 0
+                 : shared_allocation_bound<CapturedFrameBuffer>() + CapturedFrameBuffer::storage_bytes(limits))
         .value();
 }
 
@@ -174,10 +200,6 @@ void CapturedFrameStream::State::wake() noexcept
         if (status.ok()) {
             return;
         }
-        if (limits.cpu_progress) {
-            limits.cpu_progress->request(cpu_node, self);
-            return;
-        }
         queued_owner.reset();
         // No worker owns this state after rejected submission. Keep scheduled
         // set through the callback so a reentrant next cannot race cleanup.
@@ -225,7 +247,7 @@ void CapturedFrameStream::State::pump()
                 finish(Status::unavailable("previous frame is still pinned"));
                 return;
             }
-            buffer = detail::reserved_shared<CapturedFrameBuffer>(limits.encode.metadata, limits.encode);
+            buffer = detail::reserved_shared<CapturedFrameBuffer>(limits.encode.metadata, limits);
         }
     }
     if (stopped.load(std::memory_order_acquire)) {

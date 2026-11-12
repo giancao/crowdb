@@ -36,8 +36,9 @@ Status append_range(const PageState &source, const PageKeyRange &range, const Pa
         if (output->bases.size() >= limits.max_base_views) {
             return Status::resource_exhausted("logical base view budget exhausted");
         }
-        auto view  = base;
-        view.range = intersection(base.range, range);
+        auto view    = base;
+        view.range   = intersection(base.range, range);
+        view.clipped = base.clipped || view.range.lower != base.range.lower || view.range.upper != base.range.upper;
         output->bases.push_back(std::move(view));
     }
     for (const auto &run : source.overlays) {

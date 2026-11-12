@@ -27,7 +27,7 @@ use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::Replica;
 use crate::common::config::{PaxosConfig, PaxosKvConfig};
 use crate::metrics::{Counter, Gauge, LatencySummary};
-use crate::paxos::roles::{Acceptor, PxBallot, PxLogEntry, RequestIdentity, SlotIndex};
+use crate::paxos::roles::{Acceptor, ProposalPayload, PxBallot, PxLogEntry, RequestIdentity, SlotIndex};
 use crate::paxos::{PxGroupId, PxNodeId};
 
 pub(crate) use crate::cluster::group_accept::AcceptAttempt;
@@ -103,7 +103,10 @@ pub(crate) struct PendingReadBarrier {
 /// concurrent round (the "multiple pipelines" path).
 #[derive(Default)]
 pub(crate) struct PendingBatch {
-    pub(crate) op_bodies: Vec<u8>,
+    pub(crate) first_payload: Bytes,
+    pub(crate) payloads: Vec<Bytes>,
+    pub(crate) encoded_bytes: usize,
+    pub(crate) rdma_payload_target: Option<usize>,
     pub(crate) op_count: u16,
     pub(crate) identities: Vec<RequestIdentity>,
     pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
@@ -301,10 +304,6 @@ pub struct PxGroup {
     /// coalescing. When a batch fills to this size, it flushes as a
     /// concurrent round.
     pub(crate) coalesce_max_keys: std::sync::atomic::AtomicU16,
-    /// Last coalescer activity timestamp (micros since `UNIX_EPOCH`).
-    /// Updated on every enqueue and round completion. The watchdog
-    /// checks this to detect stuck batches.
-    pub(crate) coalesce_last_activity_us: std::sync::atomic::AtomicU64,
     /// Single long-running watchdog task handle. Started lazily on first
     /// enqueue through a lock-free `OnceLock` fast path and taken/joined by
     /// group shutdown through the cold-path async mutex.
@@ -448,7 +447,6 @@ impl PxGroup {
             coalescer: parking_lot::Mutex::new(None),
             coalesced_rounds_inflight: std::sync::atomic::AtomicU64::new(0),
             coalesce_max_keys: std::sync::atomic::AtomicU16::new(0),
-            coalesce_last_activity_us: std::sync::atomic::AtomicU64::new(0),
             coalesce_watchdog_handle: OnceLock::new(),
             snapshots: DashMap::new(),
             next_snapshot_handle: AtomicU64::new(1),
@@ -857,7 +855,7 @@ impl PxGroup {
         // Always run Phase 1 (classic) so an already-accepted value is
         // adopted rather than overwritten.
         let entry = match self
-            .run_prepare_phase(replica, gap_slot, bytes::Bytes::new(), quorum, 0)
+            .run_prepare_phase(replica, gap_slot, bytes::Bytes::new().into(), quorum, 0)
             .await
         {
             PrepareAttempt::Proceed { entry, .. } => entry,
@@ -891,7 +889,7 @@ impl PxGroup {
         }
     }
 
-    pub(crate) fn base_entry(&self, slot: u64, payload: bytes::Bytes) -> PxLogEntry {
+    pub(crate) fn base_entry(&self, slot: u64, payload: ProposalPayload) -> PxLogEntry {
         PxLogEntry {
             slot,
             ballot: PxBallot::new(0, self.local_replica.id),
@@ -964,7 +962,7 @@ impl PxGroup {
             term: entry.term,
             ballot_round: entry.ballot.round,
             leader_id: entry.ballot.leader_id,
-            payload: entry.payload.clone().into(),
+            payload: entry.payload.to_bytes().into(),
         })
     }
 

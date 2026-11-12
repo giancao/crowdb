@@ -71,6 +71,20 @@ table FBKvRevisionPrecondition {
 // All four return FBKvResponse (matching kv.proto's unified
 // KvResponse). The response msg_type is EKvResponse (1101) for all.
 
+table FBKvWriteRequest {
+    id:uint64;
+    rpc_create_nano:uint64;
+    version:uint32;
+    seq:uint64;
+    client_id:uint64;
+    request_id:uint64;
+    request_create_ms:uint64;
+    group_id:uint64;
+    // Existing Paxos KV batch. EKvPutRequest requires exactly one Put.
+    payload:[ubyte] (required);
+}
+
+// Conditional PUT.
 table FBKvSetRequest {
     id:uint64;
     rpc_create_nano:uint64;

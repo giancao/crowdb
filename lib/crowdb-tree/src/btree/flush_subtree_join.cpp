@@ -26,7 +26,8 @@ void FlushBatch::State::Subtree::join()
             if (j != 0) {
                 lower = child.output.separators[j - 1];
             }
-            ordered.push_back({.task = &child, .pid = child.output.pids[j], .lower = lower, .touched = true});
+            ordered.push_back(
+                {.task = &child, .pid = child.output.pids[j], .lower = lower, .touched = true, .shrank = child.shrank});
         }
     }
     for (size_t i = 0; i + 1 < ordered.size();) {
@@ -35,7 +36,7 @@ void FlushBatch::State::Subtree::join()
         auto  left   = a.task->lookup(a.pid);
         auto  right  = b.task->lookup(b.pid);
         bool  merged = false;
-        if (a.touched || b.touched) {
+        if (a.shrank || b.shrank) {
             a.task->prepare_builder();
             b.task->prepare_builder();
             if (left->leaf && right->leaf && left->metrics.page_size_known && right->metrics.page_size_known &&
@@ -110,6 +111,7 @@ void FlushBatch::State::Subtree::join()
                 return;
             }
             a.touched = true;
+            a.shrank  = a.shrank || b.shrank;
             ordered.erase(ordered.begin() + static_cast<ptrdiff_t>(i + 1));
         }
         else {
@@ -119,7 +121,7 @@ void FlushBatch::State::Subtree::join()
     InnerPageState combined(builder->options.metadata);
     for (size_t i = 0; i < ordered.size(); ++i) {
         if (owner.options.persistent && ordered[i].touched) {
-            final_pages.push_back({.task = ordered[i].task, .pid = ordered[i].pid});
+            final_pages.push_back({.task = ordered[i].task, .pid = ordered[i].pid, .level = expected->level - 1});
         }
         combined.children.push_back(ordered[i].pid);
         if (i != 0) {
@@ -128,6 +130,7 @@ void FlushBatch::State::Subtree::join()
     }
     output.pids.clear();
     output.separators.clear();
+    const bool fewer_children = combined.children.size() < inner->children.size();
     if (combined.children == inner->children && combined.separators == inner->separators) {
         output.pids.push_back(pid);
     }
@@ -138,6 +141,7 @@ void FlushBatch::State::Subtree::join()
             return;
         }
     }
+    shrank = fewer_children && output.pids.size() == 1;
 #ifdef CROWDB_TREE_TEST_UTIL
     if (owner.options.after_page_for_tests) {
         owner.options.after_page_for_tests(pid, expected->level);

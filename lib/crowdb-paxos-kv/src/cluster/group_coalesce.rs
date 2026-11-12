@@ -5,8 +5,10 @@
 
 use std::sync::{Arc, Weak};
 
-use crate::cluster::group::{PendingBatch, ProposeResult, PxGroup};
-use crate::paxos::roles::RequestIdentity;
+use bytes::Bytes;
+
+use crate::cluster::group::{PendingBatch, ProposeResult, PxGroup, RemoteReplicaKind};
+use crate::paxos::roles::{ProposalPayload, RequestIdentity};
 use tracing::{info_span, Instrument};
 
 /// Coalescer watchdog interval in microseconds. The watchdog sleeps for
@@ -15,20 +17,44 @@ use tracing::{info_span, Instrument};
 /// traffic keeps arriving after the main workload stops.
 const WATCHDOG_US: u64 = 1_000_000;
 
-impl PxGroup {
-    /// Current time in microseconds since `UNIX_EPOCH`. Coarse — used only
-    /// for watchdog inactivity detection.
-    fn now_micros() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_micros() as u64)
+impl PendingBatch {
+    fn append_payload(&mut self, payload: Bytes) {
+        if payload.len() < 2 || payload.as_ref() == [0, 0] {
+            return;
+        }
+        if self.first_payload.is_empty() {
+            self.encoded_bytes = payload.len();
+            self.first_payload = payload;
+        } else {
+            self.encoded_bytes += payload.len() - 2;
+            self.payloads.push(payload);
+        }
     }
 
-    /// Record coalescer activity (enqueue or round completion). The
-    /// watchdog uses this to detect stuck batches.
-    fn coalesce_touch_activity(&self) {
-        self.coalesce_last_activity_us
-            .store(Self::now_micros(), std::sync::atomic::Ordering::Relaxed);
+    fn take_payload(&mut self) -> ProposalPayload {
+        let first = std::mem::take(&mut self.first_payload);
+        let first = if first.is_empty() {
+            Bytes::from_static(&[0, 0])
+        } else {
+            first
+        };
+        ProposalPayload::coalesced(first, std::mem::take(&mut self.payloads), self.op_count)
+    }
+}
+
+impl PxGroup {
+    fn rdma_accept_payload_target(&self) -> Option<usize> {
+        self.remote_replicas
+            .iter()
+            .filter_map(|replica| {
+                let RemoteReplicaKind::Real(remote) = replica else {
+                    return None;
+                };
+                remote
+                    .rpc_transport()?
+                    .rdma_accept_payload_target(remote.endpoint_str().as_str())
+            })
+            .min()
     }
 
     /// Start the single long-running watchdog task if not already running.
@@ -59,13 +85,12 @@ impl PxGroup {
                         // the swap.
                         let batch = group.coalesce_take_pending();
                         let Some(batch) = batch else { continue };
-                        if batch.op_count > 0 {
-                            tracing::error!(
+                        if !batch.waiters.is_empty() {
+                            tracing::debug!(
                                 g = group.group_id,
                                 op_count = batch.op_count,
-                                "coalescer: watchdog flushing stuck batch — ops delayed >1s"
+                                "coalescer watchdog flushing pending batch"
                             );
-                            group.coalesce_touch_activity();
                             group.coalesce_spawn_round(batch);
                         }
                         // Empty batch — just drop it (go idle).
@@ -80,17 +105,14 @@ impl PxGroup {
     /// already swapped in a fresh `PendingBatch` to the coalescer (so
     /// new ops accumulate for the next round). This function only
     /// builds the payload and spawns the round task.
-    fn coalesce_spawn_round(&self, batch: PendingBatch) {
+    fn coalesce_spawn_round(&self, mut batch: PendingBatch) {
         if self.tenure_cancel.is_cancelled() || self.inflight.closed() {
             for waiter in batch.waiters {
                 let _ = waiter.send(ProposeResult::Err("coalescer shutting down".to_string()));
             }
             return;
         }
-        let mut payload = Vec::with_capacity(2 + batch.op_bodies.len());
-        payload.extend_from_slice(&batch.op_count.to_le_bytes());
-        payload.extend_from_slice(&batch.op_bodies);
-        let payload = bytes::Bytes::from(payload);
+        let payload = batch.take_payload();
         let identities = batch.identities;
         let waiters = batch.waiters;
         let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
@@ -126,12 +148,10 @@ impl PxGroup {
     /// - Batch exists: append to the pending batch. If the batch fills to
     ///   `max_keys`, flush it as a concurrent round.
     ///
-    /// A single activity-based watchdog task runs in the background — it
-    /// only fires if there's no coalescer activity for `WATCHDOG_US`.
-    #[allow(clippy::type_complexity)]
+    /// A watchdog periodically drains a pending batch.
     pub(crate) async fn coalesce_enqueue(
         &self,
-        payload: Vec<u8>,
+        mut payload: Bytes,
         identity: Option<RequestIdentity>,
     ) -> ProposeResult {
         if self.tenure_cancel.is_cancelled() {
@@ -141,101 +161,66 @@ impl PxGroup {
         let request_op_count = payload
             .get(..2)
             .map_or(0, |count| u16::from_le_bytes([count[0], count[1]]));
-        let op_body: &[u8] = payload.get(2..).unwrap_or(&[]);
         let max_keys = self.coalesce_max_keys.load(std::sync::atomic::Ordering::Relaxed);
-        self.coalesce_touch_activity();
         self.coalesce_start_watchdog();
 
-        // The locked section returns:
-        //   Some((payload, identities, waiters)) → start a round now
-        //   None → joined a batch, just await the oneshot
-        let start_round: Option<(
-            Vec<u8>,
-            Vec<RequestIdentity>,
-            Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
-        )> = {
+        let (preceding_round, start_round) = {
             let mut guard = self.coalescer.lock();
             match &mut *guard {
-                None => {
-                    // Idle: start a 1-op round immediately.
-                    let batch = PendingBatch::default();
-                    *guard = Some(batch);
-                    let mut round_payload = Vec::with_capacity(2 + op_body.len());
-                    round_payload.extend_from_slice(&request_op_count.to_le_bytes());
-                    round_payload.extend_from_slice(op_body);
-                    let round_identities: Vec<RequestIdentity> = identity.into_iter().collect();
-                    Some((round_payload, round_identities, vec![tx]))
-                }
                 Some(batch)
-                    if u32::from(batch.op_count) + u32::from(request_op_count) > u32::from(max_keys) =>
+                    if u32::from(batch.op_count) + u32::from(request_op_count) <= u32::from(max_keys) =>
                 {
-                    // Keep each caller's batch intact. This request can run
-                    // independently; its completion will drain the pending batch.
-                    Some((payload, identity.into_iter().collect(), vec![tx]))
-                }
-                Some(batch) => {
-                    batch.op_bodies.extend_from_slice(op_body);
+                    let target = if batch.waiters.is_empty() {
+                        self.rdma_accept_payload_target()
+                    } else {
+                        batch.rdma_payload_target
+                    };
+                    let preceding = target
+                        .filter(|_| batch.encoded_bytes != 0 && payload.len() > 2)
+                        .filter(|target| batch.encoded_bytes.saturating_add(payload.len() - 2) > *target)
+                        .map(|_| std::mem::take(batch));
+                    batch.rdma_payload_target = target;
+                    batch.append_payload(payload);
                     batch.op_count = batch.op_count.saturating_add(request_op_count);
                     if let Some(identity) = identity {
                         batch.identities.push(identity);
                     }
                     batch.waiters.push(tx);
-                    if batch.op_count >= max_keys {
+                    let ready = batch.op_count >= max_keys
+                        || target.is_some_and(|target| batch.encoded_bytes >= target);
+                    let next = if ready {
                         // Batch full: flush as a concurrent round.
-                        let taken = std::mem::take(batch);
-                        *guard = Some(PendingBatch::default());
-                        let mut p = Vec::with_capacity(2 + taken.op_bodies.len());
-                        p.extend_from_slice(&taken.op_count.to_le_bytes());
-                        p.extend_from_slice(&taken.op_bodies);
-                        Some((p, taken.identities, taken.waiters))
+                        Some(std::mem::take(batch))
                     } else {
                         None
+                    };
+                    (preceding, next)
+                }
+                pending => {
+                    // Start immediately when idle, or run this request separately
+                    // if appending it would exceed the existing batch's limit.
+                    if pending.is_none() {
+                        *pending = Some(PendingBatch::default());
+                        if payload.len() < 2 {
+                            payload = Bytes::from_static(&[0, 0]);
+                        }
                     }
+                    (
+                        None,
+                        Some(PendingBatch {
+                            first_payload: payload,
+                            identities: identity.into_iter().collect(),
+                            waiters: vec![tx],
+                            ..PendingBatch::default()
+                        }),
+                    )
                 }
             }
         };
 
-        // If None, we joined a batch — just await the result.
-        let Some((payload, round_identities, round_waiters)) = start_round else {
-            return match rx.await {
-                Ok(result) => result,
-                Err(_) => ProposeResult::Err("coalescer round dropped".to_string()),
-            };
-        };
-
-        // Start the round. Spawn so the caller is not pinned to the paxos
-        // round and can return via the oneshot.
-        if self.tenure_cancel.is_cancelled() {
-            for waiter in round_waiters {
-                let _ = waiter.send(ProposeResult::Err("coalescer shutting down".to_string()));
-            }
-            return rx
-                .await
-                .unwrap_or_else(|_| ProposeResult::Err("coalescer round dropped".to_string()));
+        for batch in [preceding_round, start_round].into_iter().flatten() {
+            self.coalesce_spawn_round(batch);
         }
-        let payload = bytes::Bytes::from(payload);
-        let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
-            return ProposeResult::Err("group dropped".to_string());
-        };
-        group
-            .coalesced_rounds_inflight
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        tokio::spawn(
-            async move {
-                #[cfg(feature = "test-util")]
-                group.coalesce_await_round_gate().await;
-                let result = group.propose_inner(payload, &round_identities).await;
-                for waiter in round_waiters {
-                    let _ = waiter.send(result.clone());
-                }
-                group
-                    .coalesced_rounds_inflight
-                    .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                group.coalesce_drain_after_round();
-            }
-            .instrument(tracing::Span::current()),
-        );
-
         match rx.await {
             Ok(result) => result,
             Err(_) => ProposeResult::Err("coalescer round dropped".to_string()),
@@ -259,7 +244,6 @@ impl PxGroup {
     /// `coalesce_enqueue` can see `None` and start a 1-op round that
     /// would fragment the batch.
     fn coalesce_drain_after_round(&self) {
-        self.coalesce_touch_activity();
         if self.tenure_cancel.is_cancelled() {
             if let Some(batch) = self.coalesce_take_pending() {
                 for waiter in batch.waiters {
@@ -279,7 +263,7 @@ impl PxGroup {
         }
         let batch = self.coalesce_take_pending();
         let Some(batch) = batch else { return };
-        if batch.op_count == 0 {
+        if batch.waiters.is_empty() {
             #[cfg(feature = "test-util")]
             self.coalesce_pause_empty_drain_for_tests();
             // The queue became idle atomically while taking this empty batch.
@@ -295,7 +279,7 @@ impl PxGroup {
     fn coalesce_take_pending(&self) -> Option<PendingBatch> {
         let mut guard = self.coalescer.lock();
         let batch = guard.take()?;
-        if batch.op_count > 0
+        if !batch.waiters.is_empty()
             || self
                 .coalesced_rounds_inflight
                 .load(std::sync::atomic::Ordering::Acquire)

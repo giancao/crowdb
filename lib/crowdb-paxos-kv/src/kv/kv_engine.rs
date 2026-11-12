@@ -4,8 +4,11 @@
 use super::kv_future::KVFuture;
 use super::{Batch, EngineCheckpointReport, EngineFlushReport};
 
+use crate::paxos::roles::ProposalPayload;
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 /// Stable tag for an engine's snapshot byte format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +103,7 @@ pub trait KVEngine: Send + Sync {
     /// Reserve the complete apply bound before a payload can enter consensus.
     /// `None` keeps the compatibility path for engines without admission.
     /// The engine's permit owns this exact payload until commit or cancellation.
-    fn admit_proposal(&self, _payload: Bytes) -> KVFuture<super::ApplyAdmissionResult> {
+    fn admit_proposal(&self, _payload: ProposalPayload) -> KVFuture<super::ApplyAdmissionResult> {
         KVFuture::ready(Ok(None))
     }
 
@@ -119,13 +122,24 @@ pub trait KVEngine: Send + Sync {
     /// no-op (engines without a contiguous-slot watermark don't need it).
     fn noop(&self, _slot: u64) {}
 
-    /// Returns `true` if the engine has frozen memtables waiting to be
-    /// flushed (i.e. `flush()` would do real work). The maintenance loop
-    /// polls this after each pass to decide whether to run another flush
-    /// immediately or sleep until the next tick. Default: `false` (engines
-    /// without a frozen-queue concept never need an immediate flush).
+    /// Whether an apply should wake the host to request an ordinary flush.
+    /// Engines that drive their own batches can leave this false and use
+    /// periodic host maintenance for the remaining active input.
     fn flush_pending(&self) -> bool {
         false
+    }
+
+    /// Native count including automatically published ordinary flushes.
+    fn flushes_since_persistent(&self) -> Option<u64> {
+        None
+    }
+
+    /// Connect the native flush threshold to the maintenance wake, if supported.
+    ///
+    /// # Errors
+    /// Returns an error when the native Tree rejects the registration.
+    fn bind_flush_threshold(&self, _threshold: u64, _notify: Arc<Notify>) -> Result<(), String> {
+        Ok(())
     }
 
     /// Live value and its resolved slot, or `None` if unset or tombstoned.

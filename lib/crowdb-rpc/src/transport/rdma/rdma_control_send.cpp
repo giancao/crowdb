@@ -15,6 +15,31 @@
 
 namespace crowdb::rpc
 {
+namespace
+{
+// Admission checks that the prefix and views cover the entire control range.
+void copy_control_fragment(uint8_t *destination, const OutFrame &frame, uint32_t offset, uint32_t length)
+{
+    if (!frame.views_are_control) {
+        std::memcpy(destination, frame.control->payload_data() + offset, length);
+        return;
+    }
+    const auto views = frame.data_views();
+    for (uint8_t index = 0; index <= views && length != 0; ++index) {
+        const auto *view = index == 0 ? frame.control : frame.data_view(index - 1);
+        if (offset >= view->len) {
+            offset -= view->len;
+            continue;
+        }
+        const auto copied = std::min(length, view->len - offset);
+        std::memcpy(destination, view->payload_data() + offset, copied);
+        destination += copied;
+        length -= copied;
+        offset = 0;
+    }
+}
+} // namespace
+
 RdmaTransport::ControlSendState::~ControlSendState()
 {
     release_rdma_frames(frame);
@@ -23,12 +48,29 @@ RdmaTransport::ControlSendState::~ControlSendState()
 Buffer *RdmaTransport::admit_control_frame(const OutFrame &frame, const ConnectionPools &pools)
 {
     const auto *control = frame.control;
+    const auto  total   = frame.control_size();
     if (control == nullptr || control->data == nullptr || control->view_offset > control->capacity ||
-        control->len > control->capacity - control->view_offset || frame.data_views() != 0 ||
+        control->len > control->capacity - control->view_offset || frame.header.data_size != 0 ||
         frame.header.magic != MAGIC || frame.header.msg_offset != HEADER_SIZE || frame.request_id == 0 ||
         (frame.header.flags & ~FLAG_ONE_WAY) != 0 || frame.header.msg_type == RDMA_HANDSHAKE_MSG_TYPE ||
         frame.header.msg_type == RPC_CONTROL_FRAGMENT_MSG_TYPE ||
-        control->len > std::min(config_.max_control_message_bytes, pools.peer_max_control_message_bytes)) {
+        total > std::min(config_.max_control_message_bytes, pools.peer_max_control_message_bytes)) {
+        return nullptr;
+    }
+    const auto views = frame.data_views();
+    if (views > MAX_DATA_VIEWS || frame.views_are_control != (views != 0)) {
+        return nullptr;
+    }
+    uint64_t actual = control->len;
+    for (uint8_t index = 0; index < views; ++index) {
+        const auto *view = frame.data_view(index);
+        if (view == nullptr || view->data == nullptr || view->view_offset > view->capacity ||
+            view->len > view->capacity - view->view_offset) {
+            return nullptr;
+        }
+        actual += view->len;
+    }
+    if (actual != total) {
         return nullptr;
     }
     uint64_t id = 0, created = 0, response = 0;
@@ -36,7 +78,7 @@ Buffer *RdmaTransport::admit_control_frame(const OutFrame &frame, const Connecti
     if (id != frame.request_id) {
         return nullptr;
     }
-    auto admission = control_send_budget_->try_reserve(control->len);
+    auto admission = control_send_budget_->try_reserve(total);
     if (admission == nullptr) {
         return nullptr;
     }
@@ -64,11 +106,11 @@ bool RdmaTransport::flush_control_fragment(Connection *connection, ConnectionPoo
         state->frame = std::exchange(pools.pending_frame, nullptr);
         auto &f      = state->fragment;
         f.request_id = state->frame->request_id;
-        extract_control_fields(state->frame->control->data, state->frame->control->len, f.request_id, f.rpc_create_nano,
-                               f.response_create_nano);
+        extract_control_fields(state->frame->control->payload_data(), state->frame->control->len, f.request_id,
+                               f.rpc_create_nano, f.response_create_nano);
         f.stream_id        = pools.next_control_stream_id++;
         f.generation       = local_capability_.generation;
-        f.total            = state->frame->control->len;
+        f.total            = state->frame->control_size();
         f.capacity         = pools.effective_data_capacity;
         f.message_type     = state->frame->header.msg_type;
         f.message_flags    = state->frame->header.flags;
@@ -82,25 +124,31 @@ bool RdmaTransport::flush_control_fragment(Connection *connection, ConnectionPoo
         !queue.can_prepare(RDMA_CONTROL_CAPACITY + length)) {
         return false;
     }
-    auto                                       release = [](Buffer *buffer) { buffer->release(); };
-    std::unique_ptr<Buffer, decltype(release)> prefix(pools.send->alloc(RDMA_CONTROL_CAPACITY), release);
+    const bool                                 combined    = pools.recv_control == nullptr;
+    const auto                                 data_offset = combined ? RDMA_CONTROL_CAPACITY : 0;
+    auto                                       release     = [](Buffer *buffer) { buffer->release(); };
+    std::unique_ptr<Buffer, decltype(release)> prefix(combined ? nullptr : pools.send->alloc(RDMA_CONTROL_CAPACITY),
+                                                      release);
     // Keep every staging descriptor in the configured data class. Smaller
     // cached allocations cannot grow and would strand a later larger stream
     // after the fixed SQ descriptor window has been carved.
-    std::unique_ptr<Buffer, decltype(release)> data(send_pool_->alloc(config_.data_slot_capacity()), release);
-    if (prefix == nullptr || data == nullptr) {
+    const auto slot_capacity = combined ? config_.wire_slot_capacity : config_.data_slot_capacity();
+    std::unique_ptr<Buffer, decltype(release)> data(send_pool_->alloc(slot_capacity), release);
+    if (data == nullptr || (!combined && prefix == nullptr)) {
         return false;
     }
     f.stream_flags = static_cast<uint8_t>((f.offset == 0 ? CONTROL_STREAM_START : 0) |
                                           (f.offset + length == f.total ? CONTROL_STREAM_END : 0));
-    if (!write_control_fragment(std::span(prefix->data, RDMA_CONTROL_CAPACITY), f, length)) {
+    auto *control  = combined ? data.get() : prefix.get();
+    if (!write_control_fragment(std::span(control->data, RDMA_CONTROL_CAPACITY), f, length)) {
         connection->close();
         return false;
     }
-    prefix->len = RDMA_CONTROL_CAPACITY;
-    std::memcpy(data->data, state->frame->control->data + f.offset, length);
+    if (prefix != nullptr)
+        prefix->len = RDMA_CONTROL_CAPACITY;
+    copy_control_fragment(data->data + data_offset, *state->frame, static_cast<uint32_t>(f.offset), length);
     queue.charge_preparation(RDMA_CONTROL_CAPACITY + length);
-    data->len = length;
+    data->len = data_offset + length;
     data->set_metadata(f.request_id, f.stream_id, f.sequence, f.offset, data->registration_id);
     auto *data_slot    = data.release();
     auto *control_slot = prefix.release();

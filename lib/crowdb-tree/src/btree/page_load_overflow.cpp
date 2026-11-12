@@ -107,8 +107,9 @@ struct OverflowLoad : PageLoadProgress, std::enable_shared_from_this<OverflowLoa
 
     void decode_frame()
     {
-        LoadBytes  frame{LoadBytes::allocator_type(metadata)};
-        auto       status      = decode_backing_frame({blob.data(), blob.size()}, *backing, limits, metadata, &frame);
+        LoadBytes                scratch{LoadBytes::allocator_type(metadata)};
+        std::span<const uint8_t> frame;
+        auto       status      = decode_backing_frame({blob.data(), blob.size()}, *backing, limits, scratch, &frame);
         const auto frame_bytes = static_cast<uint32_t>(frame.size());
         if (!status.ok()) {
             finish(std::move(status));

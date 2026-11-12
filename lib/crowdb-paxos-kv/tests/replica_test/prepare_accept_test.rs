@@ -17,7 +17,7 @@ fn write_entry(slot: u64, ballot: PxBallot, term: u64, payload: &[u8]) -> PxLogE
         slot,
         ballot,
         term,
-        payload: Bytes::from(crate::test_util::encode_put_payload(b"key", payload)),
+        payload: Bytes::from(crate::test_util::encode_put_payload(b"key", payload)).into(),
     }
 }
 

@@ -47,8 +47,7 @@ bool RdmaTransport::submit(Connection *connection, OutFrame *frame)
             : std::min({config_.wire_slot_capacity, pools->peer_receive_slot_capacity, config_.aggregation_max_bytes});
     if (!posting || !connection->is_open())
         return reject();
-    const bool stream =
-        direct && frame->control != nullptr && frame->control->len > RDMA_CONTROL_CAPACITY - HEADER_SIZE;
+    const bool stream           = direct && frame->control_size() > RDMA_CONTROL_CAPACITY - HEADER_SIZE;
     Buffer *original_control = frame->control;
     if (stream) {
         auto *charged = admit_control_frame(*frame, *pools);

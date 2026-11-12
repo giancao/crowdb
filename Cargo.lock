@@ -1339,6 +1339,7 @@ dependencies = [
  "crowdb-rpc-ffi",
  "crowdb-test-harness",
  "crowdb-tree-ffi",
+ "futures",
  "serde",
  "tokio",
 ]

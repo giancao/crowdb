@@ -399,7 +399,7 @@ async fn wal_fsync_and_write_bw_counts_match() {
             term: 1,
             slot: i as SlotIndex,
             ballot: PxBallot::new(1, 1),
-            payload: bytes::Bytes::from(format!("v{i}")),
+            payload: bytes::Bytes::from(format!("v{i}")).into(),
         };
         wal.append(&rec).await.unwrap();
     }

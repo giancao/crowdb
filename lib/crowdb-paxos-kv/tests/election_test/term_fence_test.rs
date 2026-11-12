@@ -17,7 +17,7 @@ fn write_entry(slot: u64, term: u64, payload: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 0),
         term,
-        payload: Bytes::copy_from_slice(payload),
+        payload: Bytes::copy_from_slice(payload).into(),
     }
 }
 

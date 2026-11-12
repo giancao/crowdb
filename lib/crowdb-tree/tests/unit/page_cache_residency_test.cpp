@@ -58,7 +58,7 @@ TEST(PageCacheResidency, CloseDetachesRuntimeWhileOldPinsAndPreparedUpdatesRemai
     gate.release.count_down();
     fixture->runtime.drain();
     EXPECT_TRUE(closed.load(std::memory_order_acquire));
-    EXPECT_EQ(fixture->lane->queue_permits(), 0U);
+    EXPECT_EQ(fixture->lane->queued(), 0U);
     EXPECT_EQ(resources->snapshot().proxy_pages, 0U);
     fixture.reset();
     PageCacheResidency::publish(std::move(late_update));

@@ -32,7 +32,7 @@ fn write_entry(group: u64, slot: u64) -> WALRecord {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::from(format!("aligned-val-{slot}")),
+        payload: Bytes::from(format!("aligned-val-{slot}")).into(),
     };
     WALRecord::from_accepted(group, &entry)
 }
@@ -211,8 +211,8 @@ async fn large_binary_batch_splits_across_iov_max_and_replays() {
     };
     let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
 
-    // 300 binary records -> 1200 IoSlices -> 2 writev calls (MAX_IOV = 1024).
-    let records: Vec<WALRecord> = (1..=300).map(|slot| write_entry(1, slot)).collect();
+    // 342 binary records -> 1026 IoSlices -> 2 writev calls (MAX_IOV = 1024).
+    let records: Vec<WALRecord> = (1..=342).map(|slot| write_entry(1, slot)).collect();
     let mut tasks = Vec::new();
     for rec in &records {
         let wal = wal.clone();
@@ -234,7 +234,7 @@ async fn large_binary_batch_splits_across_iov_max_and_replays() {
         1,
         "single fdatasync for the drained batch"
     );
-    assert_eq!(wal.index().lock().slot_count(), 300);
+    assert_eq!(wal.index().lock().slot_count(), records.len());
 
     wal.seal_all().await.unwrap();
     let replay = replay_group(&backend, &[PathBuf::from("/wal-vec-chunk")], 1)
@@ -296,7 +296,7 @@ async fn append_multiple_records_different_slots() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from(format!("val-{slot}")),
+            payload: Bytes::from(format!("val-{slot}")).into(),
         };
         let record = WALRecord::from_accepted(1, &entry);
         let loc = wal.append(&record).await.unwrap();
@@ -428,6 +428,40 @@ async fn segment_rotation_on_size() {
         "expected at least one sealed segment"
     );
     assert_eq!(idx.slot_count(), 10);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn memblock_rotates_before_the_batch_and_replays_oversized_records() {
+    let backend = sim_backend();
+    let disks = vec![PathBuf::from("/wal-rollover")];
+    let mut config = test_config(disks.clone());
+    config.wal_record_format = WalRecordFormat::Binary;
+    let records = [write_entry(1, 1), write_entry(1, 2), write_entry(1, 3)];
+    let record_len = records[0].encode_frame().total_len() as u64;
+    config.wal_segment_size = SEG_HEADER_LEN as u64 + 2 * record_len;
+    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
+
+    let first = wal.append(&records[0]).await.unwrap();
+    let (second, third) = tokio::join!(wal.append(&records[1]), wal.append(&records[2]));
+    let second = second.unwrap();
+    let third = third.unwrap();
+    assert!(second.segment_id > first.segment_id);
+    assert_eq!(second.segment_id, third.segment_id);
+    assert_eq!(second.file_offset, SEG_HEADER_LEN as u64);
+    assert_eq!(third.file_offset, second.file_offset + record_len);
+
+    let mut oversized = write_entry(1, 4);
+    oversized.payload = Bytes::from(vec![0x5a; 4096]).into();
+    let large = wal.append(&oversized).await.unwrap();
+    let last = wal.append(&write_entry(1, 5)).await.unwrap();
+    assert!(large.segment_id > third.segment_id);
+    assert!(last.segment_id > large.segment_id);
+    assert_eq!(large.file_offset, SEG_HEADER_LEN as u64);
+    wal.seal_all().await.unwrap();
+
+    let recovered = replay_group(&backend, &disks, 1).await.unwrap();
+    assert_eq!(recovered.records.len(), 5);
+    assert_eq!(recovered.records[3], oversized);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

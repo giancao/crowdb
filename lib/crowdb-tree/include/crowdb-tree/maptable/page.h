@@ -30,13 +30,27 @@ namespace crowdb::tree
 // separately.
 struct FrameStore
 {
+    using Bytes = OverwriteByteVector<AllocationKind::kFrame>;
 
-    std::vector<uint8_t, BudgetAllocator<uint8_t, AllocationBudget, AllocationKind::kFrame>> owned;
-    uint8_t                                                                                 *ptr        = nullptr;
-    uint32_t                                                                                 page_bytes = 0;
+    Bytes    owned;
+    uint8_t *ptr        = nullptr;
+    uint32_t page_bytes = 0;
 
-    explicit FrameStore(std::shared_ptr<AllocationBudget> budget = {})
-        : owned(BudgetAllocator<uint8_t, AllocationBudget, AllocationKind::kFrame>(std::move(budget)))
+    explicit FrameStore(std::shared_ptr<AllocationBudget> budget = {}) : owned(Bytes::allocator_type(std::move(budget)))
+    {
+    }
+
+    explicit FrameStore(Bytes frame)
+        : owned(std::move(frame)),
+          ptr(owned.data()),
+          page_bytes(static_cast<uint32_t>(owned.size()))
+    {
+    }
+
+    FrameStore(Bytes frame, size_t offset, uint32_t bytes)
+        : owned(std::move(frame)),
+          ptr(owned.data() + offset),
+          page_bytes(bytes)
     {
     }
 
@@ -75,6 +89,18 @@ class LeafBase : public PageBase
     {
     }
 
+    explicit LeafBase(FrameStore::Bytes frame) : PageBase(page_type::kLeafBase), fs_(std::move(frame))
+    {
+    }
+
+  protected:
+    LeafBase(FrameStore::Bytes frame, size_t offset, uint32_t bytes)
+        : PageBase(page_type::kLeafBase),
+          fs_(std::move(frame), offset, bytes)
+    {
+    }
+
+  public:
     // build from already key-sorted, deduplicated entries. Entries are only READ
     // (their bytes are copied into the frame — that copy is page construction),
     // so take them by const ref: this both avoids requiring a move at every call
@@ -122,14 +148,6 @@ class LeafBase : public PageBase
         auto p = std::make_unique<LeafBase>();
         p->fs_.adopt_copy(buf, page_bytes);
         return p.release();
-    }
-
-    static std::shared_ptr<const LeafBase> from_frame_copy_shared(const uint8_t *buf, uint32_t page_bytes,
-                                                                  const std::shared_ptr<AllocationBudget> &budget)
-    {
-        auto page = std::allocate_shared<LeafBase>(MetadataAllocator<LeafBase>(budget), budget);
-        page->fs_.adopt_copy(buf, page_bytes);
-        return page;
     }
 
     [[nodiscard]] LeafFrameView view() const

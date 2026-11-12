@@ -25,7 +25,16 @@ bool valid_rdma_wire_capacity(uint32_t wire_capacity, RdmaWireLayout layout)
     BufferCapacityClass cls;
     uint32_t            capacity      = 0;
     const auto          data_capacity = rdma_data_slot_capacity(wire_capacity, layout);
-    return classify_rdma_capacity(data_capacity, &cls, &capacity) && capacity == data_capacity;
+    return (classify_rdma_capacity(data_capacity, &cls, &capacity) && capacity == data_capacity) ||
+           rdma_combined_control_data(wire_capacity, layout);
+}
+
+bool rdma_combined_control_data(uint32_t wire_capacity, RdmaWireLayout layout)
+{
+    BufferCapacityClass cls;
+    uint32_t            capacity = 0;
+    return layout == RdmaWireLayout::ControlData && wire_capacity > RDMA_CONTROL_CAPACITY &&
+           classify_rdma_capacity(wire_capacity, &cls, &capacity) && capacity == wire_capacity;
 }
 
 std::array<uint8_t, RDMA_HANDSHAKE_SIZE> serialize_rdma_handshake(const RdmaEndpointCapability &capability)

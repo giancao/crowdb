@@ -66,7 +66,8 @@ TEST(FacadeCheckpointDiagnostics, FailedAndStagedWritesPreserveLastDurableObserv
     const auto first = test.tree->last_snapshot_pages_written();
     ASSERT_GT(first, 0U);
     ASSERT_TRUE(test.tree->put("a", "two").ok());
-    test.store.fail_at = test.store.events.size() + 1;
+    test.store.fail_at    = test.store.events.size() + 1;
+    test.store.fail_count = 2;
     EXPECT_FALSE(test.tree->flush_with_persistent().ok());
     EXPECT_EQ(test.tree->last_snapshot_pages_written(), first);
     test.store.fail_at = 0;

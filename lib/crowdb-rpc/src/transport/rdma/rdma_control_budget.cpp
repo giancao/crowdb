@@ -10,18 +10,37 @@ namespace crowdb::rpc
 {
 struct ControlStreamBudgetState
 {
-    uint64_t              limit;
-    std::function<void()> wake;
-    std::atomic<uint64_t> used{0};
-    std::atomic<uint64_t> peak{0};
-    std::atomic<uint64_t> stalls{0};
+    uint64_t                                  limit;
+    std::function<void()>                     wake;
+    std::shared_ptr<ControlStreamBudgetState> totals;
+    std::atomic<uint64_t>                     used{0};
+    std::atomic<uint64_t>                     peak{0};
+    std::atomic<uint64_t>                     stalls{0};
+
+    void update_peak(uint64_t current)
+    {
+        uint64_t previous = peak.load(std::memory_order_relaxed);
+        while (previous < current && !peak.compare_exchange_weak(previous, current, std::memory_order_relaxed)) {
+        }
+    }
+
+    void release(uint64_t bytes)
+    {
+        used.fetch_sub(bytes, std::memory_order_acq_rel);
+        if (totals)
+            totals->used.fetch_sub(bytes, std::memory_order_relaxed);
+        if (wake)
+            wake();
+    }
 };
 
-ControlStreamBudget::ControlStreamBudget(uint64_t limit, std::function<void()> wake)
+ControlStreamBudget::ControlStreamBudget(uint64_t limit, std::function<void()> wake, const ControlStreamBudget *totals)
     : state_(std::make_shared<ControlStreamBudgetState>())
 {
     state_->limit = limit;
     state_->wake  = std::move(wake);
+    if (totals != nullptr)
+        state_->totals = totals->state_;
 }
 
 ControlStreamLease::ControlStreamLease(std::shared_ptr<ControlStreamBudgetState> state, uint64_t bytes)
@@ -32,9 +51,7 @@ ControlStreamLease::ControlStreamLease(std::shared_ptr<ControlStreamBudgetState>
 
 ControlStreamLease::~ControlStreamLease()
 {
-    state_->used.fetch_sub(bytes_, std::memory_order_acq_rel);
-    if (state_->wake)
-        state_->wake();
+    state_->release(bytes_);
 }
 
 std::shared_ptr<ControlStreamLease> ControlStreamBudget::try_reserve(uint64_t bytes)
@@ -43,11 +60,15 @@ std::shared_ptr<ControlStreamLease> ControlStreamBudget::try_reserve(uint64_t by
     do {
         if (bytes == 0 || bytes > state_->limit || used > state_->limit - bytes) {
             state_->stalls.fetch_add(1, std::memory_order_relaxed);
+            if (state_->totals)
+                state_->totals->stalls.fetch_add(1, std::memory_order_relaxed);
             return {};
         }
     } while (!state_->used.compare_exchange_weak(used, used + bytes, std::memory_order_acq_rel));
-    uint64_t peak = state_->peak.load(std::memory_order_relaxed);
-    while (peak < used + bytes && !state_->peak.compare_exchange_weak(peak, used + bytes, std::memory_order_relaxed)) {
+    state_->update_peak(used + bytes);
+    if (state_->totals) {
+        auto &totals = *state_->totals;
+        totals.update_peak(totals.used.fetch_add(bytes, std::memory_order_relaxed) + bytes);
     }
     // Build the lease before publishing its shared_ptr. If its control-block
     // allocation fails, shared_ptr deletes the lease and returns admission.
@@ -56,9 +77,7 @@ std::shared_ptr<ControlStreamLease> ControlStreamBudget::try_reserve(uint64_t by
         lease = new ControlStreamLease(state_, bytes);
     }
     catch (const std::bad_alloc &) {
-        state_->used.fetch_sub(bytes, std::memory_order_acq_rel);
-        if (state_->wake)
-            state_->wake();
+        state_->release(bytes);
         return {};
     }
     try {

@@ -29,11 +29,12 @@ class TreeApplyOperation
   private:
     friend class TreeCore;
     static constexpr size_t kReplayCallerControlBytes = 4096;
-    static Status           bind_replay(
-        std::shared_ptr<TreeCore> core, uint64_t slot, size_t count, CoreWriteReader read,
-        detail::InlineFunction<std::shared_ptr<const void>(const std::shared_ptr<detail::AllocationReservation> &)>
-               retain,
-        size_t retained_metadata_bytes, std::shared_ptr<TreeApplyOperation> *out);
+    static Status bind_replay(std::shared_ptr<TreeCore> core, uint64_t slot, size_t count, CoreWriteReader read,
+                              detail::InlineFunction<std::shared_ptr<const void>(
+                                  const std::shared_ptr<detail::AllocationReservation> &, ApplyInputOwner **)>
+                                     retain,
+                              size_t retained_metadata_bytes, std::shared_ptr<TreeApplyOperation> *out,
+                              const ExternalValue *external);
     static std::optional<size_t> allocation_bound(size_t retained_metadata_bytes) noexcept;
     static Status bind_prepaid(std::shared_ptr<TreeCore> core, std::shared_ptr<AdmittedBatch> batch,
                                detail::ResourceBudget::Credit credit, std::shared_ptr<TreeApplyOperation> *out);

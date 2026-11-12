@@ -97,6 +97,47 @@ PublicationCoordinator::~PublicationCoordinator()
     auto *root = root_.load();
     root->state->retirement.mark();
     Root::dispose(root);
+    if (flush_threshold_drop_ != nullptr) {
+        flush_threshold_drop_(flush_threshold_context_);
+    }
+}
+
+bool PublicationCoordinator::bind_flush_threshold(uint64_t threshold, void (*wake)(void *),
+                                                  void (*drop_context)(void *), void *context) noexcept
+{
+    if (threshold == 0 || wake == nullptr || drop_context == nullptr) {
+        return false;
+    }
+    const bool already_bound = flush_threshold_bound_.test_and_set(std::memory_order_relaxed);
+    if (already_bound) {
+        if (flush_threshold_.load(std::memory_order_acquire) == 0 || wake != flush_threshold_wake_ ||
+            drop_context != flush_threshold_drop_ || context != flush_threshold_context_) {
+            return false;
+        }
+    }
+    else {
+        flush_threshold_wake_    = wake;
+        flush_threshold_drop_    = drop_context;
+        flush_threshold_context_ = context;
+    }
+    // Pair with the count increment so a concurrent crossing is observed
+    // by either this registration or the flush completion.
+    flush_threshold_.store(threshold, std::memory_order_seq_cst);
+    if (flushes_since_persistent_.load(std::memory_order_seq_cst) >= threshold) {
+        wake(context);
+    }
+    if (already_bound) {
+        drop_context(context);
+    }
+    return true;
+}
+
+void PublicationCoordinator::note_ordinary_flush() noexcept
+{
+    const auto count = flushes_since_persistent_.fetch_add(1, std::memory_order_seq_cst) + 1;
+    if (count != 0 && flush_threshold_.load(std::memory_order_seq_cst) == count) {
+        flush_threshold_wake_(flush_threshold_context_);
+    }
 }
 
 std::shared_ptr<const PublishedTreeState> PublicationCoordinator::capture() const

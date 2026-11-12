@@ -36,6 +36,7 @@ TEST(CapturedWrite, FinalPageStreamWritesAndReadsWithoutASnapshotMapping)
     Completion done;
     test.run(&done);
     ASSERT_EQ(done.values.load(), 1U) << done.status.to_string();
+    EXPECT_EQ(test.runtime->snapshot().submitted, 5U);
     const auto &result = test.operation->result();
     ASSERT_TRUE(result.pages);
     ASSERT_EQ(result.pages->frames.size(), 1U);

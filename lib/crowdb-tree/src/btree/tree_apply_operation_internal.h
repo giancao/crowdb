@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 #pragma once
 #include "admitted_batch.h"
-#include "apply_dispatcher.h"
 #include "apply_progress.h"
 #include "apply_waiters.h"
 #include "flush_operation.h"
@@ -77,6 +76,7 @@ struct TreeApplyOperation::State : std::enable_shared_from_this<State>
         std::shared_ptr<const void> caller_owner;
         SourceWriteOptions          options;
         AdmittedBatch::Plan         bound;
+        ApplyInputOwner            *external_owner = nullptr;
     };
 
     State(std::weak_ptr<TreeCore> core, uint64_t generation, std::shared_ptr<AdmittedBatch> batch,
@@ -96,45 +96,45 @@ struct TreeApplyOperation::State : std::enable_shared_from_this<State>
     void        bind_replay_batch(detail::ResourceBudget::Credit grant);
     void        connect_flush(std::shared_ptr<FlushOperation> operation);
     void        wake(Status status) noexcept;
+    void        schedule() noexcept;
     void        finish(Status status) noexcept;
 
-    std::shared_ptr<ApplyWaiters>                  waiters;
-    bool                                           owns_replay_waiters = false;
-    const ReplayControls                          *replay_controls     = nullptr;
-    ReplayControls::Lease                          replay_control;
-    std::optional<ReplayInput>                     replay_input;
-    uint64_t                                       replay_slot    = 0;
-    uint64_t                                       replay_flushed = UINT64_MAX;
-    std::weak_ptr<TreeCore>                        weak_core;
-    const uint64_t                                 generation;
-    std::shared_ptr<AdmittedBatch>                 batch;
-    std::shared_ptr<detail::AllocationReservation> metadata;
-    std::shared_ptr<TreeOperationLifetime::Ticket> apply_ticket;
-    std::shared_ptr<TreeOperationLifetime::Ticket> backend_ticket;
-    std::shared_ptr<SourceRotation>                source_rotation;
-    std::shared_ptr<ApplyProgress>                 progress;
-    std::shared_ptr<ApplyDispatcher>               dispatcher;
-    std::shared_ptr<TreeWorkMetrics>               work;
-    SourceAdmission                               *sources  = nullptr;
-    ApplyFrontier                                 *frontier = nullptr;
-    FlushController                               *flush    = nullptr;
-    FlushPreparationOptions                        preparation{};
-    ApplyDispatcher::Node                          node;
-    std::atomic<Phase>                             phase{Phase::kPrepared};
-    std::shared_ptr<State>                         self;
-    uint64_t                                       slot     = 0;
-    uint64_t                                       observed = 0;
-    Wait                                           waiting  = Wait::kNone;
-    Status                                         resumed;
-    bool                                           flush_rejected = false;
-    detail::CallbackComplete                       complete       = nullptr;
-    void                                          *context        = nullptr;
-    FlushReservePlan                               plan{};
-    detail::FlushCredits                           credits;
-    size_t                                         next_credit = 0;
-    std::optional<TreeMetricsOperation>            admission_metrics;
-    std::optional<ProgressAttempt>                 progress_attempt;
-    std::optional<CreditAttempt>                   credit_attempt;
-    std::optional<FlushAttempt>                    flush_attempt;
+    std::shared_ptr<ApplyWaiters>                   waiters;
+    bool                                            owns_replay_waiters = false;
+    const ReplayControls                           *replay_controls     = nullptr;
+    ReplayControls::Lease                           replay_control;
+    std::optional<ReplayInput>                      replay_input;
+    uint64_t                                        replay_slot    = 0;
+    uint64_t                                        replay_flushed = UINT64_MAX;
+    std::weak_ptr<TreeCore>                         weak_core;
+    const uint64_t                                  generation;
+    std::shared_ptr<AdmittedBatch>                  batch;
+    std::shared_ptr<detail::AllocationReservation>  metadata;
+    std::shared_ptr<TreeOperationLifetime::Ticket>  apply_ticket;
+    std::shared_ptr<TreeOperationLifetime::Ticket>  backend_ticket;
+    std::shared_ptr<SourceRotation>                 source_rotation;
+    std::shared_ptr<ApplyProgress>                  progress;
+    std::shared_ptr<detail::FlushRuntime::Progress> ready;
+    std::shared_ptr<TreeWorkMetrics>                work;
+    SourceAdmission                                *sources  = nullptr;
+    ApplyFrontier                                  *frontier = nullptr;
+    FlushController                                *flush    = nullptr;
+    FlushPreparationOptions                         preparation{};
+    std::atomic<Phase>                              phase{Phase::kPrepared};
+    std::shared_ptr<State>                          self;
+    uint64_t                                        slot     = 0;
+    uint64_t                                        observed = 0;
+    Wait                                            waiting  = Wait::kNone;
+    Status                                          resumed;
+    bool                                            flush_rejected = false;
+    detail::CallbackComplete                        complete       = nullptr;
+    void                                           *context        = nullptr;
+    FlushReservePlan                                plan{};
+    detail::FlushCredits                            credits;
+    size_t                                          next_credit = 0;
+    std::optional<TreeMetricsOperation>             admission_metrics;
+    std::optional<ProgressAttempt>                  progress_attempt;
+    std::optional<CreditAttempt>                    credit_attempt;
+    std::optional<FlushAttempt>                     flush_attempt;
 };
 } // namespace crowdb::tree

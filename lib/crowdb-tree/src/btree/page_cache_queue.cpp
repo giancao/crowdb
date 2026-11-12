@@ -6,26 +6,45 @@
 
 namespace crowdb::tree
 {
-SharedPageCache::State::Request *SharedPageCache::State::claim(bool accept) noexcept
+SharedPageCache::State::Request *SharedPageCache::State::claim(const std::shared_ptr<AllocationBudget> &metadata,
+                                                               bool                                     accept) noexcept
 {
+    Request *claimed = nullptr;
     if (!closed.load(std::memory_order_acquire)) {
-        const auto first = next_request.fetch_add(1, std::memory_order_relaxed) % requests.size();
-        for (size_t offset = 0; offset < requests.size(); ++offset) {
+        const auto first  = next_request.fetch_add(1, std::memory_order_relaxed) % requests.size();
+        const auto probes = accept ? size_t{1} : requests.size();
+        for (size_t offset = 0; offset < probes; ++offset) {
             auto &request = requests[(first + offset) % requests.size()];
             bool  free    = false;
             if (request.occupied.compare_exchange_strong(free, true, std::memory_order_acquire)) {
-                if (accept) {
-                    request.owner = weak_from_this().lock();
-                    assert(request.owner);
-                    waiters.fetch_add(1, std::memory_order_relaxed);
-                    ordinary_waiters.fetch_add(1, std::memory_order_relaxed);
-                }
-                return &request;
+                claimed = &request;
+                break;
+            }
+        }
+        if (claimed == nullptr && accept) {
+            try {
+                auto request             = detail::reserved_shared<Request>(metadata);
+                claimed                  = request.get();
+                claimed->command.context = claimed;
+                claimed->allocation      = std::move(request);
+            }
+            catch (const std::bad_alloc &) {
+                // The caller can still use its upstream without cache state.
+                rejected.fetch_add(1, std::memory_order_relaxed);
+                return nullptr;
             }
         }
     }
-    rejected.fetch_add(1, std::memory_order_relaxed);
-    return nullptr;
+    if (claimed == nullptr) {
+        rejected.fetch_add(1, std::memory_order_relaxed);
+    }
+    else if (accept) {
+        claimed->owner = weak_from_this().lock();
+        assert(claimed->owner);
+        waiters.fetch_add(1, std::memory_order_relaxed);
+        ordinary_waiters.fetch_add(1, std::memory_order_relaxed);
+    }
+    return claimed;
 }
 
 void SharedPageCache::State::submit(Request *request) noexcept

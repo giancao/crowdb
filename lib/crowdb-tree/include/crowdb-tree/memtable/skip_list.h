@@ -14,75 +14,73 @@
 #include "crowdb-tree/slice.h"
 
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace crowdb::tree
 {
 
-// A versioned cell value held by a skip-list node. Allocated separately so
-// it can be atomically swapped (overwrite) and epoch-retired independently
-// of the node. The buffer is the same contiguous-or-split form as
-// cell_entry::cell (R30): kOwned = full [header][value]; kExternal =
-// value-only borrowed from a Rust Bytes (drop_fn fires on destruction).
-struct CellVersion
+// One node in a key's descending slot order. Its value can outlive the list.
+// Owned buffers include the cell header. External buffers contain only value bytes.
+struct CellVersion : EpochManager::Deferred
 {
-    static std::shared_ptr<CellVersion> create(buffer bytes, uint64_t version, uint8_t kind,
-                                               std::shared_ptr<AllocationCounter> counter, AllocationLease credit,
-                                               const std::shared_ptr<AllocationBudget> &budget);
-    AllocationLease                     payload_credit;
-    buffer                              cell;
-    uint64_t                            slot;
-    uint8_t                             flags;
-    AllocationCharge                    allocation;
+    static constexpr uintptr_t kRemoved = 1;
+    static constexpr uintptr_t kEnd     = 2;
 
-    CellVersion(buffer bytes, uint64_t version, uint8_t kind, std::shared_ptr<AllocationCounter> counter = nullptr,
+    std::atomic<uintptr_t> next_bits{0};
+    uint64_t               slot;
+    uint8_t                flags;
+    AllocationLease        credit;
+    buffer                 cell;
+    AllocationCharge       allocation;
+
+    CellVersion(buffer &&bytes, uint64_t version, uint8_t kind, std::shared_ptr<AllocationCounter> counter = nullptr,
                 AllocationLease credit = {})
-        : payload_credit(std::move(credit)),
-          cell(std::move(bytes)),
-          slot(version),
-          flags(kind)
+        : slot(version),
+          flags(kind),
+          credit(std::move(credit)),
+          cell(std::move(bytes))
     {
         if (counter != nullptr) {
             allocation.set(std::move(counter), sizeof(CellVersion) + cell.size());
         }
     }
-};
-
-// Immutable descriptor. The common case has no history allocation. History
-// is ordered newest first; payload ownership is shared across descriptors.
-struct VersionSet : EpochManager::Deferred, detail::RetirementNode
-{
-    AllocationLease                          descriptor_credit;
-    std::shared_ptr<detail::RetirementQueue> retirement;
-    std::shared_ptr<const CellVersion>       current;
-    std::vector<std::shared_ptr<const CellVersion>, MetadataAllocator<std::shared_ptr<const CellVersion>>> history;
-    uint64_t                                                                                               bound = 0;
-    size_t                                                                                                 bytes = 0;
-    AllocationCharge                                                                                       allocation;
-
-    explicit VersionSet(AllocationLease credit = {}, std::shared_ptr<AllocationBudget> budget = {});
 
     struct Deleter
     {
-        void operator()(VersionSet *versions) const noexcept;
+        void operator()(CellVersion *version) const noexcept;
     };
 
-    using Owner = std::unique_ptr<VersionSet, Deleter>;
-    static Owner                                            create(const std::shared_ptr<AllocationBudget> &budget);
-    [[nodiscard]] const CellVersion                        *at(uint64_t frontier) const;
-    [[nodiscard]] const std::shared_ptr<const CellVersion> *owner_at(uint64_t frontier) const;
+    using Owner = std::unique_ptr<CellVersion, Deleter>;
+    static Owner create(buffer &&cell, uint64_t slot, uint8_t flags, AllocationLease payload,
+                        const std::shared_ptr<AllocationBudget>  &budget,
+                        const std::shared_ptr<AllocationCounter> &counter, size_t key_bytes, void **key_storage);
+    static Owner reference(std::shared_ptr<const CellVersion> cell, const std::shared_ptr<AllocationBudget> &budget,
+                           const std::shared_ptr<AllocationCounter> &counter);
+    [[nodiscard]] static size_t allocation_bound() noexcept;
+
+    [[nodiscard]] static CellVersion *pointer(uintptr_t bits) noexcept
+    {
+        return std::bit_cast<CellVersion *>(bits & ~(kRemoved | kEnd));
+    }
+
+    [[nodiscard]] CellVersion *next() const noexcept
+    {
+        return pointer(next_bits.load(std::memory_order_acquire));
+    }
+
+    [[nodiscard]] const CellVersion *version_at(uint64_t frontier) const;
+
+    // Keeps the published node alive until epoch retirement. A split tail
+    // instead holds the original value owner and has its own list link.
+    std::shared_ptr<const CellVersion> value_owner;
 };
 
 struct MutationStats
 {
-    uint64_t                     copy_count    = 0;
-    uint64_t                     copy_ns       = 0;
-    uint64_t                     copy_max_ns   = 0;
-    bool                         measure_copy  = false;
     uint64_t                     cas_retries   = 0;
     uint64_t                     overwrite     = 0;
     uint64_t                     keep          = 0;
@@ -98,7 +96,9 @@ struct Node : EpochManager::Deferred
 {
     AllocationLease           allocation_credit;
     AllocationCharge          allocation;
-    std::atomic<VersionSet *> versions_{nullptr};
+    std::weak_ptr<const void> shared_allocation;
+    std::atomic<uintptr_t>    versions_{0};
+    std::atomic<uint64_t>     pruning_bound_{0};
     uint32_t                  height_{1};  // tower height
     uint32_t                  key_len_{0}; // inline key length
 
@@ -146,9 +146,7 @@ class ConcurrentSkipList
   public:
     static constexpr uint32_t kMaxHeight = 12;
 
-    // Preparation is thread-bound and owns every allocation needed by commit.
-    // The source admission authority bounds all versions that may race this
-    // write, including writers that have not reached their CAS yet.
+    // Preparation is thread-bound and owns the objects needed by commit.
     class PreparedWrite
     {
       public:
@@ -160,12 +158,12 @@ class ConcurrentSkipList
 
         [[nodiscard]] Slice key() const noexcept
         {
-            return candidate_->key_slice();
+            return existing_ != nullptr ? existing_->key_slice() : candidate_->key_slice();
         }
 
         [[nodiscard]] const std::shared_ptr<const CellVersion> &cell_owner() const noexcept
         {
-            return cell_;
+            return version_->value_owner;
         }
 
       private:
@@ -177,21 +175,18 @@ class ConcurrentSkipList
         };
 
         EpochManager::Guard                guard_;
-        std::shared_ptr<const CellVersion> cell_;
-        bool                               initialize_slot_ = true;
-        VersionSet::Owner                  initial_;
-        VersionSet::Owner                  replacement_;
+        CellVersion::Owner                 version_;
         std::unique_ptr<Node, NodeDeleter> candidate_;
-        uint64_t                           bound_ = 0;
+        Node                              *existing_        = nullptr;
+        uint64_t                           bound_           = 0;
+        bool                               initialize_slot_ = false;
     };
 
-    [[nodiscard]] PreparedWrite prepare_write(Slice key, std::shared_ptr<CellVersion> cell, uint64_t bound,
-                                              size_t max_versions, const std::shared_ptr<AllocationBudget> &budget);
-    // Consumes preparation once. Concurrent version changes are rebuilt using
-    // its fixed capacity; this path does not allocate or return an error.
+    [[nodiscard]] PreparedWrite prepare_write(Slice key, buffer &&cell, uint8_t flags, AllocationLease payload,
+                                              uint64_t bound, const std::shared_ptr<AllocationBudget> &budget);
     [[nodiscard]] PreparedWrite prepare_reference(Slice key, std::shared_ptr<const CellVersion> cell, uint64_t bound,
-                                                  size_t max_versions, const std::shared_ptr<AllocationBudget> &budget);
-    bool                        commit_write(PreparedWrite write, uint64_t slot) noexcept;
+                                                  const std::shared_ptr<AllocationBudget> &budget);
+    bool commit_write(PreparedWrite write, uint64_t slot, MutationStats *stats = nullptr) noexcept;
 
     // Ordered cursor with one coherent version candidate per position. The
     // caller retains source ownership and epoch protection for its lifetime.
@@ -222,14 +217,14 @@ class ConcurrentSkipList
 
         [[nodiscard]] const CellVersion *cell_version() const
         {
-            return candidate_;
+            return candidate_ != nullptr ? candidate_->value_owner.get() : nullptr;
         }
 
         // Copy while the source and this thread's epoch guard are alive. The
         // result owns only this version, independently of the node/history.
         [[nodiscard]] std::shared_ptr<const CellVersion> cell_owner() const
         {
-            return candidate_owner_ != nullptr ? *candidate_owner_ : nullptr;
+            return candidate_ != nullptr ? candidate_->value_owner : nullptr;
         }
 
         // Select this exact key at a captured frontier without advancing to
@@ -239,9 +234,9 @@ class ConcurrentSkipList
             if (cur_ == nullptr) {
                 return {};
             }
-            const auto *versions = cur_->versions_.load(std::memory_order_acquire);
-            const auto *owner    = versions->owner_at(frontier);
-            return owner != nullptr ? *owner : nullptr;
+            const auto *versions = CellVersion::pointer(cur_->versions_.load(std::memory_order_acquire));
+            const auto *version  = versions->version_at(frontier);
+            return version != nullptr ? version->value_owner : nullptr;
         }
 
         void set_floor(uint64_t floor)
@@ -267,13 +262,12 @@ class ConcurrentSkipList
         }
 
       private:
-        void                                      select();
-        const Node                               *cur_       = nullptr;
-        const CellVersion                        *candidate_ = nullptr;
-        uint64_t                                  frontier_  = UINT64_MAX;
-        uint64_t                                  floor_     = 0;
-        std::optional<Slice>                      upper_;
-        const std::shared_ptr<const CellVersion> *candidate_owner_ = nullptr;
+        void                 select();
+        const Node          *cur_       = nullptr;
+        const CellVersion   *candidate_ = nullptr;
+        uint64_t             frontier_  = UINT64_MAX;
+        uint64_t             floor_     = 0;
+        std::optional<Slice> upper_;
     };
 
     explicit ConcurrentSkipList(EpochManager *epoch = nullptr, std::shared_ptr<AllocationBudget> budget = {});
@@ -384,17 +378,24 @@ class ConcurrentSkipList
     friend class MemTable;
     bool                                retire_step() noexcept;
     std::shared_ptr<SourceMemoryLedger> source_ledger_;
-    void                                account_versions(const VersionSet *previous, const VersionSet &next) noexcept;
-    void                                account_node(const Node &node, const VersionSet &versions) noexcept;
+    void account_version(const CellVersion &version, const CellVersion *history, bool removed = false) noexcept;
+    void account_node(const Node &node, const CellVersion &version) noexcept;
     friend class Cursor;
 
-    [[nodiscard]] static Node *alloc_node(uint32_t height, Slice key, const std::shared_ptr<AllocationBudget> &budget);
+    [[nodiscard]] static Node  *alloc_node(uint32_t height, Slice key, const std::shared_ptr<AllocationBudget> &budget);
+    [[nodiscard]] static Node  *construct_node(void *storage, uint32_t height, Slice key) noexcept;
+    static void                 destroy_node(Node *node) noexcept;
+    [[nodiscard]] PreparedWrite prepare_key(Slice key, uint64_t bound, const std::shared_ptr<AllocationBudget> &budget);
+    [[nodiscard]] PreparedWrite prepare_cell(Slice key, buffer &&cell, uint64_t slot, uint8_t flags,
+                                             AllocationLease payload, uint64_t bound,
+                                             const std::shared_ptr<AllocationBudget> &budget);
 
     static uint32_t random_height();
-    Node           *find_or_insert(Slice key, VersionSet *versions, bool *inserted);
     void            link_upper(Node *node);
-    bool            replace(Node *node, std::shared_ptr<const CellVersion> cv, uint64_t bound, MutationStats *stats,
-                            const std::shared_ptr<AllocationBudget> &budget);
+    bool insert_version(Node &node, CellVersion::Owner &version, uint64_t bound, MutationStats *stats) noexcept;
+    void prune_versions(Node &node, uint64_t bound, MutationStats *stats) noexcept;
+    bool unlink_version(std::atomic<uintptr_t> &link, CellVersion &version, uintptr_t next,
+                        MutationStats *stats) noexcept;
 
     Node *find_ge(Slice key, Node **prev, Node **successors = nullptr) const;
 
@@ -403,6 +404,7 @@ class ConcurrentSkipList
     TestHook test_hook_    = nullptr;
 #endif
     Node                             *head_;
+    CellVersion                      *retiring_version_ = nullptr;
     std::atomic<uint32_t>             max_height_{1};
     std::atomic<size_t>               count_{0};
     std::atomic<size_t>               bytes_{0};

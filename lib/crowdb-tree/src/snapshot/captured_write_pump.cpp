@@ -144,14 +144,14 @@ void CapturedWriteOperation::State::received_frame()
         descriptor = frame->reuse->primary->frame;
     }
     else if (descriptor.type == page_type::kOverflowFrame) {
-        OverflowFrameView overflow(frame->buffer->bytes.data(), descriptor.frame_bytes);
+        OverflowFrameView overflow(frame->buffer->bytes().data(), descriptor.frame_bytes);
         descriptor.next_overflow  = overflow.next_page_id();
         descriptor.overflow_bytes = overflow.chunk_len();
         dependencies->ids         = frame->info.dependencies;
     }
     else if (descriptor.type == page_type::kLeafBase) {
         const auto status =
-            capture_stored_overflow(LeafFrameView(frame->buffer->bytes.data(), descriptor.frame_bytes),
+            capture_stored_overflow(LeafFrameView(frame->buffer->bytes().data(), descriptor.frame_bytes),
                                     limits.frames.encode.max_entries, budget.bytes, &descriptor.stored_overflow);
         if (!status.ok()) {
             finish(status);
@@ -163,15 +163,20 @@ void CapturedWriteOperation::State::received_frame()
     if (limits.frames.retain_overflow_buffers && descriptor.type == page_type::kOverflowFrame) {
         const auto &encoded = *result.frame;
         if (submit_overflow(descriptor, {.info                = encoded.info,
-                                         .frame               = encoded.buffer->bytes,
+                                         .frame               = encoded.buffer->bytes(),
                                          .owner               = encoded.buffer,
-                                         .reload_dependencies = dependencies})) {
+                                         .reload_dependencies = dependencies,
+                                         .raw_blob            = encoded.buffer->raw_blob()})) {
             finish_frame();
         }
         return;
     }
     if (overflow_writes) {
         join_overflow(Status::Ok());
+        return;
+    }
+    if (frame->reused_overflow.empty()) {
+        begin_write();
         return;
     }
     stage = Stage::Dependencies;

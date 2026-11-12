@@ -185,6 +185,85 @@ impl RpcClient {
         data: Option<Buffer>,
         msg_type: u16,
     ) -> Result<CallFuture, RpcError> {
+        self.call_with(|cb, context| {
+            self.send(server, conn, request_id, control, data, msg_type, cb, context)
+        })
+    }
+
+    /// Send two immutable buffers as one TCP or oversized RDMA ControlData control.
+    pub fn call_control_tail(
+        &self,
+        server: &RpcServer,
+        conn: &Connection,
+        request_id: u64,
+        prefix: Buffer,
+        tail: Buffer,
+        msg_type: u16,
+    ) -> Result<CallFuture, RpcError> {
+        self.call_with(|cb, context| {
+            let status = unsafe {
+                sys::crowdb_rpc_client_send_control_tail(
+                    self.handle,
+                    server.handle(),
+                    conn.handle(),
+                    request_id,
+                    prefix.into_raw(),
+                    tail.into_raw(),
+                    msg_type,
+                    cb,
+                    context,
+                )
+            };
+            if status == sys::CROWDB_RPC_OK {
+                Ok(())
+            } else {
+                Err(RpcError::from_status(status))
+            }
+        })
+    }
+
+    /// Send a prefix and immutable views as one TCP or oversized RDMA ControlData control.
+    /// Consumes the writable prefix. A queued frame retains its references
+    /// through all partial writes, and the immutable tails can be reused.
+    pub fn call_control_chain(
+        &self,
+        server: &RpcServer,
+        conn: &Connection,
+        request_id: u64,
+        prefix: Buffer,
+        tails: &BufferChain,
+        msg_type: u16,
+    ) -> Result<CallFuture, RpcError> {
+        let tail_count = u8::try_from(tails.view_count()).map_err(|_| RpcError::InvalidArg)?;
+        self.call_with(|cb, context| {
+            // Buffer is transparent over its C handle. The call borrows the
+            // handles synchronously and retains its own native references.
+            let status = unsafe {
+                sys::crowdb_rpc_client_send_control_chain(
+                    self.handle,
+                    server.handle(),
+                    conn.handle(),
+                    request_id,
+                    prefix.handle(),
+                    tails.raw_handles(),
+                    tail_count,
+                    msg_type,
+                    cb,
+                    context,
+                )
+            };
+            if status == sys::CROWDB_RPC_OK {
+                Ok(())
+            } else {
+                Err(RpcError::from_status(status))
+            }
+        })
+    }
+
+    fn call_with(
+        &self,
+        submit: impl FnOnce(sys::crowdb_rpc_on_complete, *mut std::ffi::c_void) -> Result<(), RpcError>,
+    ) -> Result<CallFuture, RpcError> {
         // Ensure the slab completion pool is sized (idempotent on the
         // C++ side — returns early if already sized). The slab provides
         // 7-13% throughput benefit over the map-only path for call(),
@@ -195,16 +274,7 @@ impl RpcClient {
         let (tx, rx) = oneshot::channel();
         let user_data = Box::into_raw(Box::new((tx, send_ts))) as *mut std::ffi::c_void;
 
-        if let Err(e) = self.send(
-            server,
-            conn,
-            request_id,
-            control,
-            data,
-            msg_type,
-            Some(on_complete_cb),
-            user_data,
-        ) {
+        if let Err(e) = submit(Some(on_complete_cb), user_data) {
             // Reclaim the oneshot sender to avoid a leak (callback was
             // NOT invoked — caller must handle the error).
             unsafe {

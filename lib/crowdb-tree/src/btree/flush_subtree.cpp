@@ -154,13 +154,7 @@ void FlushBatch::State::Subtree::start(detail::CallbackComplete callback, void *
 void FlushBatch::State::Subtree::schedule() noexcept
 {
     const auto result = owner.runtime.try_submit(owner.lane, &Subtree::run, this);
-    if (result.ok()) {
-        return;
-    }
-    if (owner.options.cpu_progress) {
-        owner.options.cpu_progress->request(cpu_node, owner.weak_from_this().lock());
-    }
-    else {
+    if (!result.ok()) {
         complete(result);
     }
 }
@@ -185,7 +179,9 @@ void FlushBatch::State::Subtree::run(void *raw) noexcept
 void FlushBatch::State::Subtree::complete(Status result) noexcept
 {
     auto lifetime = owner.weak_from_this().lock();
-    status        = std::move(result);
+    decode_bases.reset();
+    decode_index.reset();
+    status = std::move(result);
     if (layout_metrics) {
         (void)layout_metrics->finish(status.ok() ? TreeOutcome::Success : TreeOutcome::Error, tree_metrics_now_ns());
     }
@@ -237,6 +233,14 @@ void FlushBatch::State::Subtree::step()
 
 void FlushBatch::State::Subtree::fork()
 {
+    if (decode_index) {
+        auto decode = std::move(decode_index);
+        auto result = decode(&inner);
+        if (!result.ok()) {
+            complete(std::move(result));
+            return;
+        }
+    }
     if (!inner) {
         inner = expected->inner;
     }
@@ -245,8 +249,18 @@ void FlushBatch::State::Subtree::fork()
             complete(Status::unavailable("flush index requires an asynchronous loader"));
             return;
         }
-        request_load();
-        return;
+        auto result = load();
+        if (!result) {
+            return;
+        }
+        if (!result->ok()) {
+            complete(std::move(*result));
+            return;
+        }
+        if (!inner) {
+            complete(Status::corruption("flush loader returned no index"));
+            return;
+        }
     }
     if (inner->children.empty() || inner->children.size() != inner->separators.size() + 1) {
         complete(Status::corruption("invalid flush index shape"));
@@ -301,14 +315,17 @@ void FlushBatch::State::Subtree::reset_work()
     status         = Status::Ok();
     children_ready = false;
     joined         = false;
+    shrank         = false;
     persist_at     = 0;
+    page_writes.reset();
     final_pages.clear();
     child_join.reset();
     layout.reset();
     layout_metrics.reset();
     builder.reset();
+    decode_bases.reset();
+    decode_index.reset();
     loaded_leaf.reset();
-    next_base = 0;
     output.pids.clear();
     output.separators.clear();
     for (auto &child : children) {

@@ -23,18 +23,20 @@ struct TreeResourceLimits
 
 struct TreeRuntimeOptions
 {
+    // Queue depth targets are reported with usage. They do not reject ready jobs.
     size_t workers               = 4;
     size_t cpu_queue_limit       = 256;
     size_t max_waiters_per_class = 256;
     size_t backend_workers       = 2;
     size_t backend_queue_limit   = 256;
-    // Retained routing reserve for the CPU queue and host-owned descriptors.
+    // Retained routing reserve for pool bootstrap and host-owned descriptors.
     size_t             lifecycle_bytes = 4ULL * 1024 * 1024;
     TreeResourceLimits limits{};
 };
 
 struct TreeBindingOptions
 {
+    // Ready queues report these targets without applying them as admission limits.
     size_t cpu_queue_limit     = 64;
     size_t backend_queue_limit = 64;
     // Retained per-tree routing reserve for its lane and core metadata.

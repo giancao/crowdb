@@ -10,9 +10,11 @@ use super::{
     Batch, KVEngine, KVFuture, ScanDirection, SnapshotChunk, SnapshotExporter, SnapshotFormat,
     SnapshotImporter, SnapshotMetadata, SnapshotViewEntry,
 };
+use crate::paxos::roles::ProposalPayload;
 use bytes::Bytes;
 use crowdb_tree_ffi::{AsyncCrowdbtree, Crowdbtree, CtError, GetOutcome, OwnedGetOutcome, ScanOutcome};
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 mod admission;
 mod maintenance;
@@ -39,6 +41,7 @@ pub struct CrowdbTreeEngine {
     inner: AsyncCrowdbtree,
     has_backend: bool,
     maintenance_pending: Arc<std::sync::atomic::AtomicU64>,
+    memtable_flush_count: usize,
 }
 
 impl CrowdbTreeEngine {
@@ -103,6 +106,7 @@ impl CrowdbTreeEngine {
             inner: AsyncCrowdbtree::from_sync(tree),
             has_backend: opt.page_store.is_some() || opt.path.as_deref().is_some_and(|path| !path.is_empty()),
             maintenance_pending: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            memtable_flush_count: opt.tuning.memtable_flush_count as usize,
         }
     }
 
@@ -194,7 +198,7 @@ impl KVEngine for CrowdbTreeEngine {
         true
     }
 
-    fn admit_proposal(&self, payload: Bytes) -> KVFuture<super::ApplyAdmissionResult> {
+    fn admit_proposal(&self, payload: ProposalPayload) -> KVFuture<super::ApplyAdmissionResult> {
         KVFuture::ready(admission::prepare(&self.inner.handle(), &payload))
     }
 
@@ -330,17 +334,34 @@ impl KVEngine for CrowdbTreeEngine {
     }
 
     fn flush_pending(&self) -> bool {
+        // With native batching, SourceRotation owns the automatic ordinary
+        // flush. Host requests can collide with it and keep freezing the active
+        // table through the retry wake. The maintenance watchdog drains tails.
+        if self.memtable_flush_count != 0 {
+            return false;
+        }
         self.maintenance_pending
             .load(std::sync::atomic::Ordering::Acquire)
             & 1
             != 0
-            || self.inner.handle().frozen_table_count() > 0
+            || self.inner.handle().frozen_table_count() != 0
     }
 
     fn resume_from_slot(&self) -> u64 {
         // Recovery/WAL retention must use the committed checkpoint frontier.
         // Publication can advance in memory without any durable backend.
         self.inner.handle().durable_coverage()
+    }
+
+    fn flushes_since_persistent(&self) -> Option<u64> {
+        Some(self.inner.handle().flushes_since_persistent())
+    }
+
+    fn bind_flush_threshold(&self, threshold: u64, notify: Arc<Notify>) -> Result<(), String> {
+        self.inner
+            .handle()
+            .bind_flush_threshold(threshold, notify)
+            .map_err(|error| error.to_string())
     }
 
     fn persist_snapshot(&self) -> u64 {

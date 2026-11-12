@@ -47,7 +47,7 @@ struct TestProgressOwner : std::enable_shared_from_this<TestProgressOwner>
     }
 };
 
-TEST(FlushRuntime, ReservedProgressConsumesLaneAndGlobalCapacityAndSurvivesFullQueueClose)
+TEST(FlushRuntime, RegisteredOwnerAndReadyJobsShareTheWorkerQueueThroughClose)
 {
     FlushRuntime        runtime(1, 2);
     auto                progress_lane = std::make_shared<FlushRuntime::Lane>(1);
@@ -58,13 +58,13 @@ TEST(FlushRuntime, ReservedProgressConsumesLaneAndGlobalCapacityAndSurvivesFullQ
     ASSERT_TRUE(
         runtime.reserve_progress(progress_lane, &TestProgressOwner::run, owner.get(), {}, &owner->progress).ok());
     auto increment = [](void *context) noexcept { static_cast<std::atomic<size_t> *>(context)->fetch_add(1); };
-    EXPECT_EQ(runtime.try_submit(progress_lane, increment, &ordinary).code(), Code::kResourceExhausted);
     TestProgressGate gate;
     ASSERT_TRUE(runtime.try_submit(ordinary_lane, &TestProgressGate::wait, &gate).ok());
     gate.entered.wait();
     const auto queued = runtime.try_submit(ordinary_lane, increment, &ordinary);
     EXPECT_TRUE(queued.ok());
-    EXPECT_EQ(runtime.try_submit(ordinary_lane, increment, &ordinary).code(), Code::kResourceExhausted);
+    EXPECT_TRUE(runtime.try_submit(ordinary_lane, increment, &ordinary).ok());
+    EXPECT_TRUE(runtime.try_submit(progress_lane, increment, &ordinary).ok());
     runtime.close();
     for (size_t i = 0; i < 100; ++i) {
         owner->progress->request(owner);
@@ -72,13 +72,13 @@ TEST(FlushRuntime, ReservedProgressConsumesLaneAndGlobalCapacityAndSurvivesFullQ
     std::weak_ptr<TestProgressOwner> retained = owner;
     owner.reset();
     EXPECT_FALSE(retained.expired());
-    EXPECT_EQ(runtime.snapshot().queued, 2U);
+    EXPECT_EQ(runtime.snapshot().queued, 4U);
     gate.release.count_down();
     runtime.drain();
     EXPECT_TRUE(retained.expired());
     EXPECT_EQ(calls.load(), 1U);
-    EXPECT_EQ(ordinary.load(), 1U);
-    EXPECT_EQ(runtime.snapshot().completed, 3U);
+    EXPECT_EQ(ordinary.load(), 3U);
+    EXPECT_EQ(runtime.snapshot().completed, 5U);
 }
 
 TEST(FlushRuntime, ReservedProgressRerunsUseSealedStorageAndDrainReleasesLastContextOwner)
@@ -144,10 +144,10 @@ TEST(FlushRuntime, AsyncProgressCloseKeepsRerunsAndFiresAfterLastContextOwner)
     runtime.drain();
     EXPECT_TRUE(close.completed);
     EXPECT_EQ(calls.load(), 3U);
-    EXPECT_EQ(lane->queue_permits(), 0U);
+    EXPECT_EQ(lane->queued(), 0U);
 }
 
-TEST(FlushRuntime, FailedProgressRegistrationReturnsSlotAndQueueCredits)
+TEST(FlushRuntime, FailedProgressRegistrationLeavesRuntimeUsable)
 {
     test_read::LoadCredits                  credits;
     FlushRuntime                            runtime(1, 1);

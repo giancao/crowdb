@@ -6,6 +6,7 @@
 
 use crowdb_paxos_kv::wal::pipeline_backend::WalBlockAlignment;
 use crowdb_paxos_kv::wal::{IoBackend, MemBlockDevice, OpenOptions};
+use std::io::IoSlice;
 use std::path::Path;
 
 async fn open_segment(backend: &IoBackend, path: &str) -> crowdb_paxos_kv::wal::WalFile {
@@ -23,12 +24,14 @@ async fn unaligned_device_writes_payload_directly_without_amplification() {
 
     let mut file = open_segment(&backend, "/dev/mem/seg-0000001.ck").await;
     file.write_at(b"hello", 10).await.unwrap();
+    file.write_at(b"ABCD", 13).await.unwrap();
 
-    let mut buf = [0u8; 5];
-    file.read_exact_at(&mut buf, 10).await.unwrap();
-    assert_eq!(&buf, b"hello");
+    let mut buf = [0xA5; 17];
+    file.read_exact_at(&mut buf, 0).await.unwrap();
+    assert_eq!(&buf[..10], &[0; 10]);
+    assert_eq!(&buf[10..], b"helABCD");
 
-    assert_eq!(device.write_count(), 1);
+    assert_eq!(device.write_count(), 2);
     assert_eq!(device.rmw_count(), 0);
 }
 
@@ -103,6 +106,28 @@ async fn aligned_device_block_aligned_write_avoids_amplification() {
     file.write_at(&block, 4096).await.unwrap();
 
     assert_eq!(device.rmw_count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn aligned_vectored_write_aligns_the_combined_range() {
+    let device = MemBlockDevice::with_alignment(WalBlockAlignment::Aligned { io_unit_bytes: 8 });
+    let backend = IoBackend::MemBlock(device.clone());
+    let mut file = open_segment(&backend, "/dev/mem/seg-0000001.ck").await;
+
+    let slices = [IoSlice::new(b"abc"), IoSlice::new(b"defgh")];
+    assert_eq!(file.write_vectored_at(&slices, 8).await.unwrap(), 8);
+    assert_eq!(device.rmw_count(), 0);
+
+    let slices = [IoSlice::new(b"XY"), IoSlice::new(b""), IoSlice::new(b"Z123")];
+    assert_eq!(file.write_vectored_at(&slices, 13).await.unwrap(), 6);
+    assert_eq!(file.len().await.unwrap(), 24);
+    let mut data = [0xA5; 24];
+    file.read_exact_at(&mut data, 0).await.unwrap();
+    assert_eq!(&data[..8], &[0; 8]);
+    assert_eq!(&data[8..19], b"abcdeXYZ123");
+    assert_eq!(&data[19..], &[0; 5]);
+    assert_eq!(device.write_count(), 2);
+    assert_eq!(device.rmw_count(), 1);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

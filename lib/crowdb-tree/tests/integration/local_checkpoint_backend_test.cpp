@@ -15,9 +15,9 @@ TEST(LocalCheckpoint, RealBlockReopenUsesOnlyAnchorAndDurableMapping)
     ASSERT_TRUE(BlockPageStore::open_blocks(dir.path, 1, 3, 4096, 4096, &file).ok());
     crowdb::common::Topology topology;
     topology.pipelines.emplace_back().entries = 64;
-    crowdb::common::DiskIOUring uring(std::move(topology));
-    ASSERT_TRUE(uring.valid());
-    auto              store = std::make_shared<BlockAsyncPageStore>(file.get(), &uring);
+    auto uring                                = std::make_unique<crowdb::common::DiskIOUring>(std::move(topology));
+    ASSERT_TRUE(uring->valid());
+    auto              store = std::make_shared<BlockAsyncPageStore>(file.get(), uring.get());
     TestCheckpoint    test;
     uint64_t          next = 1;
     const std::string value(12000, 'r');
@@ -51,6 +51,9 @@ TEST(LocalCheckpoint, RealBlockReopenUsesOnlyAnchorAndDurableMapping)
     test.registry.reset();
     test.source.ledger.reset();
     store.reset();
+    // The fixture owns a standalone reactor. A sender completion can precede
+    // destruction of the final CQE callback owner on the reactor thread.
+    uring.reset();
     file.reset();
     test.source.credits.seal();
     EXPECT_EQ(test.source.credits.budget.snapshot().allocated[LoadCredits::kBytes], 0U);

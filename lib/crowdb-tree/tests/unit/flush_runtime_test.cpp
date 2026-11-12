@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
+#include "btree/allocation_account.h"
 #include "btree/allocation_reservation.h"
 #include "btree/flush_runtime.h"
 
@@ -45,7 +46,7 @@ struct JoinReceiver
     }
 };
 
-TEST(FlushRuntime, SingleWorkerCanSubmitNestedWorkWithOneQueueCredit)
+TEST(FlushRuntime, SingleWorkerCanSubmitNestedWork)
 {
     FlushRuntime runtime(1, 1);
     auto         lane = std::make_shared<FlushRuntime::Lane>(1);
@@ -74,7 +75,7 @@ TEST(FlushRuntime, SingleWorkerCanSubmitNestedWorkWithOneQueueCredit)
     EXPECT_EQ(stats.inflight, 0U);
 }
 
-TEST(FlushRuntime, SealedJobStorageSupportsRepeatedNestedDispatchWithoutNewCredit)
+TEST(FlushRuntime, SealedBootstrapSupportsRepeatedNestedDispatch)
 {
     ResourceBudget::Limits limits{};
     const auto             category = static_cast<size_t>(BudgetClass::kHandoff);
@@ -130,15 +131,29 @@ TEST(FlushRuntime, FailedStorageAdmissionReturnsAllClaimedCapacity)
         FAIL() << "runtime storage credit rejected";
     }
     auto reservation = std::make_shared<AllocationReservation>(std::move(credit.value()));
+    reservation->seal();
     EXPECT_THROW((void)FlushRuntime(1, 1024, reservation), std::bad_alloc);
-    EXPECT_EQ(reservation->available(), limits[category]);
+    EXPECT_EQ(reservation->available(), 0U);
     EXPECT_EQ(budget.snapshot().allocated[category], 0U);
+    FlushRuntime runtime(1, 1);
+    auto         lane = std::make_shared<FlushRuntime::Lane>(1, reservation);
+    EXPECT_EQ(runtime.try_submit(lane, +[](void *) noexcept {}, nullptr).code(), Code::kResourceExhausted);
+    EXPECT_EQ(lane->queued(), 0U);
+    lane->drain();
 }
 
-TEST(FlushRuntime, QueueAndLaneAreBoundedAndCloseDrainsAcceptedTasks)
+TEST(FlushRuntime, QueueTargetsDoNotRejectReadyTasksAndCloseDrainsAcceptedTasks)
 {
+    ResourceBudget::Limits limits{};
+    const auto             category = static_cast<size_t>(BudgetClass::kRouting);
+    limits[category]                = 64 * 1024;
+    ResourceBudget                     budget(limits, 4);
+    std::shared_ptr<AllocationAccount> allocations;
+    ASSERT_TRUE(
+        AllocationAccount::create_ongoing(budget.make_account(limits), BudgetClass::kRouting, &allocations).ok());
+    const auto   idle = budget.snapshot().allocated[category];
     FlushRuntime runtime(1, 2);
-    auto         lane_a = std::make_shared<FlushRuntime::Lane>(1);
+    auto         lane_a = std::make_shared<FlushRuntime::Lane>(1, allocations);
     auto         lane_b = std::make_shared<FlushRuntime::Lane>(1);
 
     struct Gate
@@ -155,17 +170,21 @@ TEST(FlushRuntime, QueueAndLaneAreBoundedAndCloseDrainsAcceptedTasks)
     auto noop = [](void *) noexcept {};
     ASSERT_TRUE(runtime.try_submit(lane_a, blocker, &gate).ok());
     gate.entered.wait();
-    EXPECT_TRUE(runtime.try_submit(lane_a, noop, nullptr).ok());
-    EXPECT_EQ(runtime.try_submit(lane_a, noop, nullptr).code(), Code::kResourceExhausted);
+    constexpr size_t queued_tasks = 1024;
+    for (size_t i = 0; i < queued_tasks; ++i) {
+        EXPECT_TRUE(runtime.try_submit(lane_a, noop, nullptr).ok());
+    }
     EXPECT_TRUE(runtime.try_submit(lane_b, noop, nullptr).ok());
-    EXPECT_EQ(runtime.try_submit(std::make_shared<FlushRuntime::Lane>(1), noop, nullptr).code(),
-              Code::kResourceExhausted);
+    EXPECT_EQ(runtime.snapshot().queued, queued_tasks + 1);
+    EXPECT_EQ(lane_a->queued(), queued_tasks);
+    EXPECT_GT(budget.snapshot().allocated[category], idle);
     runtime.close();
     EXPECT_EQ(runtime.try_submit(lane_b, noop, nullptr).code(), Code::kUnavailable);
     gate.release.count_down();
     runtime.drain();
-    EXPECT_EQ(runtime.snapshot().completed, 3U);
-    EXPECT_EQ(runtime.snapshot().rejected, 3U);
+    EXPECT_EQ(runtime.snapshot().completed, queued_tasks + 2);
+    EXPECT_EQ(runtime.snapshot().rejected, 1U);
+    EXPECT_EQ(budget.snapshot().allocated[category], idle);
 }
 
 TEST(FlushRuntime, ClosingLaneRejectsNewJobsAndCompletesOnce)

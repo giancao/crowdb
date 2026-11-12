@@ -30,7 +30,7 @@ fn accept_entry(slot: u64, term: u64, replica_id: u64) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, replica_id),
         term,
-        payload: bytes::Bytes::from_static(b"v"),
+        payload: bytes::Bytes::from_static(b"v").into(),
     }
 }
 

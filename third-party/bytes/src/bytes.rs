@@ -3,6 +3,7 @@ mod owner_lease;
 pub use accounted_owner::OwnerAllocation;
 pub use owner_lease::{OwnerAllocationContext, OwnerAllocationError, OwnerAllocationLease};
 
+use core::any::TypeId;
 use core::mem::{self, ManuallyDrop};
 use core::ops::{Deref, RangeBounds};
 use core::ptr::NonNull;
@@ -111,6 +112,59 @@ pub struct Bytes {
     vtable: &'static Vtable,
 }
 
+/// Proof that a byte view retains a backing with a known initialized range
+/// and actual capacity. The proof borrows the view and allocates no storage.
+pub struct RetainedAllocation<'a> {
+    view: &'a Bytes,
+    initialized: &'a [u8],
+    capacity: usize,
+}
+
+impl fmt::Debug for RetainedAllocation<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetainedAllocation")
+            .field("view_len", &self.view.len())
+            .field("initialized_len", &self.initialized.len())
+            .field("capacity", &self.capacity)
+            .finish()
+    }
+}
+
+impl<'a> RetainedAllocation<'a> {
+    /// Describe an allocation whose owner already supplies its real capacity.
+    ///
+    /// # Safety
+    /// The view must retain `initialized` in its backing until the last clone
+    /// drops, and `capacity` must be that complete backing's actual capacity.
+    pub unsafe fn new(view: &'a Bytes, initialized: &'a [u8], capacity: usize) -> Self {
+        Self {
+            view,
+            initialized,
+            capacity,
+        }
+    }
+
+    /// Return the retaining view, initialized allocation and actual capacity.
+    pub fn parts(&self) -> (&'a Bytes, &'a [u8], usize) {
+        (self.view, self.initialized, self.capacity)
+    }
+
+    /// Retain the original `from_owner` control for a foreign consumer. The
+    /// consumer must call the returned release function exactly once.
+    pub fn retain(
+        &self,
+    ) -> Option<(*mut core::ffi::c_void, unsafe extern "C" fn(*mut core::ffi::c_void))> {
+        let owner = self.view.vtable.owner?;
+        let context = unsafe { owned_retain(&self.view.data) };
+        Some((context.cast(), owner.release))
+    }
+}
+
+pub(crate) struct OwnerVtable {
+    borrow: unsafe fn(&AtomicPtr<()>, TypeId) -> Option<*const ()>,
+    release: unsafe extern "C" fn(*mut core::ffi::c_void),
+}
+
 pub(crate) struct Vtable {
     /// fn(data, ptr, len)
     pub clone: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
@@ -124,6 +178,7 @@ pub(crate) struct Vtable {
     /// fn(data, ptr, len)
     pub drop: unsafe fn(&mut AtomicPtr<()>, *const u8, usize),
     pub owner_allocation: Option<unsafe fn(&AtomicPtr<()>, owner_lease::Action, core::alloc::Layout) -> bool>,
+    pub owner: Option<&'static OwnerVtable>,
 }
 
 impl Bytes {
@@ -289,6 +344,15 @@ impl Bytes {
         ret.len = buf.len();
 
         ret
+    }
+
+    /// Borrow a thread-safe owner installed by [`Bytes::from_owner`]. Slices
+    /// and clones retain the same owner. Other representations return `None`.
+    pub fn owner<T: Sync + 'static>(&self) -> Option<&T> {
+        let owner = self.vtable.owner?;
+        // The vtable checks the concrete type. This Bytes keeps the owner alive.
+        let ptr = unsafe { (owner.borrow)(&self.data, TypeId::of::<T>()) }?;
+        Some(unsafe { &*ptr.cast::<T>() })
     }
 
     /// Returns the number of bytes contained in this `Bytes`.
@@ -1078,7 +1142,8 @@ impl fmt::Debug for Vtable {
 // ===== impl StaticVtable =====
 
 const STATIC_VTABLE: Vtable = Vtable {
-        owner_allocation: None,
+    owner_allocation: None,
+    owner: None,
     clone: static_clone,
     into_vec: static_to_vec,
     into_mut: static_to_mut,
@@ -1117,9 +1182,15 @@ struct Owned<T> {
     owner: T,
 }
 
-impl<T> Owned<T> {
+impl<T: 'static> Owned<T> {
+    const OWNER: OwnerVtable = OwnerVtable {
+        borrow: owned_ref::<T>,
+        release: owned_release::<T>,
+    };
+
     const VTABLE: Vtable = Vtable {
         owner_allocation: None,
+        owner: Some(&Self::OWNER),
         clone: owned_clone::<T>,
         into_vec: owned_to_vec::<T>,
         into_mut: owned_to_mut::<T>,
@@ -1128,17 +1199,32 @@ impl<T> Owned<T> {
     };
 }
 
-unsafe fn owned_clone<T>(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
+unsafe fn owned_ref<T: 'static>(data: &AtomicPtr<()>, expected: TypeId) -> Option<*const ()> {
+    if expected != TypeId::of::<T>() {
+        return None;
+    }
+    let owned = data.load(Ordering::Relaxed).cast::<Owned<T>>();
+    Some(ptr::addr_of!((*owned).owner).cast())
+}
+
+unsafe fn owned_retain(data: &AtomicPtr<()>) -> *mut () {
     let owned = data.load(Ordering::Relaxed);
     let old_cnt = (*owned.cast::<AtomicUsize>()).fetch_add(1, Ordering::Relaxed);
     if old_cnt > usize::MAX >> 1 {
         crate::abort();
     }
+    owned
+}
 
+unsafe extern "C" fn owned_release<T>(context: *mut core::ffi::c_void) {
+    owned_drop_impl::<T>(context.cast());
+}
+
+unsafe fn owned_clone<T: 'static>(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
     Bytes {
         ptr,
         len,
-        data: AtomicPtr::new(owned as _),
+        data: AtomicPtr::new(owned_retain(data)),
         vtable: &Owned::<T>::VTABLE,
     }
 }
@@ -1184,7 +1270,8 @@ unsafe fn owned_drop<T>(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) 
 // ===== impl PromotableVtable =====
 
 static PROMOTABLE_EVEN_VTABLE: Vtable = Vtable {
-        owner_allocation: None,
+    owner_allocation: None,
+    owner: None,
     clone: promotable_even_clone,
     into_vec: promotable_even_to_vec,
     into_mut: promotable_even_to_mut,
@@ -1193,7 +1280,8 @@ static PROMOTABLE_EVEN_VTABLE: Vtable = Vtable {
 };
 
 static PROMOTABLE_ODD_VTABLE: Vtable = Vtable {
-        owner_allocation: None,
+    owner_allocation: None,
+    owner: None,
     clone: promotable_odd_clone,
     into_vec: promotable_odd_to_vec,
     into_mut: promotable_odd_to_mut,
@@ -1370,7 +1458,8 @@ impl Drop for Shared {
 const _: [(); 0 - mem::align_of::<Shared>() % 2] = []; // Assert that the alignment of `Shared` is divisible by 2.
 
 static SHARED_VTABLE: Vtable = Vtable {
-        owner_allocation: None,
+    owner_allocation: None,
+    owner: None,
     clone: shared_clone,
     into_vec: shared_to_vec,
     into_mut: shared_to_mut,

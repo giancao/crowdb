@@ -24,7 +24,6 @@ struct TestSoftFlush : TestPreparedFlushTree
         EXPECT_TRUE(ApplyProgress::create(8, bootstrap, &progress).ok());
         EXPECT_TRUE(ApplyDispatcher::create(runtime, lane, 4, bootstrap, &dispatcher).ok());
         preparation.cpu_progress = dispatcher;
-        batch.cpu_progress       = dispatcher;
     }
 
     ~TestSoftFlush()

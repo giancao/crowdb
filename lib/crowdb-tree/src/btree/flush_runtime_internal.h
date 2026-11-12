@@ -12,17 +12,6 @@
 
 namespace crowdb::tree::detail
 {
-inline bool flush_runtime_acquire(std::atomic<size_t> &counter, size_t limit) noexcept
-{
-    auto value = counter.load(std::memory_order_relaxed);
-    while (value < limit) {
-        if (counter.compare_exchange_weak(value, value + 1, std::memory_order_acq_rel)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 inline uint64_t flush_runtime_now_ns() noexcept
 {
     return static_cast<uint64_t>(
@@ -62,24 +51,21 @@ struct FlushRuntime::State
         using Operation = stdexec::connect_result_t<
             decltype(stdexec::schedule(std::declval<exec::static_thread_pool &>().get_scheduler())), Receiver>;
 
-        Job(State *owner, size_t slot_index, std::shared_ptr<Lane> tree_lane, Task work, void *argument,
+        Job(State *owner, std::shared_ptr<Lane> tree_lane, Task work, void *argument,
             std::shared_ptr<ProgressState> progress_owner = {},
             std::shared_ptr<const void>    argument_owner = {}) noexcept
             : state(owner),
-              slot(slot_index),
               lane(std::move(tree_lane)),
               task(work),
               context(argument),
               progress(std::move(progress_owner)),
               context_owner(std::move(argument_owner)),
               queued_at(flush_runtime_now_ns()),
-              operation(stdexec::connect(stdexec::schedule(state->schedulers[slot_index % state->schedulers.size()]),
-                                         Receiver{this}))
+              operation(stdexec::connect(stdexec::schedule(state->scheduler()), Receiver{this}))
         {
         }
 
         State                         *state;
-        size_t                         slot;
         std::shared_ptr<Lane>          lane;
         Task                           task;
         void                          *context;
@@ -89,21 +75,13 @@ struct FlushRuntime::State
         Operation                      operation;
     };
 
-    struct Slot
-    {
-        std::atomic<bool> occupied{false};
-        alignas(Job) std::array<std::byte, sizeof(Job)> storage;
-    };
-
-    State(size_t workers, size_t limit, const std::shared_ptr<AllocationBudget> &budget)
+    State(size_t workers, size_t target, const std::shared_ptr<AllocationBudget> &budget)
         : pool_storage(budget),
-          pool(static_cast<uint32_t>(workers), {}, exec::no_numa_policy{}, &pool_storage,
-               pool_storage.thread_factory()),
           schedulers(MetadataAllocator<exec::static_thread_pool::scheduler>(budget)),
           worker_count(workers),
-          queue_limit(limit),
-          slots(workers + limit, MetadataAllocator<Slot>(budget)),
-          lifecycle(std::allocate_shared<Activity>(MetadataAllocator<Activity>(budget)))
+          queue_target(target),
+          lifecycle(std::allocate_shared<Activity>(MetadataAllocator<Activity>(budget))),
+          pool(static_cast<uint32_t>(workers), {}, exec::no_numa_policy{}, &pool_storage, pool_storage.thread_factory())
     {
         // Register on the bootstrap thread once. A cached target scheduler
         // submits through its existing shared MPSC remote queue, without
@@ -114,37 +92,27 @@ struct FlushRuntime::State
         }
     }
 
-    [[nodiscard]] size_t claim_slot() noexcept
+    [[nodiscard]] const exec::static_thread_pool::scheduler &scheduler() noexcept
     {
-        const auto first = next_slot.fetch_add(1, std::memory_order_relaxed) % slots.size();
-        // Reserved progress and ordinary jobs share this fixed slot array.
-        for (size_t offset = 0; offset < slots.size(); ++offset) {
-            const auto index    = (first + offset) % slots.size();
-            bool       expected = false;
-            if (slots[index].occupied.compare_exchange_strong(expected, true, std::memory_order_acquire)) {
-                return index;
-            }
-        }
-        return SIZE_MAX;
-    }
-
-    [[nodiscard]] Job *prepare_job(const std::shared_ptr<Lane> &lane, Task task, void *context) noexcept
-    {
-        const auto index = claim_slot();
-        return index == SIZE_MAX ? nullptr
-                                 : ::new (static_cast<void *>(slots[index].storage.data()))
-                                       Job(this, index, lane, task, context);
+        return schedulers[next_worker.fetch_add(1, std::memory_order_relaxed) % schedulers.size()];
     }
 
     static void release_job(Job *job) noexcept
     {
-        auto      *state    = job->state;
-        const auto index    = job->slot;
-        const bool reserved = job->progress != nullptr;
+        const bool             embedded = job->progress != nullptr;
+        MetadataAllocator<Job> allocator(embedded ? nullptr : job->lane->allocations_);
         std::destroy_at(job);
-        if (!reserved) {
-            state->slots[index].occupied.store(false, std::memory_order_release);
+        if (!embedded) {
+            allocator.deallocate(job, 1);
         }
+    }
+
+    void submit(Job &job) noexcept
+    {
+        job.lane->queued_.fetch_add(1, std::memory_order_relaxed);
+        queued.fetch_add(1, std::memory_order_relaxed);
+        submitted.fetch_add(1, std::memory_order_relaxed);
+        stdexec::start(job.operation);
     }
 
     void finish() const noexcept
@@ -161,22 +129,20 @@ struct FlushRuntime::State
         }
     }
 
-    PoolStorage              pool_storage;
-    exec::static_thread_pool pool;
+    PoolStorage pool_storage;
     std::vector<exec::static_thread_pool::scheduler, MetadataAllocator<exec::static_thread_pool::scheduler>> schedulers;
-    const size_t                               worker_count;
-    size_t                                     queue_limit;
-    std::vector<Slot, MetadataAllocator<Slot>> slots;
-    std::atomic<size_t>                        next_slot{0};
-    std::shared_ptr<Activity>                  lifecycle;
-    std::atomic<size_t>                        queue_permits{0};
-    std::atomic<size_t>                        queued{0};
-    std::atomic<uint64_t>                      inflight{0};
-    std::atomic<uint64_t>                      submitted{0};
-    std::atomic<uint64_t>                      completed{0};
-    std::atomic<uint64_t>                      rejected{0};
-    std::atomic<uint64_t>                      queue_ns{0};
-    std::atomic<uint64_t>                      execute_ns{0};
+    const size_t              worker_count;
+    const size_t              queue_target;
+    std::atomic<size_t>       next_worker{0};
+    std::shared_ptr<Activity> lifecycle;
+    std::atomic<size_t>       queued{0};
+    std::atomic<uint64_t>     inflight{0};
+    std::atomic<uint64_t>     submitted{0};
+    std::atomic<uint64_t>     completed{0};
+    std::atomic<uint64_t>     rejected{0};
+    std::atomic<uint64_t>     queue_ns{0};
+    std::atomic<uint64_t>     execute_ns{0};
+    exec::static_thread_pool  pool;
 };
 
 struct FlushRuntime::ProgressState : std::enable_shared_from_this<ProgressState>
@@ -185,9 +151,8 @@ struct FlushRuntime::ProgressState : std::enable_shared_from_this<ProgressState>
     static constexpr uint64_t kStopArmed  = uint64_t{1} << 62;
     static constexpr uint64_t kWork       = ~(State::kClosed | kStopArmed | kCloseArmed);
 
-    ProgressState(State *runtime, size_t index, std::shared_ptr<Lane> tree_lane, Task work, void *argument)
+    ProgressState(State *runtime, std::shared_ptr<Lane> tree_lane, Task work, void *argument)
         : runtime(runtime),
-          slot(index),
           lane(std::move(tree_lane)),
           task(work),
           context(argument)
@@ -205,10 +170,8 @@ struct FlushRuntime::ProgressState : std::enable_shared_from_this<ProgressState>
     void arm_close(uint64_t flags) noexcept;
     void finish_close(uint64_t idle) noexcept;
     void close_and_drain() noexcept;
-    void detach() noexcept;
 
     State                *runtime;
-    size_t                slot;
     std::shared_ptr<Lane> lane;
     Task                  task;
     void                 *context;
@@ -217,7 +180,7 @@ struct FlushRuntime::ProgressState : std::enable_shared_from_this<ProgressState>
     // final idle transition. A producer may schedule after the last job ends.
     std::atomic<uint64_t> work{0};
     AsyncCompletion       on_drained;
-    std::atomic<bool>     detached{false};
+    alignas(State::Job) std::array<std::byte, sizeof(State::Job)> operation_storage;
 };
 
 } // namespace crowdb::tree::detail

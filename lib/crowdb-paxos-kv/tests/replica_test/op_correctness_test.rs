@@ -65,7 +65,7 @@ fn entry(slot: u64, payload: Vec<u8>) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, 1),
         term: 1,
-        payload: Bytes::from(payload),
+        payload: Bytes::from(payload).into(),
     }
 }
 

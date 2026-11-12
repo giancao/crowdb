@@ -83,7 +83,7 @@ async fn replay_recovers_records() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 3,
-            payload: Bytes::from(format!("v{slot}")),
+            payload: Bytes::from(format!("v{slot}")).into(),
         };
         let record = WALRecord::from_accepted(1, &entry);
         wal.append(&record).await.unwrap();
@@ -169,7 +169,7 @@ async fn replay_1000_records_deterministic() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from(format!("v{slot}")),
+            payload: Bytes::from(format!("v{slot}")).into(),
         };
         let record = WALRecord::from_accepted(1, &entry);
         wal.append(&record).await.unwrap();
@@ -198,7 +198,7 @@ async fn restore_without_snapshot_applies_contiguous_slots() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from(encode_put_payload(key, value)),
+            payload: Bytes::from(encode_put_payload(key, value)).into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }
@@ -239,7 +239,7 @@ async fn restore_from_replay_rebuilds_live_replica_state() {
         slot: 2,
         ballot: PxBallot::new(3, 7),
         term: 3,
-        payload: Bytes::from(encode_put_payload(b"restore-key", b"restore-value")),
+        payload: Bytes::from(encode_put_payload(b"restore-key", b"restore-value")).into(),
     };
     let accepted = WALRecord::from_accepted(1, &accepted_entry);
     wal.append(&accepted).await.unwrap();
@@ -269,7 +269,7 @@ async fn restore_from_replay_rebuilds_live_replica_state() {
         slot: 1,
         ballot: PxBallot::new(6, 7),
         term: 5,
-        payload: Bytes::new(),
+        payload: Bytes::new().into(),
     };
     restored.learn_chosen(&repair, &[]).await;
     restored.learn_chosen(&accepted_entry, &[]).await;
@@ -301,7 +301,7 @@ async fn restore_from_replay_with_engine_uses_injected_engine() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from(encode_put_payload(key, value)),
+            payload: Bytes::from(encode_put_payload(key, value)).into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }
@@ -357,7 +357,7 @@ async fn restore_from_replay_with_engine_resumes_from_last_applied_slot() {
             slot,
             ballot: PxBallot::new(0, 1),
             term,
-            payload: Bytes::from(encode_put_payload(key, value)),
+            payload: Bytes::from(encode_put_payload(key, value)).into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }
@@ -479,7 +479,7 @@ async fn restore_from_replay_with_engine_keeps_prefix_when_resume_slot_has_no_ac
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::from(encode_put_payload(key, value)),
+            payload: Bytes::from(encode_put_payload(key, value)).into(),
         };
         wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
     }

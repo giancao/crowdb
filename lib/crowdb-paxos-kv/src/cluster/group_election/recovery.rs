@@ -77,7 +77,7 @@ impl PxGroup {
             return false;
         }
         let mut entry = match self
-            .run_prepare_phase(replica, slot, bytes::Bytes::new(), self.quorum(), 0)
+            .run_prepare_phase(replica, slot, bytes::Bytes::new().into(), self.quorum(), 0)
             .await
         {
             PrepareAttempt::Proceed { entry, .. } => entry,

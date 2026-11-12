@@ -4,6 +4,8 @@
 
 #include "tree_core_batch.h"
 
+#include <span>
+
 namespace crowdb::tree
 {
 // Owns one validated, deduplicated request before consensus assigns its slot.
@@ -12,20 +14,24 @@ namespace crowdb::tree
 class AdmittedBatch
 {
   public:
+    static constexpr size_t kMaxPlanningEntries = 4096;
+
     struct Plan
     {
-        size_t         incoming_bytes = 0;
-        size_t         staging_bytes  = 0;
-        size_t         source_bytes   = 0;
-        WriteFootprint footprint;
+        size_t                       staging_bytes = 0;
+        size_t                       source_bytes  = 0;
+        WriteFootprint               footprint;
+        std::optional<ExternalValue> external;
     };
 
-    // Derive the whole input/source bound without allocation or source entrance.
+    // Derive the bound and place the selected indices at the start of scratch.
     static Status plan(const Config &config, const SourceWriteOptions &options, size_t max_value_bytes, size_t count,
-                       const CoreWriteReader &read, Plan *out);
+                       const CoreWriteReader &read, std::span<size_t> scratch, Plan *out,
+                       const ExternalValue *external = nullptr);
     static Status bind_prepaid(const SourceWriteOptions &options, size_t count, const CoreWriteReader &read,
                                detail::BudgetClass category, const Plan &plan, detail::ResourceBudget::Credit staging,
-                               detail::ResourceBudget::Credit source, std::shared_ptr<AdmittedBatch> *out);
+                               detail::ResourceBudget::Credit source, std::shared_ptr<AdmittedBatch> *out,
+                               std::span<const size_t> selected = {}, ApplyInputOwner *owner = nullptr);
     static Status create(const Config &config, const SourceWriteOptions &options, size_t max_value_bytes, size_t count,
                          const CoreWriteReader &read, detail::BudgetClass category,
                          std::shared_ptr<AdmittedBatch> *out);
@@ -53,23 +59,26 @@ class AdmittedBatch
   private:
     struct Cell
     {
-        size_t  key_offset   = 0;
-        size_t  key_size     = 0;
-        size_t  value_offset = 0;
-        size_t  value_size   = 0;
-        uint8_t flags        = 0;
+        AllocationLease charge;
+        buffer          value;
+        size_t          key_offset = 0;
+        size_t          key_size   = 0;
+        uint8_t         flags      = 0;
     };
 
     explicit AdmittedBatch(std::shared_ptr<detail::AllocationReservation> metadata);
     Status initialize(const SourceWriteOptions &options, size_t count, const CoreWriteReader &read,
-                      detail::BudgetClass category, size_t incoming_bytes, SourceWriteReservation prepaid = {});
+                      detail::BudgetClass category, SourceWriteReservation prepaid = {});
+    void   initialize_cells(std::span<const size_t> order, const CoreWriteReader &read);
+    void   initialize_owned_cell(const CoreWriteInput &input, const ExternalValue &external,
+                                 ExternalAllocation::Owner owner);
     Status prepare_cells(SourceAdmission::Writer &writer);
 
-    std::shared_ptr<detail::AllocationReservation>            metadata_;
-    SourceWriteReservation                                    source_;
-    detail::ReservedVector<uint8_t, AllocationKind::kPayload> bytes_;
-    detail::ReservedVector<Cell>                              cells_;
-    detail::ReservedVector<SourceAdmission::Writer::Prepared> prepared_;
-    bool                                                      consumed_ = false;
+    std::shared_ptr<detail::AllocationReservation>             metadata_;
+    SourceWriteReservation                                     source_;
+    detail::ReservedVector<uint8_t, AllocationKind::kMetadata> keys_;
+    detail::ReservedVector<Cell>                               cells_;
+    detail::ReservedVector<SourceAdmission::Writer::Prepared>  prepared_;
+    bool                                                       consumed_ = false;
 };
 } // namespace crowdb::tree

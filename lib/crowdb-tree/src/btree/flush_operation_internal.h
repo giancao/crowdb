@@ -96,7 +96,6 @@ struct FlushOperation::State : std::enable_shared_from_this<State>
     std::optional<Attempt>                      drain_attempt;
     std::optional<Attempt>                      batch_attempt;
     std::shared_ptr<State>                      queued_owner;
-    ApplyDispatcher::Node                       cpu_node{&State::run_cpu, this};
     CpuStage                                    queued_stage = CpuStage::kBegin;
     std::atomic<FlushBatch *>                   cancel_batch{nullptr};
     std::atomic<bool>                           complete_success{false};
@@ -110,6 +109,7 @@ struct FlushOperation::State : std::enable_shared_from_this<State>
     bool                                        covered_at_start = false;
     FlushResult                                 report;
     uint64_t                                    started_at_ns = 0;
+    size_t                                      input_tables  = 0;
     std::optional<TreeMetricsOperation>         batch_metrics;
     std::optional<TreeMetricsOperation>         capture_metrics;
     std::optional<TreeMetricsOperation>         drain_metrics;

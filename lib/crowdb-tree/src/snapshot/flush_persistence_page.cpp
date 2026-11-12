@@ -4,11 +4,13 @@
 #include "backend/local/extent_writeback.h"
 #include "btree/allocation_bound.h"
 #include "btree/overflow_backing.h"
+#include "btree/page_cache.h"
 #include "btree/writeback_rebase.h"
 #include "crowdb-common/log.h"
 #include "snapshot/flush_persistence.h"
 #include "snapshot/primary_backing.h"
 
+#include <algorithm>
 #include <bit>
 #include <cassert>
 
@@ -33,17 +35,25 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
 
         void set_value() noexcept
         {
-            owner->resume(Status::Ok());
+            auto self = std::move(owner);
+            if (self->has_resident_overflow) {
+                self->resume(Status::Ok());
+                return;
+            }
+            // A successful write already completed on this CPU pool.
+            self->status = Status::Ok();
+            Page::run(self.get());
         }
 
         void set_error(Status error) noexcept
         {
-            owner->resume(std::move(error));
+            auto self = std::move(owner);
+            self->resume(std::move(error));
         }
 
         void set_stopped() noexcept
         {
-            owner->resume(Status::unavailable());
+            set_error(Status::unavailable());
         }
     };
 
@@ -70,17 +80,41 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
     std::optional<Attempt>                  attempt;
     Status                                  status;
     std::optional<TreeMetricsOperation>     metrics;
+    LeafDecode                              decode_bases;
+    std::shared_ptr<const PublishedPage>    replacement;
     ApplyDispatcher::Node                   node{&Page::run, this};
+    std::shared_ptr<Page>                   next_resident_page;
+    bool                                    has_resident_overflow = false;
+    bool                                    owns_resident_write   = false;
+    bool                                    retried               = false;
 
     void start()
     {
         metrics.emplace(owner->preparation_->core->publisher().work_metrics(), TreeStage::PageWritebackPipeline,
                         tree_metrics_now_ns());
-        resume(Status::Ok());
+        has_resident_overflow =
+            input.page->leaf && std::ranges::any_of(input.page->leaf->bases, [](const BaseRef &base) {
+                return base.backing && base.backing->storage == BackingStorage::kResidentFrame &&
+                       base.backing->overflow;
+            });
+        if (has_resident_overflow) {
+            resume(Status::Ok());
+        }
+        else {
+            run(this);
+        }
     }
 
     void prepare()
     {
+        if (decode_bases) {
+            auto decode = std::move(decode_bases);
+            auto result = decode();
+            if (!result.ok()) {
+                finish(std::move(result));
+                return;
+            }
+        }
         auto &preparation = *owner->preparation_;
         limits            = preparation.options.write;
         const auto bytes  = final_frame_bytes(*input.page, limits.frames.encode.frame_bytes);
@@ -102,20 +136,50 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         limits.frames.reuse_backend_id = preparation.core->local_backend()
                                            ? preparation.core->local_backend()->ledger->limits().backend_id
                                            : preparation.core->chunk_backend()->backend_identity();
-        auto result                    = preparation.work(*owner->initial_, nullptr, &work);
-        if (!result.ok()) {
-            finish(std::move(result));
-            return;
+        if (!work.loader) {
+            auto result = preparation.work(*owner->initial_, nullptr, &work);
+            if (!result.ok()) {
+                finish(std::move(result));
+                return;
+            }
+        }
+        if (input.page->leaf &&
+            std::ranges::any_of(input.page->leaf->bases, [](const BaseRef &base) { return !base.resident; })) {
+            auto page  = detail::reserved_shared<PublishedPage>(work.budget.bytes, *input.page);
+            auto leaf  = detail::reserved_shared<PageState>(work.budget.bytes, *page->leaf, work.budget.bytes);
+            page->leaf = leaf;
+            input.page = std::move(page);
+            if (preparation.core->cache() &&
+                std::ranges::any_of(leaf->bases, [](const BaseRef &base) { return base.clipped && !base.resident; })) {
+                work.loader =
+                    preparation.core->cache()->bind(work.loader, work.budget.bytes, PageLoadPriority::Maintenance);
+            }
+            auto loaded = read_leaf_bases(*work.loader, *leaf, work.budget.bytes,
+                                          [self = shared_from_this()](Status status, LeafDecode decode) noexcept {
+                                              self->decode_bases = std::move(decode);
+                                              self->resume(std::move(status));
+                                          });
+            if (!loaded) {
+                return;
+            }
+            if (!loaded->ok()) {
+                finish(std::move(*loaded));
+                return;
+            }
         }
         limits.frames.encode.metadata     = work.budget.bytes;
         limits.frames.encode.work_metrics = work.budget.work_metrics;
         limits.frames.encode.cause        = work.budget.cause;
-        limits.frames.cpu_progress        = work.budget.cpu_progress;
         limits.frames.plan_only           = false;
+        if (limits.write.compression == compress_algo::kNone) {
+            limits.frames.raw_write = limits.write;
+        }
+        const auto &config = preparation.core->config();
         limits.frames.retain_overflow_buffers =
-            limits.write.chunk_backed && static_cast<bool>(work.budget.cpu_progress);
-        result = CapturedFrameStream::create(input, work.loader, preparation.core->binding()->cpu(),
-                                             preparation.core->binding()->lane(), limits.frames, reserve, &stream);
+            limits.write.chunk_backed || config.async_page_store != nullptr ||
+            (config.page_store != nullptr && typeid(*config.page_store) == typeid(MemPageStore));
+        auto result = CapturedFrameStream::create(input, work.loader, preparation.core->binding()->cpu(),
+                                                  preparation.core->binding()->lane(), limits.frames, reserve, &stream);
         if (!result.ok()) {
             finish(std::move(result));
             return;
@@ -126,12 +190,22 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         pages->root_page_id = input.page_id;
         pages->next_page_id = input.next_page_id;
         auto chunk          = preparation.core->chunk_backend();
-        result              = CapturedWriteOperation::create(
+        auto inherited      = owner->inherited_;
+        if (owns_resident_write) {
+            if (owner->pages_) {
+                inherited = owner->pages_;
+            }
+        }
+        else {
+            // Independent output pages only read the immutable baseline.
+            work.budget.cpu_progress.reset();
+        }
+        result = CapturedWriteOperation::create(
             stream, pages, preparation.ticket->backend(preparation.core->async_backend()),
             preparation.core->binding()->cpu(), preparation.core->binding()->lane(), limits, work.budget,
             chunk ? chunk->reserve(work.budget.bytes)
                   : extent_write_reservation(preparation.core->local_backend()->ledger, work.budget.bytes),
-            owner->pages_ ? owner->pages_ : owner->inherited_, &write);
+            std::move(inherited), &write);
         if (!result.ok()) {
             finish(std::move(result));
             return;
@@ -147,8 +221,24 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
 
     void resume(Status result) noexcept
     {
-        status = std::move(result);
-        owner->preparation_->cpu_progress->request(node, weak_from_this().lock());
+        status    = std::move(result);
+        auto self = weak_from_this().lock();
+        if (has_resident_overflow) {
+            owner->preparation_->cpu_progress->request(node, std::move(self));
+            return;
+        }
+        const auto &binding = owner->preparation_->core->binding();
+        try {
+            auto submitted = binding->cpu()->try_submit(binding->lane(), &Page::run, this, self);
+            if (!submitted.ok()) {
+                attempt.reset();
+                finish(std::move(submitted));
+            }
+        }
+        catch (const std::bad_alloc &) {
+            attempt.reset();
+            finish(Status::resource_exhausted());
+        }
     }
 
     static void run(void *raw) noexcept
@@ -168,15 +258,40 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
 
     void step()
     {
+        if (replacement) {
+            install();
+            return;
+        }
         attempt.reset();
         if (!status.ok()) {
-            finish(status);
+            if (write && write->result().primary_io_failed && owner->preparation_->core->local_backend() &&
+                owner->preparation_->core->config().async_page_store != nullptr &&
+                limits.frames.exclusion.length == 0 && !retried) {
+                // The failed local write reached terminal completion. Its
+                // unreferenced extents return to the existing ledger/GC path.
+                retried = true;
+                write.reset();
+                stream.reset();
+                prepare();
+            }
+            else {
+                finish(status);
+            }
             return;
         }
         if (write) {
             written();
         }
         else {
+            // Imported raw overflow can be shared by different leaf pages.
+            // Finish staging it before the next importer looks up its PID.
+            if (has_resident_overflow && !owns_resident_write) {
+                if (auto *previous = std::exchange(owner->last_resident_page_, this)) {
+                    previous->next_resident_page = shared_from_this();
+                    return;
+                }
+                owns_resident_write = true;
+            }
             prepare();
         }
     }
@@ -197,13 +312,23 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
             receipt.summary->live_key_bytes        = input.children_summary->live_key_bytes;
             receipt.summary->live_value_bytes      = input.children_summary->live_value_bytes;
         }
-        std::shared_ptr<const PublishedPage> replacement;
         auto status = build_writeback_rebase(input.page, input.page, receipt, input.coverage, work.budget.bytes,
                                              &replacement, limits.frames.encode.max_sources, input.gc_floor);
         if (!status.ok()) {
             finish(std::move(status));
             return;
         }
+        if (owns_resident_write) {
+            install();
+        }
+        else {
+            owner->preparation_->cpu_progress->request(node, weak_from_this().lock());
+        }
+    }
+
+    void install()
+    {
+        const auto &result = write->result();
         // The catalog receives only final page receipts and their protected raw
         // dependencies. Structural deletions are applied at the root join.
         if (!owner->pages_) {
@@ -220,9 +345,9 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
             }
         }
         owner->pages_->frames.budget(work.budget.bytes);
-        status = owner->pages_->replace_primary(*result.pages);
+        auto status = owner->pages_->replace_primary(*result.pages);
         if (status.ok()) {
-            owner->pages_->frames.at(input.page_id).summary = receipt.summary;
+            owner->pages_->frames.at(input.page_id).summary = replacement->primary->frame.summary;
         }
         if (!status.ok()) {
             finish(std::move(status));
@@ -233,14 +358,20 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
         owner->report_.reused_frames += result.reused_frames;
         ++owner->report_.primary_frames;
         ++owner->report_.rebased_pages;
-        if (metrics) {
-            (void)metrics->finish(TreeOutcome::Success, tree_metrics_now_ns());
-        }
-        done(Status::Ok(), std::move(replacement));
+        finish(Status::Ok(), std::move(replacement));
     }
 
-    void finish(Status result) noexcept
+    void finish(Status result, std::shared_ptr<const PublishedPage> replacement = {}) noexcept
     {
+        if (owns_resident_write) {
+            if (auto next = std::move(next_resident_page)) {
+                next->owns_resident_write = true;
+                next->resume(Status::Ok());
+            }
+            else {
+                owner->last_resident_page_ = nullptr;
+            }
+        }
         if (metrics) {
             (void)metrics->finish(result.ok() ? TreeOutcome::Success : TreeOutcome::Error, tree_metrics_now_ns());
         }
@@ -248,7 +379,7 @@ struct FlushPersistence::Page : std::enable_shared_from_this<Page>
             CRB_LOG_ERROR("persistent page {} failed: {}", input.page_id, result.to_string());
         }
         try {
-            done(std::move(result), {});
+            done(std::move(result), std::move(replacement));
         }
         catch (...) {
             CRB_LOG_ERROR("persistent page receiver threw");

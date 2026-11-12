@@ -251,6 +251,8 @@ async fn coalesce_ops_during_round_share_next_slot() {
     };
     assert_ne!(s1, s2, "first op must get its own slot");
     assert_eq!(s2, s3, "ops arriving during round must share next slot");
+    let small_batch = group.local_replica().accepted_at(s2).await.unwrap();
+    assert!(small_batch.payload.contiguous().is_some());
 }
 
 #[tokio::test]
@@ -422,6 +424,46 @@ async fn coalesce_preserves_operation_counts_from_batch_requests() {
             .expect("key missing");
         assert_eq!(stored.1, value);
     }
+}
+
+#[tokio::test]
+async fn coalesce_drains_zero_operation_requests_and_retains_their_identity() {
+    let group = coalesce_group(32);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    group.set_coalesce_round_gate_for_tests(gate);
+    let first_group = Arc::clone(&group);
+    let first = tokio::spawn(async move {
+        first_group
+            .propose(encode_put(b"first", b"value"), Some(1), Some(1))
+            .await
+    });
+    let (first, empty) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !group.has_coalesce_pending_for_tests() {
+            tokio::task::yield_now().await;
+        }
+        let (empty, first) = tokio::join!(
+            biased;
+            group.propose(vec![0, 0], Some(2), Some(1)),
+            async {
+                release.send(()).unwrap();
+                first.await.unwrap()
+            },
+        );
+        (first, empty)
+    })
+    .await
+    .expect("queued zero-operation request must finish");
+    let ProposeResult::Chosen { slot: first_slot } = first else {
+        panic!("first request failed: {first:?}");
+    };
+    let ProposeResult::Chosen { slot } = empty else {
+        panic!("zero-operation request failed: {empty:?}");
+    };
+    assert!(slot > first_slot);
+    assert!(matches!(
+        group.propose(vec![0, 0], Some(2), Some(1)).await,
+        ProposeResult::Chosen { slot: retried } if retried == slot
+    ));
 }
 
 #[tokio::test]

@@ -24,7 +24,7 @@ async fn apply_through(replica: &PxLocalReplica, upto: SlotIndex) {
                     slot,
                     ballot: PxBallot::new(0, 0),
                     term: 0,
-                    payload: bytes::Bytes::new(),
+                    payload: bytes::Bytes::new().into(),
                 },
                 &[],
             )

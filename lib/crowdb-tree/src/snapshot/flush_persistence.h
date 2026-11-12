@@ -33,6 +33,7 @@ class FlushPersistence : public std::enable_shared_from_this<FlushPersistence>
     std::shared_ptr<const PublishedTreeState>                         initial_;
     std::shared_ptr<const CapturedDurablePages>                       inherited_;
     std::shared_ptr<CapturedDurablePages>                             pages_;
+    Page                                                             *last_resident_page_ = nullptr;
     CheckpointResult                                                  report_;
     bool                                                              finished_   = false;
     uint64_t                                                          wal_offset_ = 0;

@@ -107,7 +107,8 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
     let net = crate::common::net_lock::lock().await;
     crate::common::logging::init_test_subscriber();
     let tmp = crowdb_test_harness::test_dirs::tempdir_in_test_data("g2-crash-restart");
-    let cfg = PxElectionConfig::for_tests();
+    // Real-time RPC and file-backed WAL need the live-test election profile.
+    let cfg = PxElectionConfig::for_e2e();
 
     // Pass 1: bind each store on an ephemeral port (peers are placeholders).
     let mut nodes = Vec::with_capacity(ids.len());
@@ -218,7 +219,7 @@ impl WalCluster {
     }
 
     async fn restart(&mut self, id: u64, wal_dir: PathBuf) {
-        let cfg = PxElectionConfig::for_tests();
+        let cfg = PxElectionConfig::for_e2e();
         let conf_dir = wal_dir.parent().expect("wal_dir parent").join("conf");
         let peers: Vec<(u64, String)> = self
             .nodes
@@ -394,15 +395,8 @@ async fn assert_offline_replay_has_values(node_id: u64, wal_dir: PathBuf, kvs: &
 #[tokio::test]
 async fn cluster_survives_leader_kill_and_restart_with_no_data_loss() {
     let mut cluster = start_wal_cluster(&[1, 2, 3]).await;
-    // Wait for an initial leader so commit_writes has a target, but capture
-    // the *current* leader only after all writes have committed. With the
-    // aggressive for_tests election timings (30–60 ms), a spurious leader
-    // change can occur during the write phase on a slow CI runner. Killing
-    // the original (now stepped-down) node would test a follower restart,
-    // not the intended leader-kill scenario, and that follower's WAL may
-    // not yet carry every accepted slot if it was briefly in a higher term
-    // than the new leader. Capturing the leader post-commit guarantees the
-    // killed node was the proposer that durably logged every chosen slot.
+    // Resolve the leader again after committing the writes so the test
+    // stops the current leader even if leadership changed during setup.
     cluster
         .wait_for_leader(Duration::from_secs(3))
         .await

@@ -33,7 +33,7 @@ fn write_entry(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::from(encode_put(key, value)),
+        payload: Bytes::from(encode_put(key, value)).into(),
     }
 }
 
@@ -63,7 +63,7 @@ async fn dedup_suppresses_retried_request_at_same_slot() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            payload: Bytes::new(),
+            payload: Bytes::new().into(),
         };
         replica.learn_chosen(&entry, &[]).await;
     }
@@ -126,7 +126,7 @@ async fn dedup_ignores_client_id_zero() {
         slot: 1,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::from(encode_put(b"k", b"v")),
+        payload: Bytes::from(encode_put(b"k", b"v")).into(),
     };
     replica.learn_chosen(&entry, &tag(0, 1)).await;
 
@@ -141,7 +141,7 @@ async fn dedup_ignores_entries_without_client_id() {
         slot: 1,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::new(),
+        payload: Bytes::new().into(),
     };
     replica.learn_chosen(&entry, &[]).await;
 
@@ -181,7 +181,7 @@ async fn dedup_does_not_false_positive_on_out_of_order_higher_seq() {
         slot: 1,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        payload: Bytes::new(),
+        payload: Bytes::new().into(),
     };
     replica.learn_chosen(&fill, &[]).await;
     replica.learner.await_applied(2).await;

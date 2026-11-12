@@ -149,7 +149,7 @@ impl PxGroup {
                                     .unwrap_or(u64::MAX),
                             );
                         }
-                        replica.spawn_accept_persist(entry.clone());
+                        replica.enqueue_accept_persist(entry);
                         return AcceptAttempt::Chosen;
                     }
                 }
@@ -287,7 +287,7 @@ impl PxGroup {
                 }
 
                 if local_accepted && fold.accepted >= quorum {
-                    replica.spawn_accept_persist(entry.clone());
+                    replica.enqueue_accept_persist(entry);
                     return AcceptAttempt::Chosen;
                 }
             } else {

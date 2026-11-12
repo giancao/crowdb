@@ -9,9 +9,10 @@ namespace crowdb::tree
 {
 struct SourceRotationOptions
 {
-    size_t bytes   = 0;
-    size_t entries = 0;
-    size_t tables  = 2;
+    size_t bytes        = 0;
+    size_t entries      = 0;
+    size_t tables       = 2;
+    size_t flush_tables = 0;
     // Actual reader and flush source capacity, including inherited tables.
     size_t source_window = 64;
 };
@@ -34,6 +35,7 @@ class SourceRotation : public std::enable_shared_from_this<SourceRotation>
     // Zero means no threshold was crossed. Success of the write is independent
     // of this best-effort soft maintenance admission.
     [[nodiscard]] uint64_t request() noexcept;
+    [[nodiscard]] bool     request_for_apply();
     [[nodiscard]] uint64_t request_pressure() noexcept;
     void                   resume_capacity() noexcept;
     void                   wait(uint64_t sequence) noexcept;
@@ -89,7 +91,7 @@ class SourceRotation : public std::enable_shared_from_this<SourceRotation>
     static void paused(void *context) noexcept;
     void        resume() noexcept;
     void        prepare(const std::shared_ptr<const SourceCatalog> &catalog);
-    void        flush();
+    void        flush(bool pause_capacity = true);
     void        flush_done() noexcept;
     void        plan_flush();
     void        await_credit();

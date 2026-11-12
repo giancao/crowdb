@@ -115,7 +115,8 @@ void CapturedWriteOperation::State::begin_resident_write(DurableCapturedFrame va
         .info                = {.page_id = value.page_id, .type = value.type, .bytes = value.frame_bytes},
         .frame               = backing->resident_frame,
         .owner               = backing->owner,
-        .reload_dependencies = dependencies
+        .reload_dependencies = dependencies,
+        .raw_blob            = {},
     };
     resident_sources.emplace(value.page_id, ResidentSource{.backing = backing, .dependencies = dependencies});
     if (limits.frames.retain_overflow_buffers) {

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -91,44 +92,65 @@ struct MemPageStore::Data
         return &node->children[index & 255];
     }
 
-    void prepare(uint64_t off, size_t len)
-    {
-        using Prepared = std::pair<std::atomic<void *> *, std::unique_ptr<Page>>;
-        std::vector<Prepared> prepared;
-        const auto            last = (off + len - 1) / kPageBytes;
-        for (auto index = off / kPageBytes; index <= last; ++index) {
-            auto *entry = slot(index, true);
-            if (entry->load(std::memory_order_acquire) == nullptr) {
-#ifdef CROWDB_TREE_TEST_UTIL
-                if (new_pages_before_failure) {
-                    if (*new_pages_before_failure == 0) {
-                        throw std::bad_alloc();
-                    }
-                    --*new_pages_before_failure;
-                }
-#endif
-                prepared.emplace_back(entry, std::make_unique<Page>());
-            }
-        }
-        // Prepare the complete write before publishing any new data page.
-        // The caller's range owner excludes GC until this I/O completes.
-        for (auto &[entry, page] : prepared) {
-            void *empty = nullptr;
-            if (entry->compare_exchange_strong(empty, page.get(), std::memory_order_release,
-                                               std::memory_order_relaxed)) {
-                [[maybe_unused]] auto *published = page.release();
-                pages.fetch_add(1, std::memory_order_relaxed);
-            }
-        }
-    }
+    using PreparedPage = std::pair<std::atomic<void *> *, std::unique_ptr<Page>>;
 
     void write(uint64_t off, const uint8_t *buf, size_t len)
     {
+        // Allocate every new page before changing existing bytes. The caller's
+        // range owner excludes GC until this I/O completes.
+        std::array<PreparedPage, 2> prepared;
+        std::vector<PreparedPage>   additional;
+        size_t                      count_prepared = 0;
+        const auto                  last           = (off + len - 1) / kPageBytes;
+        for (auto index = off / kPageBytes; index <= last; ++index) {
+            auto *entry = slot(index, true);
+            if (entry->load(std::memory_order_acquire) != nullptr) {
+                continue;
+            }
+#ifdef CROWDB_TREE_TEST_UTIL
+            if (new_pages_before_failure) {
+                if (*new_pages_before_failure == 0) {
+                    throw std::bad_alloc();
+                }
+                --*new_pages_before_failure;
+            }
+#endif
+            auto page = std::make_unique_for_overwrite<Page>();
+            if (count_prepared < prepared.size()) {
+                prepared[count_prepared] = {entry, std::move(page)};
+            }
+            else {
+                additional.emplace_back(entry, std::move(page));
+            }
+            ++count_prepared;
+        }
+
+        size_t next = 0;
         while (len != 0) {
             const auto offset = static_cast<size_t>(off % kPageBytes);
             const auto count  = std::min(len, kPageBytes - offset);
-            auto      *page   = static_cast<Page *>(slot(off / kPageBytes, false)->load(std::memory_order_acquire));
-            std::memcpy(page->data() + offset, buf, count);
+            auto      *entry  = slot(off / kPageBytes, false);
+            void      *page   = entry->load(std::memory_order_acquire);
+            if (next < count_prepared) {
+                auto &candidate = next < prepared.size() ? prepared[next] : additional[next - prepared.size()];
+                if (candidate.first == entry) {
+                    if (page == nullptr) {
+                        auto *fresh = candidate.second.get();
+                        std::memset(fresh->data(), 0, offset);
+                        std::memset(fresh->data() + offset + count, 0, kPageBytes - offset - count);
+                        // Other users may access disjoint ranges after the CAS.
+                        // This write's range remains private until completion.
+                        if (entry->compare_exchange_strong(page, fresh, std::memory_order_acq_rel,
+                                                           std::memory_order_acquire)) {
+                            page = candidate.second.release();
+                            pages.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                    ++next;
+                }
+            }
+            assert(page != nullptr);
+            std::memcpy(static_cast<Page *>(page)->data() + offset, buf, count);
             off += count;
             buf += count;
             len -= count;
@@ -175,7 +197,6 @@ try {
     }
     // Grow only the written pages. Existing data never moves, and sparse holes
     // do not become physical allocations during checkpoint address growth.
-    data_->prepare(off, len);
     data_->write(off, buf, len);
     return Status::Ok();
 }

@@ -60,7 +60,7 @@ mod tests {
         fn arm(tree: &Crowdbtree) -> Self {
             let mut permit = Self(ptr::null_mut());
             assert_eq!(
-                unsafe { sys::ct_apply_prepare(tree.as_ptr(), ptr::null(), 0, 0, &mut permit.0) },
+                unsafe { sys::ct_apply_prepare_callback(tree.as_ptr(), ptr::null(), 0, 0, &mut permit.0) },
                 0
             );
             assert_eq!(unsafe { sys::ct_apply_arm(permit.0) }, 0);

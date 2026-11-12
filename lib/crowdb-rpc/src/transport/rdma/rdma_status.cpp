@@ -2,11 +2,26 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "../../status_json.h"
+#include "rdma_control_stream.h"
 #include "rdma_cq.h"
 
 #ifdef CROWDB_RPC_HAVE_RDMA
 namespace crowdb::rpc
 {
+std::string RdmaTransport::connection_cache_status_json(const Connection &connection)
+{
+    const auto *pools = static_cast<const ConnectionPools *>(connection.transport_context_.get());
+    if (pools == nullptr || pools->control_receive == nullptr)
+        return "null";
+    const auto &budget = pools->control_receive->budget();
+    StatusJson  status;
+    status.number("bytes", budget.used());
+    status.number("peak_bytes", budget.high_water());
+    status.number("limit_bytes", budget.limit());
+    status.number("stalls", budget.stalls());
+    return status.finish();
+}
+
 std::string RdmaTransport::status_json() const
 {
     const auto &counters   = stats();

@@ -16,6 +16,11 @@ struct InnerPageState;
 class TreeWorkMetrics;
 class ApplyDispatcher;
 
+using LeafDecode        = detail::InlineFunction<Status(), 24>;
+using LeafReadComplete  = detail::InlineFunction<void(Status, LeafDecode), 32>;
+using InnerDecode       = detail::InlineFunction<Status(std::shared_ptr<const InnerPageState> *), 24>;
+using InnerReadComplete = detail::InlineFunction<void(Status, InnerDecode), 32>;
+
 class PageLoader
 {
   public:
@@ -25,11 +30,19 @@ class PageLoader
     virtual ~PageLoader() = default;
     // Exactly one nonthrowing callback, possibly inline. No blocking fallback.
     virtual void load_leaf(BaseRef base, LeafComplete complete) = 0;
+    // The caller keeps the private base alive through completion and decode.
+    // A loader that supplies an already decoded base may return no decode work.
+    virtual void read_leaf(BaseRef &base, LeafReadComplete complete);
     virtual void load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete);
     virtual void load_overflow(uint64_t head, uint64_t length, ValueComplete complete);
     virtual void load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
                                ValueComplete complete);
 };
+
+// An immediate result is already decoded. Otherwise the completion retains
+// the private leaf until all accepted reads terminate.
+std::optional<Status> read_leaf_bases(PageLoader &loader, PageState &leaf,
+                                      const std::shared_ptr<AllocationBudget> &metadata, LeafReadComplete complete);
 
 struct PageLoadLimits
 {
@@ -73,16 +86,20 @@ class AsyncStorePageLoader final : public PageLoader
     struct State;
 
   public:
-    // The host retains and drains the runtime off its workers. I/O completion
-    // only schedules decoding; CPU work never runs on the transport thread.
+    // I/O completion either returns the owned buffer for caller-side decoding
+    // or schedules a CPU decode. It never decodes on the transport thread.
     AsyncStorePageLoader(std::shared_ptr<AsyncPageStore> store, std::shared_ptr<detail::FlushRuntime> runtime,
                          std::shared_ptr<detail::FlushRuntime::Lane> lane, PageLoadLimits limits = {},
                          OverflowBackingResolver overflow = {}, PageLoadBudget budget = {});
-    void load_leaf(BaseRef base, LeafComplete complete) override;
-    void load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete) override;
-    void load_overflow(uint64_t head, uint64_t length, ValueComplete complete) override;
-    void load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
-                       ValueComplete complete) override;
+    void                  load_leaf(BaseRef base, LeafComplete complete) override;
+    void                  read_leaf(BaseRef &base, LeafReadComplete complete) override;
+    std::optional<Status> try_load_leaf_bases(PageState &leaf);
+    void                  load_inner(std::shared_ptr<const BackingRef> backing, InnerComplete complete) override;
+    std::optional<Status> read_inner(std::shared_ptr<const BackingRef>      backing,
+                                     std::shared_ptr<const InnerPageState> *out, InnerReadComplete complete);
+    void                  load_overflow(uint64_t head, uint64_t length, ValueComplete complete) override;
+    void                  load_overflow(std::shared_ptr<const BackingRef> primary, uint64_t head, uint64_t length,
+                                        ValueComplete complete) override;
     // Serial routing can retain one path plus completed decoder steps that
     // have handed their result to a continuation but not yet returned.
     [[nodiscard]] static std::optional<size_t> routing_reserve_bound(const PageLoadLimits &limits, size_t depth,

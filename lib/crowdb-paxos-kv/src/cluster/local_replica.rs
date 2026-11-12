@@ -241,11 +241,8 @@ pub struct PxLocalReplica {
     /// R65: replication flow counters + gauges. Set via
     /// [`Self::set_metrics_registry`] when a registry is wired.
     pub(crate) replication_handles: OnceLock<ReplicationRegistryHandles>,
-    /// Test-only gate that blocks `spawn_accept_persist`'s background
-    /// task before `wal.append`, so a test can deterministically kill
-    /// the replica in the CAS→persist window (R16b early-ack). Set via
-    /// `set_persist_gate_for_tests` under the `test-util` feature;
-    /// `None` in production.
+    /// Test-only gate that delays enqueueing the local Accepted record,
+    /// so a crash test can stop the replica between CAS and persistence.
     #[cfg(feature = "test-util")]
     pub(super) persist_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// R63: latest commit point from heartbeat / batch-chosen / accept.
@@ -492,12 +489,7 @@ impl PxLocalReplica {
         self.wal = Some(wal);
     }
 
-    /// Install a `Notify` gate that blocks `spawn_accept_persist`'s
-    /// background task before `wal.append`. The test keeps the `Arc`;
-    /// the background task waits on `notify.notified()` and only
-    /// proceeds once the test calls `notify_one()`. Used by T1
-    /// crash-recovery tests to deterministically hit the CAS→persist
-    /// window.
+    /// Delay the early-ack Accepted enqueue until the test calls `notify_one()`.
     #[cfg(feature = "test-util")]
     pub fn set_persist_gate_for_tests(&self, notify: Arc<tokio::sync::Notify>) {
         *self.persist_gate.lock() = Some(notify);

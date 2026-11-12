@@ -44,7 +44,7 @@ fn accepted_write(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(3, 7),
         term: 3,
-        payload: Bytes::from(encode_put_payload(key, value)),
+        payload: Bytes::from(encode_put_payload(key, value)).into(),
     }
 }
 

@@ -434,11 +434,12 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
     auto &parser      = conn->parser();
     auto  on_frame_cb = [conn](Frame *frame) { conn->on_frame(frame); };
 
-    // Process bytes from recv_buf starting at offset `pos`, up to `end`.
+    // Process all bytes already in the worker receive buffer.
     // Handles header+control (via feed_data) and data (direct copy to
     // data_buf_). Returns when all bytes are consumed or parser needs
     // more bytes from the socket.
-    auto process_recv_bytes = [&](uint32_t pos, uint32_t end) -> bool {
+    auto process_recv_bytes = [&](uint32_t end) -> bool {
+        uint32_t pos = 0;
         while (pos < end && parser.last_error() == FramingError::None) {
             if (parser.state() == ParseState::ReadingData) {
                 // Copy data bytes from recv_buf to data_buf_.
@@ -469,19 +470,22 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
                 }
             }
         }
-        return true;
+        return parser.last_error() == FramingError::None;
     };
 
-    // Buzz-cpp read strategy: one big read() into recv_buf pulls a TCP
-    // segment (possibly multiple frames). process_recv_bytes handles
-    // header+control+small data from recv_buf (memcpy, no extra syscall).
-    // When recv_buf is exhausted and parser still needs data (large data
-    // payload spanning multiple TCP segments), read() directly into
-    // data_buf_ — no extra copy. read_calls counts only the main recv_buf
-    // read (TCP segment arrivals), so raggr = frames_parsed / read_calls
-    // reflects true kernel-level coalescing.
+    // Batch ordinary reads so one syscall can consume multiple small frames.
+    // After the worker buffer is exhausted, read a large remaining control
+    // or data directly into the frame. The target ends at that field boundary.
+    constexpr uint32_t direct_control_min = 4 * 1024;
     while (true) {
-        ssize_t n = ::read(fd, recv_buf, recv_buf_size);
+        const bool direct =
+            parser.state() == ParseState::ReadingData || parser.control_remaining() >= direct_control_min;
+        const auto target = direct ? parser.next_read_target()
+                                   : FrameParser::ReadTarget{recv_buf, static_cast<uint32_t>(recv_buf_size)};
+        if (target.len == 0) {
+            break;
+        }
+        const auto n = ::read(fd, target.ptr, target.len);
         if (n <= 0) {
             if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                 if (n < 0 && errno == ECONNREFUSED) {
@@ -496,36 +500,25 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
 #ifdef __linux__
         // Re-arm TCP_QUICKACK — the kernel resets it after sending each
         // ACK. Without this, delayed ACKs stall Nagle's send (40ms/round).
-        if (conn->quickack) {
+        if (!direct && conn->quickack) {
             int quickack = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
         }
 #endif
-        // Process all bytes in recv_buf — header+control via feed_data,
-        // data via direct copy from recv_buf. Handles multiple frames.
-        process_recv_bytes(0, static_cast<uint32_t>(n));
-        // If parser still needs data bytes (recv_buf exhausted mid-frame),
-        // read directly into data_buf_ — no extra copy for large payloads.
-        while (parser.state() == ParseState::ReadingData) {
-            auto target = parser.next_read_target();
-            if (target.len == 0) {
-                break;
-            }
-            ssize_t n2 = ::read(fd, target.ptr, target.len);
-            if (n2 <= 0) {
-                if (n2 == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-                    conn->close();
-                }
-                goto done;
-            }
-            bw_read().observe(static_cast<uint64_t>(n2));
-            Frame *frame = parser.advance(static_cast<uint32_t>(n2));
-            if (frame != nullptr) {
+        if (direct) {
+            if (auto *frame = parser.advance(static_cast<uint32_t>(n)); frame != nullptr) {
                 on_frame_cb(frame);
             }
+            if (parser.last_error() == FramingError::None) {
+                continue;
+            }
         }
+        else if (process_recv_bytes(static_cast<uint32_t>(n))) {
+            continue;
+        }
+        conn->close();
+        break;
     }
-done:
     // If on_frame enqueued responses (via submit_inline), collect this
     // connection for batch writev after all events are processed.
     if (conn->has_pending_send()) {

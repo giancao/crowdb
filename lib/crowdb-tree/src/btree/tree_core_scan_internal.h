@@ -33,7 +33,6 @@ struct CoreScan
     ReadPreparation                             prepared;
     std::shared_ptr<PublishedScan>              read;
     std::shared_ptr<Operation>                  operation;
-    std::shared_ptr<ApplyDispatcher>            progress;
     std::shared_ptr<detail::FlushRuntime::Lane> lane;
     std::shared_ptr<CoreScan>                   owner;
     ScanComplete                                complete;
@@ -45,7 +44,6 @@ struct CoreScan
     size_t                                      value_limit = 0;
     uint64_t                                    deadline_ms = 0;
     bool                                        strict      = false;
-    ApplyDispatcher::Node                       cpu_node{&CoreScan::step, this};
 
     void               finish(Status status, bool truncated) noexcept;
     void               schedule() noexcept;

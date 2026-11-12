@@ -173,6 +173,9 @@ class Crowdbtree
 
     [[nodiscard]] uint64_t durable_sequence() const;
     [[nodiscard]] uint64_t durable_coverage() const;
+    [[nodiscard]] uint64_t flushes_since_persistent() const noexcept;
+    bool                   bind_flush_threshold(uint64_t threshold, void (*wake)(void *), void (*drop_context)(void *),
+                                                void    *context) noexcept;
     [[nodiscard]] uint64_t root_page_id() const;
 
     [[nodiscard]] bool io_failed() const

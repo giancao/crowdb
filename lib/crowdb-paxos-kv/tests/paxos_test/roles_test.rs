@@ -49,7 +49,7 @@ fn entry(slot: u64, payload: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, 1),
         term: 1,
-        payload: Bytes::copy_from_slice(payload),
+        payload: Bytes::copy_from_slice(payload).into(),
     }
 }
 
@@ -85,5 +85,5 @@ fn noop_entry_has_empty_payload() {
 fn write_entry_carries_kv_payload() {
     let e = entry(1, b"some-payload");
     assert!(!e.payload.is_empty());
-    assert_eq!(e.payload.as_ref(), b"some-payload");
+    assert_eq!(e.payload.to_bytes().as_ref(), b"some-payload");
 }

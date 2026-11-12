@@ -36,9 +36,8 @@ try {
         }
         metadata = detail::AllocationReservation::create(std::move(*paid));
     }
-    auto bounds         = options;
-    bounds.cpu_progress = preparation.cpu_progress;
-    bounds.publication  = preparation.publication;
+    auto bounds        = options;
+    bounds.publication = preparation.publication;
     auto operation = detail::reserved_shared<FlushOperation::State>(metadata, publisher, runtime, sources, contiguous,
                                                                     lane, std::move(bounds), FlushBatch::Maintenance{});
     operation->progress                  = progress;

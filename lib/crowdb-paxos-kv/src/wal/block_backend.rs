@@ -87,6 +87,9 @@ impl BlockDeviceController {
 
     fn apply_corruptions(&self, segments: &Mutex<BTreeMap<PathBuf, Vec<u8>>>) {
         let mut requests = self.inner.corrupt_requests.lock();
+        if requests.is_empty() {
+            return;
+        }
         let mut stored_segments = segments.lock();
         for (segment, offset) in requests.drain(..) {
             if let Some(data) = stored_segments.get_mut(&segment) {
@@ -418,6 +421,7 @@ impl BlockSegment {
 #[derive(Clone)]
 pub struct MemBlockDevice {
     segments: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
+    segment_capacity: usize,
     layouts: Arc<Mutex<BTreeSet<PathBuf>>>,
     controller: BlockDeviceController,
     write_count: Arc<AtomicU64>,
@@ -440,6 +444,7 @@ impl MemBlockDevice {
     pub fn with_alignment(alignment: WalBlockAlignment) -> Self {
         Self {
             segments: Arc::new(Mutex::new(BTreeMap::new())),
+            segment_capacity: 0,
             layouts: Arc::new(Mutex::new(BTreeSet::new())),
             controller: BlockDeviceController::default(),
             write_count: Arc::new(AtomicU64::new(0)),
@@ -447,6 +452,22 @@ impl MemBlockDevice {
             alignment,
             rmw_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub(super) fn with_segment_size(&self, segment_size: u64) -> io::Result<Self> {
+        let end = usize::try_from(segment_size)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        Ok(Self {
+            segment_capacity: self.capacity_with_footer(end)?,
+            ..self.clone()
+        })
+    }
+
+    fn capacity_with_footer(&self, end: usize) -> io::Result<usize> {
+        let unit = self.alignment.io_unit_bytes().unwrap_or(1);
+        end.checked_add(super::segment::MAX_FOOTER_LEN)
+            .and_then(|sealed_end| sealed_end.checked_next_multiple_of(unit))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "MemBlock segment capacity overflow"))
     }
 
     #[must_use]
@@ -493,7 +514,12 @@ impl MemBlockDevice {
             ));
         }
         if opts.create && !segments.contains_key(&segment_path) {
-            segments.insert(segment_path.clone(), Vec::new());
+            let mut data = Vec::new();
+            if self.segment_capacity != 0 {
+                data.try_reserve_exact(self.segment_capacity)
+                    .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+            }
+            segments.insert(segment_path.clone(), data);
         }
         if opts.truncate {
             if let Some(data) = segments.get_mut(&segment_path) {
@@ -634,62 +660,64 @@ pub(crate) struct MemBlockSegment {
 
 impl MemBlockSegment {
     pub(super) fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
-        self.device.controller.check_write()?;
-        self.write_bytes(data, offset)?;
-        self.device.write_count.fetch_add(1, Ordering::AcqRel);
-        Ok(data.len())
+        self.write_slices(&[std::io::IoSlice::new(data)], offset, false)
     }
 
     pub(super) fn write_vectored_at(&self, bufs: &[std::io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
+        self.write_slices(bufs, offset, self.device.segment_capacity != 0)
+    }
+
+    fn write_slices(
+        &self,
+        bufs: &[std::io::IoSlice<'_>],
+        offset: u64,
+        reserve_footer: bool,
+    ) -> io::Result<usize> {
         self.device.controller.check_write()?;
-        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
-        let mut cur_offset = offset;
-        for buf in bufs {
-            self.write_bytes(buf, cur_offset)?;
-            cur_offset += buf.len() as u64;
+        let total_len = bufs.iter().map(|buf| buf.len()).sum();
+        if !bufs.is_empty() {
+            let plan = self.device.alignment.plan_write(offset, total_len);
+            let start = usize::try_from(offset).expect("offset exceeds usize");
+            let end = usize::try_from(plan.aligned_offset).expect("aligned offset exceeds usize")
+                + plan.aligned_len;
+            let mut segments = self.device.segments.lock();
+            let segment_data = segments
+                .get_mut(&self.segment_path)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MemBlockSegment: segment removed"))?;
+            let capacity = segment_data.capacity();
+            let required = if reserve_footer && end > capacity.saturating_sub(super::segment::MAX_FOOTER_LEN)
+            {
+                self.device.capacity_with_footer(start + total_len)?
+            } else {
+                end
+            };
+            if required > capacity {
+                let reserved = if self.device.segment_capacity == 0 {
+                    segment_data.try_reserve(required - segment_data.len())
+                } else {
+                    segment_data.try_reserve_exact(required - segment_data.len())
+                };
+                reserved.map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+            }
+            if start > segment_data.len() {
+                segment_data.resize(start, 0);
+            }
+            let mut cursor = start;
+            for buf in bufs {
+                let covered = buf.len().min(segment_data.len() - cursor);
+                segment_data[cursor..cursor + covered].copy_from_slice(&buf[..covered]);
+                segment_data.extend_from_slice(&buf[covered..]);
+                cursor += buf.len();
+            }
+            if end > segment_data.len() {
+                segment_data.resize(end, 0);
+            }
+            if plan.requires_read_modify_write {
+                self.device.rmw_count.fetch_add(1, Ordering::AcqRel);
+            }
         }
         self.device.write_count.fetch_add(1, Ordering::AcqRel);
         Ok(total_len)
-    }
-
-    fn write_bytes(&self, data: &[u8], offset: u64) -> io::Result<()> {
-        match self.device.alignment {
-            WalBlockAlignment::Unaligned => self.write_unaligned(data, offset),
-            WalBlockAlignment::Aligned { .. } => self.write_aligned(data, offset),
-        }
-    }
-
-    fn write_unaligned(&self, data: &[u8], offset: u64) -> io::Result<()> {
-        let mut segments = self.device.segments.lock();
-        let segment_data = segments
-            .get_mut(&self.segment_path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MemBlockSegment: segment removed"))?;
-        let off = usize::try_from(offset).expect("offset exceeds usize");
-        let end = off + data.len();
-        if end > segment_data.len() {
-            segment_data.resize(end, 0);
-        }
-        segment_data[off..end].copy_from_slice(data);
-        Ok(())
-    }
-
-    fn write_aligned(&self, data: &[u8], offset: u64) -> io::Result<()> {
-        let plan = self.device.alignment.plan_write(offset, data.len());
-        let mut segments = self.device.segments.lock();
-        let segment_data = segments
-            .get_mut(&self.segment_path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MemBlockSegment: segment removed"))?;
-        let aligned_off = usize::try_from(plan.aligned_offset).expect("aligned offset exceeds usize");
-        let aligned_end = aligned_off + plan.aligned_len;
-        if aligned_end > segment_data.len() {
-            segment_data.resize(aligned_end, 0);
-        }
-        let payload_off = aligned_off + plan.payload_offset_within_aligned;
-        segment_data[payload_off..payload_off + data.len()].copy_from_slice(data);
-        if plan.requires_read_modify_write {
-            self.device.rmw_count.fetch_add(1, Ordering::AcqRel);
-        }
-        Ok(())
     }
 
     pub(super) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {

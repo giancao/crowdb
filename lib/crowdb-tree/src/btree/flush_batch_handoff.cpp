@@ -74,11 +74,6 @@ void FlushBatch::State::start_range(Range &range, RangeComplete done)
         publisher.work_metrics()->dispatch.queued_step();
         [[maybe_unused]] auto *scheduled = work.release();
     }
-    else if (options.cpu_progress) {
-        publisher.work_metrics()->dispatch.queued_step();
-        auto *ready = work.release();
-        options.cpu_progress->request(ready->node, ready->owner);
-    }
     else {
         finish_range(range, done, std::move(status));
     }
@@ -290,6 +285,9 @@ void FlushBatch::State::cover()
             self->report.phase = FlushPhase::kRepairRequired;
             self->finish();
             return;
+        }
+        if (!self->options.persistent && !result.already_committed && self->report.frontier > self->report.floor) {
+            self->publisher.note_ordinary_flush();
         }
         record_work(self->publisher.work_metrics(), TreeWorkCounter::SourceDetached, detached, TreeWorkCause::Flush);
         if (self->subtree) {

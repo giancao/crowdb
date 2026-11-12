@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 #include "flush_subtree.h"
 #include "page_load.h"
-#include "snapshot/flush_persistence.h"
 #include "snapshot/primary_backing.h"
 
 #include <algorithm>
@@ -96,18 +95,27 @@ void FlushBatch::State::Subtree::leaf()
         loaded_leaf =
             detail::reserved_shared<PageState>(builder->options.metadata, *input->leaf, builder->options.metadata);
     }
-    while (next_base < loaded_leaf->bases.size()) {
-        auto &base = loaded_leaf->bases[next_base];
-        if (base.resident) {
-            ++next_base;
-            continue;
+    if (decode_bases) {
+        auto decode = std::move(decode_bases);
+        auto result = decode();
+        if (!result.ok()) {
+            complete(std::move(result));
+            return;
         }
+    }
+    if (std::ranges::any_of(loaded_leaf->bases, [](const auto &base) { return !base.resident; })) {
         if (!owner.options.loader) {
             complete(Status::unavailable("flush leaf requires an asynchronous loader"));
             return;
         }
-        request_load();
-        return;
+        auto result = load();
+        if (!result) {
+            return;
+        }
+        if (!result->ok()) {
+            complete(std::move(*result));
+            return;
+        }
     }
     auto limits        = builder->options.pages;
     limits.max_sources = std::max(limits.max_sources, loaded_leaf->bases.size() + loaded_leaf->overlays.size());
@@ -133,7 +141,8 @@ void FlushBatch::State::Subtree::leaf()
     }
     output.pids.clear();
     output.separators.clear();
-    result = detail::build_flush_leaf_outputs(*builder, pid, input, layout->layout(), &output);
+    result =
+        detail::build_flush_leaf_outputs(*builder, pid, input, layout->layout(), owner.options.persistent, &output);
     if (split_metrics) {
         (void)split_metrics->finish(result.ok() ? TreeOutcome::Success : TreeOutcome::Error, tree_metrics_now_ns());
         if (result.ok()) {
@@ -146,6 +155,11 @@ void FlushBatch::State::Subtree::leaf()
         complete(std::move(result));
         return;
     }
+    shrank =
+        output.pids.size() == 1 &&
+        ((expected->metrics.kv_known && layout->layout().statistics.front().kv_count < expected->metrics.kv_count) ||
+         (collect_tombstone && expected->metrics.page_size_known &&
+          layout->layout().primary_bytes.front() < expected->metrics.page_size_bytes));
     result = coalesce_leaf(limits);
     if (!result.ok()) {
         complete(std::move(result));
@@ -161,69 +175,23 @@ void FlushBatch::State::Subtree::leaf()
     finish_pages();
 }
 
-void FlushBatch::State::Subtree::request_load()
-{
-    load();
-}
-
-void FlushBatch::State::Subtree::load() noexcept
+std::optional<Status> FlushBatch::State::Subtree::load() noexcept
 {
     try {
         if ((owner.lifecycle.load(std::memory_order_acquire) & kStopped) != 0) {
-            status = Status::unavailable("flush stopped before cold load");
-            schedule();
-            return;
-        }
-        if (writing) {
-            if (!owner.options.consolidation) {
-                status = Status::invalid_argument("flush consolidation options are absent");
-                schedule();
-                return;
-            }
-            auto target = final_pages[persist_at];
-            auto page   = target.task->lookup(target.pid);
-            owner.options.persistence->write(
-                {
-                    .page         = page,
-                    .page_id      = target.pid,
-                    .coverage     = owner.report.frontier,
-                    .gc_floor     = owner.options.consolidation->pages.gc_floor,
-                    .next_page_id = owner.next_pid.load(std::memory_order_relaxed),
-                    .context = {.range        = page->leaf ? page->leaf->range : bounds,
-                                .inner_fences = page->level != 0 ? std::optional(fences(target.pid)) : std::nullopt},
-                    .children_summary = page->level != 0 ? std::optional(child_summary(target.pid)) : std::nullopt
-            },
-                [this, lease = owner.metadata](uint64_t count, ReservedOverflowIds *out) {
-                    auto next = owner.next_pid.load(std::memory_order_relaxed);
-                    do {
-                        if (count > MappingView::kPageLimit - next) {
-                            return Status::resource_exhausted("flush overflow PID space exhausted");
-                        }
-                    } while (!owner.next_pid.compare_exchange_weak(next, next + count, std::memory_order_relaxed));
-                    *out = {.first = next, .count = count, .owner = lease};
-                    return Status::Ok();
-                },
-                [this, target, keep = owner.weak_from_this().lock()](Status result, auto replacement) noexcept {
-                    try {
-                        if (result.ok() && replacement) {
-                            target.task->prepare_builder();
-                            result = target.task->builder->replace(target.pid, std::move(replacement));
-                        }
-                    }
-                    catch (const std::bad_alloc &) {
-                        result = Status::resource_exhausted();
-                    }
-                    catch (const std::exception &) {
-                        result = Status::internal_error("flush receipt installation failed");
-                    }
-                    status = std::move(result);
-                    ++persist_at;
-                    writing = false;
-                    schedule();
-                });
-            return;
+            return Status::unavailable();
         }
         if (expected->level != 0) {
+            if (auto *loader = dynamic_cast<AsyncStorePageLoader *>(owner.options.loader.get())) {
+                return loader->read_inner(
+                    expected->inner_backing, &inner,
+                    [this, keep = owner.weak_from_this().lock()](Status result, InnerDecode decode) noexcept {
+                        status       = std::move(result);
+                        decode_index = std::move(decode);
+                        schedule();
+                    });
+            }
+            index_load_events.store(0, std::memory_order_relaxed);
             owner.options.loader->load_inner(expected->inner_backing, [this, keep = owner.weak_from_this().lock()](
                                                                           Status result, auto page) noexcept {
                 status = std::move(result);
@@ -231,32 +199,31 @@ void FlushBatch::State::Subtree::load() noexcept
                 if (status.ok() && !inner) {
                     status = Status::corruption("flush loader returned no index");
                 }
-                schedule();
+                if ((index_load_events.fetch_or(1, std::memory_order_acq_rel) & 2U) != 0) {
+                    schedule();
+                }
             });
+            if ((index_load_events.fetch_or(2, std::memory_order_acq_rel) & 1U) != 0) {
+                return status;
+            }
+            return std::nullopt;
         }
-        else {
-            auto loader =
-                owner.options.consolidation_loader ? owner.options.consolidation_loader : owner.options.loader;
-            loader->load_leaf(loaded_leaf->bases[next_base],
-                              [this, keep = owner.weak_from_this().lock()](Status result, auto page) noexcept {
-                                  status = std::move(result);
-                                  if (status.ok() && !page) {
-                                      status = Status::corruption("flush loader returned no leaf");
-                                  }
-                                  if (status.ok()) {
-                                      loaded_leaf->bases[next_base++].resident = std::move(page);
-                                  }
-                                  schedule();
-                              });
-        }
+        const bool shared_backing =
+            std::ranges::any_of(loaded_leaf->bases, [](const BaseRef &base) { return base.clipped && !base.resident; });
+        const auto &loader = !shared_backing && owner.options.consolidation_loader ? owner.options.consolidation_loader
+                                                                                   : owner.options.loader;
+        return read_leaf_bases(*loader, *loaded_leaf, builder->options.metadata,
+                               [this, keep = owner.weak_from_this().lock()](Status result, LeafDecode decode) noexcept {
+                                   status       = std::move(result);
+                                   decode_bases = std::move(decode);
+                                   schedule();
+                               });
     }
     catch (const std::bad_alloc &) {
-        status = Status::resource_exhausted("flush cold load allocation failed");
-        schedule();
+        return Status::resource_exhausted();
     }
-    catch (const std::exception &) {
-        status = Status::internal_error("flush cold load failed");
-        schedule();
+    catch (...) {
+        return Status::internal_error();
     }
 }
 

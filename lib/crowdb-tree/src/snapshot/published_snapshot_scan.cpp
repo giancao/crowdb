@@ -51,8 +51,7 @@ Status prepare_view_scan(const PublishedReadViewContext &view, CoreScanOptions o
     status = core_read_detail::prepare_scan(options, std::move(ready), std::move(range),
                                             view.load_limits().max_value_bytes, out);
     if (status.ok()) {
-        (*out)->lane     = view.lane();
-        (*out)->progress = view.binding()->view_cpu_progress();
+        (*out)->lane = view.lane();
     }
     return status;
 }

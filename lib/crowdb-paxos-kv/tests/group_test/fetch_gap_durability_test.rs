@@ -2,9 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::common::cluster::start_cluster;
+use bytes::Bytes;
 use crowdb_paxos_kv::{
     cluster::{group::PxGroup, PaxosKvServer, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica},
     paxos::roles::{Acceptor, Learner, PxBallot, PxLogEntry},
+    rpc::PxRpcTransport,
     wal::{replay::replay_group, IoBackend, MemBlockDevice, WalConfig, WalEngine},
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -26,7 +28,7 @@ async fn restart_fetched_value(higher_promise: bool) {
         slot: 1,
         ballot: PxBallot::new(1, 1),
         term: 0,
-        payload: bytes::Bytes::from_static(b"\x01\x00\x00\x03\x00\x00\x00key\x05\x00\x00\x00value"),
+        payload: Bytes::from_static(b"\x01\x00\x00\x03\x00\x00\x00key\x05\x00\x00\x00value").into(),
     };
     leader.local_replica().acceptor.accept(&entry).await;
     leader.local_replica().learner.learn(entry.clone(), &[]).await;
@@ -48,7 +50,7 @@ async fn restart_fetched_value(higher_promise: bool) {
     if higher_promise {
         let stale = PxLogEntry {
             ballot: PxBallot::new(0, 99),
-            payload: bytes::Bytes::from_static(b"\x01\x00\x00\x03\x00\x00\x00key\x05\x00\x00\x00stale"),
+            payload: Bytes::from_static(b"\x01\x00\x00\x03\x00\x00\x00key\x05\x00\x00\x00stale").into(),
             ..entry.clone()
         };
         replica.acceptor.accept(&stale).await;
@@ -68,20 +70,8 @@ async fn restart_fetched_value(higher_promise: bool) {
         1,
         cluster.leader().listen_addr().unwrap().to_string(),
     )]);
-    group
-        .get_remote_replica(1)
-        .unwrap()
-        .set_rpc_transport(cluster.leader().rpc_transport().unwrap());
     let group = Arc::new(group);
-    group.start_fetchgap_driver().await;
-    group.note_missing_chosen_for_tests(1);
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while group.local_replica().contiguous_applied() != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    fetch_after_transport_binding(&group, cluster.leader().rpc_transport().unwrap()).await;
     assert_eq!(
         group.local_replica().learner.engine_get(b"key").await,
         Some((1, b"value".to_vec()))
@@ -120,6 +110,23 @@ async fn restart_fetched_value(higher_promise: bool) {
     cluster.shutdown().await;
 }
 
+async fn fetch_after_transport_binding(group: &Arc<PxGroup>, transport: Arc<PxRpcTransport>) {
+    tokio::time::pause();
+    group.start_fetchgap_driver().await;
+    group.note_missing_chosen_for_tests(1);
+    // Let the driver see the gap before the leader's RPC transport is bound.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    tokio::time::resume();
+    group.get_remote_replica(1).unwrap().set_rpc_transport(transport);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while group.local_replica().contiguous_applied() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("FetchGap must recover the pending slot after transport binding");
+}
+
 #[tokio::test]
 async fn fetch_gap_does_not_advertise_an_unproven_accepted_value_as_chosen() {
     let cluster = start_cluster(&[1, 2], 1).await;
@@ -128,7 +135,7 @@ async fn fetch_gap_does_not_advertise_an_unproven_accepted_value_as_chosen() {
         slot: 1,
         ballot: PxBallot::new(1, 1),
         term: 0,
-        payload: bytes::Bytes::new(),
+        payload: Bytes::new().into(),
     };
     leader.local_replica().acceptor.accept(&entry).await;
     let transport = cluster.leader().rpc_transport().unwrap();
@@ -148,6 +155,6 @@ async fn fetch_gap_does_not_advertise_an_unproven_accepted_value_as_chosen() {
     };
     let reply = transport.send_fetch_gap(destination, 1, 1, 0, 1).await.unwrap();
     assert_eq!(reply.slot, entry.slot);
-    assert_eq!(reply.payload, entry.payload);
+    assert_eq!(reply.payload, entry.payload.to_bytes());
     cluster.shutdown().await;
 }

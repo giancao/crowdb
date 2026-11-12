@@ -89,11 +89,12 @@ void RdmaTransport::dispatch_completion(const ibv_wc &wc)
         RdmaAggregate aggregate;
         bool          valid       = false;
         bool          application = false;
-        if (work->prefix != nullptr) {
-            Header header;
-            valid       = parse_rdma_direct_control(std::span(work->prefix->data, RDMA_CONTROL_CAPACITY),
-                                                    work->pools->effective_data_capacity, wc.byte_len, header);
-            application = valid && header.msg_type != RDMA_HANDSHAKE_MSG_TYPE;
+        if (work->prefix != nullptr || config_.wire_layout == RdmaWireLayout::ControlData) {
+            Header      header;
+            const auto *control = work->prefix == nullptr ? work->slot->data : work->prefix->data;
+            valid               = parse_rdma_direct_control(std::span(control, RDMA_CONTROL_CAPACITY),
+                                                            work->pools->effective_data_capacity, wc.byte_len, header);
+            application         = valid && header.msg_type != RDMA_HANDSHAKE_MSG_TYPE;
         }
         else {
             valid = wc.byte_len <= work->slot->capacity &&

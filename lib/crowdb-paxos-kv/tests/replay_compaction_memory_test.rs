@@ -45,7 +45,7 @@ async fn replay_releases_superseded_accepts_while_scanning_half_a_gibibyte() {
             slot: (sequence - 1) % 32 + 1,
             ballot: PxBallot::new(round, 7),
             term: round,
-            payload: Bytes::from(vec![u8::try_from(sequence % 251).unwrap(); 65536]),
+            payload: Bytes::from(vec![u8::try_from(sequence % 251).unwrap(); 65536]).into(),
         };
         file.write_all(&WALRecord::from_accepted(1, &entry).encode())
             .unwrap();
@@ -75,7 +75,7 @@ async fn replay_releases_superseded_accepts_while_scanning_half_a_gibibyte() {
         assert_eq!(record.slot, slot);
         assert_eq!(record.ballot, PxBallot::new(256, 7));
         assert_eq!(
-            record.payload,
+            record.payload.to_bytes(),
             vec![u8::try_from((8160 + slot) % 251).unwrap(); 65536]
         );
     }

@@ -18,9 +18,9 @@ void SharedPageCache::State::uncached(Request *request)
     misses.fetch_add(1, std::memory_order_relaxed);
     record_work(request->metadata, TreeWorkCounter::CacheMisses, 1,
                 request->priority == PageLoadPriority::Read ? TreeWorkCause::Read : TreeWorkCause::Flush);
-    const auto finish = [self = shared_from_this(), request, identity](Status                                status,
-                                                                       std::shared_ptr<const LeafBase>       leaf,
-                                                                       std::shared_ptr<const InnerPageState> inner) {
+    const auto finish = [self = shared_from_this(), allocation = request->allocation, request,
+                         identity](Status status, std::shared_ptr<const LeafBase> leaf,
+                                   std::shared_ptr<const InnerPageState> inner) {
         auto expected = identity << 1;
         if (!request->completion.compare_exchange_strong(expected, expected | 1, std::memory_order_acq_rel)) {
             return;

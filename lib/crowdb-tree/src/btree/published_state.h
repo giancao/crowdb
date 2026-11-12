@@ -539,6 +539,20 @@ class PublicationCoordinator
         return work_metrics_;
     }
 
+    [[nodiscard]] uint64_t flushes_since_persistent() const noexcept
+    {
+        return flushes_since_persistent_.load(std::memory_order_relaxed);
+    }
+
+    bool bind_flush_threshold(uint64_t threshold, void (*wake)(void *), void (*drop_context)(void *),
+                              void    *context) noexcept;
+    void note_ordinary_flush() noexcept;
+
+    void note_persistent_flush() noexcept
+    {
+        flushes_since_persistent_.store(0, std::memory_order_relaxed);
+    }
+
     // false means no ownership was taken (full/closed/already submitted).
     // The coordinator owner must outlive producers and terminal callbacks.
     // close() rejects subsequent entry; producers already in try_submit() may
@@ -607,17 +621,25 @@ class PublicationCoordinator
 
     std::array<std::atomic<uint64_t>, kMaintenanceSlots> maintenance_times_{};
     std::atomic<uint64_t>                                maintenance_scan_pid_{0};
-    const size_t                                         capacity_;
-    const uint64_t                                       identity_;
-    std::atomic<size_t>                                  queued_{0};
-    std::atomic<size_t>                                  ordinary_queued_{0};
-    std::atomic<bool>                                    checkpoint_completion_{false};
-    std::atomic<bool>                                    lane_prepared_{false};
-    std::atomic<bool>                                    closed_{false};
-    std::atomic<uint64_t>                                requested_gc_floor_{0};
-    std::atomic<bool>                                    running_{false};
-    std::atomic<PublicationRequest *>                    incoming_{nullptr};
-    std::atomic<Root *>                                  root_{nullptr};
+
+    std::atomic<uint64_t> flushes_since_persistent_{0};
+    std::atomic<uint64_t> flush_threshold_{0};
+    std::atomic_flag      flush_threshold_bound_;
+    void (*flush_threshold_wake_)(void *) = nullptr;
+    void (*flush_threshold_drop_)(void *) = nullptr;
+    void *flush_threshold_context_        = nullptr;
+
+    const size_t                      capacity_;
+    const uint64_t                    identity_;
+    std::atomic<size_t>               queued_{0};
+    std::atomic<size_t>               ordinary_queued_{0};
+    std::atomic<bool>                 checkpoint_completion_{false};
+    std::atomic<bool>                 lane_prepared_{false};
+    std::atomic<bool>                 closed_{false};
+    std::atomic<uint64_t>             requested_gc_floor_{0};
+    std::atomic<bool>                 running_{false};
+    std::atomic<PublicationRequest *> incoming_{nullptr};
+    std::atomic<Root *>               root_{nullptr};
     // Retired roots may still contain allocator-backed checkpoint sets when
     // epoch destruction drains them, so this resource must outlive the epoch.
     std::pmr::memory_resource *const       checkpoint_upstream_;

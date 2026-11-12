@@ -77,7 +77,7 @@ async fn learn_prefix(replica: &PxLocalReplica) {
                     slot,
                     ballot: PxBallot::new(0, 1),
                     term: 1,
-                    payload: Bytes::from(payload),
+                    payload: Bytes::from(payload).into(),
                 },
                 &[],
             )

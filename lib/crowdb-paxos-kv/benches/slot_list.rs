@@ -50,7 +50,7 @@ macro_rules! define_slot_node_churn_bench {
                                     slot: 7,
                                     ballot,
                                     term: ballot.round,
-                                    payload: bytes::Bytes::from_static(&[1, 2, 3]),
+                                    payload: bytes::Bytes::from_static(&[1, 2, 3]).into(),
                                 };
                                 accepted_ptr = node.cas_accepted(accepted_ptr, entry).unwrap();
                             }

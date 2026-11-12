@@ -7,7 +7,8 @@
 
 namespace crowdb::tree
 {
-Status SourceAdmission::Writer::prepare_write(Slice key, uint8_t flags, buffer value, Prepared *out)
+Status SourceAdmission::Writer::prepare_write(Slice key, uint8_t flags, buffer &&value, Prepared *out,
+                                              std::optional<AllocationLease> charge)
 try {
     if (!table_ || !credit_ || out == nullptr || out->table_) {
         return Status::invalid_argument("prepared write needs an admitted permit and empty output");
@@ -25,14 +26,13 @@ try {
         (remaining_.max_key_size != 0 && key.size() > remaining_.max_key_size)) {
         return Status::invalid_argument("prepared write exceeds its admitted footprint");
     }
-    const auto &options    = source_budget_->options();
-    const auto  cell_flags = split ? flags : cell.flags();
-    auto        prepared   = table_->prepare_write(key, std::move(value), cell_flags,
-                                                   AllocationLease(credit_, capacity, AllocationKind::kPayload), bound_,
-                                                   options.max_entries + options.max_gap_entries, credit_);
-    out->table_            = table_;
-    out->write_            = std::move(prepared);
-    out->footprint_        = {.entries = 1, .key_bytes = key.size(), .payload_bytes = capacity};
+    const auto cell_flags = split ? flags : cell.flags();
+    auto       prepared   = table_->prepare_write(
+        key, std::move(value), cell_flags,
+        charge ? std::move(*charge) : AllocationLease(credit_, capacity, AllocationKind::kPayload), bound_, credit_);
+    out->table_     = table_;
+    out->write_     = std::move(prepared);
+    out->footprint_ = {.entries = 1, .key_bytes = key.size(), .payload_bytes = capacity};
     ++planned_.entries;
     planned_.key_bytes += key.size();
     planned_.payload_bytes += capacity;

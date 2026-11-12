@@ -8,8 +8,8 @@
 //! before the local WAL persist completes) does not lose data:
 //!
 //! 1. **T1.1** — Kill the leader in the CAS→persist window: the
-//!    `test-util` `Notify` gate blocks `spawn_accept_persist`'s
-//!    background task before `wal.append`. The `put` returns `Chosen`
+//!    `test-util` `Notify` gate delays handing off the Accepted record
+//!    to the WAL writer. The `put` returns `Chosen`
 //!    (quorum + CAS done, persist deferred). Kill the leader — the
 //!    persist task is cancelled, no `Accepted` record on disk.
 //!    Survivors re-elect; the value is readable through them (Paxos-
@@ -18,7 +18,7 @@
 //!
 //! 2. **T1.2** — Persist failure while alive: the `Notify` gate blocks
 //!    the persist; the `put` returns `Chosen`. Set the WAL's `failed`
-//!    flag so the background `wal.append()` returns `Err("WAL disk
+//!    flag so the enqueue returns `Err("WAL disk
 //!    failed")` (error logged). The value is still chosen (Paxos-safe).
 //!    Clear the `failed` flag and run `repair_once_for_tests` — the
 //!    leader re-drives the slot, making the value durable.
@@ -36,6 +36,7 @@ use crowdb_paxos_kv::cluster::paxos_kv_server::PaxosKvServer;
 use crowdb_paxos_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crowdb_paxos_kv::common::config::{PxElectionConfig, WalConfig};
 use crowdb_paxos_kv::rpc::{KvGetRequest, KvSetRequest};
+use crowdb_paxos_kv::wal::record::RecordType;
 use crowdb_paxos_kv::wal::replay::replay_group;
 use crowdb_paxos_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
 use crowdb_paxos_kv_client::PaxosKvRpcTransport;
@@ -102,7 +103,7 @@ async fn build_wal_group(
     }
     group.set_election_config(cfg);
     // R16b: enable early-ack on every node. The leader defers its local
-    // WAL persist to a background task; followers persist normally.
+    // WAL persist to its writer; followers wait for their durable ack.
     group.set_wal_early_ack(true);
     let next_slot = group
         .local_replica()
@@ -323,7 +324,7 @@ async fn t1_1_kill_in_cas_persist_window_value_survives() {
         .expect("initial leader elected");
 
     // Install the persist gate on EVERY node so whichever replica is leader
-    // when the write lands has its `spawn_accept_persist` background task
+    // when the write lands has its Accepted record
     // blocked before `wal.append`. The gate only affects the leader's
     // deferred persist (followers use the sync `on_accept_persist` path);
     // installing it on followers is harmless. The test never releases the
@@ -412,6 +413,38 @@ async fn t1_1_kill_in_cas_persist_window_value_survives() {
     cluster.shutdown().await;
 }
 
+#[tokio::test]
+async fn early_ack_local_write_is_covered_by_following_wal_flush() {
+    let cluster = start_wal_cluster(&[1, 2, 3]).await;
+    let leader_id = cluster
+        .wait_for_leader(TEST_TIMEOUT)
+        .await
+        .expect("leader elected");
+    let leader = cluster.nodes.iter().find(|node| node.id == leader_id).unwrap();
+    let group = leader.store.get_group(GROUP).unwrap();
+    let replica = group.local_replica();
+    let value = b"early-ack flush ordering";
+    commit_one_write(&cluster, b"ordered-wal", value, 1).await;
+    let slot = replica.last_chosen_slot();
+    replica
+        .wal()
+        .unwrap()
+        .flush_all()
+        .await
+        .expect("flush leader WAL");
+
+    let backend = Arc::new(IoBackend::File);
+    let replay = replay_group(&backend, std::slice::from_ref(&leader.wal_dir), GROUP)
+        .await
+        .expect("read flushed records");
+    assert!(replay.records.iter().any(|record| {
+        record.slot == slot
+            && record.record_type == RecordType::Accepted
+            && record.payload.contiguous().unwrap().ends_with(value)
+    }));
+    cluster.shutdown().await;
+}
+
 // ── T1.2 ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -442,11 +475,11 @@ async fn t1_2_persist_failure_paxos_safe_and_repair_re_drives() {
     commit_one_write(&cluster, key, value, 1).await;
 
     // The value is Paxos-chosen. The leader's local persist is blocked.
-    // Set the WAL's `failed` flag so the background `wal.append()` will
+    // Set the WAL's `failed` flag so the WAL enqueue will
     // return `Err("WAL disk failed")` when released.
     failed_flag.store(true, Ordering::Release);
 
-    // Release the gate — the background task proceeds, `wal.append()`
+    // Release the gate — the test task proceeds, enqueue
     // fails, and the error is logged. The value is still chosen.
     persist_gate.notify_one();
 
