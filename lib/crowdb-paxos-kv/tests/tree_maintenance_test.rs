@@ -18,7 +18,9 @@ use crowdb_paxos_kv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 use crowdb_paxos_kv::wal::replay::replay_group;
 use crowdb_paxos_kv::wal::wal_engine::WalEngine;
 use crowdb_paxos_kv::wal::{IoBackend, MemBlockDevice, WalConfig};
-use crowdb_tree_ffi::{AsyncCrowdbtree, CtError, PageStore, SyncMode, TreeRuntime, TreeRuntimeOptions};
+use crowdb_tree_ffi::{
+    AsyncCrowdbtree, Crowdbtree, CtError, PageStore, SyncMode, TreeRuntime, TreeRuntimeOptions,
+};
 
 #[derive(Default)]
 struct Calls {
@@ -235,26 +237,15 @@ async fn native_automatic_flush_counts_toward_the_persistent_threshold() {
     drop(engine.flush_async().unwrap());
     assert!(!engine.flush_pending());
     let replica = shutdown_replica(Box::new(engine)).await;
-    for slot in 1_u64..=2 {
-        replica
-            .learn_chosen(
-                &PxLogEntry {
-                    slot,
-                    ballot: PxBallot::new(1, 1),
-                    term: 1,
-                    payload: encode_mutations(&[KvGroupMutation::Put {
-                        key: Bytes::copy_from_slice(&slot.to_be_bytes()),
-                        value: Bytes::from_static(b"value"),
-                    }])
-                    .into(),
-                },
-                &[],
-            )
-            .await;
-    }
-    tokio::time::timeout(std::time::Duration::from_secs(5), wake.notified())
-        .await
-        .expect("automatic flush must wake maintenance on the count threshold");
+    apply_two_memtables(&replica, &tree).await;
+    let notified = tokio::time::timeout(std::time::Duration::from_secs(5), wake.notified()).await;
+    assert!(
+        notified.is_ok(),
+        "automatic flush must wake maintenance on the count threshold; applied={} frozen={} flushes={}",
+        replica.contiguous_applied(),
+        tree.frozen_table_count(),
+        tree.flushes_since_persistent(),
+    );
     assert_eq!(tree.flushes_since_persistent(), 1);
     assert_eq!(tree.durable_coverage(), 0);
 
@@ -313,6 +304,39 @@ async fn native_automatic_flush_counts_toward_the_persistent_threshold() {
     assert_eq!(tree.flushes_since_persistent(), 1);
 }
 
+async fn apply_two_memtables(replica: &PxLocalReplica, tree: &Crowdbtree) {
+    use std::time::Duration;
+
+    for slot in 1_u64..=2 {
+        if slot == 2 {
+            // Rotation is asynchronous. A second write can otherwise join the
+            // first table before it freezes and leave just one table to flush.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while tree.frozen_table_count() == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("first write must freeze its memtable");
+        }
+        replica
+            .learn_chosen(
+                &PxLogEntry {
+                    slot,
+                    ballot: PxBallot::new(1, 1),
+                    term: 1,
+                    payload: encode_mutations(&[KvGroupMutation::Put {
+                        key: Bytes::copy_from_slice(&slot.to_be_bytes()),
+                        value: Bytes::from_static(b"value"),
+                    }])
+                    .into(),
+                },
+                &[],
+            )
+            .await;
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn rebuilt_group_keeps_the_native_flush_wake() {
     let mut config = CrowdbTreeConfig {
@@ -346,24 +370,7 @@ async fn rebuilt_group_keeps_the_native_flush_wake() {
     prior.tenure_cancel().cancel();
     rebuilt.start_engine_maintenance_loop().await;
 
-    for slot in 1_u64..=2 {
-        rebuilt
-            .local_replica()
-            .learn_chosen(
-                &PxLogEntry {
-                    slot,
-                    ballot: PxBallot::new(1, 1),
-                    term: 1,
-                    payload: encode_mutations(&[KvGroupMutation::Put {
-                        key: Bytes::copy_from_slice(&slot.to_be_bytes()),
-                        value: Bytes::from_static(b"value"),
-                    }])
-                    .into(),
-                },
-                &[],
-            )
-            .await;
-    }
+    apply_two_memtables(rebuilt.local_replica(), &tree).await;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while tree.durable_coverage() < 2 {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
