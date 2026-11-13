@@ -162,19 +162,18 @@ fn candidate_port(service: ServicePort, instance: u16, offset: u16) -> Result<u1
 /// filesystem errors. Returns `PortAllocError::Overflow` if the
 /// computed port overflows `u16`.
 pub fn alloc_port(service: ServicePort, instance: u16, cfg: &PortAllocConfig) -> Result<u16, PortAllocError> {
-    let path = cfg.claim_path();
-    let mut file = lock_claim_file(&path)?;
-    alloc_port_locked(service, instance, cfg.offset, &mut file)
+    alloc_port_with_probe(service, instance, cfg, is_port_free)
 }
 
-/// Inner allocation logic assuming the claim file is already locked.
-fn alloc_port_locked(
+fn alloc_port_with_probe(
     service: ServicePort,
     start_instance: u16,
-    offset: u16,
-    file: &mut File,
+    cfg: &PortAllocConfig,
+    probe: impl Fn(u16) -> bool,
 ) -> Result<u16, PortAllocError> {
-    let mut claims = read_claims(file);
+    let mut file = lock_claim_file(&cfg.claim_path())?;
+    let mut claims = read_claims(&mut file);
+    let offset = cfg.offset;
     let range_size = service.range_size();
 
     for i in start_instance..range_size {
@@ -182,11 +181,11 @@ fn alloc_port_locked(
         if claims.contains(&port) {
             continue;
         }
-        if !is_port_free(port) {
+        if !probe(port) {
             continue;
         }
         claims.insert(port);
-        write_claims(file, &claims)?;
+        write_claims(&mut file, &claims)?;
         return Ok(port);
     }
 
@@ -211,24 +210,22 @@ pub fn alloc_port_range(
     count: u16,
     cfg: &PortAllocConfig,
 ) -> Result<Vec<u16>, PortAllocError> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let path = cfg.claim_path();
-    let mut file = lock_claim_file(&path)?;
-    alloc_port_range_locked(service, start_instance, count, cfg.offset, &mut file)
+    alloc_port_range_with_probe(service, start_instance, count, cfg, is_port_free)
 }
 
-/// Inner range allocation logic assuming the claim file is already
-/// locked.
-fn alloc_port_range_locked(
+fn alloc_port_range_with_probe(
     service: ServicePort,
     start_instance: u16,
     count: u16,
-    offset: u16,
-    file: &mut File,
+    cfg: &PortAllocConfig,
+    probe: impl Fn(u16) -> bool,
 ) -> Result<Vec<u16>, PortAllocError> {
-    let mut claims = read_claims(file);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = lock_claim_file(&cfg.claim_path())?;
+    let mut claims = read_claims(&mut file);
+    let offset = cfg.offset;
     let range_size = service.range_size();
 
     for start in start_instance..=(range_size.saturating_sub(count)) {
@@ -237,13 +234,13 @@ fn alloc_port_range_locked(
             .collect();
         let ports = ports?;
 
-        let all_free = ports.iter().all(|p| !claims.contains(p) && is_port_free(*p));
+        let all_free = ports.iter().all(|p| !claims.contains(p) && probe(*p));
 
         if all_free {
             for p in &ports {
                 claims.insert(*p);
             }
-            write_claims(file, &claims)?;
+            write_claims(&mut file, &claims)?;
             return Ok(ports);
         }
     }
@@ -371,34 +368,35 @@ mod tests {
             .join("port-allocator-tests")
             .join(format!("{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        // Place the initial Paxos-KV and DiskDB probes between the
-        // CrowDB service ranges and the default Linux ephemeral range.
-        // Each test shifts its initial ports by 32.
-        let offset = 17_065 + u16::try_from(id).unwrap() * 32;
-        PortAllocConfig::new(&dir).with_offset(offset)
+        PortAllocConfig::new(dir)
     }
 
     fn cleanup(cfg: &PortAllocConfig) {
         let _ = fs::remove_dir_all(&cfg.root);
     }
 
+    fn allocate(service: ServicePort, instance: u16, cfg: &PortAllocConfig) -> u16 {
+        alloc_port_with_probe(service, instance, cfg, |_| true).unwrap()
+    }
+
     #[test]
     fn alloc_single_port() {
         let cfg = unique_cfg();
-        let base = ServicePort::PaxosKvServerMgmt.base() + cfg.offset;
-        let port = alloc_port(ServicePort::PaxosKvServerMgmt, 0, &cfg).unwrap();
+        let service = ServicePort::PaxosKvServerMgmt;
+        let base = service.base();
+        let port = allocate(service, 0, &cfg);
         assert_eq!(port, base);
-        let claimed = read_claimed_ports(&cfg).unwrap();
-        assert!(claimed.contains(&port));
+        assert_eq!(read_claimed_ports(&cfg).unwrap(), HashSet::from([base]));
         cleanup(&cfg);
     }
 
     #[test]
     fn alloc_second_instance() {
         let cfg = unique_cfg();
-        let base = ServicePort::PaxosKvServerMgmt.base() + cfg.offset;
-        let p0 = alloc_port(ServicePort::PaxosKvServerMgmt, 0, &cfg).unwrap();
-        let p1 = alloc_port(ServicePort::PaxosKvServerMgmt, 1, &cfg).unwrap();
+        let service = ServicePort::PaxosKvServerMgmt;
+        let base = service.base();
+        let p0 = allocate(service, 0, &cfg);
+        let p1 = allocate(service, 1, &cfg);
         assert_eq!(p0, base);
         assert_eq!(p1, base + 1);
         cleanup(&cfg);
@@ -407,30 +405,44 @@ mod tests {
     #[test]
     fn alloc_skips_claimed() {
         let cfg = unique_cfg();
-        let base = ServicePort::PaxosKvServerMgmt.base() + cfg.offset;
-        let p0 = alloc_port(ServicePort::PaxosKvServerMgmt, 0, &cfg).unwrap();
+        let service = ServicePort::PaxosKvServerMgmt;
+        let base = service.base();
+        let p0 = allocate(service, 0, &cfg);
         assert_eq!(p0, base);
-        // Allocating instance 0 again should skip to instance 1.
-        let p1 = alloc_port(ServicePort::PaxosKvServerMgmt, 0, &cfg).unwrap();
+        let p1 = allocate(service, 0, &cfg);
         assert_eq!(p1, base + 1);
         cleanup(&cfg);
+    }
+
+    #[test]
+    fn alloc_skips_unavailable_port() {
+        let cfg = unique_cfg();
+        let service = ServicePort::PaxosKvServerMgmt;
+        let base = service.base();
+        let port = alloc_port_with_probe(service, 0, &cfg, |port| port != base).unwrap();
+        assert_eq!(port, base + 1);
+        assert_eq!(read_claimed_ports(&cfg).unwrap(), HashSet::from([port]));
+        cleanup(&cfg);
+    }
+
+    #[test]
+    fn probe_rejects_listening_socket() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        assert!(!is_port_free(listener.local_addr().unwrap().port()));
     }
 
     #[test]
     fn alloc_range() {
         let cfg = unique_cfg();
         let service = ServicePort::PaxosKvServerRpc;
-        let base = service.base() + cfg.offset;
+        let base = service.base();
         mark_failed(base + 1, &cfg).unwrap();
-        let ports = alloc_port_range(service, 0, 3, &cfg).unwrap();
-        assert_eq!(ports.len(), 3);
-        assert!(ports[0] >= base + 2);
-        assert!(ports[2] < base + service.range_size());
-        assert!(ports.windows(2).all(|pair| pair[1] == pair[0] + 1));
-        let claimed = read_claimed_ports(&cfg).unwrap();
-        for p in &ports {
-            assert!(claimed.contains(p));
-        }
+        let ports = alloc_port_range_with_probe(service, 0, 3, &cfg, |port| port != base + 3).unwrap();
+        assert_eq!(ports, [base + 4, base + 5, base + 6]);
+        assert_eq!(
+            read_claimed_ports(&cfg).unwrap(),
+            HashSet::from([base + 1, base + 4, base + 5, base + 6]),
+        );
         cleanup(&cfg);
     }
 
@@ -445,17 +457,18 @@ mod tests {
     #[test]
     fn mark_failed_skips_port() {
         let cfg = unique_cfg();
-        let base = ServicePort::PaxosKvServerMgmt.base() + cfg.offset;
+        let service = ServicePort::PaxosKvServerMgmt;
+        let base = service.base();
         mark_failed(base, &cfg).unwrap();
-        let port = alloc_port(ServicePort::PaxosKvServerMgmt, 0, &cfg).unwrap();
-        assert_ne!(port, base, "failed port must be skipped");
+        let port = allocate(service, 0, &cfg);
+        assert_eq!(port, base + 1);
         cleanup(&cfg);
     }
 
     #[test]
     fn reset_claims_clears() {
         let cfg = unique_cfg();
-        alloc_port(ServicePort::PaxosKvServerMgmt, 0, &cfg).unwrap();
+        allocate(ServicePort::PaxosKvServerMgmt, 0, &cfg);
         let claimed = read_claimed_ports(&cfg).unwrap();
         assert!(!claimed.is_empty());
         reset_claims(&cfg).unwrap();
@@ -466,21 +479,20 @@ mod tests {
 
     #[test]
     fn offset_shifts_base() {
-        let base_cfg = unique_cfg();
-        let extra = 50;
-        let base_offset = base_cfg.offset;
-        let cfg = base_cfg.with_offset(base_offset + extra);
-        let port = alloc_port(ServicePort::PaxosKvServerMgmt, 0, &cfg).unwrap();
-        assert_eq!(port, ServicePort::PaxosKvServerMgmt.base() + base_offset + extra);
+        let offset = 50;
+        let cfg = unique_cfg().with_offset(offset);
+        let service = ServicePort::PaxosKvServerMgmt;
+        let port = allocate(service, 0, &cfg);
+        assert_eq!(port, service.base() + offset);
         cleanup(&cfg);
     }
 
     #[test]
     fn different_services_do_not_collide() {
         let cfg = unique_cfg();
-        let kv_mgmt = alloc_port(ServicePort::PaxosKvServerMgmt, 0, &cfg).unwrap();
-        let kv_listen = alloc_port(ServicePort::PaxosKvServerRpc, 0, &cfg).unwrap();
-        let diskdb = alloc_port(ServicePort::DiskdbRpc, 0, &cfg).unwrap();
+        let kv_mgmt = allocate(ServicePort::PaxosKvServerMgmt, 0, &cfg);
+        let kv_listen = allocate(ServicePort::PaxosKvServerRpc, 0, &cfg);
+        let diskdb = allocate(ServicePort::DiskdbRpc, 0, &cfg);
         assert_ne!(kv_mgmt, kv_listen);
         assert_ne!(kv_mgmt, diskdb);
         assert_ne!(kv_listen, diskdb);
