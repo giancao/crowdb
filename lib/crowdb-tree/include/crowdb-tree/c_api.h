@@ -154,9 +154,8 @@ using ct_tree_summary = struct
 
 // Page store selection for durable storage.
 enum ct_page_store_kind : uint8_t {
-    CT_PAGE_STORE_DISK_TEXT = 0, // PageDiskTextStore (file-based, no alignment)
-    CT_PAGE_STORE_DISK      = 1, // PageDiskStore (block device, 4K aligned, O_DIRECT)
-    CT_PAGE_STORE_MEM       = 2, // PageMemStore (in-memory block device, no alignment)
+    CT_PAGE_STORE_DISK = 0, // PageDiskStore (block device, 4K aligned, O_DIRECT)
+    CT_PAGE_STORE_MEM  = 1, // PageMemStore (in-memory block device, no alignment)
 };
 
 // Durability barrier policy.
@@ -179,14 +178,14 @@ struct ct_options
     size_t                  range_start_len;
     const uint8_t          *range_end; // null = maximum-unbounded; exclusive when present
     size_t                  range_end_len;
-    const char             *path;              // durable file path; null/empty => in-memory
-    uint32_t                iu_size;           // 0 => default (1 for mem, 4096 for file)
+    const char             *path;              // durable block directory; null/empty => in-memory
+    uint32_t                iu_size;           // 0 => default (1 for mem, 4096 for disk)
     uint32_t                frame_bytes;       // 0 => default
     uint64_t                buffer_pool_bytes; // 0 => default
     uint8_t                 compression;       // 0 = none, 1 = lz4
     uint64_t                max_inline_value;  // 0 => default (frame_bytes/4)
     enum ct_page_store_kind page_store_kind;   // default CT_PAGE_STORE_DISK; ignored for in-memory
-    uint64_t                block_size;        // 0 => default 64 MiB; ignored for file/mem-block
+    uint64_t                block_size;        // 0 => default 64 MiB; ignored for mem
     uint32_t                store_id;          // default 0; block file naming
     uint32_t                group_id;          // default 0; maps to PxGroupId in CrowdbKV
     enum ct_sync_mode       sync_mode;         // default CT_SYNC_FULL

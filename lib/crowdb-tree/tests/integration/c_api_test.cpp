@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -30,7 +31,6 @@
 
 #    include <cerrno>
 #    include <cstddef>
-#    include <filesystem>
 #    include <memory>
 #    include <thread>
 #endif
@@ -311,7 +311,7 @@ TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
     ct_close(t);
 }
 
-TEST(CApi, FileCheckpointReopen)
+TEST(CApi, DefaultDiskCheckpointReopen)
 {
     crowdb::tree_test::TempDir tmp("capi_");
     ASSERT_FALSE(tmp.path.empty());
@@ -319,10 +319,8 @@ TEST(CApi, FileCheckpointReopen)
 
     ct_options opt  = {};
     opt.path        = path.c_str();
-    opt.iu_size     = 1;
     opt.frame_bytes = 4096;
     opt.compression = 1; // lz4 (falls back to stored-raw if unavailable)
-    // Default page store is CT_PAGE_STORE_DISK_TEXT (file-based page store)
 
     std::map<std::string, std::string> oracle;
     {
@@ -338,6 +336,7 @@ TEST(CApi, FileCheckpointReopen)
         EXPECT_EQ(durable, 50U);
         ct_close(t);
     }
+    ASSERT_TRUE(std::filesystem::is_regular_file(std::filesystem::path(path) / "0-0.blk-0000"));
     {
         ct_tree *t = nullptr;
         ASSERT_EQ(ct_open(&opt, &t), 0);
@@ -356,9 +355,7 @@ TEST(CApi, FileCheckpointReopen)
     }
 }
 
-// plan-tree #22: ct_options.page_store_kind=CT_PAGE_STORE_DISK selects PageDiskStore
-// instead of the default file-based page store -- same round-trip as
-// FileCheckpointReopen above, just through the block-device page store.
+// Explicit disk selection also supports smaller blocks for testing.
 TEST(CApi, BlockDeviceCheckpointReopen)
 {
     crowdb::tree_test::TempDir tmp("capi_");

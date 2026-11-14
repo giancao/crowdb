@@ -69,11 +69,9 @@ pub enum Compression {
 /// Ignored when `Config::path` is `None` (in-memory).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PageStoreKind {
-    /// File-based page store, no alignment.
-    #[default]
-    DiskText,
     /// Block device: 4K aligned, `O_DIRECT` for a real SSD/SCM
     /// deployment target.
+    #[default]
     Disk,
     /// Mem block device: in-memory, no alignment.
     Mem,

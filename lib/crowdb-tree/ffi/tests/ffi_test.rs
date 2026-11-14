@@ -801,11 +801,32 @@ fn mem_apply_batch_multi_key_and_dup_last_wins() {
 }
 
 #[test]
-fn file_snapshot_reopen_smoke() {
+fn explicit_mem_store_keeps_path_volatile() {
     let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
     let opt = Config {
         path: Some(dir.path().to_string_lossy().into_owned()),
-        iu_size: 1,
+        page_store_kind: PageStoreKind::Mem,
+        ..Default::default()
+    };
+
+    {
+        let t = open_tree(&opt).unwrap();
+        t.apply_put(1, b"key", b"value").unwrap();
+        t.flush().unwrap();
+        assert_eq!(t.flush_with_persistent().unwrap(), 1);
+        assert_eq!(t.get(b"key").unwrap(), Some((1, b"value".to_vec())));
+    }
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    let t = open_tree(&opt).unwrap();
+    assert_eq!(t.last_applied_slot(), 0);
+    assert_eq!(t.get(b"key").unwrap(), None);
+}
+
+#[test]
+fn default_disk_snapshot_reopen_smoke() {
+    let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
+    let opt = Config {
+        path: Some(dir.path().to_string_lossy().into_owned()),
         frame_bytes: 4096,
         ..Default::default()
     };
@@ -820,7 +841,8 @@ fn file_snapshot_reopen_smoke() {
         let durable = t.flush_with_persistent().unwrap();
         assert_eq!(durable, 50);
     }
-    // Reopen the same file and verify recovery.
+    assert!(dir.path().join("0-0.blk-0000").is_file());
+    // Reopen the same block directory and verify recovery.
     let t = open_tree(&opt).unwrap();
     assert_eq!(t.last_applied_slot(), 50);
     for i in 0..50usize {
@@ -831,10 +853,7 @@ fn file_snapshot_reopen_smoke() {
     }
 }
 
-// : Config::page_store_kind = PageStoreKind::Disk selects
-// PageDiskStore instead of the default file-based page store -- same
-// round-trip as file_snapshot_reopen_smoke above, just through the
-// block-device page store.
+// Explicit disk selection and IU size retain the same recovery behavior.
 #[test]
 fn block_device_snapshot_reopen_smoke() {
     let dir = crowdb_test_harness::test_dirs::tempdir_in_test_data("tree-ffi");
@@ -856,7 +875,7 @@ fn block_device_snapshot_reopen_smoke() {
         let durable = t.flush_with_persistent().unwrap();
         assert_eq!(durable, 50);
     }
-    // Reopen the same file and verify recovery.
+    // Reopen the same block directory and verify recovery.
     let t = open_tree(&opt).unwrap();
     assert_eq!(t.last_applied_slot(), 50);
     for i in 0..50usize {

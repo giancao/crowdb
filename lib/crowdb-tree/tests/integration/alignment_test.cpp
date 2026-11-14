@@ -1,8 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-// PT9: IU block alignment (9.1-9.3) + debug store/codec on real frames (9.5).
-#include "crowdb-tree/btree/debug_codec.h"
+// IU block alignment and byte-transparent store round-trips on real frames.
 #include "crowdb-tree/crowdb-tree.h"
 #include "crowdb-tree/page_store/page_store.h"
 

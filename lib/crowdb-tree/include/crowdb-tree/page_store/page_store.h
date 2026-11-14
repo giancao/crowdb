@@ -116,7 +116,7 @@ class PageStore
     }
 
     // Block size for array-of-blocks page stores (PageDiskStore::open_blocks).
-    // 0 for single-medium / PageDiskTextStore — no block-level compaction.
+    // 0 for single-medium stores without block-level compaction.
     [[nodiscard]] virtual uint64_t block_size() const
     {
         return 0;
@@ -277,11 +277,8 @@ class PageMemStore : public PageStore
     uint32_t              iu_size_;
 };
 
-// Debug wrapper (PT9-B): a byte-transparent pass-through over an inner store
-// with iu forced to 1 (byte-addressable, variable-length extents). It exposes
-// hooks for rendering page frames as readable text (see debug_codec.h) without
-// changing the on-disk byte layout, so an engine opened on it round-trips
-// identically. Useful for inspecting / diffing durable state in tests.
+// Byte-transparent test wrapper with iu forced to 1 (byte-addressable,
+// variable-length extents). Counts writes without changing the encoded bytes.
 class DebugPageStore : public PageStore
 {
   public:

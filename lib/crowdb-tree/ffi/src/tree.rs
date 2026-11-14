@@ -365,9 +365,8 @@ impl Crowdbtree {
             compression: u8::from(opt.compression_lz4),
             max_inline_value: opt.max_inline_value,
             page_store_kind: match opt.page_store_kind {
-                PageStoreKind::DiskText => 0,
-                PageStoreKind::Disk => 1,
-                PageStoreKind::Mem => 2,
+                PageStoreKind::Disk => 0,
+                PageStoreKind::Mem => 1,
             },
             block_size: opt.block_size,
             store_id: opt.store_id,

@@ -20,7 +20,6 @@
 #include "crowdb-tree/crowdb-tree.h"
 #include "crowdb-tree/page_store/async_page_store.h"
 #include "crowdb-tree/page_store/page_disk_store.h"
-#include "crowdb-tree/page_store/page_disk_text_store.h"
 #include "crowdb-tree/page_store/page_store.h"
 #include "crowdb-tree/page_store/page_store_release_service.h"
 #include "crowdb-tree/page_store_release_c_api.h"
@@ -502,9 +501,6 @@ try {
         if (!durable || opt->page_store_kind == CT_PAGE_STORE_MEM) {
             o.page_store_label = "mem";
         }
-        else if (opt->page_store_kind == CT_PAGE_STORE_DISK_TEXT) {
-            o.page_store_label = "file";
-        }
         else {
             o.page_store_label = "block";
         }
@@ -570,25 +566,6 @@ try {
         }
         bs->set_sync_mode(sm);
         h->store_bundle->store = std::move(bs);
-        o.page_store           = h->store_bundle->store.get();
-        std::unique_ptr<Crowdbtree> t;
-        Status                      os = Crowdbtree::open(o, &t);
-        if (!os.ok()) {
-            return to_status(os);
-        }
-        h->tree = std::move(t);
-    }
-    else if (opt->page_store_kind == CT_PAGE_STORE_DISK_TEXT) {
-        // File page store: file-based page store, no alignment
-        uint32_t                           store_id = opt->store_id;
-        uint32_t                           group_id = opt->group_id;
-        std::unique_ptr<PageDiskTextStore> ts;
-        Status                             s = PageDiskTextStore::open(opt->path, store_id, group_id, &ts);
-        if (!s.ok()) {
-            return to_status(s);
-        }
-        ts->set_sync_mode(sm);
-        h->store_bundle->store = std::move(ts);
         o.page_store           = h->store_bundle->store.get();
         std::unique_ptr<Crowdbtree> t;
         Status                      os = Crowdbtree::open(o, &t);
@@ -758,8 +735,7 @@ ct_status ct_close_async(ct_tree *tree, void (*complete)(void *, ct_status), voi
     }
     auto *store = c_api_page_store(tree);
     auto *block = dynamic_cast<PageDiskStore *>(store);
-    if (dynamic_cast<PageDiskTextStore *>(store) != nullptr ||
-        (block != nullptr && block->release_service() && !block->release_service()->externally_driven())) {
+    if (block != nullptr && block->release_service() && !block->release_service()->externally_driven()) {
         return static_cast<ct_status>(Code::kNotSupported);
     }
     tree->close_complete = complete;

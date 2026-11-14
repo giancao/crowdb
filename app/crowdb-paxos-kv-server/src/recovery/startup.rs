@@ -98,9 +98,7 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
 }
 
 /// Durable per-group crowdb-tree directory path: `{data_root}/store{store_id}/group{group_id}`.
-/// Both `PageDiskTextStore` and `PageDiskStore` expect a directory path (`PageDiskTextStore` creates a subdirectory
-/// `{path}/{store_id}-{group_id}/`, `PageDiskStore` creates `.blk-*` files
-/// directly in `path`).
+/// `PageDiskStore` creates `{store_id}-{group_id}.blk-*` files directly in this directory.
 #[must_use]
 pub fn store_crowdb_tree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
     data_root
