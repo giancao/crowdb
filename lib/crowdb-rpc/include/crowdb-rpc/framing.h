@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <vector>
 
 namespace crowdb::rpc
@@ -41,12 +42,25 @@ struct Header
     uint8_t  flags      = 0;
 };
 
-// A complete frame: header + extracted control fields + optional data
-// buffer. The parser extracts request_id + rpc_create_nano from the
-// flatbuffer control message during parse and discards
-// the control bytes. Data is read into a pool-allocated, ref-counted
-// Buffer. The handler/callback that receives a Frame* must delete it
-// when done (destructor releases data_buf to the pool).
+// Direct socket reads overwrite the resized control bytes. The parser
+// publishes the frame only after it has filled the entire control.
+template <class T> struct ControlByteAllocator : std::allocator<T>
+{
+    template <class U> struct rebind
+    {
+        using other = ControlByteAllocator<U>;
+    };
+
+    void construct(T *location) noexcept
+    {
+        ::new (static_cast<void *>(location)) T;
+    }
+};
+
+using ControlBytes = std::vector<uint8_t, ControlByteAllocator<uint8_t>>;
+
+// A complete frame owns the control bytes and any pool-allocated data.
+// The handler that receives a Frame* deletes it when done.
 struct Frame
 {
     Header   header;
@@ -66,16 +80,11 @@ struct Frame
     std::shared_ptr<void> control_owner;
     // Asynchronous FFI handlers retain their connection through Frame release.
     std::shared_ptr<Connection> connection_owner;
-    std::vector<uint8_t>        control;
+    uint64_t                    tcp_request_cache_bytes       = 0;
+    bool                        release_admission_on_delivery = false;
+    ControlBytes                control;
 
-    ~Frame()
-    {
-        if (release_callback != nullptr)
-            release_callback(release_context, data_buf);
-        if (data_buf != nullptr) {
-            data_buf->release();
-        }
-    }
+    ~Frame();
 };
 
 enum class FramingError {
@@ -105,9 +114,8 @@ void extract_control_fields(const uint8_t *control, uint32_t len, uint64_t &out_
 // next* — directly into pool-allocated Buffers. This unifies the TCP and
 // RDMA receive paths.
 //
-// Control fields (request_id, rpc_create_nano) are
-// extracted during parse and the control bytes are discarded. Data is
-// read into a pool-allocated Buffer. No malloc per frame.
+// The parser extracts routing fields from the completed control and retains
+// its bytes in the frame. Data is read into a pool-allocated Buffer.
 //
 // Usage in the read loop:
 //   target = parser.next_read_target();
@@ -147,6 +155,11 @@ class FrameParser
         return state_;
     }
 
+    [[nodiscard]] uint32_t control_remaining() const
+    {
+        return state_ == ParseState::ReadingControl ? header_.msg_size - control_offset_ : 0;
+    }
+
     // Where to read next. len == 0 means no more bytes needed right now.
     ReadTarget next_read_target();
 
@@ -170,12 +183,11 @@ class FrameParser
             if (state_ == ParseState::ReadingData) {
                 break;
             }
-            auto target = next_read_target();
+            const auto target = next_read_target();
             if (target.len == 0) {
                 break;
             }
-            uint32_t to_copy = target.len;
-            to_copy          = std::min(to_copy, len - consumed);
+            const auto to_copy = std::min(target.len, len - consumed);
             std::memcpy(target.ptr, data + consumed, to_copy);
             consumed += to_copy;
             Frame *frame = advance(to_copy);
@@ -203,13 +215,8 @@ class FrameParser
     uint8_t  header_buf_[HEADER_SIZE];
     uint32_t header_offset_ = 0;
 
-    // Control: reused across frames (resized to msg_size).
-    std::vector<uint8_t> control_buf_;
-    uint32_t             control_offset_ = 0;
-
-    // Data: pool-allocated Buffer (replaces malloc'd data_).
-    Buffer  *data_buf_    = nullptr;
-    uint32_t data_offset_ = 0;
+    uint32_t control_offset_ = 0;
+    uint32_t data_offset_    = 0;
 
     // Pool for data allocation.
     BufferPool *pool_ = nullptr;
@@ -219,8 +226,8 @@ class FrameParser
     uint64_t parsed_rpc_create_nano_      = 0;
     uint64_t parsed_response_create_nano_ = 0;
 
-    // The completed frame (returned by advance, owned by the caller).
-    Frame *frame_ = nullptr;
+    // Owns partial control and pool data until advance yields a complete frame.
+    std::unique_ptr<Frame> frame_;
 
     // Validate the parsed header; returns FramingError::None if ok.
     [[nodiscard]] FramingError validate_header() const;

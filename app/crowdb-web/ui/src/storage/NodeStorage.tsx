@@ -169,7 +169,10 @@ export function NodeStorage({ nodeId, rackId, active, readonly, ready, inventory
         if (state.removed) setFocusTarget('candidates');
         if (selectedEntity?.type === 'Disk' && selectedEntity.id === state.disk_id) inspectEntity({ ...selectedEntity });
         confirmed.confirm(managing.group, state);
-        void loadGroup(nodeId, managing.group, true); void removed.refresh(undefined, true); void model.refresh();
+        void loadGroup(nodeId, managing.group, true);
+        if (action === 'rejoin') void removed.refreshAfterRejoin(managing.group, state.disk_id);
+        else void removed.refresh(undefined, true);
+        void model.refresh();
       }} />}
     {joining && <JoinCandidatesDialog nodeId={nodeId} disks={candidates} groups={inventory?.diskGroups ?? []} onClose={() => setJoining(false)} onAccepted={supplied.accept} />}
     {creating && <CreateFileDiskDialog nodeId={nodeId} groups={inventory?.diskGroups ?? []} groupId={recommendedGroup} available={available} onClose={() => setCreating(false)} onAccepted={model.accept} />}

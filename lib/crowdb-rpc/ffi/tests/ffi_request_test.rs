@@ -88,6 +88,217 @@ fn test_ping_control(id: u64, tag: u64) -> Buffer {
     Buffer::from_bytes(builder.finished_data())
 }
 
+#[tokio::test]
+async fn retained_connection_dispatches_same_id_in_both_directions() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const REGISTER: u16 = 32010;
+    const REQUEST: u16 = 32011;
+    const RESPONSE: u16 = 32012;
+    const HOLD: u16 = 32013;
+    let listener = Arc::new(RpcServer::new(None));
+    let dialer = Arc::new(RpcServer::new(None));
+    let listener_client = RpcClient::new();
+    let dialer_client = RpcClient::new();
+    listener.set_request_client(&listener_client);
+    dialer.set_request_client(&dialer_client);
+    listener.listen("127.0.0.1", 0).unwrap();
+    let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
+    listener.register_owned_handler(REGISTER, move |request| {
+        let connection = request.retain_connection().unwrap();
+        drop(request);
+        accepted_tx.send(connection).unwrap();
+    });
+    let (hold_tx, mut hold_rx) = tokio::sync::mpsc::unbounded_channel();
+    dialer.register_owned_handler(HOLD, move |request| hold_tx.send(request).unwrap());
+    for server in [&listener, &dialer] {
+        server.register_owned_handler(REQUEST, move |request| {
+            let control = Buffer::from_bytes(request.control());
+            request.reply(control, None, RESPONSE).unwrap();
+        });
+        server.start();
+    }
+    let outgoing = dialer
+        .connect_for_requests("127.0.0.1", listener.port())
+        .await
+        .unwrap();
+    dialer_client
+        .send_one_way(&dialer, &outgoing, 1, test_ping_control(1, 0), None, REGISTER)
+        .unwrap();
+    let accepted = timeout(Duration::from_secs(3), accepted_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let forward = dialer_client
+        .call(&dialer, &outgoing, 2, test_ping_control(2, 3), None, REQUEST)
+        .unwrap();
+    let reverse = listener_client
+        .call(&listener, &accepted, 2, test_ping_control(2, 4), None, REQUEST)
+        .unwrap();
+    let (forward, reverse) = timeout(Duration::from_secs(3), async { tokio::join!(forward, reverse) })
+        .await
+        .unwrap();
+    assert_eq!(
+        forward.unwrap().control.unwrap().as_slice(),
+        test_ping_control(2, 3).as_slice()
+    );
+    assert_eq!(
+        reverse.unwrap().control.unwrap().as_slice(),
+        test_ping_control(2, 4).as_slice()
+    );
+
+    let pending = listener_client
+        .call(&listener, &accepted, 3, test_ping_control(3, 5), None, HOLD)
+        .unwrap();
+    let held = timeout(Duration::from_secs(3), hold_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    outgoing.close();
+    assert!(matches!(
+        timeout(Duration::from_secs(3), pending).await.unwrap(),
+        Err(crowdb_rpc_ffi::RpcError::ConnectionClosed)
+    ));
+    drop(held);
+    dialer.stop();
+    listener.stop();
+}
+
+#[tokio::test]
+async fn rdma_owned_reply_returns_request_cache_while_payload_stays_live() {
+    if std::env::var_os("CROWDB_RDMA_E2E").is_none() {
+        return;
+    }
+    use crowdb_rpc_ffi::{RdmaConfig, RdmaWireLayout};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const SIZE: usize = 96 * 1024;
+    const REQUEST_TYPE: u16 = 310;
+    let address = std::env::var("CROWDB_RDMA_E2E_LISTEN_ADDR").unwrap();
+    let config = RdmaConfig {
+        enabled: true,
+        allow_tcp_fallback: false,
+        listen_enabled: true,
+        device: std::env::var("CROWDB_RDMA_DEVICE").unwrap_or_default(),
+        source_address: address.clone(),
+        sq_depth: 4,
+        rq_depth: 4,
+        posted_receive_target: 4,
+        cq_depth: 16,
+        wire_layout: RdmaWireLayout::ControlData,
+        wire_slot_capacity: 64 * 1024,
+        max_control_message_bytes: SIZE as u32,
+        control_receive_budget_bytes: SIZE as u64,
+        control_send_budget_bytes: 2 * SIZE as u64,
+        ..RdmaConfig::default()
+    };
+    let server = Arc::new(RpcServer::new(None));
+    server.configure_rdma(&config).unwrap();
+    server.listen(&address, 0).unwrap();
+    let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    server.register_owned_handler(REQUEST_TYPE, move |mut request| {
+        let address = request.control().as_ptr();
+        let payload = request.take_control_bytes().unwrap();
+        assert_eq!(payload.as_ptr(), address);
+        let allocation = Buffer::control_allocation(&payload).unwrap();
+        assert_eq!(allocation.parts().2, SIZE);
+        tx.send((request, payload)).unwrap();
+    });
+    server.start();
+
+    let outgoing = RpcServer::new(None);
+    outgoing
+        .configure_rdma(&RdmaConfig {
+            listen_enabled: false,
+            ..config
+        })
+        .unwrap();
+    outgoing.start();
+    let connection = outgoing.connect(&address, server.port()).unwrap();
+    assert!(connection.is_rdma());
+    let client = RpcClient::new();
+    client.attach(&connection);
+    let encoded = |id| {
+        let mut bytes = test_ping_control(id, 0).as_slice().to_vec();
+        bytes.resize(SIZE, 0);
+        bytes[SIZE - 1] = u8::try_from(id).unwrap();
+        Buffer::from_vec(bytes)
+    };
+    let first = client
+        .call(&outgoing, &connection, 1, encoded(1), None, REQUEST_TYPE)
+        .unwrap();
+    let (first_request, held) = timeout(Duration::from_secs(3), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = client
+        .call(&outgoing, &connection, 2, encoded(2), None, REQUEST_TYPE)
+        .unwrap();
+    assert!(timeout(Duration::from_millis(50), requests.recv()).await.is_err());
+    let sent: serde_json::Value = serde_json::from_slice(&outgoing.transport_status_json().unwrap()).unwrap();
+    assert_eq!(sent["rdma"]["control_fragments_sent"], 4);
+    assert_eq!(sent["rdma"]["copied_control_send_bytes"], 2 * SIZE);
+    assert_eq!(sent["rdma"]["control_send_bytes"], 0);
+    let incoming: serde_json::Value =
+        serde_json::from_slice(&server.transport_status_json().unwrap()).unwrap();
+    assert_eq!(incoming["connections"][0]["request_cache"]["bytes"], SIZE);
+    assert!(
+        incoming["connections"][0]["request_cache"]["stalls"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+
+    let response_type = FBMsgType::EConnectionPingResponse.0 as u16;
+    first_request.reply(encoded(1), None, response_type).unwrap();
+    let first_response = timeout(Duration::from_secs(3), first).await.unwrap().unwrap();
+    assert_eq!(first_response.control.unwrap().as_slice()[SIZE - 1], 1);
+    let (second_request, second_payload) = timeout(Duration::from_secs(3), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held[SIZE - 1], 1);
+    assert_eq!(second_payload[SIZE - 1], 2);
+    second_request.reply(encoded(2), None, response_type).unwrap();
+    let second_response = timeout(Duration::from_secs(3), second).await.unwrap().unwrap();
+    assert_eq!(second_response.control.unwrap().as_slice()[SIZE - 1], 2);
+
+    client
+        .send_one_way(&outgoing, &connection, 3, encoded(3), None, REQUEST_TYPE)
+        .unwrap();
+    let (one_way, one_way_payload) = timeout(Duration::from_secs(3), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let last = client
+        .call(&outgoing, &connection, 4, encoded(4), None, REQUEST_TYPE)
+        .unwrap();
+    drop(one_way);
+    let (last_request, _) = timeout(Duration::from_secs(3), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(one_way_payload[SIZE - 1], 3);
+    last_request
+        .reply(encoded(4), None, FBMsgType::EUnknownResponse.0 as u16)
+        .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(3), last)
+            .await
+            .unwrap()
+            .unwrap()
+            .control
+            .unwrap()
+            .as_slice()[SIZE - 1],
+        4
+    );
+    outgoing.stop();
+    server.stop();
+}
+
 // ── Client→server regression ──────────────────────────────────────
 // Verify the existing client→server path still works after the
 // on_response return-bool change and the server dispatch reorder.

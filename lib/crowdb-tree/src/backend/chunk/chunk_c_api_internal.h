@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "chunk_page_store.h"
+#include "chunk_root_catalog.h"
 #include "chunk_transport.h"
 
 #include <memory>

@@ -16,8 +16,15 @@ std::string Connection::status_json() const
 {
     StatusJson status;
     status.number("schema_version", 1);
+    status.number("connection_id", id());
     status.string("path", path() == ConnectionPath::Rdma ? "rdma" : "tcp");
     status.boolean("open", is_open());
+    if (path() == ConnectionPath::Tcp)
+        status.number("request_cache_bytes", request_cache_bytes_.load(std::memory_order_relaxed));
+#ifdef CROWDB_RPC_HAVE_RDMA
+    else
+        status.raw("request_cache", RdmaTransport::connection_cache_status_json(*this));
+#endif
     status.raw("info", transport_info_json_);
     return status.finish();
 }
@@ -30,6 +37,15 @@ std::string SocketTransport::status_json() const
     status.number("io_engines", engines_.size());
     status.number("io_workers", workers_.size());
     status.number("connection_count", connection_count());
+    std::string connections = "[";
+    for (const auto &entry : live_conns_) {
+        if (auto connection = entry.second.lock()) {
+            if (connections.size() > 1)
+                connections += ',';
+            connections += connection->status_json();
+        }
+    }
+    status.raw("connections", connections + ']');
     status.boolean("tcp_nodelay", tcp_nodelay_);
     status.boolean("tcp_quickack", quickack_);
     status.boolean("event_write", event_write_);

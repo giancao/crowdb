@@ -89,11 +89,11 @@ TEST(KitchenSink, AllFeaturesRandomizedReopen)
                 ASSERT_TRUE(t.flush().ok());
             }
             if (round % 250 == 0) {
-                ASSERT_TRUE(t.snapshot(nullptr).ok());
+                ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
             }
         }
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         EXPECT_FALSE(t.io_failed());
 
         // Live parity.
@@ -140,7 +140,7 @@ TEST(KitchenSink, OverwriteEvictedOverflowChainNoLeak)
     ++slot;
     ASSERT_TRUE(t.apply(slot, put_one(k, make_val(12000, 1))).ok()); // ~3 overflow frames
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     // Evict everything: the old overflow chain's pages become unloaded.
     (void)t.evict_clean_leaves(0);
@@ -150,7 +150,7 @@ TEST(KitchenSink, OverwriteEvictedOverflowChainNoLeak)
     ++slot;
     ASSERT_TRUE(t.apply(slot, put_one(k, make_val(9000, 2))).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     std::string v;
     uint64_t    s;

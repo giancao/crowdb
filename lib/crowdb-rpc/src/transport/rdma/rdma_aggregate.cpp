@@ -29,9 +29,9 @@ bool parse_rdma_aggregate(std::span<const uint8_t> bytes, RdmaAggregate &result)
 
 bool rdma_frame_size(const OutFrame &frame, uint32_t limit, uint32_t &size)
 {
-    if (frame.control == nullptr || frame.control->data == nullptr || frame.control->len > frame.control->capacity ||
-        frame.control->len > RDMA_CONTROL_CAPACITY - HEADER_SIZE || frame.header.magic != MAGIC ||
-        frame.header.msg_offset != HEADER_SIZE || frame.data_views() > MAX_DATA_VIEWS)
+    if (frame.views_are_control || frame.control == nullptr || frame.control->data == nullptr ||
+        frame.control->len > frame.control->capacity || frame.control->len > RDMA_CONTROL_CAPACITY - HEADER_SIZE ||
+        frame.header.magic != MAGIC || frame.header.msg_offset != HEADER_SIZE || frame.data_views() > MAX_DATA_VIEWS)
         return false;
     uint64_t bytes = static_cast<uint64_t>(HEADER_SIZE) + frame.control->len;
     for (uint8_t index = 0; index < frame.data_views(); ++index) {

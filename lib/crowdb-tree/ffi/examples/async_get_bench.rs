@@ -102,7 +102,7 @@ async fn run_bench(value_len: usize, frame_bytes: u32) {
         tree.handle().apply_put((i + 1) as u64, k, &v).expect("apply_put");
     }
     tree.flush().await.expect("flush");
-    tree.snapshot().await.expect("snapshot");
+    tree.flush_with_persistent().await.expect("flush with persistent");
 
     println!("N={N} value_len={value_len}\n");
     println!("== fast path (resident hit, no reactor round trip needed) ==");

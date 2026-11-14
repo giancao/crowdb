@@ -44,10 +44,6 @@ class KqueueEngine : public SocketEngine
     int  notify_ident_ = -1;    // EVFILT_USER ident for cross-thread notify
     int  timer_fd_     = -1;    // timer ident (EVFILT_TIMER)
     bool oneshot_      = false; // multi-worker safety
-
-    // fd → Connection* map (only used for add/remove; wait() uses udata).
-    std::mutex                            conn_mu_;
-    std::unordered_map<int, Connection *> connections_;
 };
 
 } // namespace crowdb::rpc

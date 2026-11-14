@@ -16,12 +16,12 @@ RdmaConfig test_control_config(uint32_t capacity, uint32_t max_control_bytes)
     config.use_environment = false;
     config.sq_depth = config.rq_depth = config.posted_receive_target = 2;
     config.cq_depth                                                  = 4;
-    config.send_arena_bytes                                          = uint64_t{2} * capacity;
-    config.receive_arena_bytes                                       = uint64_t{2} * config.wire_slot_capacity;
-    config.max_control_message_bytes                                 = max_control_bytes;
-    config.control_send_budget_bytes                                 = uint64_t{3} * max_control_bytes;
-    config.control_receive_budget_bytes                              = max_control_bytes;
-    config.poll_empty_budget                                         = 1;
+    config.send_arena_bytes    = uint64_t{2} * (config.combined_control_data() ? config.wire_slot_capacity : capacity);
+    config.receive_arena_bytes = uint64_t{2} * config.wire_slot_capacity;
+    config.max_control_message_bytes    = max_control_bytes;
+    config.control_send_budget_bytes    = uint64_t{3} * max_control_bytes;
+    config.control_receive_budget_bytes = max_control_bytes;
+    config.poll_empty_budget            = 1;
     if (const auto *address = std::getenv("CROWDB_RDMA_E2E_LISTEN_ADDR")) {
         config.source_address = address;
     }
@@ -38,7 +38,7 @@ OutFrame *test_control_frame(BufferPool &pool, uint64_t id, uint32_t size)
         return nullptr;
     }
     for (uint32_t index = 0; index < size; ++index) {
-        control->data[index] = static_cast<uint8_t>(index * 131U + id);
+        control->data[index] = static_cast<uint8_t>((index * 131U) + id);
     }
     auto *identity = build_ping_request(&pool, id, 11);
     if (identity == nullptr || size < identity->len) {
@@ -72,7 +72,7 @@ std::unique_ptr<TestControlPeers> TestControlPeers::create(const RdmaConfig &cli
     auto pair    = std::make_unique<TestControlPeers>();
     pair->server = std::make_unique<RdmaTransport>(server_config, &pair->application);
     pair->client = std::make_unique<RdmaTransport>(client_config, &pair->application);
-    if (!pair->server->listen(server_config.source_address, 19401)) {
+    if (!pair->server->listen(server_config.source_address, 0)) {
         return nullptr;
     }
     std::thread acceptor([&] {
@@ -82,7 +82,7 @@ std::unique_ptr<TestControlPeers> TestControlPeers::create(const RdmaConfig &cli
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     });
-    pair->outgoing = pair->client->connect(server_config.source_address, 19401);
+    pair->outgoing = pair->client->connect(server_config.source_address, pair->server->local_capability().port);
     acceptor.join();
     if (pair->incoming == nullptr || pair->outgoing == nullptr) {
         return nullptr;

@@ -54,7 +54,8 @@ OutFrame *RpcClient::build_frame(uint64_t request_id, Buffer *control, Buffer *d
 }
 
 OutFrame *RpcClient::build_frame_chain(uint64_t request_id, Buffer *control, Buffer *const *data_views,
-                                       uint8_t data_view_count, uint16_t msg_type, uint8_t flags)
+                                       uint8_t data_view_count, uint16_t msg_type, uint8_t flags,
+                                       uint32_t control_tail_len)
 {
     auto *frame            = new OutFrame;
     frame->request_id      = request_id;
@@ -74,6 +75,9 @@ OutFrame *RpcClient::build_frame_chain(uint64_t request_id, Buffer *control, Buf
     for (uint8_t index = 0; index < data_view_count; ++index) {
         frame->header.data_size += data_views[index]->len;
     }
+    frame->header.msg_size += control_tail_len;
+    frame->header.data_size -= control_tail_len;
+    frame->views_are_control = control_tail_len != 0;
     return frame;
 }
 
@@ -82,7 +86,6 @@ OutFrame *RpcClient::build_frame_chain(uint64_t request_id, Buffer *control, Buf
 // back to the pending map if the slot is occupied (slow request holding
 // it). The slab path is O(1) + zero heap alloc; the map path is one heap
 // alloc (std::function) — the overload fallback.
-// Flow: doc/design/rpc/rpc-flow-analysis.md § "Flow".
 bool RpcClient::send(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control, Buffer *data,
                      uint16_t msg_type, crowdb_rpc_on_complete cb, void *user_data)
 {
@@ -98,6 +101,20 @@ bool RpcClient::send_chain(Transport *transport, Connection *conn, uint64_t requ
     return send_impl(transport, conn, request_id, control, data_views, data_view_count, msg_type, cb, user_data, false);
 }
 
+bool RpcClient::send_control_tail(Transport *transport, Connection *conn, uint64_t request_id, Buffer *prefix,
+                                  Buffer *tail, uint16_t msg_type, crowdb_rpc_on_complete cb, void *user_data)
+{
+    Buffer *views[] = {tail};
+    return send_impl(transport, conn, request_id, prefix, views, 1, msg_type, cb, user_data, false, tail->len);
+}
+
+bool RpcClient::send_control_chain(Transport *transport, Connection *conn, uint64_t request_id, Buffer *prefix,
+                                   Buffer *const *tails, uint8_t tail_count, uint32_t tail_len, uint16_t msg_type,
+                                   crowdb_rpc_on_complete cb, void *user_data)
+{
+    return send_impl(transport, conn, request_id, prefix, tails, tail_count, msg_type, cb, user_data, false, tail_len);
+}
+
 bool RpcClient::send_slab_only(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control,
                                Buffer *data, uint16_t msg_type, crowdb_rpc_on_complete cb, void *user_data)
 {
@@ -108,7 +125,7 @@ bool RpcClient::send_slab_only(Transport *transport, Connection *conn, uint64_t 
 
 bool RpcClient::send_impl(Transport *transport, Connection *conn, uint64_t request_id, Buffer *control,
                           Buffer *const *data_views, uint8_t data_view_count, uint16_t msg_type,
-                          crowdb_rpc_on_complete cb, void *user_data, bool slab_only)
+                          crowdb_rpc_on_complete cb, void *user_data, bool slab_only, uint32_t control_tail_len)
 {
     try {
         uint64_t timeout  = default_timeout_ns_.load(std::memory_order_relaxed);
@@ -151,7 +168,8 @@ bool RpcClient::send_impl(Transport *transport, Connection *conn, uint64_t reque
                     slot.user_data  = user_data;
                     slot.conn       = conn;
                     slot.deadline_ns.store(deadline, std::memory_order_relaxed);
-                    OutFrame *frame = build_frame_chain(request_id, control, data_views, data_view_count, msg_type, 0);
+                    OutFrame *frame = build_frame_chain(request_id, control, data_views, data_view_count, msg_type, 0,
+                                                        control_tail_len);
                     slot.state.store(ready, std::memory_order_release);
                     if (!transport->submit(conn, frame)) {
                         uint64_t   pending   = ready;
@@ -197,7 +215,8 @@ bool RpcClient::send_impl(Transport *transport, Connection *conn, uint64_t reque
         pending_.insert_or_assign(request_id,
                                   PendingEntry{.completion = completion, .deadline_ns = deadline, .conn = conn});
 
-        OutFrame *frame = build_frame_chain(request_id, control, data_views, data_view_count, msg_type, 0);
+        OutFrame *frame =
+            build_frame_chain(request_id, control, data_views, data_view_count, msg_type, 0, control_tail_len);
         if (!transport->submit(conn, frame)) {
             // Claim cancellation only if a response/disconnect has not already
             // taken callback ownership. A completion winner owns user_data.

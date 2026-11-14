@@ -19,6 +19,13 @@ struct RpcChunkRouteLease
     RpcChunkRouteLease(const RpcChunkRouteLease &)            = delete;
     RpcChunkRouteLease &operator=(const RpcChunkRouteLease &) = delete;
 
+    RpcChunkRouteLease(RpcChunkRouteLease &&other) noexcept
+        : route(other.route),
+          owner(std::exchange(other.owner, nullptr)),
+          release(std::exchange(other.release, nullptr))
+    {
+    }
+
     ~RpcChunkRouteLease()
     {
         if (owner != nullptr && release != nullptr) {

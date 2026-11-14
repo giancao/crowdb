@@ -5,12 +5,12 @@
 
 use super::{prepared_overlay_artifact, split_plan, storage_plan_error, ChunkKvStorage};
 use crate::MonitorError;
-use crowdb_chunk_kv::{Partition, PartitionConfig, PreparedSplit};
+use crowdb_chunk_kv::{Partition, PreparedSplit};
 use crowdb_chunk_stream::StreamRegistry;
 use crowdb_protocol::chunk_kv::{
     ChunkKvRangeCatalogEntry, ChunkKvRangeCatalogPartitionState, SplitTransition,
 };
-use crowdb_tree_ffi::ChunkPageStoreOptions;
+use crowdb_tree_ffi::ChunkRuntimeOptions;
 
 impl ChunkKvStorage {
     pub(super) async fn resume_split_handoff(
@@ -42,21 +42,24 @@ impl ChunkKvStorage {
             )
             .await
             .map_err(|error| storage_plan_error(&error.to_string()))?;
+        // A live retry may still have a synchronized but unpublished parent
+        // suffix. Publish it before opening the independent recovery reader.
+        parent
+            .publish_split_journal_prefix(proof.cutover_offset)
+            .await
+            .map_err(|error| storage_plan_error(&error.to_string()))?;
         let source_stream = self
             .streams
             .open_read_only_current(proof.source_stream_name, self.metadata_store_id)
             .await
             .map_err(|error| storage_plan_error(&error.to_string()))?;
-        let page_store = self
-            .open_durable_tree_page_store(
-                ChunkPageStoreOptions {
+        let (page_store, catalog) = self
+            .open_durable_tree(
+                ChunkRuntimeOptions {
                     tree_id: transition.child.artifact.tree_id,
                     owner_epoch: transition.child.owner_epoch,
                     open_generation: proof.base_root_manifest_generation,
-                    pack_bytes: 0,
                     iu_size: 0,
-                    max_concurrent_packs: 0,
-                    materialization_bytes_per_pass: 0,
                     mirror_copies: 0,
                     max_chunk_bytes: 0,
                 },
@@ -75,14 +78,17 @@ impl ChunkKvStorage {
         };
         let (child, artifact) = Partition::recover_native_split_handoff(
             prepared_overlay_artifact(&entry, proof),
-            PartitionConfig::default(),
-            crowdb_tree_ffi::Config::default(),
-            page_store,
+            self.partition_config.clone(),
+            self.tree_config(),
+            page_store.clone(),
             child_stream,
             source_stream,
         )
         .await
         .map_err(|error| storage_plan_error(&error.to_string()))?;
+        Self::complete_tree_recovery(&child, &page_store, &catalog)
+            .await
+            .map_err(|error| storage_plan_error(&error.to_string()))?;
         parent
             .resume_split_child_session(split_plan(transition), child, artifact)
             .await

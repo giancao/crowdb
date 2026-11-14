@@ -8,6 +8,8 @@ use std::ffi::CString;
 use std::ptr;
 use std::sync::Arc;
 
+mod native_connect;
+
 /// An RPC server. Accepts connections and dispatches to handlers.
 pub struct RpcServer {
     handle: sys::crowdb_rpc_server_t,
@@ -190,13 +192,7 @@ impl RpcServer {
     pub fn connect(&self, addr: &str, port: i32) -> Result<Connection, RpcError> {
         let c_addr = CString::new(addr).map_err(|_| RpcError::InvalidArg)?;
         let handle = unsafe { sys::crowdb_rpc_connect(self.handle, c_addr.as_ptr(), port) };
-        if handle.is_null() {
-            Err(RpcError::ConnectionError)
-        } else {
-            Ok(Connection {
-                inner: Arc::new(ConnectionInner { handle, owned: true }),
-            })
-        }
+        Connection::from_owned(handle)
     }
 
     /// Register the built-in echo handler for the given msg_type. The
@@ -331,11 +327,8 @@ impl RpcServer {
         }
     }
 
-    /// Wire an RpcClient into the server for server-initiated request-
-    /// response (e.g. WatchNotify: server sends a notify request, awaits
-    /// ack). The server's dispatch tries the request client's on_response
-    /// first (to route ack responses); if no match, dispatches as a
-    /// request (existing behavior).
+    /// Install response correlation for server-initiated requests before
+    /// `start`. Registered request handlers take precedence over correlation.
     pub fn set_request_client(&self, client: &crate::RpcClient) {
         unsafe { sys::crowdb_rpc_server_set_request_client(self.handle, client.handle()) };
     }
@@ -375,16 +368,25 @@ pub struct Connection {
 
 struct ConnectionInner {
     handle: sys::crowdb_rpc_conn_t,
-    owned: bool,
+    ownership: ConnectionOwnership,
+}
+
+enum ConnectionOwnership {
+    Outbound { _server: Option<Arc<RpcServer>> },
+    Retained { _server: Arc<RpcServer> },
+    Borrowed,
 }
 
 impl Drop for ConnectionInner {
     fn drop(&mut self) {
-        if self.owned && !self.handle.is_null() {
-            unsafe {
+        if self.handle.is_null() || matches!(self.ownership, ConnectionOwnership::Borrowed) {
+            return;
+        }
+        unsafe {
+            if matches!(self.ownership, ConnectionOwnership::Outbound { .. }) {
                 sys::crowdb_rpc_conn_close(self.handle);
-                sys::crowdb_rpc_conn_destroy(self.handle);
             }
+            sys::crowdb_rpc_conn_destroy(self.handle);
         }
     }
 }
@@ -403,6 +405,22 @@ impl std::fmt::Debug for Connection {
 }
 
 impl Connection {
+    fn from_owned(handle: sys::crowdb_rpc_conn_t) -> Result<Self, RpcError> {
+        Self::with_ownership(handle, ConnectionOwnership::Outbound { _server: None })
+    }
+
+    fn with_ownership(
+        handle: sys::crowdb_rpc_conn_t,
+        ownership: ConnectionOwnership,
+    ) -> Result<Self, RpcError> {
+        if handle.is_null() {
+            return Err(RpcError::ConnectionError);
+        }
+        Ok(Self {
+            inner: Arc::new(ConnectionInner { handle, ownership }),
+        })
+    }
+
     pub fn handle(&self) -> sys::crowdb_rpc_conn_t {
         self.inner.handle
     }
@@ -418,6 +436,12 @@ impl Connection {
     pub fn is_rdma(&self) -> bool {
         // SAFETY: this owned handle retains immutable path metadata.
         unsafe { sys::crowdb_rpc_conn_is_rdma(self.inner.handle) != 0 }
+    }
+
+    /// Negotiated logical control bytes that fit in one RDMA SEND, or zero on TCP.
+    #[must_use]
+    pub fn rdma_single_send_control_capacity(&self) -> u32 {
+        unsafe { sys::crowdb_rpc_conn_rdma_single_send_control_capacity(self.inner.handle) }
     }
 
     /// Whether TCP was refused before the peer accepted this connection.
@@ -452,7 +476,10 @@ impl Connection {
     #[must_use]
     pub fn from_handle(handle: sys::crowdb_rpc_conn_t) -> Self {
         Self {
-            inner: Arc::new(ConnectionInner { handle, owned: false }),
+            inner: Arc::new(ConnectionInner {
+                handle,
+                ownership: ConnectionOwnership::Borrowed,
+            }),
         }
     }
 }
@@ -545,7 +572,6 @@ pub struct ServerRequest {
     pub rpc_create_nano: u64,
     pub msg_type: u16,
     pub conn_handle: *mut std::ffi::c_void,
-    response_connection: *mut std::ffi::c_void,
     response_server: Option<Arc<RpcServer>>,
     frame_handle: *mut std::ffi::c_void,
     control_ptr: *const u8,
@@ -555,6 +581,22 @@ pub struct ServerRequest {
 }
 
 impl ServerRequest {
+    /// Retain the accepted connection and its server beyond this request.
+    /// Dropping the retained handle leaves connection closure to its owner.
+    ///
+    /// # Errors
+    /// Returns an error if the handler is unowned or the connection cannot be retained.
+    pub fn retain_connection(&self) -> Result<Connection, RpcError> {
+        let server = self.response_server.as_ref().ok_or(RpcError::InvalidArg)?;
+        let handle = unsafe { sys::crowdb_rpc_frame_retain_connection(self.frame_handle) };
+        Connection::with_ownership(
+            handle,
+            ConnectionOwnership::Retained {
+                _server: Arc::clone(server),
+            },
+        )
+    }
+
     /// Consumes a request from `register_owned_handler` and transfers immutable
     /// response buffers to its retained original server/connection.
     /// # Errors
@@ -566,10 +608,20 @@ impl ServerRequest {
         msg_type: u16,
     ) -> Result<(), RpcError> {
         let server = self.response_server.as_ref().ok_or(RpcError::InvalidArg)?;
-        // SAFETY: the private connection was captured by the original callback;
-        // this request retains its Frame connection owner and originating server.
-        unsafe {
-            server.submit_response_buffer(self.response_connection, control, data, msg_type, self.request_id)
+        // SAFETY: this request owns its native Frame and the originating server.
+        let status = unsafe {
+            crate::sys::crowdb_rpc_server_reply(
+                server.handle,
+                self.frame_handle,
+                control.into_raw(),
+                data.map_or(std::ptr::null_mut(), crate::Buffer::into_raw),
+                msg_type,
+            )
+        };
+        if status == crate::sys::CROWDB_RPC_OK {
+            Ok(())
+        } else {
+            Err(RpcError::from_status(status))
         }
     }
 
@@ -589,6 +641,32 @@ impl ServerRequest {
         } else {
             unsafe { std::slice::from_raw_parts(self.control_ptr, self.control_len as usize) }
         }
+    }
+
+    /// Take the initialized control bytes at their current address. The
+    /// buffer can outlive this request and its connection. On allocation
+    /// failure the request still owns the bytes.
+    #[must_use]
+    pub fn take_control(&mut self) -> Option<crate::Buffer> {
+        let handle = unsafe {
+            if self.response_server.is_some() {
+                sys::crowdb_rpc_frame_take_request_control(self.frame_handle)
+            } else {
+                sys::crowdb_rpc_frame_take_control(self.frame_handle)
+            }
+        };
+        if handle.is_null() {
+            return None;
+        }
+        self.control_ptr = ptr::null();
+        self.control_len = 0;
+        Some(crate::Buffer::from_raw(handle))
+    }
+
+    /// Take the control with an immutable owner that survives Bytes slicing.
+    #[must_use]
+    pub fn take_control_bytes(&mut self) -> Option<bytes::Bytes> {
+        self.take_control().map(crate::Buffer::into_control_bytes)
     }
 
     /// Borrow the data payload bytes. Valid as long as `self` is alive.
@@ -649,7 +727,6 @@ unsafe extern "C" fn rust_handler_trampoline(
         rpc_create_nano,
         msg_type,
         conn_handle,
-        response_connection: conn_handle,
         response_server: None,
         frame_handle,
         control_ptr: control,

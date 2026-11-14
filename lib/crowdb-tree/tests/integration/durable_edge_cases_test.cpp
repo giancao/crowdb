@@ -70,7 +70,7 @@ TEST(DurableEdgeCases, EmptyAndBinaryValuesReopen)
             ASSERT_TRUE(t.flush().ok());
             oracle[it.first] = it.second;
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         check_all(&t, oracle);
     }
     std::unique_ptr<Crowdbtree> t2;
@@ -98,7 +98,7 @@ TEST(DurableEdgeCases, OversizedKeyRejectedNormalKeysDurable)
         ASSERT_TRUE(t.apply(2, put_one("normal", "v")).ok());
         ASSERT_TRUE(t.flush().ok());
         oracle["normal"] = "v";
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         check_all(&t, oracle);
         // The rejected key is absent.
         std::string v;
@@ -137,7 +137,7 @@ TEST(DurableEdgeCases, OverflowChunkBoundarySizes)
             ASSERT_TRUE(t.flush().ok());
             oracle[key] = v;
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         check_all(&t, oracle);
     }
     std::unique_ptr<Crowdbtree> t2;

@@ -70,6 +70,7 @@ impl TestServingLease {
             ChunkKvService::new(super::test_process::TestProcess::authority(INSTANCE_ID), 8).unwrap();
         service
             .install_catalog_and_reconcile(&head, &[page], std::slice::from_ref(&partition))
+            .await
             .unwrap();
         let mut grant = ServingGrant {
             instance_id: INSTANCE_ID,

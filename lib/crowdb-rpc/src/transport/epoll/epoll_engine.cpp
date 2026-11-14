@@ -122,7 +122,7 @@ void EpollEngine::add_external_fd(int fd, uint64_t tag)
         return;
     }
     {
-        std::scoped_lock lock(conn_mu_);
+        std::scoped_lock lock(external_fds_mu_);
         external_fds_[fd] = tag;
     }
     struct epoll_event ev;
@@ -133,7 +133,7 @@ void EpollEngine::add_external_fd(int fd, uint64_t tag)
     if (result < 0 && errno == EEXIST)
         result = ::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
     if (result < 0) {
-        std::scoped_lock lock(conn_mu_);
+        std::scoped_lock lock(external_fds_mu_);
         external_fds_.erase(fd);
     }
 }
@@ -144,16 +144,12 @@ void EpollEngine::remove_external_fd(int fd)
         return;
     }
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-    std::scoped_lock lock(conn_mu_);
+    std::scoped_lock lock(external_fds_mu_);
     external_fds_.erase(fd);
 }
 
 void EpollEngine::add_connection(int read_fd, int write_fd, Connection *conn)
 {
-    {
-        std::scoped_lock lock(conn_mu_);
-        connections_[read_fd] = conn;
-    }
     // Register read fd with EPOLLIN (armed immediately for reading).
     struct epoll_event ev;
     std::memset(&ev, 0, sizeof(ev));
@@ -173,10 +169,6 @@ void EpollEngine::add_connection(int read_fd, int write_fd, Connection *conn)
 
 void EpollEngine::remove_connection(int read_fd, int write_fd)
 {
-    {
-        std::scoped_lock lock(conn_mu_);
-        connections_.erase(read_fd);
-    }
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, read_fd, nullptr);
     if (write_fd >= 0 && write_fd != read_fd) {
         ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, write_fd, nullptr);
@@ -270,7 +262,7 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
             const int fd  = static_cast<int>(ev.data.u64 & (EXTERNAL_EVENT - 1));
             uint64_t  tag = 0;
             {
-                std::scoped_lock lock(conn_mu_);
+                std::scoped_lock lock(external_fds_mu_);
                 auto             it = external_fds_.find(fd);
                 if (it != external_fds_.end()) {
                     tag = it->second;
@@ -322,7 +314,7 @@ int EpollEngine::wait(EngineEvent *out_events, int max_events, int timeout_ms)
 void EpollEngine::shutdown()
 {
     {
-        std::scoped_lock lock(conn_mu_);
+        std::scoped_lock lock(external_fds_mu_);
         external_fds_.clear();
     }
     if (notify_fd_ >= 0) {

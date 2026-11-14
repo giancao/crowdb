@@ -45,7 +45,8 @@ uint32_t RdmaTransport::flush_direct_connection(Connection *connection, Connecti
         if (pools.control_send == nullptr && pools.pending_frame == nullptr &&
             pools.send_queue.drain(&pools.pending_frame, 1) == 0)
             break;
-        if (pools.control_send != nullptr || pools.pending_frame->control->len > RDMA_CONTROL_CAPACITY - HEADER_SIZE) {
+        if (pools.control_send != nullptr ||
+            pools.pending_frame->control_size() > RDMA_CONTROL_CAPACITY - HEADER_SIZE) {
             if (!flush_control_fragment(connection, pools)) {
                 break;
             }
@@ -131,10 +132,10 @@ uint32_t RdmaTransport::flush_direct_connection(Connection *connection, Connecti
 bool RdmaTransport::post_direct(Connection *connection, ConnectionPools &pools, Buffer *slot, Buffer *prefix,
                                 OutFrame *frame, std::shared_ptr<ControlSendState> control_send)
 {
-    const bool last =
-        control_send == nullptr || control_send->fragment.offset + slot->len == control_send->fragment.total;
-    return prepare_send(connection, pools, slot, prefix, frame, last ? 1U : 0U,
-                        RDMA_CONTROL_CAPACITY + (prefix == nullptr ? 0 : slot->len), std::move(control_send));
+    const auto wire_bytes = prefix == nullptr ? slot->len : RDMA_CONTROL_CAPACITY + slot->len;
+    const bool last = control_send == nullptr || control_send->fragment.offset + wire_bytes - RDMA_CONTROL_CAPACITY ==
+                                                     control_send->fragment.total;
+    return prepare_send(connection, pools, slot, prefix, frame, last ? 1U : 0U, wire_bytes, std::move(control_send));
 }
 } // namespace crowdb::rpc
 #endif

@@ -3,10 +3,11 @@
 
 //! Bootstrap publishes one final encrypted credential without preparation state.
 
-use super::{credential_key, CredentialAuthority, CredentialAuthorityError};
+use super::{credential_key, CredentialAuthority, CredentialAuthorityError, CREATE_ATTEMPTS};
 use crowdb_access_s3::auth::{DurableCredentialRecord, IssuedUserToken};
-use crowdb_kv_client::{Error as KvError, GetOutcome, ReadMode};
+use crowdb_paxos_kv_client::{Error as KvError, GetOutcome, ReadMode};
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 impl CredentialAuthority {
     /// Reuses an existing token or creates one final resource at a stable public
@@ -30,23 +31,31 @@ impl CredentialAuthority {
             encrypted,
         }
         .encode()?;
-        match self.control.put_cas(0, 0, &key, &bytes, 0).await {
-            Ok(_) => Ok(issued),
-            Err(KvError::CasFailed {
-                observation: Some(observation),
-                ..
-            }) if observation.key.as_ref() == key.as_slice() && observation.revision != 0 => {
-                self.token(user, &issued.access_key_id, &observation.value)
-            }
-            // Older peers and uncertain/busy outcomes have no comparison value.
-            // Reconcile only the final resource, never a preparation record.
-            Err(error @ (KvError::CasFailed { .. } | KvError::CasBusy | KvError::OutcomeUnknown)) => {
-                match self.control.get(0, 0, &key, ReadMode::Linearizable, None).await? {
-                    GetOutcome::Found { value, .. } => self.token(user, &issued.access_key_id, &value),
-                    GetOutcome::NotFound => Err(error.into()),
+        let mut attempt = 1;
+        loop {
+            let error = match self.control.put_cas(0, 0, &key, &bytes, 0).await {
+                Ok(_) => return Ok(issued),
+                Err(KvError::CasFailed {
+                    observation: Some(observation),
+                    ..
+                }) if observation.key.as_ref() == key.as_slice() && observation.revision != 0 => {
+                    return self.token(user, &issued.access_key_id, &observation.value);
                 }
+                Err(error @ (KvError::CasFailed { .. } | KvError::CasBusy | KvError::OutcomeUnknown)) => {
+                    error
+                }
+                Err(error) => return Err(error.into()),
+            };
+            // The concurrent create may still hold the CAS guard without a
+            // visible record. Retry that same conditional create after yielding.
+            match self.control.get(0, 0, &key, ReadMode::Linearizable, None).await? {
+                GetOutcome::Found { value, .. } => return self.token(user, &issued.access_key_id, &value),
+                GetOutcome::NotFound if matches!(error, KvError::CasBusy) && attempt < CREATE_ATTEMPTS => {
+                    tokio::time::sleep(Duration::from_millis(1 << (attempt - 1))).await;
+                    attempt += 1;
+                }
+                GetOutcome::NotFound => return Err(error.into()),
             }
-            Err(error) => Err(error.into()),
         }
     }
 

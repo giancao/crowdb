@@ -13,12 +13,55 @@
 
 #    include <algorithm>
 #    include <deque>
+#    include <future>
 
 namespace crowdb::rpc
 {
 
 struct TestRdmaTransport
 {
+    static bool context_resumes_after_owner_releases_for_tests(RdmaTransport &transport)
+    {
+        ibv_context existing{};
+        transport.context_             = &existing;
+        const bool       was_available = transport.capability_available_.exchange(true, std::memory_order_acq_rel);
+        std::unique_lock owner(transport.cm_mu_);
+        auto adoption = std::async(std::launch::async, [&] { return transport.adopt_cm_context(&existing, false); });
+        const bool returned = adoption.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        owner.unlock();
+        const auto first   = adoption.get();
+        const auto resumed = transport.adopt_cm_context(&existing, false);
+        transport.context_ = nullptr;
+        transport.capability_available_.store(was_available, std::memory_order_release);
+        return returned && first == RdmaTransport::CmContext::kBusy && resumed == RdmaTransport::CmContext::kReady;
+    }
+
+    static bool publication_reports_busy_for_tests(RdmaTransport &transport, bool hold_cm)
+    {
+        auto            &queue = *transport.completion_queues_.front();
+        auto             pools = std::make_shared<RdmaTransport::ConnectionPools>(1, 0);
+        std::unique_lock lock(transport.cm_mu_, std::defer_lock);
+        if (hold_cm) {
+            lock.lock();
+        }
+        else {
+            queue.polling.test_and_set(std::memory_order_acquire);
+        }
+        auto       publish  = std::async(std::launch::async,
+                                         [&] { return transport.try_publish_cm_connection(nullptr, nullptr, pools); });
+        const bool returned = publish.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        if (hold_cm) {
+            lock.unlock();
+        }
+        else {
+            queue.polling.clear(std::memory_order_release);
+        }
+        const auto result = publish.get();
+        return returned && result == RdmaTransport::CmPublish::kBusy && transport.cm_ids_.empty() &&
+               transport.cm_connections_.empty() && transport.cm_pools_.empty() && queue.connections.empty() &&
+               transport.cm_channel_ == nullptr && pools->cm_id == nullptr;
+    }
+
     static void advertise_expired_endpoint_for_tests(RdmaTransport &transport, const std::string &address,
                                                      uint16_t port)
     {
@@ -116,14 +159,34 @@ struct TestRdmaTransport
         transport.dispatch_completion(completion);
     }
 
-    static void cancel(RdmaTransport &transport)
+    static void cancel(RdmaTransport &transport, Connection *connection = nullptr)
     {
-        transport.cancel_work();
+        transport.cancel_work(connection);
     }
 
-    static void disconnect(RdmaTransport &transport, Connection *connection)
+    static auto hold_posting(Connection *connection)
     {
-        transport.close_after_drain(connection);
+        return std::make_unique<RdmaTransport::Operation>(RdmaTransport::pools_for(connection)->posting_state);
+    }
+
+    static bool try_retire_qp(RdmaTransport &transport, Connection *connection, rdma_cm_id &id)
+    {
+        return transport.try_destroy_connection_qp(connection, &id);
+    }
+
+    static bool advance_cm_retirement(RdmaTransport &transport, const std::shared_ptr<Connection> &connection,
+                                      rdma_cm_id &id)
+    {
+        if (!transport.cm_retirement_.pending()) {
+            transport.cm_retirement_.connection = connection;
+            transport.cm_retirement_.id         = &id;
+        }
+        return transport.advance_cm_retirement();
+    }
+
+    static void clear_cm_retirement(RdmaTransport &transport)
+    {
+        transport.cm_retirement_ = {};
     }
 
     static void set_cq(RdmaTransport &transport, ibv_cq *cq, uint32_t index = 0)

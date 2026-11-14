@@ -15,15 +15,40 @@
 #pragma once
 
 #include "crowdb-tree/backend/page_store.h"
+#include "crowdb-tree/memory_budget.h"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
-#include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
+namespace crowdb::common
+{
+class DiskIOUring;
+}
+
 namespace crowdb::tree
 {
+
+class BlockDirectory;
+class BlockAsyncPageStore;
+class BackendReleaseService;
+struct AsyncCompletion;
+
+namespace detail
+{
+class AllocationAccount;
+struct BlockAccountAccess;
+} // namespace detail
+
+struct BlockDirectoryDeleter
+{
+    std::shared_ptr<AllocationBudget> budget;
+    void                              operator()(BlockDirectory *directory) const noexcept;
+};
 
 // ── Medium abstraction ────────────────────────────────────────────
 // BlockPageStore delegates all raw I/O to a Medium. This allows the same
@@ -75,15 +100,8 @@ class MemoryMedium : public BlockPageStoreMedium
     Status                 fsync() override;
     [[nodiscard]] uint64_t size() const override;
 
-    // Direct access to the underlying buffer (for content verification tests).
-    [[nodiscard]] const std::vector<uint8_t> &data() const
-    {
-        return data_;
-    }
-
   private:
-    mutable std::mutex   mu_;
-    std::vector<uint8_t> data_;
+    MemPageStore data_;
 };
 
 // File medium: wraps a single fd with pwrite/pread/fdatasync/lseek.
@@ -92,6 +110,7 @@ class FileMedium : public BlockPageStoreMedium
 {
   public:
     ~FileMedium() override;
+    static void operator delete(void *pointer) noexcept;
 
     FileMedium(const FileMedium &)            = delete;
     FileMedium &operator=(const FileMedium &) = delete;
@@ -99,23 +118,52 @@ class FileMedium : public BlockPageStoreMedium
     // Open (creating if absent) a regular file. `o_direct` selects O_DIRECT
     // on Linux / F_NOCACHE on macOS.
     static Status open(const std::string &path, bool o_direct, std::unique_ptr<FileMedium> *out);
+    static Status open_owned(const char *path, bool direct, const std::shared_ptr<AllocationBudget> &budget,
+                             std::shared_ptr<FileMedium>                  *out,
+                             const std::shared_ptr<BackendReleaseService> &release = {});
 
     Status                 pwrite_at(uint64_t off, const uint8_t *buf, size_t len) override;
     Status                 pread_partial(uint64_t off, uint8_t *buf, size_t len, size_t *out_read) const override;
     Status                 fsync() override;
     [[nodiscard]] uint64_t size() const override;
 
+    [[nodiscard]] static size_t close_allocation_bound() noexcept;
+
     [[nodiscard]] int fd() const
     {
         return fd_;
     }
 
+    // A barrier acknowledges only the generation observed before submission.
+    // Writers mark both submission and completion so a racing barrier cannot
+    // consume a write that has not yet reached the device.
+    void                   mark_dirty() noexcept;
+    [[nodiscard]] uint64_t dirty_generation() const noexcept;
+    [[nodiscard]] bool     dirty() const noexcept;
+    void                   acknowledge_sync(uint64_t generation) noexcept;
+
   private:
+    friend class BlockDirectory;
+    static Status allocate_owned(const std::shared_ptr<AllocationBudget> &budget, std::shared_ptr<FileMedium> *out,
+                                 const std::shared_ptr<BackendReleaseService> &release);
+
     explicit FileMedium(int fd) : fd_(fd)
     {
     }
 
-    int fd_ = -1;
+    struct CloseNode;
+    [[nodiscard]] Status  prepare_close(const std::shared_ptr<AllocationBudget>      &budget,
+                                        const std::shared_ptr<BackendReleaseService> &service);
+    CloseNode            *close_ = nullptr;
+    int                   fd_    = -1;
+    std::atomic<uint64_t> written_{0};
+    std::atomic<uint64_t> synced_{0};
+};
+
+struct BlockSyncTarget
+{
+    std::shared_ptr<FileMedium> medium;
+    uint64_t                    generation = 0;
 };
 
 // ── BlockPageStore ────────────────────────────────────────────────
@@ -123,6 +171,16 @@ class BlockPageStore : public PageStore
 {
   public:
     ~BlockPageStore() override;
+
+    // A standalone C++ host retains this service and pumps it until drained
+    // after releasing the store and any retained file readers. A bound wake
+    // driver owns this responsibility across Tree/runtime close.
+    [[nodiscard]] const std::shared_ptr<BackendReleaseService> &release_service() const noexcept
+    {
+        return release_;
+    }
+
+    static void operator delete(void *pointer) noexcept;
 
     BlockPageStore(const BlockPageStore &)            = delete;
     BlockPageStore &operator=(const BlockPageStore &) = delete;
@@ -133,11 +191,24 @@ class BlockPageStore : public PageStore
     // sector size.
     static Status open(const std::string &path, uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
 
-    // Open an array-of-blocks store. Creates `{dir}/{store_id}-{group_id}.blk-{NNNN}`
-    // files on demand when the current block fills up. On reopen, scans the
-    // directory for existing block files and opens them all.
+    // Open an array-of-blocks store. Creates
+    // `{dir}/{store_id}-{group_id}.blk-{NNNN}` files on demand when the current
+    // block fills up. On reopen, scans the directory for existing block files and
+    // opens them all.
     static Status open_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
                               uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
+
+    // Allocate the directory owner without opening files. The host can bind
+    // its release driver before asynchronous startup admits any fd owners.
+    static Status prepare_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
+                                 uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
+#ifdef CROWDB_HAVE_LIBURING
+    static Status open_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
+                              uint32_t iu_size, common::DiskIOUring &uring, std::unique_ptr<BlockPageStore> *out);
+    // The unpublished store and reactor must outlive completion. Basenames
+    // are consumed during submission. Only matching extent files are opened.
+    Status submit_open_blocks(std::span<const std::string> names, common::DiskIOUring &uring, AsyncCompletion done);
+#endif
 
     // Open an in-memory store (MemoryMedium, iu_size=1). Replaces MemPageStore.
     static Status open_mem(uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
@@ -146,6 +217,10 @@ class BlockPageStore : public PageStore
     Status                 read_at(uint64_t off, uint8_t *buf, size_t len) const override;
     Status                 sync() override;
     [[nodiscard]] uint64_t size() const override;
+    Status write_at(uint64_t off, const uint8_t *buf, size_t len, const std::shared_ptr<AllocationBudget> &budget);
+    Status read_at(uint64_t off, uint8_t *buf, size_t len, const std::shared_ptr<AllocationBudget> &budget) const;
+    Status sync(const std::shared_ptr<AllocationBudget> &budget);
+    [[nodiscard]] uint64_t size(const std::shared_ptr<AllocationBudget> &budget) const;
 
     [[nodiscard]] uint32_t iu_size() const override
     {
@@ -157,10 +232,11 @@ class BlockPageStore : public PageStore
         return block_size_;
     }
 
-    // Delete a block file (array-of-blocks mode only). Closes the fd,
-    // removes the BlockExtent, and unlinks the .blk-{NNNN} file.
+    // Delete a block file (array-of-blocks mode only). Unlinks its current
+    // incarnation; already accepted I/O retains the old fd until completion.
     // Safe only after snapshot commit confirms zero live pages in the block.
     Status delete_block(uint32_t block_idx) override;
+    Status delete_block(uint32_t block_idx, const std::shared_ptr<AllocationBudget> &budget);
 
     [[nodiscard]] bool is_block_device() const
     {
@@ -179,84 +255,83 @@ class BlockPageStore : public PageStore
     // (e.g. MemoryMedium). Used by BlockAsyncPageStore.
     int fd_for_offset(uint64_t off, uint64_t *out_local) const;
 
+    // Retain the actual fd incarnation through an asynchronous operation.
+    [[nodiscard]] std::shared_ptr<FileMedium>
+    file_for_offset(uint64_t off, uint64_t *out_local, const std::shared_ptr<AllocationBudget> &budget = {}) const;
+
+    // Start a GC window at the next published file, skipping sparse holes.
+    [[nodiscard]] std::optional<uint32_t> next_file_index(uint64_t                                 first,
+                                                          const std::shared_ptr<AllocationBudget> &budget) const;
+
     // Ensures block files are allocated for the byte range [off, off+len),
     // mirroring write_at_extents' allocation logic without writing any data.
     // Also marks the covered extents as dirty. Call before fd_for_offset()
     // in the async write path so the fd exists.
-    Status ensure_extents(uint64_t off, size_t len);
+    Status ensure_extents(uint64_t off, size_t len, const std::shared_ptr<AllocationBudget> &budget = {});
+#ifdef CROWDB_HAVE_LIBURING
+    // Prepare one missing extent for a write. Existing and concurrent opens
+    // return the same directory incarnation through completion.
+    void submit_ensure_block(uint32_t block_idx, common::DiskIOUring &uring, AsyncCompletion done);
+#endif
 
     // Returns fds of all dirty, non-deleted extents (array-of-blocks) or the
     // single medium's fd (single-file mode), for async fsync via DiskIOUring.
-    // Clears the dirty flag on each returned extent (mirroring sync()).
+    // Enumeration does not acknowledge durability. Failed or unknown barriers
+    // keep their captured generation dirty; newer writes survive older success.
     // Returns an empty vector if no fd is fsync-able (e.g. MemoryMedium or
     // SyncMode::kSkip).
-    std::vector<int> dirty_fds();
+    [[nodiscard]] std::vector<int> dirty_fds() const;
+
+    [[nodiscard]] std::vector<BlockSyncTarget> sync_targets() const;
+    using BlockSyncTargets = std::vector<BlockSyncTarget, MetadataAllocator<BlockSyncTarget>>;
+    [[nodiscard]] BlockSyncTargets sync_targets(const std::shared_ptr<AllocationBudget> &budget) const;
 
     // Returns fds of all live, non-deleted extents (array-of-blocks) or the
     // single medium's fd (single-file mode), for fd registration with
-    // DiskIOUring at startup. Unlike dirty_fds(), does not clear the dirty
-    // flag. Returns an empty vector if no fd is usable (e.g. MemoryMedium).
+    // DiskIOUring at startup. Returns an empty vector if no fd is usable
+    // (e.g. MemoryMedium).
     [[nodiscard]] std::vector<int> all_extent_fds() const;
 
-    // Number of live block files in an array-of-blocks store (0 for single-medium).
-    [[nodiscard]] size_t num_extents() const
-    {
-        size_t n = 0;
-        for (const auto &ext : extents_) {
-            if (!ext.deleted) {
-                ++n;
-            }
-        }
-        return n;
-    }
+    // Number of live block files in an array-of-blocks store (0 for
+    // single-medium).
+    [[nodiscard]] size_t num_extents() const;
 
   private:
-    // Single-medium constructor (open / open_mem)
-    BlockPageStore(std::unique_ptr<BlockPageStoreMedium> medium, uint32_t iu_size, bool is_block_device)
-        : medium_(std::move(medium)),
-          iu_size_(iu_size),
-          is_block_device_(is_block_device)
-    {
-    }
-
-    // Array-of-blocks constructor
-    BlockPageStore(std::string dir, uint32_t store_id, uint32_t group_id, uint64_t block_size, uint32_t iu_size)
-        : iu_size_(iu_size),
-          is_block_device_(false),
-          block_size_(block_size),
-          store_id_(store_id),
-          group_id_(group_id),
-          dir_(std::move(dir))
-    {
-    }
+    friend struct detail::BlockAccountAccess;
+    friend class BlockDirectory;
+    friend class BlockAsyncPageStore;
+#ifdef CROWDB_HAVE_LIBURING
+    void submit_delete_block(uint32_t block_idx, common::DiskIOUring &uring, AsyncCompletion done);
+#endif
+    BlockPageStore(std::shared_ptr<detail::AllocationAccount> allocations, std::shared_ptr<BlockPageStoreMedium> medium,
+                   uint32_t iu_size, bool is_block_device, std::shared_ptr<BackendReleaseService> release = {});
+    BlockPageStore(std::shared_ptr<detail::AllocationAccount> allocations, const std::string &dir, uint32_t store_id,
+                   uint32_t group_id, uint64_t block_size, uint32_t iu_size,
+                   std::shared_ptr<BackendReleaseService> release);
 
     [[nodiscard]] int fd() const;    // returns -1 if no FileMedium
     uint64_t          capacity_ = 0; // probed fixed device size; 0 = unknown
 
     // Array-of-blocks management
-    Status allocate_new_block();
-    Status write_at_extents(uint64_t off, const uint8_t *buf, size_t len);
-    Status read_at_extents(uint64_t off, uint8_t *buf, size_t len) const;
+    using BlockPath = std::basic_string<char, std::char_traits<char>, MetadataAllocator<char>>;
+    [[nodiscard]] BlockPath block_path(uint32_t index, const std::shared_ptr<AllocationBudget> &budget = {}) const;
+    Status                  write_at_extents(uint64_t off, const uint8_t *buf, size_t len,
+                                             const std::shared_ptr<AllocationBudget> &budget);
+    Status                  read_at_extents(uint64_t off, uint8_t *buf, size_t len,
+                                            const std::shared_ptr<AllocationBudget> &budget) const;
 
-    struct BlockExtent
-    {
-        std::unique_ptr<FileMedium> medium;
-        uint64_t                    base_offset = 0; // block_idx * block_size
-        uint64_t                    used        = 0; // high-water mark
-        bool                        dirty       = false;
-        bool                        deleted     = false; // block file unlinked, extent kept for index stability
-    };
-
-    std::unique_ptr<BlockPageStoreMedium> medium_; // single-medium mode
-    uint32_t                              iu_size_;
-    bool                                  is_block_device_;
+    std::shared_ptr<detail::AllocationAccount> allocations_;
+    std::shared_ptr<BackendReleaseService>     release_;
+    std::shared_ptr<BlockPageStoreMedium>      medium_; // single-medium mode
+    uint32_t                                   iu_size_;
+    bool                                       is_block_device_;
 
     // Array-of-blocks mode
-    uint64_t                 block_size_ = 0;
-    uint32_t                 store_id_   = 0;
-    uint32_t                 group_id_   = 0;
-    std::string              dir_;
-    std::vector<BlockExtent> extents_;
+    uint64_t                                               block_size_ = 0;
+    uint32_t                                               store_id_   = 0;
+    uint32_t                                               group_id_   = 0;
+    BlockPath                                              dir_;
+    std::unique_ptr<BlockDirectory, BlockDirectoryDeleter> blocks_;
 };
 
 // Dump utility: annotated hex dump of a block file. Parses known structures

@@ -83,7 +83,7 @@ Setup build_tree(int n, int value_size, bool flush, bool flush_only = false, int
     if (flush) {
         s.tree->flush();
         if (!flush_only) {
-            s.tree->snapshot(nullptr);
+            s.tree->flush_with_persistent(nullptr);
         }
     }
     return s;
@@ -159,7 +159,7 @@ void run_concurrent(const char *label, int n_prepop, int value_size, size_t limi
         s.tree->apply(i + 1, Batch{{{.key = make_key(i), .kind = OpKind::kPut, .value = make_value(value_size, i)}}});
     }
     s.tree->flush();
-    s.tree->snapshot(nullptr);
+    s.tree->flush_with_persistent(nullptr);
 
     // Optional L0 pre-fill: write prefill_l0 overwrites without flushing.
     uint64_t next_slot = static_cast<uint64_t>(n_prepop) + 1;

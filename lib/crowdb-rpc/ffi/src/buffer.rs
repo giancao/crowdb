@@ -3,14 +3,30 @@
 
 //! Safe wrappers for Buffer and BufferPool.
 
+mod owned;
+pub use owned::OwnedBytesError;
+
 use crate::sys;
 use std::ptr;
 
 /// A pool-allocated byte buffer. The buffer is ref-counted; `Drop` calls
 /// `release` which decrements the refcount and recycles to the pool when
 /// it hits zero.
+#[repr(transparent)]
 pub struct Buffer {
     handle: sys::crowdb_rpc_buffer_t,
+}
+
+// A taken control only exposes the initialized bytes and immutable allocation metadata.
+struct FrozenControl(Buffer);
+
+// SAFETY: only the read-only native getters are available through this wrapper.
+unsafe impl Sync for FrozenControl {}
+
+impl AsRef<[u8]> for FrozenControl {
+    fn as_ref(&self) -> &[u8] {
+        self.0.bytes()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -68,12 +84,17 @@ pub struct BufferChain {
     len: u32,
 }
 
+// The chain exclusively owns its wrappers and exposes only immutable views.
+// Shared TCP submissions retain the underlying buffers by atomic refcount.
+unsafe impl Sync for BufferChain {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BufferChainError {
     Empty,
     TooManyViews { maximum: usize, actual: usize },
     PayloadTooLarge,
     EmptyView,
+    OwnerAllocation(OwnedBytesError),
 }
 
 impl std::fmt::Display for BufferChainError {
@@ -85,6 +106,7 @@ impl std::fmt::Display for BufferChainError {
             }
             Self::PayloadTooLarge => f.write_str("buffer chain payload exceeds u32"),
             Self::EmptyView => f.write_str("buffer chain views must not be empty"),
+            Self::OwnerAllocation(error) => error.fmt(f),
         }
     }
 }
@@ -106,7 +128,7 @@ impl BufferChain {
                 if view.is_empty() {
                     Err(BufferChainError::EmptyView)
                 } else {
-                    Ok(Buffer::from_owned_bytes(view))
+                    Buffer::try_from_owned_bytes(view).map_err(BufferChainError::OwnerAllocation)
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -154,6 +176,10 @@ impl BufferChain {
     pub(crate) fn into_raw_handles(self) -> Vec<sys::crowdb_rpc_buffer_t> {
         self.buffers.into_iter().map(Buffer::into_raw).collect()
     }
+
+    pub(crate) fn raw_handles(&self) -> *const sys::crowdb_rpc_buffer_t {
+        self.buffers.as_ptr().cast()
+    }
 }
 
 impl std::fmt::Debug for BufferChain {
@@ -174,6 +200,21 @@ impl std::fmt::Debug for Buffer {
 }
 
 impl Buffer {
+    pub(crate) fn into_control_bytes(self) -> bytes::Bytes {
+        bytes::Bytes::from_owner(FrozenControl(self))
+    }
+
+    /// Returns the initialized root and actual allocation capacity of a taken
+    /// independent control. Receive-credit-backed controls are ineligible.
+    #[must_use]
+    pub fn control_allocation(bytes: &bytes::Bytes) -> Option<bytes::RetainedAllocation<'_>> {
+        let owner = &bytes.owner::<FrozenControl>()?.0;
+        let capacity = unsafe { sys::crowdb_rpc_buffer_allocation_capacity(owner.handle) };
+        // The moved native vector owns this initialized range and reports its
+        // actual allocation size. Bytes retains that vector across slices.
+        (capacity != 0)
+            .then(|| unsafe { bytes::RetainedAllocation::new(bytes, owner.bytes(), capacity as usize) })
+    }
     pub(crate) fn handle(&self) -> sys::crowdb_rpc_buffer_t {
         self.handle
     }
@@ -306,17 +347,7 @@ impl Buffer {
 
     /// Wrap immutable owned bytes without copying their allocation.
     pub fn from_owned_bytes(data: bytes::Bytes) -> Self {
-        if data.is_empty() {
-            return Buffer {
-                handle: std::ptr::null_mut(),
-            };
-        }
-        let data_ptr = data.as_ptr();
-        let len = data.len();
-        let ctx = Box::into_raw(Box::new(data)).cast::<std::ffi::c_void>();
-        let handle =
-            unsafe { sys::crowdb_rpc_buffer_create_external(data_ptr, len as u32, Some(free_bytes_cb), ctx) };
-        Buffer { handle }
+        Self::try_from_owned_bytes(data).unwrap_or_else(|_| Self::from_raw(ptr::null_mut()))
     }
 
     /// Create an external buffer wrapping a Vec allocation (zero-copy).
@@ -431,13 +462,5 @@ extern "C" fn free_vec_cb(ctx: *mut std::ffi::c_void) {
         // from_vec_offset. We reclaim it here exactly once (the C++ Buffer
         // release() calls free_cb once when refcount hits zero).
         unsafe { drop(Box::from_raw(ctx.cast::<Vec<u8>>())) };
-    }
-}
-
-extern "C" fn free_bytes_cb(ctx: *mut std::ffi::c_void) {
-    if !ctx.is_null() {
-        // SAFETY: `ctx` came from `Box::into_raw(Box::new(Bytes))` above and
-        // the C++ buffer invokes its release callback exactly once.
-        unsafe { drop(Box::from_raw(ctx.cast::<bytes::Bytes>())) };
     }
 }

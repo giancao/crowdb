@@ -15,7 +15,7 @@ use crowdb_chunk_stream::{
     ChunkId, ChunkStream, CursorAdvance, StreamChunkStore, StreamConfig, StreamMetadataStore, StreamName,
     StreamRecord, StreamRecordState, StreamRegistry,
 };
-use crowdb_tree_ffi::{ChunkPageStoreOptions, ChunkRootCatalog, PageStore};
+use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
 
 fn request(sequence: u64) -> RequestId {
     RequestId {
@@ -289,28 +289,6 @@ async fn split_ingress_routes_old_parent_requests_to_both_new_writers() {
     );
 }
 
-fn chunk_page_store(tree_id: u64, owner_epoch: u64) -> Arc<PageStore> {
-    let catalog = Arc::new(ChunkRootCatalog::open_memory(owner_epoch).unwrap());
-    Arc::new(
-        PageStore::open_chunk(
-            ChunkPageStoreOptions {
-                tree_id,
-                owner_epoch,
-                open_generation: 0,
-                pack_bytes: 4_096,
-                iu_size: 1,
-                max_concurrent_packs: 2,
-                max_chunk_bytes: 0,
-                mirror_copies: 0,
-                materialization_bytes_per_pass: 4_096,
-            },
-            catalog,
-            None,
-        )
-        .unwrap(),
-    )
-}
-
 async fn finish_materialization(partition: &Partition, ownership_epoch: u64) -> u64 {
     let mut passes = 0;
     loop {
@@ -481,8 +459,11 @@ async fn native_partition_constructor_owns_tree_and_stream_storage() {
 #[tokio::test]
 async fn native_partition_reopens_the_latest_tree_root() {
     let page_store = Arc::new(crowdb_tree_ffi::PageStore::open_mem(1).unwrap());
+    let runtime =
+        Arc::new(crowdb_tree_ffi::TreeRuntime::new(crowdb_tree_ffi::TreeRuntimeOptions::default()).unwrap());
     let tree = crowdb_tree_ffi::Crowdbtree::open(&crowdb_tree_ffi::Config {
         page_store: Some(Arc::clone(&page_store)),
+        runtime: Some(runtime.clone()),
         key_range: crowdb_tree_ffi::KeyRange::Bounded {
             start: Some(b"a".to_vec()),
             end: Some(b"m".to_vec()),
@@ -492,7 +473,7 @@ async fn native_partition_reopens_the_latest_tree_root() {
     .unwrap();
     tree.apply_put(1, b"b", b"persisted").unwrap();
     tree.flush().unwrap();
-    tree.snapshot_info().unwrap();
+    tree.flush_with_persistent_info().unwrap();
     drop(tree);
 
     let stream_name = StreamName { high: 1, low: 10 };
@@ -525,7 +506,10 @@ async fn native_partition_reopens_the_latest_tree_root() {
         4,
         44,
         PartitionConfig::default(),
-        crowdb_tree_ffi::Config::default(),
+        crowdb_tree_ffi::Config {
+            runtime: Some(runtime.clone()),
+            ..Default::default()
+        },
         page_store,
         stream,
     )
@@ -536,6 +520,9 @@ async fn native_partition_reopens_the_latest_tree_root() {
         partition.get(4, b"b", None).await.unwrap().unwrap().value,
         b"persisted"
     );
+    partition.suspend_for_shutdown(4).await.unwrap();
+    partition.close().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -561,19 +548,8 @@ async fn chunk_root_checkpoint_supplies_the_wal_replay_offset() {
     )
     .await
     .unwrap();
-    let catalog = Arc::new(ChunkRootCatalog::open_memory(4).unwrap());
-    let options = ChunkPageStoreOptions {
-        tree_id: 45,
-        owner_epoch: 4,
-        open_generation: 0,
-        pack_bytes: 4_096,
-        iu_size: 1,
-        max_concurrent_packs: 2,
-        max_chunk_bytes: 0,
-        mirror_copies: 0,
-        materialization_bytes_per_pass: 4_096,
-    };
-    let page_store = Arc::new(PageStore::open_chunk(options, Arc::clone(&catalog), None).unwrap());
+    let mut backend = TestChunkBackend::new(45, 4).unwrap();
+    let page_store = backend.page_store(0).unwrap();
     let config = PartitionConfig {
         retained_results: 1,
         ..PartitionConfig::default()
@@ -587,7 +563,7 @@ async fn chunk_root_checkpoint_supplies_the_wal_replay_offset() {
         4,
         config.clone(),
         45,
-        crowdb_tree_ffi::Config::default(),
+        backend.config(),
         Arc::clone(&page_store),
         stream,
     )
@@ -609,7 +585,7 @@ async fn chunk_root_checkpoint_supplies_the_wal_replay_offset() {
     let checkpoint = partition.checkpoint_quiesced(4).await.unwrap();
     assert!(checkpoint.replay_offset > 0);
     assert_eq!(page_store.wal_replay_offset().unwrap(), checkpoint.replay_offset);
-    drop(partition);
+    partition.close().await.unwrap();
 
     let stream = ChunkStream::open(
         stream_name,
@@ -621,7 +597,8 @@ async fn chunk_root_checkpoint_supplies_the_wal_replay_offset() {
     )
     .await
     .unwrap();
-    let page_store = Arc::new(PageStore::open_chunk(options, catalog, None).unwrap());
+    backend.next_writer().unwrap();
+    let page_store = backend.page_store(0).unwrap();
     let recovered = Partition::recover_native_latest_prepared_assignment(
         PartitionId { high: 1, low: 11 },
         PartitionRange {
@@ -631,7 +608,7 @@ async fn chunk_root_checkpoint_supplies_the_wal_replay_offset() {
         4,
         45,
         config,
-        crowdb_tree_ffi::Config::default(),
+        backend.config(),
         page_store,
         stream,
     )
@@ -639,6 +616,8 @@ async fn chunk_root_checkpoint_supplies_the_wal_replay_offset() {
     .unwrap();
     recovered.activate_recovered(4).unwrap();
     assert_eq!(recovered.get(4, b"b", None).await.unwrap().unwrap().value, b"2");
+    recovered.suspend_for_shutdown(4).await.unwrap();
+    recovered.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -1298,7 +1277,6 @@ async fn transfer_quiesce_drains_admitted_work_and_rejects_later_writes() {
         .await
         .unwrap();
     assert_eq!(reclaimed.tree_bytes, 0);
-    assert_eq!(reclaimed.orphan_bytes, 0);
     let metrics = partition.metrics().snapshot();
     assert_eq!(metrics.checkpoints, 1);
     assert_eq!(metrics.reclaimed_tree_bytes, 0);
@@ -1365,7 +1343,7 @@ async fn transition_generation_pin_suppresses_source_checkpoint_branching() {
         partition.checkpoint(10).await,
         Err(ChunkKvError::SplitRetry(_))
     ));
-    partition.release_generation_pin(transition).unwrap();
+    partition.release_generation_pin(transition).await.unwrap();
     assert!(partition.checkpoint(10).await.is_ok());
 }
 
@@ -1953,7 +1931,7 @@ async fn split_session_retains_parent_and_installs_live_child_at_ingress_frontie
         retained.checkpoint(9).await,
         Err(ChunkKvError::SplitRetry(_))
     ));
-    retained.release_generation_pin(plan.transition_id).unwrap();
+    retained.release_generation_pin(plan.transition_id).await.unwrap();
     assert_eq!(
         retained.checkpoint(9).await.unwrap().replay_offset,
         retained_replay_start.offset
@@ -2175,6 +2153,8 @@ async fn native_online_split_rebuilds_one_child_from_the_exact_parent_manifest()
     )
     .await
     .unwrap();
+    let parent_backend = TestChunkBackend::new(190, 18).unwrap();
+    let child_backend = TestChunkBackend::new(192, 19).unwrap();
     let parent = Partition::open_native(
         PartitionId { high: 120, low: 120 },
         PartitionRange {
@@ -2184,8 +2164,8 @@ async fn native_online_split_rebuilds_one_child_from_the_exact_parent_manifest()
         18,
         PartitionConfig::default(),
         190,
-        crowdb_tree_ffi::Config::default(),
-        chunk_page_store(190, 18),
+        parent_backend.config(),
+        parent_backend.page_store(0).unwrap(),
         parent_stream,
     )
     .unwrap();
@@ -2212,8 +2192,8 @@ async fn native_online_split_rebuilds_one_child_from_the_exact_parent_manifest()
             SplitWriterTarget {
                 tree_id: 192,
                 tree_config: crowdb_tree_ffi::Config {
-                    page_store: Some(chunk_page_store(192, 19)),
-                    ..crowdb_tree_ffi::Config::default()
+                    page_store: Some(child_backend.page_store(0).unwrap()),
+                    ..child_backend.config()
                 },
                 journal: empty_journal(&store, StreamName { high: 192, low: 1 }, 19).await,
             },
@@ -2232,7 +2212,15 @@ async fn native_online_split_rebuilds_one_child_from_the_exact_parent_manifest()
     child.activate_prepared(&proof).unwrap();
     let passes = finish_materialization(&child, 19).await;
     assert_eq!(child.metrics().snapshot().materialization_passes, passes);
-    assert_eq!(child.chunk_storage_stats().unwrap().unwrap().shared_packs, 0);
+    let backing = child.backing_storage_stats().unwrap().unwrap();
+    assert!(backing.allocated_bytes > 0);
+    assert_eq!(child.estimated_bytes().unwrap(), backing.allocated_bytes);
+    assert_ne!(
+        backing.scope_id,
+        parent.backing_storage_stats().unwrap().unwrap().scope_id
+    );
+    parent.close().await.unwrap();
+    child.close().await.unwrap();
 }
 
 async fn overlay_base_tree(tree_id: u64) -> (Arc<MemoryPartitionTree>, u64) {

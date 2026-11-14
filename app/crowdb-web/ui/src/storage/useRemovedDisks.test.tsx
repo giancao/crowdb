@@ -47,3 +47,23 @@ it('does not reuse a candidate read that started before a committed removal', as
   expect(read).toHaveBeenCalledTimes(2);
   expect(result.current.items).toEqual([disk]);
 });
+
+it('invalidates the rejoined candidate and old reads while retaining unrelated candidates on failure', async () => {
+  const other = { ...disk, disk_id: 'two' };
+  read.mockResolvedValueOnce({ items: [disk, other], next: null });
+  const { result } = renderHook(() => useRemovedDisks(1, true));
+  await waitFor(() => expect(result.current.items).toEqual([disk, other]));
+  let finish!: (value: { items: RemovedDisk[]; next: null }) => void;
+  read.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  let old!: Promise<void>;
+  act(() => { old = result.current.refresh(); });
+  read.mockRejectedValueOnce(new Error('Group 0 unavailable'));
+  await act(async () => { await result.current.refreshAfterRejoin(7, 'one'); });
+  expect(read.mock.calls[1][2]?.signal?.aborted).toBe(true);
+  await act(async () => { finish({ items: [disk, other], next: null }); await old; });
+  expect(result.current.items).toEqual([other]);
+  expect(result.current.error).toContain('Group 0 unavailable');
+  read.mockResolvedValueOnce({ items: [disk, other], next: null });
+  await act(async () => { await result.current.refresh(); });
+  expect(result.current.items).toEqual([disk, other]);
+});

@@ -61,12 +61,27 @@ class Connection : public std::enable_shared_from_this<Connection>
         return path_;
     }
 
+    [[nodiscard]] uint32_t rdma_single_send_control_capacity() const
+    {
+        return rdma_single_send_control_capacity_;
+    }
+
     void set_path(ConnectionPath path)
     {
         path_ = path;
     }
 
     [[nodiscard]] std::string status_json() const;
+
+    void add_request_cache_bytes(uint64_t bytes)
+    {
+        request_cache_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+    }
+
+    void release_request_cache_bytes(uint64_t bytes)
+    {
+        request_cache_bytes_.fetch_sub(bytes, std::memory_order_relaxed);
+    }
 
     [[nodiscard]] bool peer_handshake_received() const
     {
@@ -164,7 +179,7 @@ class Connection : public std::enable_shared_from_this<Connection>
     // Check if the connection has pending send data (queue or partials).
     [[nodiscard]] bool has_pending_send() const
     {
-        return send_queue_.has_pending() || overflow_.has_pending() || pending_count_ > 0;
+        return send_queue_.has_pending() || overflow_.has_pending() || has_partials_.load(std::memory_order_relaxed);
     }
 
     // Push a frame to the overflow queue (called when send_queue is full).
@@ -275,7 +290,10 @@ class Connection : public std::enable_shared_from_this<Connection>
     }
 
   private:
-    std::string transport_info_json_ = "{}"; // immutable after connection publication
+    void                  release_frame(OutFrame *frame);
+    std::atomic<uint64_t> request_cache_bytes_{0};
+    std::string           transport_info_json_               = "{}"; // immutable after connection publication
+    uint32_t              rdma_single_send_control_capacity_ = 0;    // immutable after connection publication
     friend class RdmaTransport;
     std::shared_ptr<void>  transport_context_;
     int64_t                id_;
@@ -312,6 +330,9 @@ class Connection : public std::enable_shared_from_this<Connection>
     // try_send sends these first, then drains the queue for new frames.
     OutFrame *pending_frames_[BATCH_MAX];
     int       pending_count_{0};
+    // Readers outside in_send_ only need a hint; the sender publishes it
+    // before releasing ownership and arms writable events for partial sends.
+    std::atomic<bool> has_partials_{false};
 
     ConnectionCallback<OnFrameCallback>       on_frame_callback_;
     ConnectionCallback<std::function<void()>> on_frame_ready_;

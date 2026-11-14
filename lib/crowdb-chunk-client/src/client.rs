@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crowdb_chunkdb_client::ChunkdbClient;
 use crowdb_common::ec::EcScheme;
-use crowdb_kv_client::{CrowdbKvClient, HardwareClient, RangeBindingClient, ServiceRegistryClient};
+use crowdb_paxos_kv_client::{HardwareClient, PaxosKvClient, RangeBindingClient, ServiceRegistryClient};
 use crowdb_protocol::chunkdb::rpc::{
     AdvanceChunkWriteRequest, AdvanceChunkWriteResponse, AllocateChunkRequest, AllocateChunkResponse,
     AllocateReplacementSegmentRequest, AllocateReplacementSegmentResponse, AppendChunkRequest,
@@ -155,7 +155,10 @@ impl ChunkIoClient {
             .native_routes()
             .await
             .map_err(|error| crate::IoError::Topology(format!("resolve ChunkDB route: {error}")))?;
-        Ok((chunkdb, topology.disk_writer.storage_route_resolver(timeout_ms)?))
+        Ok((
+            chunkdb,
+            topology.disk_writer.storage_route_resolver(timeout_ms).await?,
+        ))
     }
 
     /// Construct low-level seams with an explicit small-write policy.
@@ -595,7 +598,7 @@ impl ChunkAllocator for MetricsChunkAllocator {
 
 async fn discover_current_range_bindings(
     service: &ServiceRegistryClient,
-    kv: Arc<CrowdbKvClient>,
+    kv: Arc<PaxosKvClient>,
 ) -> Result<Option<RangeBindingClient>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let bindings = RangeBindingClient::from_shared(kv);

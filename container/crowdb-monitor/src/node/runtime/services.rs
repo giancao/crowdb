@@ -85,8 +85,9 @@ pub(super) fn kv_paused(profile: &DeploymentProfile) -> Result<bool> {
 pub(super) async fn desired(profile: &DeploymentProfile) -> Result<Vec<NodeServiceIntent>> {
     let binding: NodeBinding =
         durable::read(&profile.paths.data_root.join("node-binding.json"))?.ok_or("node unbound")?;
-    let client =
-        crowdb_kv_client::CrowdbKvClient::new(crowdb_kv_client::ClientConfig::new(binding.management_seeds));
+    let client = crowdb_paxos_kv_client::PaxosKvClient::new(crowdb_paxos_kv_client::ClientConfig::new(
+        binding.management_seeds,
+    ));
     let records = tokio::time::timeout(
         Duration::from_secs(3),
         client.scan_bounded(0, 0, b"/deployment/services/", b"", b"", 4096, false, None),
@@ -206,7 +207,7 @@ pub(super) fn failures(
     Ok(Value::Object(failures))
 }
 
-/// Couple each live managed PID to the durable execution that actually owns it.
+/// Couple each live managed PID to its completed, ready execution.
 pub(super) fn process_operations(
     root: &std::path::Path,
     live: &std::collections::BTreeMap<String, u32>,
@@ -234,7 +235,7 @@ pub(super) fn process_operations(
             } else {
                 &execution.intent.service_id
             };
-            if execution.pid.is_some() && execution.pid == live.get(process).copied() {
+            if execution.complete && execution.pid.is_some() && execution.pid == live.get(process).copied() {
                 if operations.len() >= 4096 {
                     return Err("service process observation exceeds bound".into());
                 }

@@ -14,8 +14,8 @@ export function useRemovedDisks(node: number, enabled: boolean) {
   const pending = useRef<Promise<void>>();
   const refresh = useCallback((after?: string, fresh = false): Promise<void> => {
     if (!enabled) return Promise.resolve();
-    if (pending.current) return fresh ? pending.current.then(() => refresh(after)) : pending.current;
     const signal = controller.current.signal;
+    if (pending.current) return fresh ? pending.current.then(() => signal.aborted ? undefined : refresh(after)) : pending.current;
     setLoading(true);
     const work = removedNodeDisks(node, after, { signal }).then(page => {
       if (signal.aborted) return;
@@ -33,10 +33,19 @@ export function useRemovedDisks(node: number, enabled: boolean) {
     pending.current = work;
     return work;
   }, [node, enabled]);
+  const refreshAfterRejoin = useCallback((group: number, diskId: string) => {
+    controller.current.abort();
+    controller.current = new AbortController();
+    pending.current = undefined;
+    setState(previous => previous.node !== node ? previous : {
+      ...previous, items: previous.items.filter(disk => disk.disk_group_id !== group || disk.disk_id !== diskId),
+    });
+    return refresh();
+  }, [node, refresh]);
   useEffect(() => {
     controller.current = new AbortController(); pending.current = undefined; setLoading(false);
     void refresh();
     return () => { controller.current.abort(); };
   }, [refresh]);
-  return { ...(state.node === node ? state : empty(node)), loading, refresh };
+  return { ...(state.node === node ? state : empty(node)), loading, refresh, refreshAfterRejoin };
 }

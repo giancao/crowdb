@@ -228,7 +228,7 @@ TEST(SkipList, RetriedLowerInsertionUsesTheWinningPruningBound)
                 state.resume.acquire();
             }
         });
-        MutationStats stats{.measure_copy = true};
+        MutationStats stats;
         auto writer = std::async(std::launch::async, [&] { return list.upsert("x", version(102), 0, &stats); });
         pause.entered.acquire();
         list.prune("x", bound);
@@ -237,16 +237,57 @@ TEST(SkipList, RetriedLowerInsertionUsesTheWinningPruningBound)
         EXPECT_EQ(list.find("x")->slot, 105U);
         EXPECT_EQ(list.count(), 1U);
         EXPECT_EQ(stats.keep, bound == 100 ? 1U : 0U);
-        EXPECT_GE(stats.cas_retries, 1U);
-        EXPECT_EQ(stats.copy_count, stats.cas_retries + 1);
-        EXPECT_GE(stats.copy_ns, stats.copy_max_ns);
         if (bound == 100) {
             EXPECT_EQ(list.prefix_cursor(100).cell_version()->slot, 80U);
             EXPECT_EQ(list.prefix_cursor(102).cell_version()->slot, 102U);
         }
         else {
+            EXPECT_GE(stats.cas_retries, 1U);
             EXPECT_FALSE(list.prefix_cursor(102).valid());
         }
+    }
+}
+
+TEST(SkipList, DelayedInsertCannotLinkAfterASealedOrRetiredVersion)
+{
+    for (const bool has_history : {false, true}) {
+        EpochManager       epoch;
+        ConcurrentSkipList list(&epoch);
+        ASSERT_TRUE(list.upsert("x", version(105), 0));
+        if (has_history) {
+            ASSERT_TRUE(list.upsert("x", version(80), 0));
+        }
+
+        struct Pause
+        {
+            std::atomic<bool>     once{true};
+            std::binary_semaphore entered{0};
+            std::binary_semaphore resume{0};
+        } pause;
+
+        list.set_hook_for_tests(&pause, [](void *context, ConcurrentSkipList::PausePoint point, Slice) {
+            auto &state = *static_cast<Pause *>(context);
+            if (point == ConcurrentSkipList::PausePoint::kBeforeVersionCas && state.once.exchange(false)) {
+                state.entered.release();
+                state.resume.acquire();
+            }
+        });
+        auto writer = std::async(std::launch::async, [&] { return list.upsert("x", version(75), 0); });
+        pause.entered.acquire();
+        {
+            auto guard = epoch.enter();
+            auto old   = list.prefix_cursor(has_history ? 80 : 105);
+            list.prune("x", 105);
+            EXPECT_EQ(old.cell_version()->slot, has_history ? 80U : 105U);
+        }
+        pause.resume.release();
+        EXPECT_FALSE(writer.get());
+        list.set_hook_for_tests(nullptr, nullptr);
+        EXPECT_FALSE(list.prefix_cursor(104).valid());
+        EXPECT_FALSE(list.upsert("x", version(105, "replay"), 105));
+        EXPECT_EQ(list.memory().history_count, 0U);
+        epoch.try_reclaim();
+        EXPECT_EQ(epoch.pending_retired(), 0U);
     }
 }
 #endif

@@ -55,14 +55,15 @@ class RpcServer
         handlers_.clear();
     }
 
-    // Wire an RpcClient into the server for server-initiated request-
-    // response (e.g. WatchNotify). The server's dispatch tries the
-    // request client's on_response first (to route ack responses);
-    // if no match, dispatches as a request (existing behavior).
-    void set_request_client(RpcClient *client)
+    // Install response correlation before starting the server. Request handlers
+    // take precedence, so opposite requests may use the same request ID.
+    void set_request_client(std::shared_ptr<RpcClient> client)
     {
-        request_client_ = client;
+        request_client_ = std::move(client);
     }
+
+    // Use the listener's dispatch for an outgoing connection on this transport.
+    void route_connection(Connection &connection);
 
     // Start the server: spawns worker threads + acceptor thread.
     // Blocks until the acceptor is ready to accept connections.
@@ -102,7 +103,7 @@ class RpcServer
     BufferPool                      *pool_;
     std::shared_ptr<SocketTransport> transport_;
     HandlerRegistry                  handlers_;
-    RpcClient                       *request_client_{nullptr}; // server-initiated request-response
+    std::shared_ptr<RpcClient>       request_client_;
 
     int                                listen_fd_   = -1;
     int                                listen_port_ = 0;

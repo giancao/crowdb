@@ -11,23 +11,28 @@ namespace
 struct ControlOwner
 {
     std::shared_ptr<void> admission;
-    std::vector<uint8_t>  bytes;
+    ControlBytes          bytes;
 };
 
-crowdb_rpc_buffer_t wrap_control(Frame &frame)
+crowdb_rpc_buffer_t wrap_control(Frame &frame, bool take = false, bool keep_admission = false)
 {
     if (frame.control.empty())
         return nullptr;
-    if (frame.control_owner == nullptr)
+    if (!take && frame.control_owner == nullptr)
         return crowdb_rpc_buffer_create(frame.control.data(), static_cast<uint32_t>(frame.control.size()));
-    auto owner       = std::make_unique<ControlOwner>();
-    owner->bytes     = std::move(frame.control);
-    owner->admission = std::move(frame.control_owner);
-    auto handle      = crowdb_rpc_buffer_create_external(
-        owner->bytes.data(), static_cast<uint32_t>(owner->bytes.size()),
+    auto owner  = std::make_unique<ControlOwner>();
+    auto handle = crowdb_rpc_buffer_create_external(
+        frame.control.data(), static_cast<uint32_t>(frame.control.size()),
         [](void *context) { delete static_cast<ControlOwner *>(context); }, owner.get());
-    if (handle != nullptr)
+    if (handle != nullptr) {
+        owner->bytes = std::move(frame.control);
+        if (!keep_admission)
+            owner->admission = std::move(frame.control_owner);
+        if ((take || keep_admission) && owner->admission == nullptr && owner->bytes.capacity() <= UINT32_MAX) {
+            handle->buf->allocation_capacity = static_cast<uint32_t>(owner->bytes.capacity());
+        }
         (void)owner.release();
+    }
     return handle;
 }
 
@@ -37,9 +42,7 @@ crowdb_rpc_buffer_t wrap_data(Buffer *buffer, uint64_t request_id)
         return nullptr;
     buffer->set_metadata(request_id, buffer->stream_id, buffer->sequence, buffer->logical_offset,
                          buffer->registration_id);
-    auto handle = std::make_unique<crowdb_rpc_buffer_s>();
-    handle->buf = buffer->ref_clone();
-    return handle->buf == nullptr ? nullptr : handle.release();
+    return wrap_owned_buffer(buffer->ref_clone());
 }
 } // namespace
 
@@ -50,9 +53,7 @@ void frame_to_c_handles(Frame *frame, crowdb_rpc_buffer_t *out_ctrl, crowdb_rpc_
     std::unique_ptr<Frame> incoming(frame);
     if (incoming == nullptr)
         return;
-    // Budget-owned controls move their exact storage and admission into the
-    // external owner. Ordinary controls preserve their existing copied handle.
-    *out_ctrl = wrap_control(*incoming);
+    *out_ctrl = wrap_control(*incoming, false, incoming->release_admission_on_delivery);
     *out_data = wrap_data(incoming->data_buf, incoming->request_id);
 }
 
@@ -62,7 +63,12 @@ void invoke_c_handler(crowdb_rpc_handler_fn callback, void *user_data, Frame *re
         delete request;
         return;
     }
-    request->connection_owner  = conn == nullptr ? nullptr : conn->weak_from_this().lock();
+    request->connection_owner = conn == nullptr ? nullptr : conn->weak_from_this().lock();
+    if (request->connection_owner != nullptr && conn->path() == ConnectionPath::Tcp) {
+        request->tcp_request_cache_bytes = static_cast<uint64_t>(request->header.msg_size) + request->header.data_size;
+        if (request->tcp_request_cache_bytes != 0)
+            conn->add_request_cache_bytes(request->tcp_request_cache_bytes);
+    }
     uint64_t       req_id      = request->request_id;
     uint64_t       create_nano = request->rpc_create_nano;
     uint16_t       msg_type    = request->header.msg_type;
@@ -90,6 +96,30 @@ extern "C" void crowdb_rpc_frame_release(void *frame_handle)
     delete static_cast<crowdb::rpc::Frame *>(frame_handle);
 }
 
+extern "C" crowdb_rpc_buffer_t crowdb_rpc_frame_take_control(void *frame_handle)
+{
+    try {
+        if (frame_handle != nullptr) {
+            return crowdb::rpc::wrap_control(*static_cast<crowdb::rpc::Frame *>(frame_handle), true);
+        }
+    }
+    catch (...) {
+    }
+    return nullptr;
+}
+
+extern "C" crowdb_rpc_buffer_t crowdb_rpc_frame_take_request_control(void *frame_handle)
+{
+    try {
+        if (frame_handle != nullptr) {
+            return crowdb::rpc::wrap_control(*static_cast<crowdb::rpc::Frame *>(frame_handle), true, true);
+        }
+    }
+    catch (...) {
+    }
+    return nullptr;
+}
+
 extern "C" void crowdb_rpc_frame_close_connection(void *frame_handle)
 {
     try {
@@ -101,5 +131,18 @@ extern "C" void crowdb_rpc_frame_close_connection(void *frame_handle)
         }
     }
     catch (...) {
+    }
+}
+
+extern "C" crowdb_rpc_conn_t crowdb_rpc_frame_retain_connection(void *frame_handle)
+{
+    auto *frame = static_cast<crowdb::rpc::Frame *>(frame_handle);
+    if (frame == nullptr || frame->connection_owner == nullptr)
+        return nullptr;
+    try {
+        return new crowdb_rpc_conn_s{frame->connection_owner};
+    }
+    catch (...) {
+        return nullptr;
     }
 }

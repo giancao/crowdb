@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crowdb_chunk_kv_server::storage::open_root_catalog_for_tests;
 use crowdb_chunk_kv_server::{ChunkKvRangeCatalogPublisher, Group0ControlStore};
-use crowdb_kv_client::CrowdbKvClient;
+use crowdb_paxos_kv_client::PaxosKvClient;
 use crowdb_protocol::chunk_kv::{
     ChunkKvRangeCatalogEntry, ChunkKvRangeCatalogHead, ChunkKvRangeCatalogPage, ChunkKvRangeCatalogPageRef,
     ChunkKvRangeCatalogPartitionState, Id128, KeyRange, OwnerDescriptor, PartitionArtifact,
@@ -47,7 +47,7 @@ async fn preparing_target_does_not_fence_source_or_mutate_shared_root() {
         .await
         .unwrap();
     publish_assignment(kv.clone(), source_entry.clone(), 1).await;
-    source.publish(42, 0, 1, 1, b"source-checkpoint-1").unwrap();
+    source.publish(42, 0, 1, 1, b"source-checkpoint-1").await.unwrap();
     let mut target_entry = source_entry.clone();
     target_entry.owner.instance_id = 2;
     target_entry.owner_epoch = 2;
@@ -58,37 +58,37 @@ async fn preparing_target_does_not_fence_source_or_mutate_shared_root() {
         .await
         .unwrap();
     assert_eq!(
-        target.load(42, RootCatalogObject::Manifest(1)).unwrap(),
+        target
+            .load_async(42, RootCatalogObject::Manifest(1))
+            .await
+            .unwrap(),
         Some(b"source-checkpoint-1".to_vec())
     );
     assert_eq!(
-        target.publish(42, 1, 2, 2, b"unpublished-target"),
+        target.publish(42, 1, 2, 2, b"unpublished-target").await,
         Err(CtError::Unavailable)
     );
-    // Private preparation metadata and exact pin cleanup do not publish a root.
-    let reference = target.allocate_reference_segment_id(42).unwrap();
-    target
-        .store(
-            42,
-            RootCatalogObject::ReferenceSegment(reference),
-            b"prepared-reference",
-        )
-        .unwrap();
-    source.pin_generation(42, 2, 2, 1).unwrap();
-    target.unpin_generation(42, 2, 2).unwrap();
-    source.publish(42, 1, 1, 2, b"source-checkpoint-2").unwrap();
+    source.pin_generation_async(42, 2, 2, 1).await.unwrap();
+    target.unpin_generation_async(42, 2, 2).await.unwrap();
+    source.publish(42, 1, 1, 2, b"source-checkpoint-2").await.unwrap();
     drop(source);
     let recovered = open_root_catalog_for_tests(kv, 0, 1, &source_entry)
         .await
         .unwrap();
     assert_eq!(
-        recovered.load(42, RootCatalogObject::CurrentManifest).unwrap(),
+        recovered
+            .load_async(42, RootCatalogObject::CurrentManifest)
+            .await
+            .unwrap(),
         Some(b"source-checkpoint-2".to_vec())
     );
-    recovered.publish(42, 2, 1, 3, b"source-checkpoint-3").unwrap();
+    recovered
+        .publish(42, 2, 1, 3, b"source-checkpoint-3")
+        .await
+        .unwrap();
 }
 
-async fn publish_assignment(kv: Arc<CrowdbKvClient>, entry: ChunkKvRangeCatalogEntry, generation: u64) {
+async fn publish_assignment(kv: Arc<PaxosKvClient>, entry: ChunkKvRangeCatalogEntry, generation: u64) {
     let mut page = ChunkKvRangeCatalogPage {
         generation,
         page_index: 0,
@@ -122,7 +122,7 @@ async fn only_published_matching_target_can_claim_mutable_root() {
     let source = open_root_catalog_for_tests(kv.clone(), 0, 1, &source_entry)
         .await
         .unwrap();
-    source.publish(42, 0, 1, 1, b"source-root").unwrap();
+    source.publish(42, 0, 1, 1, b"source-root").await.unwrap();
     publish_assignment(kv.clone(), source_entry.clone(), 1).await;
     let mut target_entry = source_entry.clone();
     target_entry.owner.instance_id = 2;
@@ -134,7 +134,7 @@ async fn only_published_matching_target_can_claim_mutable_root() {
         .await
         .unwrap();
     assert_eq!(
-        target.publish(42, 1, 2, 2, b"target-root"),
+        target.publish(42, 1, 2, 2, b"target-root").await,
         Err(CtError::Unavailable)
     );
     let mut wrong = target_entry.clone();
@@ -142,21 +142,21 @@ async fn only_published_matching_target_can_claim_mutable_root() {
     wrong.transition_id = Some(Id128 { high: 3, low: 5 });
     publish_assignment(kv.clone(), wrong, 2).await;
     assert_eq!(
-        target.publish(42, 1, 2, 2, b"target-root"),
+        target.publish(42, 1, 2, 2, b"target-root").await,
         Err(CtError::Unavailable)
     );
-    source.publish(42, 1, 1, 2, b"source-root-2").unwrap();
+    source.publish(42, 1, 1, 2, b"source-root-2").await.unwrap();
     target_entry.state = ChunkKvRangeCatalogPartitionState::TargetCatchingUp;
     publish_assignment(kv.clone(), target_entry.clone(), 3).await;
     assert_eq!(
-        target.publish(42, 2, 2, 3, b"target-root"),
+        target.publish(42, 2, 2, 3, b"target-root").await,
         Err(CtError::Unavailable)
     );
     target_entry.state = ChunkKvRangeCatalogPartitionState::Serving;
     publish_assignment(kv.clone(), target_entry, 4).await;
-    target.publish(42, 2, 2, 3, b"target-root").unwrap();
+    target.publish(42, 2, 2, 3, b"target-root").await.unwrap();
     assert_eq!(
-        source.publish(42, 3, 1, 4, b"stale-source"),
+        source.publish(42, 3, 1, 4, b"stale-source").await,
         Err(CtError::Unavailable)
     );
     assert!(open_root_catalog_for_tests(kv, 0, 1, &source_entry)
@@ -172,7 +172,7 @@ async fn released_recovery_marker_does_not_block_the_first_target_checkpoint() {
     let source = open_root_catalog_for_tests(kv.clone(), 0, 1, &source_entry)
         .await
         .unwrap();
-    source.publish(42, 0, 1, 1, b"source-root").unwrap();
+    source.publish(42, 0, 1, 1, b"source-root").await.unwrap();
     publish_assignment(kv.clone(), source_entry.clone(), 1).await;
 
     // Lease-excluded recovery adopts the original stream without an overlay.
@@ -185,7 +185,7 @@ async fn released_recovery_marker_does_not_block_the_first_target_checkpoint() {
         .await
         .unwrap();
     assert_eq!(
-        recovered.publish(42, 1, 2, 2, b"target-root"),
+        recovered.publish(42, 1, 2, 2, b"target-root").await,
         Err(CtError::Unavailable)
     );
 
@@ -194,16 +194,19 @@ async fn released_recovery_marker_does_not_block_the_first_target_checkpoint() {
     recovered_entry.state = ChunkKvRangeCatalogPartitionState::Serving;
     recovered_entry.transition_id = None;
     publish_assignment(kv.clone(), recovered_entry.clone(), 2).await;
-    recovered.publish(42, 1, 2, 2, b"target-root").unwrap();
+    recovered.publish(42, 1, 2, 2, b"target-root").await.unwrap();
     assert_eq!(
-        source.publish(42, 2, 1, 3, b"stale-source"),
+        source.publish(42, 2, 1, 3, b"stale-source").await,
         Err(CtError::Unavailable)
     );
     let reopened = open_root_catalog_for_tests(kv, 0, 1, &recovered_entry)
         .await
         .unwrap();
     assert_eq!(
-        reopened.load(42, RootCatalogObject::CurrentManifest).unwrap(),
+        reopened
+            .load_async(42, RootCatalogObject::CurrentManifest)
+            .await
+            .unwrap(),
         Some(b"target-root".to_vec())
     );
 }
@@ -217,7 +220,7 @@ async fn released_marker_on_another_assignment_does_not_authorize_the_prepared_r
         let source = open_root_catalog_for_tests(kv.clone(), 0, 1, &source_entry)
             .await
             .unwrap();
-        source.publish(42, 0, 1, 1, b"source-root").unwrap();
+        source.publish(42, 0, 1, 1, b"source-root").await.unwrap();
         publish_assignment(kv.clone(), source_entry.clone(), 1).await;
         let mut prepared = source_entry;
         prepared.owner.instance_id = 2;
@@ -239,12 +242,15 @@ async fn released_marker_on_another_assignment_does_not_authorize_the_prepared_r
         }
         publish_assignment(kv, published, 2).await;
         assert_eq!(
-            target.publish(42, 1, 2, 2, b"unpublished-target"),
+            target.publish(42, 1, 2, 2, b"unpublished-target").await,
             Err(CtError::Unavailable),
             "released marker must not bypass {mismatch} identity"
         );
         assert_eq!(
-            source.load(42, RootCatalogObject::CurrentManifest).unwrap(),
+            source
+                .load_async(42, RootCatalogObject::CurrentManifest)
+                .await
+                .unwrap(),
             Some(b"source-root".to_vec())
         );
     }

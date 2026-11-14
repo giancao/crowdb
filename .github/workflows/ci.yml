@@ -314,7 +314,7 @@ jobs:
         name: ${{ needs.ContainerImage.outputs.artifact }}
         path: target
     - name: Import shared release image
-      run: pixi run --manifest-path container/oci-image/pixi.toml import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
+      run: pixi run --locked --manifest-path container/oci-image/pixi.toml -e image-import import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
     - name: Run complete S3 acceptance
       run: pixi run test-e2e-s3
     - name: Capture runner state on failure
@@ -379,7 +379,7 @@ jobs:
         name: ${{ needs.ContainerImage.outputs.artifact }}
         path: target
     - name: Import shared release image
-      run: pixi run --manifest-path container/oci-image/pixi.toml import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
+      run: pixi run --locked --manifest-path container/oci-image/pixi.toml -e image-import import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
     - name: Run Iceberg acceptance
       env:
         E2E_PARTITION: ${{ matrix.partition }}
@@ -564,7 +564,10 @@ jobs:
       id: source
       run: |
         pixi run bash -euc '
-          [[ "$GITHUB_REPOSITORY" == buzzcrow/crowdb ]]
+          if [[ "$GITHUB_REPOSITORY_ID" != 1305349686 ]]; then
+            echo "::error::ContainerImage requires repository ID 1305349686, got $GITHUB_REPOSITORY_ID"
+            exit 1
+          fi
           version=$(cat VERSION)
           revision=$(git rev-parse HEAD)
           [[ "$revision" == "$GITHUB_SHA" ]]
@@ -628,7 +631,7 @@ jobs:
         name: ${{ needs.ContainerImage.outputs.artifact }}
         path: target
     - name: Import the shared verified image
-      run: pixi run --manifest-path container/oci-image/pixi.toml import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
+      run: pixi run --locked --manifest-path container/oci-image/pixi.toml -e image-import import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
     - name: Verify centralized KV fixtures and protocol layer
       run: |
         pixi run test-container-e2e-fixture
@@ -679,7 +682,7 @@ jobs:
         name: ${{ needs.ContainerImage.outputs.artifact }}
         path: target
     - name: Import formal release image
-      run: pixi run --manifest-path container/oci-image/pixi.toml import target/crowdb.oci.tar --image crowdb-node:dev
+      run: pixi run --locked --manifest-path container/oci-image/pixi.toml -e image-import import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
     - name: Verify installed system browser
       run: |
         for b in /snap/bin/chromium /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome /usr/bin/google-chrome-stable /usr/bin/microsoft-edge; do
@@ -740,7 +743,7 @@ jobs:
         name: ${{ needs.ContainerImage.outputs.artifact }}
         path: target
     - name: Import shared release image
-      run: pixi run --manifest-path container/oci-image/pixi.toml import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
+      run: pixi run --locked --manifest-path container/oci-image/pixi.toml -e image-import import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
     - name: Verify container domain
       env:
         E2E_DOMAINS: ${{ matrix.domains }}
@@ -792,7 +795,7 @@ jobs:
         name: ${{ needs.ContainerImage.outputs.artifact }}
         path: target
     - name: Import shared release image
-      run: pixi run --manifest-path container/oci-image/pixi.toml import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
+      run: pixi run --locked --manifest-path container/oci-image/pixi.toml -e image-import import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
     - name: Verify deployment acceptance
       env:
         E2E_PARTITION: ${{ matrix.partition }}

@@ -20,6 +20,7 @@
 #include "crowdb-tree/status.h"
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace crowdb::tree
@@ -37,6 +38,18 @@ inline constexpr size_t kDurableBlobHeader = 1 + 4 + 4 + 4;
 // when it actually shrinks the page (else stored raw with algo = kNone).
 void encode_durable_page(const uint8_t *frame, uint32_t page_bytes, compress_algo prefer, std::vector<uint8_t> *out);
 
+// Allocation-free encoding into a caller-owned output window of at least
+// kDurableBlobHeader + frame.size() bytes. Input/output must not overlap.
+// Scratch includes codec-state alignment slack and may start at any address.
+// The returned logical length excludes any backend alignment padding.
+[[nodiscard]] size_t durable_encode_scratch_bytes(compress_algo prefer) noexcept;
+Status encode_durable_page_into(std::span<const uint8_t> frame, compress_algo prefer, std::span<uint8_t> output,
+                                std::span<uint8_t> scratch, uint32_t *logical_bytes);
+
+// Finish the raw envelope around a freshly encoded, checksummed frame
+// already present at kDurableBlobHeader. The remaining bytes are IU padding.
+void finish_raw_durable_page(std::span<uint8_t> output, uint32_t frame_bytes) noexcept;
+
 // Read the logical (raw, uncompressed) frame length recorded in a durable
 // blob's header, so a reader can size the decode buffer without knowing the
 // frame geometry up front. Returns 0 if the blob is shorter than the header.
@@ -46,6 +59,9 @@ void encode_durable_page(const uint8_t *frame, uint32_t page_bytes, compress_alg
 // This is the value the manifest records and store_unloaded re-tags. Returns 0
 // if the blob is shorter than the header.
 [[nodiscard]] uint32_t durable_blob_logical_len(const uint8_t *blob, size_t blob_len);
+
+// Validate a raw envelope and borrow its frame bytes from the caller's buffer.
+Status view_raw_durable_page(std::span<const uint8_t> blob, uint32_t page_bytes, std::span<const uint8_t> *frame);
 
 // Decode a durable blob back into exactly `page_bytes` at `frame_out`. Verifies
 // the stored-bytes CRC and the decompressed length. Returns corruption on any

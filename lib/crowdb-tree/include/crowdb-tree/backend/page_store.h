@@ -20,9 +20,10 @@
 #include "crowdb-tree/status.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <functional>
-#include <mutex>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -43,10 +44,27 @@ inline uint64_t round_up_to_iu(uint64_t v, uint32_t iu)
     return iu <= 1 ? v : ((v + iu - 1) / iu) * iu;
 }
 
+struct Config;
+class TreeCore;
+
 class PageStore
 {
   public:
     virtual ~PageStore() = default;
+
+    // One runtime allocator/recovery domain per backend object. The caller
+    // retains this lease through all accepted operations and export owners.
+    // Legacy callers must still obey the backend's exclusive-writer contract.
+    [[nodiscard]] bool try_claim_runtime_domain() noexcept
+    {
+        bool unclaimed = false;
+        return runtime_claimed_.compare_exchange_strong(unclaimed, true, std::memory_order_acq_rel);
+    }
+
+    void release_runtime_domain() noexcept
+    {
+        runtime_claimed_.store(false, std::memory_order_release);
+    }
 
     // Write/read `len` bytes at byte offset `off`. The store grows on write as
     // needed (up to capacity for fixed-size backends).
@@ -91,7 +109,7 @@ class PageStore
 
     virtual Status decode_mapping_location(uint64_t word, uint64_t *addr, uint32_t *physical_len) const
     {
-        if (addr == nullptr || physical_len == nullptr || !slot_word::is_byte_location(word)) {
+        if (addr == nullptr || physical_len == nullptr || !slot_word::is_unloaded(word)) {
             return Status::corruption("mapping byte location has an invalid tag");
         }
         *addr         = slot_word::unloaded_iu_index(word) * iu_size();
@@ -200,8 +218,25 @@ class PageStore
         return sync_mode_;
     }
 
+    using RuntimeFactory      = Status (*)(const Config &, std::shared_ptr<TreeCore> *);
+    using RuntimeOpenComplete = std::function<void(Status, std::shared_ptr<TreeCore>)>;
+    using RuntimeAsyncFactory = Status (*)(const Config &, RuntimeOpenComplete);
+
+    [[nodiscard]] virtual RuntimeFactory runtime_factory() const noexcept
+    {
+        return nullptr;
+    }
+
+    [[nodiscard]] virtual RuntimeAsyncFactory runtime_async_factory() const noexcept
+    {
+        return nullptr;
+    }
+
   protected:
     SyncMode sync_mode_ = SyncMode::kFull;
+
+  private:
+    std::atomic<bool> runtime_claimed_{false};
 };
 
 // In-memory block device. Durable only for the lifetime of the object;
@@ -210,9 +245,12 @@ class PageStore
 class MemPageStore : public PageStore
 {
   public:
-    explicit MemPageStore(uint32_t iu_size = 1) : iu_size_(iu_size)
-    {
-    }
+    static constexpr size_t kBackingPageBytes = 64 * 1024;
+
+    // Concurrent overlapping byte accesses require caller ordering. Existing
+    // backing/extent owners protect each I/O from whole-page reclamation.
+    explicit MemPageStore(uint32_t iu_size = 1);
+    ~MemPageStore() override;
 
     Status write_at(uint64_t off, const uint8_t *buf, size_t len) override;
     Status read_at(uint64_t off, uint8_t *buf, size_t len) const override;
@@ -224,15 +262,22 @@ class MemPageStore : public PageStore
 
     [[nodiscard]] uint64_t size() const override;
 
+    // Allocated byte capacity of the memory data backing, excluding metadata.
+    [[nodiscard]] size_t resident_bytes() const;
+
+    // The caller must hold the ledger's exclusive free-range lease for this
+    // entire backing page until removal completes. The logical size is unchanged.
+    [[nodiscard]] bool release_backing_page(uint64_t index);
+
     [[nodiscard]] uint32_t iu_size() const override
     {
         return iu_size_;
     }
 
   private:
-    mutable std::mutex   mu_;
-    std::vector<uint8_t> data_;
-    uint32_t             iu_size_;
+    struct Data;
+    std::unique_ptr<Data> data_;
+    uint32_t              iu_size_;
 };
 
 // Debug wrapper (PT9-B): a byte-transparent pass-through over an inner store

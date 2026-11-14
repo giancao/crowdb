@@ -54,10 +54,8 @@ class EpollEngine : public SocketEngine
     bool              oneshot_   = false; // multi-worker safety
     std::atomic<bool> stop_notified_{false};
 
-    // fd → Connection* map (only used for add/remove; wait() uses data.ptr).
-    std::mutex                            conn_mu_;
-    std::unordered_map<int, Connection *> connections_;
-    std::unordered_map<int, uint64_t>     external_fds_;
+    std::mutex                        external_fds_mu_;
+    std::unordered_map<int, uint64_t> external_fds_;
 
     void mod_fd(int fd, uint32_t events, Connection *conn) const;
     void mod_fd_write(int fd, uint32_t events, Connection *conn) const;

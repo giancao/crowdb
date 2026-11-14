@@ -313,8 +313,10 @@ TEST(BlockPageStoreMem, ContentVerification)
 
     auto *mem = dynamic_cast<MemoryMedium *>(s->medium());
     ASSERT_NE(mem, nullptr);
-    const auto &data = mem->data();
-    EXPECT_EQ(data.size(), 53U);
+    std::vector<uint8_t> data(53);
+    size_t               read = 0;
+    ASSERT_TRUE(mem->pread_partial(0, data.data(), data.size(), &read).ok());
+    EXPECT_EQ(read, 53U);
     EXPECT_EQ(data[50], 0xAA);
     EXPECT_EQ(data[51], 0xBB);
     EXPECT_EQ(data[52], 0xCC);

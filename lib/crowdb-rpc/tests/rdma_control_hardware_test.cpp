@@ -25,25 +25,50 @@ class RdmaControlHardwareTest : public ::testing::Test
 
 TEST_F(RdmaControlHardwareTest, AsymmetricClassesRoundTripBeyondTheWholeReceiveWindow)
 {
-    for (const auto capacity : {RDMA_METADATA_CAPACITY, RDMA_AGGREGATE_CAPACITY, RDMA_DATAPATH_CAPACITY}) {
+    constexpr uint32_t                      combined  = RDMA_AGGREGATE_CAPACITY - RDMA_CONTROL_CAPACITY;
+    constexpr std::pair<uint32_t, uint32_t> layouts[] = {
+        {RDMA_METADATA_CAPACITY,  RDMA_DATAPATH_CAPACITY },
+        {RDMA_AGGREGATE_CAPACITY, RDMA_DATAPATH_CAPACITY },
+        {RDMA_DATAPATH_CAPACITY,  RDMA_DATAPATH_CAPACITY },
+        {combined,                RDMA_AGGREGATE_CAPACITY},
+        {RDMA_AGGREGATE_CAPACITY, combined               },
+        {combined,                combined               },
+    };
+    for (const auto &[client_data, server_data] : layouts) {
+        const auto capacity      = std::min(client_data, server_data);
         const auto size          = (2 * capacity) + 13;
-        auto       client_config = test_control_config(capacity, size);
-        auto       server_config = test_control_config(RDMA_DATAPATH_CAPACITY, size);
+        auto       client_config = test_control_config(client_data, size);
+        auto       server_config = test_control_config(server_data, size);
         auto       pair          = TestControlPeers::create(client_config, server_config);
         ASSERT_NE(pair, nullptr);
         for (auto *transport : {pair->client.get(), pair->server.get()}) {
-            const auto owner      = transport == pair->client.get() ? pair->outgoing.get() : pair->incoming.get();
-            const auto capacities = TestRdmaTransport::receive_capacities_for_tests(*transport, owner);
+            const auto          owner = transport == pair->client.get() ? pair->outgoing.get() : pair->incoming.get();
+            const auto          capacities = TestRdmaTransport::receive_capacities_for_tests(*transport, owner);
+            BufferCapacityClass capacity_class;
+            uint32_t            registered_capacity = 0;
+            ASSERT_TRUE(classify_rdma_capacity(capacity, &capacity_class, &registered_capacity));
             ASSERT_EQ(capacities.size(), 2U);
             for (const auto actual : capacities) {
-                EXPECT_EQ(actual, capacity);
+                EXPECT_EQ(actual, registered_capacity);
             }
         }
         auto *request = test_control_frame(pair->application, 43, size);
         ASSERT_NE(request, nullptr);
-        const std::vector<uint8_t> expected(request->control->data, request->control->data + size);
+        auto                      *source = request->control;
+        const std::vector<uint8_t> expected(source->data, source->data + size);
+        constexpr uint32_t         prefix_bytes  = 64;
+        const auto                 tail_boundary = capacity - 7;
+        request->control                         = source->slice(0, prefix_bytes);
+        request->data                            = source->slice(prefix_bytes, tail_boundary - prefix_bytes);
+        request->data_tail[0]                    = source->slice(tail_boundary, size - tail_boundary);
+        request->data_view_count                 = 2;
+        request->views_are_control               = true;
+        source->release();
+        ASSERT_NE(request->control, nullptr);
+        ASSERT_NE(request->data, nullptr);
+        ASSERT_NE(request->data_tail[0], nullptr);
         pair->incoming->set_on_frame([&](Frame *frame, Connection *connection) {
-            EXPECT_EQ(frame->control, expected);
+            EXPECT_TRUE(std::ranges::equal(frame->control, expected));
             EXPECT_EQ(frame->header.data_size, 0U);
             EXPECT_EQ(frame->data_buf, nullptr);
             auto *reply = test_control_reply(frame);
@@ -55,10 +80,12 @@ TEST_F(RdmaControlHardwareTest, AsymmetricClassesRoundTripBeyondTheWholeReceiveW
         std::unique_ptr<Frame> received;
         pair->outgoing->set_on_frame([&](Frame *frame, Connection *) { received.reset(frame); });
         ASSERT_TRUE(pair->client->submit(pair->outgoing.get(), request));
+        EXPECT_EQ(pair->client->stats().control_send_bytes.load(), size);
         ASSERT_TRUE(pair->drain_until([&] { return received != nullptr; }));
-        EXPECT_EQ(received->control, expected);
+        EXPECT_TRUE(std::ranges::equal(received->control, expected));
         EXPECT_EQ(received->request_id, 43U);
         EXPECT_EQ(pair->client->stats().control_fragments_sent.load(), 3U);
+        EXPECT_EQ(pair->client->stats().copied_control_send_bytes.load(), size);
         EXPECT_EQ(pair->server->stats().control_fragments_sent.load(), 3U);
         EXPECT_EQ(pair->client->stats().rpc_frames_received.load(), 1U);
         EXPECT_EQ(pair->server->stats().rpc_frames_received.load(), 1U);

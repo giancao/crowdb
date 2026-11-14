@@ -101,7 +101,7 @@ TEST(InnerMerge, DeleteHeavyCollapsesTreeAndReopens)
                 EXPECT_FALSE(found) << "resurrected " << make_key(i);
             }
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         EXPECT_FALSE(t.io_failed());
     }
 

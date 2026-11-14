@@ -1,0 +1,203 @@
+// Copyright 2026-present Gian <crow.db@outlook.com>
+// Licensed under the Apache License, Version 2.0.
+
+#pragma once
+
+#include "crowdb-tree/backend/async_page_store.h"
+#include "crowdb-tree/memory_budget.h"
+#include "stdexec_adapter.h"
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+
+namespace crowdb::tree::detail
+{
+
+// CPU steps must return instead of waiting for children or I/O. Closing and
+// destroying the runtime belongs to the host, never one of its workers.
+class FlushRuntime
+{
+    struct ProgressState;
+
+  public:
+    struct Snapshot
+    {
+        uint64_t queued;
+        uint64_t inflight;
+        uint64_t submitted;
+        uint64_t completed;
+        uint64_t rejected;
+        uint64_t queue_ns;
+        uint64_t execute_ns;
+    };
+
+    class Lane
+    {
+      public:
+        explicit Lane(size_t queue_target, std::shared_ptr<AllocationBudget> allocations = {})
+            : queue_target_(queue_target),
+              allocations_(std::move(allocations))
+        {
+        }
+
+        // Host-thread boundary after producers have joined. Includes the
+        // scheduler tail after user completion and context-owner release.
+        void drain() noexcept;
+        // Producers are fenced by the caller. Serialize with other drain/close
+        // registrations. Does not close the lane.
+        void drain_async(AsyncCompletion complete) noexcept;
+        // Join registered progress before closing. The lane rejects new
+        // ordinary jobs and completes once its accepted jobs have exited.
+        void close_async(AsyncCompletion complete) noexcept;
+
+        [[nodiscard]] size_t queued() const noexcept
+        {
+            return queued_.load(std::memory_order_relaxed);
+        }
+
+        [[nodiscard]] size_t queue_target() const noexcept
+        {
+            return queue_target_;
+        }
+
+        [[nodiscard]] const std::shared_ptr<AllocationBudget> &allocations() const noexcept
+        {
+            return allocations_;
+        }
+
+      private:
+        friend class FlushRuntime;
+        static constexpr size_t           kClosing = size_t{1} << ((sizeof(size_t) * 8) - 1);
+        static constexpr size_t           kNotify  = kClosing >> 1;
+        static constexpr size_t           kJobs    = ~(kClosing | kNotify);
+        bool                              try_start_job() noexcept;
+        void                              finish_job() noexcept;
+        void                              arm_drain(size_t flags, AsyncCompletion complete) noexcept;
+        void                              complete_drain() noexcept;
+        size_t                            queue_target_;
+        std::shared_ptr<AllocationBudget> allocations_;
+        std::atomic<size_t>               queued_{0};
+        std::atomic<size_t>               jobs_{0};
+        AsyncCompletion                   on_drained_;
+    };
+
+    using Task = void (*)(void *) noexcept;
+
+    class Progress
+    {
+      public:
+        explicit Progress(std::shared_ptr<ProgressState> state);
+        // Every request for this registration uses the same context owner.
+        // Coalesced requests retain the currently queued/running owner.
+        void request(std::shared_ptr<const void> owner) noexcept;
+        // Host-thread only. Drain this registration without waiting for other
+        // Trees. Producers must stop before drain can be used as a boundary.
+        void drain() noexcept;
+        // External producers have joined. Internal requests can finish
+        // before the registration closes and completion is delivered.
+        void close_async(AsyncCompletion complete) noexcept;
+        // Fence racing producer requests and drain accepted jobs. The caller
+        // owns disposal of any work that has yet to enter this registration.
+        void stop_async(AsyncCompletion complete) noexcept;
+        // Reject late requests and drain accepted work.
+        // The closed handle may outlive the runtime. Do not call from its task.
+        void close_and_drain() noexcept;
+
+      private:
+        std::shared_ptr<ProgressState> state_;
+    };
+
+    FlushRuntime(size_t workers, size_t queue_target, std::shared_ptr<AllocationBudget> budget = {});
+    ~FlushRuntime();
+    FlushRuntime(const FlushRuntime &)            = delete;
+    FlushRuntime &operator=(const FlushRuntime &) = delete;
+
+    // No callback on rejection. The context must live through task return.
+    // Ready work goes directly to the pool. A lane tracks Tree-local drain.
+    [[nodiscard]] Status try_submit(std::shared_ptr<Lane> lane, Task task, void *context,
+                                    std::shared_ptr<const void> owner = {});
+    // A registered owner embeds its operation state. Requests do not allocate.
+    // Registered work remains usable after close to finish admitted work.
+    // The host joins producers and releases registrations before destroying
+    // this runtime; drain includes all queued/running progress continuations.
+    [[nodiscard]] Status reserve_progress(std::shared_ptr<Lane> lane, Task task, void *context,
+                                          std::shared_ptr<AllocationBudget> budget, std::shared_ptr<Progress> *out);
+    [[nodiscard]] static size_t progress_allocation_bound() noexcept;
+    // Owned state and lifecycle control. The host separately
+    // provisions the shared executor's thread/bootstrap storage.
+    [[nodiscard]] static std::optional<size_t> allocation_bound(size_t workers) noexcept;
+    void                                       close() noexcept;
+    void                                       drain() noexcept;
+    // All progress registrations must already be detached. One host call.
+    void drain_async(AsyncCompletion complete) noexcept;
+    // Only the host calls this after the drain callback. Completion follows
+    // the last worker loop. Reaping remains with the external owner.
+    void                      stop_workers(AsyncCompletion complete) noexcept;
+    [[nodiscard]] Snapshot    snapshot() const noexcept;
+    [[nodiscard]] size_t      worker_count() const noexcept;
+    [[nodiscard]] size_t      queue_target() const noexcept;
+    [[nodiscard]] static bool on_worker_thread() noexcept;
+
+  private:
+    struct State;
+    AllocationLease        state_credit_;
+    std::unique_ptr<State> state_;
+};
+
+// A dynamically sized range has a fixed number of reusable operation slots.
+// Completion is copyable and retains the join until late transports release
+// it; duplicates and stale slot generations cannot finish another child.
+class BoundedRangeJoin
+{
+    struct State;
+
+  public:
+    class Completion
+    {
+      public:
+        void operator()(Status status = Status::Ok()) const noexcept;
+
+      private:
+        friend struct State;
+
+        Completion(std::shared_ptr<State> state, size_t slot, uint64_t generation)
+            : state_(std::move(state)),
+              slot_(slot),
+              generation_(generation)
+        {
+        }
+
+        std::shared_ptr<State> state_;
+        size_t                 slot_;
+        uint64_t               generation_;
+    };
+
+    using StartChild    = std::function<void(size_t, Completion)>;
+    using StartFunction = void (*)(void *, size_t, Completion);
+
+    // start_child initiates asynchronous work or a bounded CPU step. It may
+    // complete inline; it must not wait. Throwing is converted to an error.
+    BoundedRangeJoin(size_t ranges, size_t parallelism, StartChild start_child,
+                     std::shared_ptr<AllocationBudget> budget = {});
+    // The connected receiver retains context through terminal; late duplicate
+    // completions never start another child or dereference this context.
+    BoundedRangeJoin(size_t ranges, size_t parallelism, void *context, StartFunction start_child,
+                     std::shared_ptr<AllocationBudget> budget = {});
+    ~BoundedRangeJoin();
+    BoundedRangeJoin(const BoundedRangeJoin &)            = delete;
+    BoundedRangeJoin &operator=(const BoundedRangeJoin &) = delete;
+
+    [[nodiscard]] CallbackSender               sender() noexcept;
+    void                                       request_stop() noexcept;
+    [[nodiscard]] static std::optional<size_t> allocation_bound(size_t parallelism) noexcept;
+
+  private:
+    static void            submit(void *source, CallbackComplete complete, void *context);
+    std::shared_ptr<State> state_;
+};
+
+} // namespace crowdb::tree::detail

@@ -1,0 +1,85 @@
+// Copyright 2026-present Gian <crow.db@outlook.com>
+// Licensed under the Apache License, Version 2.0.
+#include "chunk_physical_registry_internal.h"
+
+namespace crowdb::tree
+{
+void ChunkPhysicalRegistry::submit_prepare(detail::ChunkStageId stage, detail::ChunkId chunk,
+                                           const std::shared_ptr<AllocationBudget> &metadata,
+                                           std::shared_ptr<ChunkPhysicalPack> *out, ChunkPhysicalAdmission *admission,
+                                           detail::ChunkTransportCompletion completion)
+try {
+    if ((admission != nullptr && admission->rollback_) || stage.owner_epoch == 0 ||
+        (stage.operation_high == 0 && stage.operation_low == 0) || chunk.empty() || !metadata || out == nullptr ||
+        *out || metadata->retirement_queue() != state_->queue) {
+        completion.complete(Status::invalid_argument("physical pack requires the same host queue"));
+        return;
+    }
+    auto request       = std::allocate_shared<State::Request>(MetadataAllocator<State::Request>(metadata));
+    request->action    = State::Action::Prepare;
+    request->stage     = stage;
+    request->chunk     = chunk;
+    request->metadata  = metadata;
+    request->output    = out;
+    request->admission = admission;
+    if (admission != nullptr) {
+        auto rollback      = std::allocate_shared<State::Request>(MetadataAllocator<State::Request>(metadata));
+        rollback->state    = state_;
+        rollback->action   = State::Action::Forget;
+        rollback->stage    = stage;
+        rollback->chunk    = chunk;
+        rollback->metadata = metadata;
+        request->rollback  = std::move(rollback);
+    }
+    request->completion = std::move(completion);
+    state_->submit(request);
+}
+catch (const std::bad_alloc &) {
+    completion.complete(Status::resource_exhausted());
+}
+
+void ChunkPhysicalRegistry::submit_observe(const std::shared_ptr<ChunkPhysicalPack> &pack,
+                                           detail::ChunkAllocationIdentity           receipt,
+                                           const std::shared_ptr<AllocationBudget>  &metadata,
+                                           detail::ChunkTransportCompletion          completion)
+try {
+    if (!pack || !metadata || metadata->retirement_queue() != state_->queue) {
+        completion.complete(Status::invalid_argument());
+        return;
+    }
+    auto request        = std::allocate_shared<State::Request>(MetadataAllocator<State::Request>(metadata));
+    request->action     = State::Action::Observe;
+    request->stage      = pack->stage;
+    request->chunk      = pack->chunk;
+    request->pack       = pack;
+    request->receipt    = receipt;
+    request->metadata   = metadata;
+    request->completion = std::move(completion);
+    state_->submit(request);
+}
+catch (const std::bad_alloc &) {
+    completion.complete(Status::resource_exhausted());
+}
+
+void ChunkPhysicalRegistry::submit_deleted(detail::ChunkStageId stage, detail::ChunkId chunk,
+                                           const std::optional<detail::ChunkAllocationIdentity> &receipt,
+                                           const std::shared_ptr<AllocationBudget>              &metadata,
+                                           detail::ChunkTransportCompletion                      completion)
+try {
+    if (!metadata || metadata->retirement_queue() != state_->queue) {
+        completion.complete(Status::invalid_argument());
+        return;
+    }
+    auto request        = std::allocate_shared<State::Request>(MetadataAllocator<State::Request>(metadata));
+    request->action     = State::Action::Delete;
+    request->stage      = stage;
+    request->chunk      = chunk;
+    request->receipt    = receipt;
+    request->metadata   = metadata;
+    request->completion = std::move(completion);
+    state_->submit(request);
+}
+catch (const std::bad_alloc &) {
+    completion.complete(Status::resource_exhausted());
+}
+} // namespace crowdb::tree

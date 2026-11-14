@@ -241,8 +241,10 @@ void Worker::run_loop()
                 switch (ev.type) {
                 case SocketEvent::Notify:
                     drain_notified();
+                    transport_->run_scheduled();
                     break;
                 case SocketEvent::Timer:
+                    transport_->run_scheduled(true);
                     break;
                 case SocketEvent::Readable:
                     process_readable(ev, closed_fds);
@@ -432,11 +434,12 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
     auto &parser      = conn->parser();
     auto  on_frame_cb = [conn](Frame *frame) { conn->on_frame(frame); };
 
-    // Process bytes from recv_buf starting at offset `pos`, up to `end`.
+    // Process all bytes already in the worker receive buffer.
     // Handles header+control (via feed_data) and data (direct copy to
     // data_buf_). Returns when all bytes are consumed or parser needs
     // more bytes from the socket.
-    auto process_recv_bytes = [&](uint32_t pos, uint32_t end) -> bool {
+    auto process_recv_bytes = [&](uint32_t end) -> bool {
+        uint32_t pos = 0;
         while (pos < end && parser.last_error() == FramingError::None) {
             if (parser.state() == ParseState::ReadingData) {
                 // Copy data bytes from recv_buf to data_buf_.
@@ -467,19 +470,22 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
                 }
             }
         }
-        return true;
+        return parser.last_error() == FramingError::None;
     };
 
-    // Buzz-cpp read strategy: one big read() into recv_buf pulls a TCP
-    // segment (possibly multiple frames). process_recv_bytes handles
-    // header+control+small data from recv_buf (memcpy, no extra syscall).
-    // When recv_buf is exhausted and parser still needs data (large data
-    // payload spanning multiple TCP segments), read() directly into
-    // data_buf_ — no extra copy. read_calls counts only the main recv_buf
-    // read (TCP segment arrivals), so raggr = frames_parsed / read_calls
-    // reflects true kernel-level coalescing.
+    // Batch ordinary reads so one syscall can consume multiple small frames.
+    // After the worker buffer is exhausted, read a large remaining control
+    // or data directly into the frame. The target ends at that field boundary.
+    constexpr uint32_t direct_control_min = 4 * 1024;
     while (true) {
-        ssize_t n = ::read(fd, recv_buf, recv_buf_size);
+        const bool direct =
+            parser.state() == ParseState::ReadingData || parser.control_remaining() >= direct_control_min;
+        const auto target = direct ? parser.next_read_target()
+                                   : FrameParser::ReadTarget{recv_buf, static_cast<uint32_t>(recv_buf_size)};
+        if (target.len == 0) {
+            break;
+        }
+        const auto n = ::read(fd, target.ptr, target.len);
         if (n <= 0) {
             if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
                 if (n < 0 && errno == ECONNREFUSED) {
@@ -494,36 +500,25 @@ static void on_readable_impl(Connection *conn, int fd, uint8_t *recv_buf, size_t
 #ifdef __linux__
         // Re-arm TCP_QUICKACK — the kernel resets it after sending each
         // ACK. Without this, delayed ACKs stall Nagle's send (40ms/round).
-        if (conn->quickack) {
+        if (!direct && conn->quickack) {
             int quickack = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
         }
 #endif
-        // Process all bytes in recv_buf — header+control via feed_data,
-        // data via direct copy from recv_buf. Handles multiple frames.
-        process_recv_bytes(0, static_cast<uint32_t>(n));
-        // If parser still needs data bytes (recv_buf exhausted mid-frame),
-        // read directly into data_buf_ — no extra copy for large payloads.
-        while (parser.state() == ParseState::ReadingData) {
-            auto target = parser.next_read_target();
-            if (target.len == 0) {
-                break;
-            }
-            ssize_t n2 = ::read(fd, target.ptr, target.len);
-            if (n2 <= 0) {
-                if (n2 == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-                    conn->close();
-                }
-                goto done;
-            }
-            bw_read().observe(static_cast<uint64_t>(n2));
-            Frame *frame = parser.advance(static_cast<uint32_t>(n2));
-            if (frame != nullptr) {
+        if (direct) {
+            if (auto *frame = parser.advance(static_cast<uint32_t>(n)); frame != nullptr) {
                 on_frame_cb(frame);
             }
+            if (parser.last_error() == FramingError::None) {
+                continue;
+            }
         }
+        else if (process_recv_bytes(static_cast<uint32_t>(n))) {
+            continue;
+        }
+        conn->close();
+        break;
     }
-done:
     // If on_frame enqueued responses (via submit_inline), collect this
     // connection for batch writev after all events are processed.
     if (conn->has_pending_send()) {
@@ -587,6 +582,7 @@ SocketTransport::SocketTransport(uint32_t io_engines, uint32_t io_workers, Buffe
     }
 #ifdef CROWDB_RPC_HAVE_RDMA
     if (rdma_transport_ != nullptr) {
+        rdma_transport_->socket_transport_ = this;
         rdma_transport_->set_connection_handler([this](const std::shared_ptr<Connection> &conn) {
             attach_rdma_connection(conn);
             if (rdma_accept_handler_)
@@ -624,6 +620,7 @@ void SocketTransport::start()
 
 void SocketTransport::stop()
 {
+    scheduled_.close();
     for (auto &w : workers_) {
         w->request_stop();
     }
@@ -641,6 +638,38 @@ void SocketTransport::stop()
         rdma_transport_->shutdown();
 #endif
     started_.store(false, std::memory_order_release);
+}
+
+ScheduledExecutor::TaskId SocketTransport::schedule(ScheduledExecutor::Task task, uint32_t delay_ms,
+                                                    ScheduledExecutor::Task cancelled)
+{
+    if (!started_.load(std::memory_order_acquire)) {
+        return 0;
+    }
+    const auto id = scheduled_.schedule(std::move(task), delay_ms, std::move(cancelled));
+    if (id != 0) {
+        scheduled_changed_.store(true, std::memory_order_release);
+        engines_.front()->notify_worker();
+    }
+    return id;
+}
+
+bool SocketTransport::cancel_scheduled(ScheduledExecutor::TaskId id)
+{
+    if (!scheduled_.cancel(id)) {
+        return false;
+    }
+    scheduled_changed_.store(true, std::memory_order_release);
+    engines_.front()->notify_worker();
+    return true;
+}
+
+void SocketTransport::run_scheduled(bool timer_event)
+{
+    if (!scheduled_changed_.exchange(false, std::memory_order_acq_rel) && !timer_event) {
+        return;
+    }
+    scheduled_.run_due_tasks([this](int delay) { engines_.front()->set_timer(delay < 0 ? 0 : delay); });
 }
 
 void SocketTransport::add_listen_fd(int fd)
@@ -815,6 +844,10 @@ std::shared_ptr<Connection> SocketTransport::create_connection(int fd, const std
                                                                Connection::OnFrameCallback on_frame,
                                                                Connection::OnCloseCallback on_close)
 {
+#ifdef SO_NOSIGPIPE
+    int nosigpipe = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
     int64_t id             = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
     auto    conn           = std::make_shared<Connection>(id, name, pool_, 4 << 20, send_queue_capacity_);
     conn->transport_handle = static_cast<uint64_t>(fd);
@@ -833,7 +866,7 @@ std::shared_ptr<Connection> SocketTransport::create_connection(int fd, const std
     // Keep the identity registry until descriptor cleanup; a worker must
     // safely resolve an event even after an explicit caller-side close.
     conn->set_on_frame(std::move(on_frame));
-    conn->set_on_close([this, on_close = std::move(on_close)](Connection *c) {
+    conn->set_on_close([on_close = std::move(on_close)](Connection *c) {
         if (auto *worker = static_cast<Worker *>(c->io_worker); worker != nullptr) {
             worker->request_close(c->shared_from_this());
         }

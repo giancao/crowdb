@@ -47,7 +47,14 @@ template <typename T> class MpscQueue
         for (;;) {
             uint64_t head = head_.load(std::memory_order_acquire);
             if (tail - head >= capacity_) {
-                return false; // full — backpressure
+                // Other producers and the consumer can pass our old tail.
+                // Recheck before treating the unsigned distance as full.
+                const uint64_t observed_tail = tail_.load(std::memory_order_relaxed);
+                if (observed_tail == tail) {
+                    return false;
+                }
+                tail = observed_tail;
+                continue;
             }
             if (tail_.compare_exchange_weak(tail, tail + 1, std::memory_order_relaxed)) {
                 break;

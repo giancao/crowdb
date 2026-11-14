@@ -17,7 +17,7 @@ pub(crate) struct PageQuery {
 }
 
 impl ChunkKvService {
-    pub(crate) fn observe_page(&self, id: Id128, query: &PageQuery) -> Result<Value, &'static str> {
+    pub(crate) async fn observe_page(&self, id: Id128, query: &PageQuery) -> Result<Value, &'static str> {
         let raw = query.page_path.as_deref().ok_or("invalid_page_path")?;
         if raw.len() > 352
             || query.tree_version == Some(u64::MAX)
@@ -40,6 +40,7 @@ impl ChunkKvService {
         let partition = hosted.get(&id).ok_or("partition_not_hosted")?;
         let page = partition
             .inspect_page(&path, query.tree_version)
+            .await
             .map_err(|error| match error {
                 crowdb_chunk_kv::ChunkKvError::RequestConflict => "page_changed",
                 crowdb_chunk_kv::ChunkKvError::TreeCorruption(_) => "page_corrupt",

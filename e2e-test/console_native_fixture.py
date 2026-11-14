@@ -4,6 +4,7 @@
 
 import json
 import re
+import default_ports as ports
 import urllib.request
 import urllib.error
 from urllib.parse import urlparse
@@ -47,9 +48,6 @@ class NativeConsoleCluster(ShellBrowserCluster):
             raise ValueError("diskless node is outside the native profile")
         Cluster.__init__(self, image, artifacts, node_count=count, wire_replicas=False,
                          advertise=True, **kwargs)
-        # Native storage exercises the real io_uring-backed DiskIO path. Docker's
-        # default seccomp profile blocks io_uring_setup even when the host supports it.
-        self.security_options = ("seccomp=unconfined",)
         self.bundle = bundle
         self.node_ids = []
         self.rejected = False
@@ -68,7 +66,7 @@ class NativeConsoleCluster(ShellBrowserCluster):
     def api(self, path, body=None, method=None, status=200):
         payload = None if body is None else json.dumps(body).encode()
         origin = getattr(self, "management_address", self.addresses[0])
-        request = urllib.request.Request(f"http://{origin}:9090" + path,
+        request = urllib.request.Request(f"http://{origin}:6135" + path,
             data=payload, method=method, headers={"Content-Type": "application/json"})
         try:
             with HTTP.open(request, timeout=20) as response:
@@ -116,9 +114,9 @@ class NativeConsoleCluster(ShellBrowserCluster):
                     "CROWDB_DISK_INPUTS=" + json.dumps(self.candidate_inputs if index == 0 else []))))
         self.ready()
         for address in self.addresses:
-            with HTTP.open(f"http://{address}:9090/api/node/auto-join", timeout=5) as response:
+            with HTTP.open(f"http://{address}:6135/api/node/auto-join", timeout=5) as response:
                 assert json.load(response)["enabled"] is False
-            request = urllib.request.Request(f"http://{address}:9090/api/node/auto-join",
+            request = urllib.request.Request(f"http://{address}:6135/api/node/auto-join",
                 data=json.dumps({"enabled": False}).encode(),
                 headers={"Content-Type": "application/json"})
             with HTTP.open(request, timeout=5) as response:
@@ -139,6 +137,7 @@ class NativeConsoleCluster(ShellBrowserCluster):
         candidates = wait(lambda: self.api("/api/node/candidates"),
                           lambda result: len(result["candidates"]) == self.node_count,
                           "isolated manual node candidates", seconds=10)["candidates"]
+        setup = diskless_setup()
         for index, address in enumerate(self.addresses):
             candidate = next(entry for entry in candidates if any(
                 urlparse(endpoint).hostname == address
@@ -150,7 +149,7 @@ class NativeConsoleCluster(ShellBrowserCluster):
             record = self.api("/api/node/admit", {
                 "discovery_id": candidate["advertisement"]["discovery_id"],
                 "rack_id": self.rack_ids[index], "ssh_user": "crowdb", "ssh_port": 2222, "ssh_password": "crowdb",
-                "setup": diskless_setup()})
+                "setup": setup})
             self.node_ids.append(record["node_id"])
         if self.bootstrap:
             if self.auto_bootstrap:
@@ -165,16 +164,20 @@ class NativeConsoleCluster(ShellBrowserCluster):
                      if node.get("kv_server", {}).get("health") == "up"} == set(self.node_ids),
                  "live remote KV observations", seconds=10)
             if self.auto_bootstrap:
-                self.verify_auto_bootstrap()
+                management_port = next(service["listeners"]["http_port"]
+                                       for service in setup["services"] if service["kind"] == "paxos-kv")
+                self.verify_auto_bootstrap(management_port)
                 verify_file_preparation(self)
-        self.origins = [f"http://{address}:10000" for address in self.addresses]
+        self.origins = [f"http://{address}:{ports.PAXOS_KV_SERVER_MGMT_BASE}" for address in self.addresses]
         (self.artifacts / "native-endpoints.json").write_text(json.dumps({
-            "nodes": self.node_ids, "addresses": self.addresses, "disk_gib": self.disk_gib,
+            "nodes": self.node_ids, "addresses": self.addresses,
+            "management_address": getattr(self, "management_address", self.addresses[0]), "disk_gib": self.disk_gib,
             "zone_gib": self.zone_gib, "spare_disk_gib": self.spare_disk_gib, "racks": self.rack_ids, "ports": {
-                "web": 9090, "ssh": 2222, "kv": 10000, "diskdb": 7100, "diskio": 7200}}, indent=2))
+                "web": ports.WEB_BASE, "ssh": ports.SSH_PORT, "kv": ports.PAXOS_KV_SERVER_MGMT_BASE,
+                "diskdb": 7100, "diskio": 7200}}, indent=2))
         return self
 
-    def verify_auto_bootstrap(self):
+    def verify_auto_bootstrap(self, management_port):
         admissions = self.api("/api/node/admissions")
         ordered = sorted(admissions, key=lambda node: node["discovery_id"])
         operation = self.api("/api/cluster/initialization")
@@ -184,10 +187,10 @@ class NativeConsoleCluster(ShellBrowserCluster):
         accepted = json.loads(self.command("exec", initiator, "cat", "/opt/crowdb/data/initialization.json"))
         assert accepted["operation"]["identity"]["operation_id"] == operation["operation_id"]
         assert accepted["create_data_group"] is False, accepted
-        for address in self.addresses:
-            with HTTP.open(f"http://{address}:10000/stores/0/groups/0/ready", timeout=5) as response:
-                readiness = json.load(response)
-                assert readiness["ready"] and readiness["voting_replicas"] == 3, readiness
+        readiness_url = f"http://127.0.0.1:{management_port}/stores/0/groups/0/ready"
+        for server in self.servers:
+            readiness = json.loads(self.command("exec", server, "curl", "-fsS", "--max-time", "5", readiness_url))
+            assert readiness["ready"] and readiness["voting_replicas"] == 3, readiness
         self.api("/api/node/auto-join", {"enabled": False})
         assert self.api("/api/cluster/initialization")["operation_id"] == operation["operation_id"]
 
@@ -199,7 +202,7 @@ class NativeConsoleCluster(ShellBrowserCluster):
 
     def ready(self):
         for address in self.addresses:
-            wait(lambda: HTTP.open(f"http://{address}:9090/healthz", timeout=5).read(),
+            wait(lambda: HTTP.open(f"http://{address}:6135/healthz", timeout=5).read(),
                  lambda body: body == b"ok", "native release Web listener", seconds=20)
 
     def observed_browser(self, name, *, config):

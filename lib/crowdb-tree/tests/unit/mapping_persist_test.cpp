@@ -37,30 +37,6 @@ TEST(MappingPersist, SegmentImageRoundTrip)
     EXPECT_EQ(got_hdr.flags, 0U);
 }
 
-TEST(MappingPersist, MixedPageReferenceImageUsesVersionTwo)
-{
-    SegmentImageHeader hdr;
-    hdr.seg_idx                 = 2;
-    hdr.generation              = 4;
-    hdr.slot_count              = 4;
-    hdr.live_count              = 2;
-    std::vector<uint64_t> words = {
-        slot_word::kEmpty,
-        slot_word::pack_unloaded(9, 1),
-        slot_word::pack_page_ref(17, 2),
-        slot_word::kEmpty,
-    };
-
-    std::vector<uint8_t> image;
-    encode_segment_image(hdr, words, &image);
-    SegmentImageHeader    decoded;
-    std::vector<uint64_t> decoded_words;
-    ASSERT_TRUE(decode_segment_image(image.data(), image.size(), &decoded, &decoded_words).ok());
-    EXPECT_EQ(decoded.format_version, 2U);
-    EXPECT_EQ(decoded.flags, 1U);
-    EXPECT_EQ(decoded_words, words);
-}
-
 TEST(MappingPersist, SegmentImageToleratesTrailingPadding)
 {
     SegmentImageHeader hdr;

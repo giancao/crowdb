@@ -19,9 +19,8 @@ ControlStreamReceiver::ControlStreamReceiver(ControlStreamBudget budget, uint32_
       max_message_bytes_(max_message_bytes),
       timeout_(timeout)
 {
-    BufferCapacityClass type;
-    uint32_t            rounded = 0;
-    if (!classify_rdma_capacity(capacity, &type, &rounded) || rounded != capacity || generation == 0 ||
+    if (capacity > RDMA_DATAPATH_CAPACITY ||
+        !valid_rdma_wire_capacity(capacity + RDMA_CONTROL_CAPACITY, RdmaWireLayout::ControlData) || generation == 0 ||
         max_message_bytes == 0 || max_message_bytes > INT32_MAX || max_message_bytes > budget_.limit() ||
         timeout.count() <= 0)
         throw std::invalid_argument("invalid logical control stream bounds");

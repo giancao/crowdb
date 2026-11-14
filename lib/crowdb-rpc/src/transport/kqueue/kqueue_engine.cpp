@@ -58,10 +58,6 @@ void KqueueEngine::add_listen_fd(int fd)
 void KqueueEngine::add_connection(int read_fd, int write_fd, Connection *conn)
 {
     (void)write_fd;
-    {
-        std::lock_guard<std::mutex> lock(conn_mu_);
-        connections_[read_fd] = conn;
-    }
     // kqueue uses separate filters (EVFILT_READ, EVFILT_WRITE) on the
     // same fd, so read and write are already independent — no dup needed.
     // Register read with a connection ID token for safe event resolution.
@@ -74,10 +70,6 @@ void KqueueEngine::add_connection(int read_fd, int write_fd, Connection *conn)
 void KqueueEngine::remove_connection(int read_fd, int write_fd)
 {
     (void)write_fd;
-    {
-        std::lock_guard<std::mutex> lock(conn_mu_);
-        connections_.erase(read_fd);
-    }
     // Delete both read and write filters (kqueue uses same fd for both).
     struct kevent changes[2];
     EV_SET(&changes[0], read_fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);

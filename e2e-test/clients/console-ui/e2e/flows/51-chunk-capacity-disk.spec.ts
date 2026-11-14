@@ -6,29 +6,28 @@ import { step } from '../fixtures/stepTimer';
 import { diskBranch, diskMenu } from '../fixtures/capacity';
 
 test('native diagnostics: Capacity navigation fetches only opened storage branches', async ({ page }) => {
-  const groups: number[] = []; const disks: string[] = []; const usage: string[] = [];
+  const groups = new Set<number>(); const disks = new Set<string>(); const usage: string[] = [];
   page.on('request', request => {
     const url = new URL(request.url());
     const node = url.pathname.match(/^\/api\/nodes\/(\d+)\/disk-groups$/);
-    if (node) groups.push(Number(node[1]));
-    if (/^\/api\/nodes\/\d+\/disk-groups\/\d+\/disks$/.test(url.pathname)) disks.push(url.pathname);
+    if (node) groups.add(Number(node[1]));
+    if (/^\/api\/nodes\/\d+\/disk-groups\/\d+\/disks$/.test(url.pathname)) disks.add(url.pathname);
     if (url.pathname === '/api/diskdb/usage') usage.push(url.search);
   });
   await page.goto('/?domain=Cluster');
   const sidebar = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
   await expect(sidebar.getByRole('button', { name: 'N-1', exact: true })).toBeVisible();
-  expect(groups).toEqual([]); expect(disks).toEqual([]); expect(usage).toEqual([]);
+  expect(groups.size).toBe(0); expect(disks.size).toBe(0); expect(usage).toEqual([]);
   await page.getByRole('complementary', { name: 'Cluster tree sidebar' }).getByRole('button', { name: 'datacenter', exact: true }).click();
   await expect(page.getByTestId('capacity-summary')).toBeVisible();
-  expect(groups).toEqual([]); expect(disks).toEqual([]);
+  expect(groups.size).toBe(0); expect(disks.size).toBe(0);
   await sidebar.getByTestId('tree-node-STORAGE-1').getByRole('button', { name: 'Expand', exact: true }).click();
   await expect(sidebar.getByRole('button', { name: 'DG-1', exact: true })).toBeVisible();
-  expect(groups).toEqual([1]); expect(disks).toEqual([]);
+  expect([...groups]).toEqual([1]); expect(disks.size).toBe(0);
   await sidebar.getByRole('button', { name: 'DG-1', exact: true }).click();
   await expect.poll(() => usage.some(query => query.includes('dg=1')), { intervals: [100] }).toBe(true);
-  await expect.poll(() => disks.length, { intervals: [100] }).toBe(1);
-  expect(disks[0]).toBe('/api/nodes/1/disk-groups/1/disks');
-  expect(groups.every(node => node === 1)).toBe(true);
+  await expect.poll(() => [...disks], { intervals: [100] }).toEqual(['/api/nodes/1/disk-groups/1/disks']);
+  expect([...groups]).toEqual([1]);
 });
 
 // Baseline: 10.1s (2026-10-15), native file admission, Offline/Remove and retained Offline Rejoin.

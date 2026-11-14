@@ -57,8 +57,8 @@ class OciReferenceCluster(CliClient, Cluster):
     def endpoint(self, index):
         return f"http://127.0.0.1:{self.port_base + index * 10}"
 
-    def ready_report(self):
-        report = json.loads(self.invoke("cluster", "check", "--wait", "180", "--json", endpoint=self.endpoint(0)))
+    def ready_report(self, index=0):
+        report = json.loads(self.invoke("cluster", "check", "--wait", "180", "--json", endpoint=self.endpoint(index)))
         assert report["phase"] == "ready"
         return report
 
@@ -79,8 +79,7 @@ class OciReferenceCluster(CliClient, Cluster):
         witness = protocols.write_witnesses(self)
         protocols.read_witnesses(self, witness)
         for index in range(self.node_count):
-            observed = json.loads(self.invoke("cluster", "check", "--json", endpoint=self.endpoint(index)))
-            assert observed["phase"] == "ready" and observed["observation"]["cluster_id"] == cluster_id
+            assert self.ready_report(index)["observation"]["cluster_id"] == cluster_id
         assert not (self.root / "persistent/oci-clusters").exists()
         runtime.recreate(self)
         after_report = self.ready_report()

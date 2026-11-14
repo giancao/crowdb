@@ -1,5 +1,5 @@
 [workspace]
-name = "crowdb-kv"
+name = "crowdb-paxos-kv"
 version = "0.3.0"
 description = "CROWDB — distributed key-value store with multi-paxos groups"
 channels = ["conda-forge"]
@@ -38,7 +38,7 @@ isa-l = "*"
 # crowdb-protocol's .fbs codegen. Provides `flatc` and flatbuffers/cpp headers.
 flatbuffers = "*"
 tomlplusplus = ">=3.3.0,<4"
-# Rust toolchain (crowdb-kv)
+# Rust toolchain (crowdb-paxos-kv)
 rust = ">=1.96"
 openssl = "*"
 pkg-config = "*"
@@ -128,6 +128,7 @@ auditwheel = ">=6, <7"
 ################################################################################
 # Host setup, frontend dependencies and profiling tools.
 install-deps = { cmd = "bash tools/pixi-tasks/install-deps.sh" }
+install-console-ui-deps = { cmd = "npm ci", cwd = "app/crowdb-web/ui" }
 # Stop services and remove build products/runtime state; --runtime-only preserves build products and persistent clusters.
 clean = { cmd = "bash tools/pixi-tasks/clean-build.sh" }
 # Build the native libraries used by the C++ and storage component gates.
@@ -146,7 +147,7 @@ test-core = { cmd = "python tools/pixi-tasks/test.py unit core" }
 test-storage = { cmd = "python tools/pixi-tasks/test.py unit storage", depends-on = ["build-native"] }
 test-access = { cmd = "python tools/pixi-tasks/test.py unit access" }
 test-console = { cmd = "python tools/pixi-tasks/test.py unit console" }
-test-console-ui = { cmd = "python tools/pixi-tasks/test.py unit ui", depends-on = ["install-deps"] }
+test-console-ui = { cmd = "python tools/pixi-tasks/test.py unit ui", depends-on = ["install-console-ui-deps"] }
 test-access-sdk = "python tools/pixi-tasks/test.py unit sdk"
 test-dataset-sdk = "cargo test --release --manifest-path sdk/Cargo.toml --workspace --locked"
 test-dataset-sdk-python = "python tools/sdk/package.py"

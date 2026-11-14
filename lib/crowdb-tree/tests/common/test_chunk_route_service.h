@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "backend/chunk/chunk_transport.h"
 #include "chunkdb_generated.h"
 #include "crowdb-rpc/c_api.h"
 #include "crowdb-tree/c_api.h"
@@ -11,10 +12,26 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <future>
 #include <vector>
 
 namespace crowdb::tree::detail
 {
+
+template <auto Submit, class Transport, class... Args> Status await_chunk_rpc(Transport &transport, Args &&...args)
+{
+    auto terminal = std::make_shared<std::promise<Status>>();
+    auto result   = terminal->get_future();
+    (transport.*Submit)(std::forward<Args>(args)...,
+                        ChunkTransportCompletion{.complete_fn =
+                                                     +[](void *context, Status status) {
+                                                         static_cast<std::promise<Status> *>(context)->set_value(
+                                                             std::move(status));
+                                                     },
+                                                 .context = terminal.get(),
+                                                 .owner   = terminal});
+    return result.get();
+}
 
 enum class TestSealReply : uint8_t { Exact, Active, WrongCursor };
 
@@ -28,9 +45,14 @@ struct TestChunkRouteService
     std::atomic<uint32_t> seals{0};
     std::atomic<uint64_t> sealed_bytes{0};
     std::atomic<bool>     sealed{false};
-    TestSealReply         seal_reply = TestSealReply::Exact;
+    TestSealReply         seal_reply    = TestSealReply::Exact;
+    uint32_t              mirror_copies = 1;
     std::atomic<uint64_t> acknowledged{0};
     bool                  drop_allocation = false;
+    std::atomic<uint64_t> requested_low{0};
+    std::atomic<uint32_t> deletes{0};
+    std::atomic<bool>     fence_missing{false};
+    bool                  unfinished_delete = false;
 
     static void handle(uint64_t request_id, uint64_t /*unused*/, uint16_t message, const uint8_t *control,
                        uint32_t length, const uint8_t * /*unused*/, uint32_t /*unused*/, void *connection, void *frame,
@@ -50,6 +72,11 @@ struct TestChunkRouteService
         if (message == FBMsgType_EAllocateChunkRequest) {
             if (!verifier.VerifyBuffer<FBAllocateChunkRequest>(nullptr)) {
                 return;
+            }
+            const auto *allocation = flatbuffers::GetRoot<FBAllocateChunkRequest>(control);
+            if (allocation->chunk_id() != nullptr) {
+                low = allocation->chunk_id()->low();
+                requested_low.store(low);
             }
             allocations.fetch_add(1);
             if (drop_allocation) {
@@ -71,6 +98,15 @@ struct TestChunkRouteService
             acknowledged.store(flatbuffers::GetRoot<FBAdvanceChunkWriteRequest>(control)->acknowledged_cursor());
             advances.fetch_add(1);
         }
+        else if (message == FBMsgType_EDeleteChunkRequest) {
+            if (!verifier.VerifyBuffer<FBDeleteChunkRequest>(nullptr)) {
+                return;
+            }
+            const auto *request = flatbuffers::GetRoot<FBDeleteChunkRequest>(control);
+            low                 = request->chunk_id()->low();
+            fence_missing.store(request->fence_missing());
+            deletes.fetch_add(1);
+        }
         else {
             if (!verifier.VerifyBuffer<FBSealChunkRequest>(nullptr)) {
                 return;
@@ -85,8 +121,8 @@ struct TestChunkRouteService
         flatbuffers::FlatBufferBuilder builder;
         const bool                     is_seal = message == FBMsgType_ESealChunkRequest;
         const auto cursor = acknowledged.load() + uint64_t{is_seal && seal_reply == TestSealReply::WrongCursor};
-        const auto chunk =
-            make_chunk(builder, low, cursor, sealed.load() && (!is_seal || seal_reply != TestSealReply::Active));
+        const auto chunk  = make_chunk(
+            builder, low, cursor, sealed.load() && (!is_seal || seal_reply != TestSealReply::Active), mirror_copies);
         uint16_t response_type = 0;
         if (message == FBMsgType_EAllocateChunkRequest) {
             builder.Finish(CreateFBAllocateChunkResponse(builder, request_id, 0, code, 0, 0, 0, chunk));
@@ -100,6 +136,14 @@ struct TestChunkRouteService
             builder.Finish(CreateFBAdvanceChunkWriteResponse(builder, request_id, 0, code, 0, 0, 0, chunk));
             response_type = FBMsgType_EAdvanceChunkWriteResponse;
         }
+        else if (message == FBMsgType_EDeleteChunkRequest) {
+            const FBInt128 id(0x0200'0000'0000'0042ULL, low);
+            const auto deleted = unfinished_delete ? chunk
+                                                   : CreateFBChunk(builder, &id, 5, FBChunkState_Deleted, 1, 2, 0, 0, 0,
+                                                                   FBChunkType_BtreePage, 17, 0);
+            builder.Finish(CreateFBDeleteChunkResponse(builder, request_id, 0, code, 0, 0, 0, deleted));
+            response_type = FBMsgType_EDeleteChunkResponse;
+        }
         else {
             builder.Finish(CreateFBSealChunkResponse(builder, request_id, 0, code, 0, 0, 0, chunk));
             response_type = FBMsgType_ESealChunkResponse;
@@ -108,8 +152,9 @@ struct TestChunkRouteService
                                                             builder.GetSize(), nullptr, 0, response_type, request_id));
     }
 
-    static flatbuffers::Offset<crowdb::chunkdb::proto::FBChunk>
-    make_chunk(flatbuffers::FlatBufferBuilder &builder, uint64_t low, uint64_t acknowledged_bytes, bool is_sealed)
+    static flatbuffers::Offset<crowdb::chunkdb::proto::FBChunk> make_chunk(flatbuffers::FlatBufferBuilder &builder,
+                                                                           uint64_t low, uint64_t acknowledged_bytes,
+                                                                           bool is_sealed, uint32_t copies = 1)
     {
         using namespace crowdb::chunkdb::proto;
         const crowdb::rpc::proto::FBInt128 id(0x0200'0000'0000'0042ULL, low);
@@ -117,9 +162,11 @@ struct TestChunkRouteService
         if (is_sealed && acknowledged_bytes == 0) {
             return CreateFBChunk(builder, &id, 3, FBChunkState_Sealed, 1, 2, 0, 0, 0, FBChunkType_BtreePage, 17, 0);
         }
-        const std::vector<crowdb::diskdb::proto::FBSegment> segments{
-            {disk, id, 0, 1, 2, 4096}
-        };
+        std::vector<crowdb::diskdb::proto::FBSegment> segments;
+        segments.reserve(copies);
+        for (uint32_t index = 0; index < copies; ++index) {
+            segments.emplace_back(disk, id, index, 1, 2, 4096);
+        }
         const auto mirror = CreateFBMirrorStrip(builder, builder.CreateVectorOfStructs(segments));
         const auto strip  = CreateFBChunkStrip(builder, 0, 0, 256U * 1024U, 256U * 1024U, 1, 0, 0, FBStripType_Mirror,
                                                FBStripBody_FBMirrorStrip, mirror.Union());
@@ -150,8 +197,9 @@ struct TestChunkRouteFixture
             service.parity = index;
             service.server = crowdb_rpc_server_create(nullptr);
             static_cast<void>(crowdb_rpc_server_listen(service.server, "127.0.0.1", 0));
-            for (auto message : {FBMsgType_EAllocateChunkRequest, FBMsgType_EQueryChunkRequest,
-                                 FBMsgType_EAdvanceChunkWriteRequest, FBMsgType_ESealChunkRequest}) {
+            for (auto message :
+                 {FBMsgType_EAllocateChunkRequest, FBMsgType_EQueryChunkRequest, FBMsgType_EAdvanceChunkWriteRequest,
+                  FBMsgType_ESealChunkRequest, FBMsgType_EDeleteChunkRequest}) {
                 crowdb_rpc_server_register_handler(service.server, message, TestChunkRouteService::handle, &service,
                                                    nullptr);
             }

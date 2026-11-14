@@ -3,7 +3,6 @@
 
 import type { APIRequestContext, Page } from '@playwright/test';
 import { expect } from './realBackend';
-import { waitForLeader } from './localSetup';
 import type { observeDefaultDeployments } from './defaultDeployments';
 import { step } from './stepTimer';
 import { queueFullPlans } from './fullServicePlans';
@@ -13,7 +12,8 @@ type UIContext = { page: Page; request: APIRequestContext; baseURL: string; depl
 const disklessNodes = [4, 5, 6];
 
 export async function disklessExpansion(context: UIContext) {
-  const { page, request, baseURL, deployments } = context;
+  const { page, request, deployments } = context;
+  const witness = 'diskless-node-round-trip';
   const sidebar = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
   type Process = { id: string; node_id: number; pid: number };
   const observed = await request.get('/api/servers');
@@ -99,14 +99,18 @@ export async function disklessExpansion(context: UIContext) {
     const replicas = await request.get('/api/stores/0/groups/2/replicas');
     expect(replicas.ok(), await replicas.text()).toBe(true);
     expect((await replicas.json()).map((replica: { node_id: number }) => replica.node_id).sort()).toEqual([3, 4, 5]);
-    await waitForLeader(baseURL, 0, 2, 10_000);
+    // The Web data client can discover the elected leader after the topology view does.
+    await expect.poll(async () => {
+      const response = await request.get(`/api/stores/0/groups/2/kv/get?key=${witness}`);
+      return response.ok() ? 'ready' : await response.text();
+    }, { timeout: 10_000, intervals: [100] }).toBe('ready');
   });
   await step('diskless: new KV group is queryable through UI', async () => {
-    const seeded = await request.post('/api/stores/0/groups/2/kv/put', { data: { key: 'diskless-node-round-trip', value: 'nodes 3, 4 and 5' } });
+    const seeded = await request.post('/api/stores/0/groups/2/kv/put', { data: { key: witness, value: 'nodes 3, 4 and 5' } });
     expect(seeded.ok(), await seeded.text()).toBe(true);
     await page.getByTestId('kv-store-select').selectOption('0');
     await page.getByTestId('kv-group-select').selectOption('2');
-    await page.getByTestId('kv-scan-table').getByText('diskless-node-round-trip', { exact: true }).click();
+    await page.getByTestId('kv-scan-table').getByText(witness, { exact: true }).click();
     await expect(page.getByRole('region', { name: 'Selected key' })).toContainText('nodes 3, 4 and 5');
   });
 }

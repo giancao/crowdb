@@ -7,6 +7,7 @@
 #include "crowdb-tree/c_api.h"
 
 #include <memory>
+#include <optional>
 
 namespace crowdb::tree::detail
 {
@@ -20,24 +21,36 @@ class RpcChunkTransport final : public ChunkTransport
     explicit RpcChunkTransport(const ct_chunk_rpc_transport_options &options);
     ~RpcChunkTransport() override;
 
-    Status allocate_mirror_chunk(uint64_t logical_capacity, uint64_t owner_epoch, ChunkId *chunk_id,
-                                 PagePurpose purpose) override;
-    Status ensure_capacity(ChunkId chunk_id, uint64_t required_bytes) override;
-    Status write_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, const uint8_t *data,
-                        size_t length) override;
-    void   submit_write_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, const uint8_t *data,
-                               size_t length, ChunkTransportCompletion completion) override;
-    Status advance_write(ChunkId chunk_id, uint64_t expected_bytes, uint64_t acknowledged_bytes) override;
-    Status read_mirror(ChunkId chunk_id, uint32_t mirror_index, uint64_t offset, uint8_t *data,
-                       size_t length) const override;
-    Status query_chunk(ChunkId chunk_id, ChunkLayout *layout) const override;
-    Status seal_chunk(ChunkId chunk_id, uint64_t owner_epoch, uint64_t acknowledged_bytes) override;
+    void submit_allocate_fixed_chunk(ChunkId id, uint64_t capacity, uint64_t epoch, PagePurpose purpose,
+                                     ChunkTransportCompletion completion) override;
+    void submit_write_fixed_mirror(ChunkId id, uint32_t mirror, uint64_t offset, const uint8_t *data, size_t length,
+                                   ChunkIoContext context, ChunkTransportCompletion completion) override;
+
+    [[nodiscard]] bool fixed_staging_supported() const noexcept override
+    {
+        return true;
+    }
+
+    void submit_query_chunk(ChunkId id, ChunkLayout *out, ChunkTransportCompletion completion) const override;
+
+    void submit_verify_fixed_read_fence(ChunkId id, uint32_t mirrors, ChunkIoContext context,
+                                        ChunkTransportCompletion completion) const override;
+    void submit_read_fixed_mirror(ChunkId id, uint32_t mirror, uint64_t offset, uint8_t *data, size_t length,
+                                  ChunkIoContext context, ChunkTransportCompletion completion) const override;
+    void submit_drain_fixed_chunk(ChunkId id, ChunkTransportCompletion completion) const override;
+    void submit_inspect_fixed_allocation(ChunkId id, uint64_t epoch, ChunkAllocationIdentity *out,
+                                         ChunkTransportCompletion completion) const override;
+    void submit_delete_chunk(ChunkId id, ChunkTransportCompletion completion) override;
+    void submit_advance_write(ChunkId id, uint64_t expected, uint64_t acknowledged,
+                              ChunkTransportCompletion completion) override;
+    void submit_seal_chunk(ChunkId id, uint64_t epoch, uint64_t acknowledged,
+                           ChunkTransportCompletion completion) override;
 
     [[nodiscard]] bool valid() const;
 
   private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 
 } // namespace crowdb::tree::detail

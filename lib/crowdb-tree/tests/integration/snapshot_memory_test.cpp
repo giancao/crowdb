@@ -1,7 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "backend/chunk/chunk_page_staging.h"
+#include "buffer_pool_test_support.h"
 #include "crowdb-tree/backend/async_page_store.h"
 #include "crowdb-tree/backend/page_store.h"
 #include "crowdb-tree/crowdb-tree.h"
@@ -9,11 +9,15 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -45,6 +49,11 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
     {
     }
 
+    [[nodiscard]] bool write_completion_is_reloadable() const noexcept override
+    {
+        return true;
+    }
+
     Status write_at(uint64_t off, const uint8_t *buf, size_t len) override
     {
         if (baseline > 0 && !prepared_bytes.has_value()) {
@@ -59,9 +68,9 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
         return Status::Ok();
     }
 
-    Status write_typed_at(PagePurpose /*purpose*/, uint64_t off, const uint8_t *buf, size_t len) override
+    Status write_typed_at(PagePurpose purpose, uint64_t off, const uint8_t *buf, size_t len) override
     {
-        if (!retained_bytes.has_value()) {
+        if (purpose == PagePurpose::kPageIndex && prepared_bytes.has_value() && !retained_bytes.has_value()) {
             const auto current = resident_bytes();
             retained_bytes     = current > baseline ? current - baseline : 0;
         }
@@ -100,14 +109,17 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
 
     uint64_t submit_write(PageAddr addr, const void *buf, size_t len, AsyncCompletion done) override
     {
-        pending_ = Pending{.addr = addr, .data = buf, .length = len, .done = done, .typed = false};
-        return 0;
+        return submit_typed_write(PagePurpose::kBtreePage, addr, buf, len, std::move(done));
     }
 
-    uint64_t submit_typed_write(PagePurpose /*purpose*/, PageAddr addr, const void *buf, size_t len,
+    uint64_t submit_typed_write(PagePurpose purpose, PageAddr addr, const void *buf, size_t len,
                                 AsyncCompletion done) override
     {
-        pending_ = Pending{.addr = addr, .data = buf, .length = len, .done = done, .typed = true};
+        {
+            std::scoped_lock lock(pending_mutex_);
+            pending_.push_back({.addr = addr, .data = buf, .length = len, .done = std::move(done), .purpose = purpose});
+        }
+        ready_.notify_one();
         return 0;
     }
 
@@ -121,16 +133,28 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
     {
     }
 
+    void wake()
+    {
+        {
+            std::scoped_lock lock(pending_mutex_);
+            terminal_ = true;
+        }
+        ready_.notify_one();
+    }
+
     bool complete_next()
     {
-        if (!pending_.has_value()) {
-            return false;
+        Pending write;
+        {
+            std::unique_lock lock(pending_mutex_);
+            ready_.wait(lock, [&] { return terminal_ || !pending_.empty(); });
+            if (pending_.empty()) {
+                return false;
+            }
+            write = std::move(pending_.front());
+            pending_.pop_front();
         }
-        const auto write = pending_.value();
-        pending_.reset();
-        const auto *data   = static_cast<const uint8_t *>(write.data);
-        auto        status = write.typed ? write_typed_at(PagePurpose::kPageIndex, write.addr, data, write.length)
-                                         : write_at(write.addr, data, write.length);
+        auto status = write_typed_at(write.purpose, write.addr, static_cast<const uint8_t *>(write.data), write.length);
         write.done.complete(std::move(status));
         return true;
     }
@@ -146,12 +170,15 @@ class TestSnapshotBufferStore final : public PageStore, public AsyncPageStore
         const void     *data;
         size_t          length;
         AsyncCompletion done;
-        bool            typed;
+        PagePurpose     purpose;
     };
 
-    std::vector<uint8_t>   bytes_;
-    uint64_t               size_ = 0;
-    std::optional<Pending> pending_;
+    std::vector<uint8_t>    bytes_;
+    uint64_t                size_ = 0;
+    std::mutex              pending_mutex_;
+    std::condition_variable ready_;
+    std::deque<Pending>     pending_;
+    bool                    terminal_ = false;
 };
 
 class SnapshotMemoryTest : public ::testing::TestWithParam<bool>
@@ -177,18 +204,21 @@ TEST_P(SnapshotMemoryTest, ReleasesCompletedPageBuffersBeforeWritingMetadata)
         store.baseline = resident_bytes();
         ASSERT_GT(store.baseline, 0U);
         if (GetParam()) {
-            bool complete = false;
-            tree.snapshot_async([&](Status status, uint64_t applied) {
+            std::atomic<bool> complete{false};
+            tree.flush_with_persistent_async([&](Status status, uint64_t applied) {
                 EXPECT_TRUE(status.ok()) << status.to_string();
                 EXPECT_EQ(applied, 256U);
-                complete = true;
+                complete.store(true, std::memory_order_release);
+                store.wake();
             });
-            while (!complete) {
-                ASSERT_TRUE(store.complete_next());
+            while (!complete.load(std::memory_order_acquire)) {
+                if (!store.complete_next()) {
+                    ASSERT_TRUE(complete.load(std::memory_order_acquire));
+                }
             }
         }
         else {
-            ASSERT_TRUE(tree.snapshot().ok());
+            ASSERT_TRUE(tree.flush_with_persistent().ok());
         }
         ASSERT_TRUE(store.retained_bytes.has_value());
         ASSERT_TRUE(store.prepared_bytes.has_value());
@@ -213,49 +243,13 @@ TEST_P(SnapshotMemoryTest, ReleasesCompletedPageBuffersBeforeWritingMetadata)
 
 INSTANTIATE_TEST_SUITE_P(WritePaths, SnapshotMemoryTest, ::testing::Bool());
 
-TEST(SnapshotMemory, PaddedOverlayKeepsZeroCoverageWithoutRetainingPadding)
-{
-    constexpr size_t     fragment_bytes = 65536;
-    constexpr size_t     page_count     = 256;
-    std::vector<uint8_t> page(2 * fragment_bytes, 0);
-    std::fill_n(page.begin(), fragment_bytes + 32, 0x53);
-    detail::ChunkPageStaging staging;
-    const auto               before = resident_bytes();
-    for (size_t i = 0; i < page_count; ++i) {
-        staging.write(i * page.size(), page);
-    }
-    const auto growth = resident_bytes() - before;
-    std::cout << "Padded overlay RSS growth: " << growth << " bytes\n";
-    EXPECT_LT(growth, 24U * 1024 * 1024) << "overlay retained allocation-unit padding alongside logical page bytes";
-    const size_t size = page_count * page.size();
-    ASSERT_EQ(staging.size(), size);
-    ASSERT_TRUE(staging.covers(0, size));
-
-    std::vector<uint8_t> expected(size);
-    for (size_t i = 0; i < page_count; ++i) {
-        std::copy(page.begin(), page.end(), expected.begin() + static_cast<std::ptrdiff_t>(i * page.size()));
-    }
-    const std::array<uint8_t, 3> patch{4, 0, 5};
-    for (const size_t offset : {fragment_bytes + 1024, (3 * fragment_bytes) - 1}) {
-        staging.write(offset, patch);
-        std::copy(patch.begin(), patch.end(), expected.begin() + static_cast<std::ptrdiff_t>(offset));
-    }
-    const std::vector<uint8_t> zeros(fragment_bytes, 0);
-    staging.write(0, zeros);
-    std::fill_n(expected.begin(), fragment_bytes, 0);
-    std::vector<uint8_t> actual(size, 0xAA);
-    staging.overlay(0, actual);
-    EXPECT_EQ(actual, expected);
-    EXPECT_TRUE(staging.covers(0, size));
-}
-
 TEST(SnapshotMemory, UnusedFrameCapacityDoesNotPrefaultTheArena)
 {
-    MemPageStore store(65536);
-    const auto   before = resident_bytes();
-    BufferPool   pool(256U * 1024 * 1024, 65536, &store);
-    const auto   current = resident_bytes();
-    const auto   growth  = current > before ? current - before : 0;
+    MemPageStore   store(65536);
+    const auto     before = resident_bytes();
+    TestBufferPool pool(256U * 1024 * 1024, 65536, &store);
+    const auto     current = resident_bytes();
+    const auto     growth  = current > before ? current - before : 0;
     std::cout << "Unused frame-cache RSS growth: " << growth << " bytes\n";
     EXPECT_LT(growth, 8U * 1024 * 1024);
     EXPECT_EQ(pool.stats().num_frames, 4096U);

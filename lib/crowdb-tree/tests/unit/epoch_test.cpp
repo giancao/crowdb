@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <latch>
 #include <thread>
 #include <vector>
 
@@ -172,11 +173,21 @@ TEST(Epoch, ConcurrentReadersDerefRetiredNoUAF)
     std::atomic<Node *>   slot{new Node{kMagic}};
     std::atomic<bool>     stop{false};
     std::atomic<uint64_t> reads{0};
+    std::latch            entered(4);
+    std::latch            retired(1);
 
     std::vector<std::thread> readers;
     readers.reserve(4);
     for (int i = 0; i < 4; ++i) {
         readers.emplace_back([&] {
+            {
+                EpochManager::Guard guard = em.enter();
+                Node               *old   = slot.load(std::memory_order_acquire);
+                entered.count_down();
+                retired.wait();
+                EXPECT_EQ(old->magic, kMagic);
+                reads.fetch_add(1, std::memory_order_relaxed);
+            }
             while (!stop.load(std::memory_order_relaxed)) {
                 EpochManager::Guard g = em.enter();
                 Node               *n = slot.load(std::memory_order_acquire);
@@ -186,10 +197,14 @@ TEST(Epoch, ConcurrentReadersDerefRetiredNoUAF)
             }
         });
     }
+    entered.wait();
     for (int i = 0; i < 20000; ++i) {
         Node *fresh = new Node{kMagic};
         Node *old   = slot.exchange(fresh, std::memory_order_acq_rel);
         em.retire_object(old);
+        if (i == 0) {
+            retired.count_down();
+        }
     }
     stop.store(true);
     for (auto &t : readers) {

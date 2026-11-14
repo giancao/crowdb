@@ -40,11 +40,12 @@ impl Partition {
             .transpose()
     }
 
-    pub(in crate::partition) fn discard_pending_child_preparation(&self) -> Result<()> {
+    pub(in crate::partition) async fn discard_pending_child_preparation(&self) -> Result<()> {
         if let Some(prepared) = self.pending_child_preparation.load_full() {
             prepared
                 .child_tree
-                .unpin_generation(prepared.plan.transition_id)?;
+                .unpin_generation(prepared.plan.transition_id)
+                .await?;
             self.pending_child_preparation.store(None);
         }
         Ok(())
@@ -94,7 +95,7 @@ impl Partition {
                 Err(error) => {
                     // Handoff has not been attempted, so this candidate cannot
                     // authorize dispatch. Release only this transition's pin.
-                    self.release_generation_pin(plan.transition_id)?;
+                    self.release_generation_pin(plan.transition_id).await?;
                     return Err(error);
                 }
             };
@@ -104,20 +105,21 @@ impl Partition {
         // An error can mean the CAS committed but its response was lost. Keep
         // this exact base and pins; rebuilding would change the durable proof.
         handoff.commit(&prepared.artifact).await?;
-        let (artifact, child) = self
+        let (artifact, child, tail_records) = self
             .install_child_cutover_session(
                 plan,
                 prepared.target.clone(),
                 prepared.base_checkpoint.clone(),
                 prepared.child_tree.clone(),
                 prepared.child_base,
+                prepared.artifact.parent_cutover_offset,
             )
             .await?;
         Ok(PreparedSplit {
             artifact,
             child,
             child_rebuild: prepared.child_rebuild,
-            delta_records: prepared.delta_records,
+            delta_records: prepared.delta_records.saturating_add(tail_records),
         })
     }
 
@@ -128,7 +130,8 @@ impl Partition {
         max_lag: u64,
     ) -> Result<PendingChildPreparation> {
         let (base_checkpoint, source) = self.split_base_snapshot(&plan).await?;
-        self.retain_generation_pin(plan.transition_id, base_checkpoint.root_manifest_generation)?;
+        self.retain_generation_pin(plan.transition_id, base_checkpoint.root_manifest_generation)
+            .await?;
         let (child_tree, child_rebuild) = source
             .rebuild_range(target.tree_id, &plan.child.range, target.tree_config.clone())
             .await?;
@@ -141,7 +144,9 @@ impl Partition {
             .catch_up_to_lag(self, &plan, child_tree.as_ref(), &plan.child, max_lag)
             .await?;
         let child_base = checkpoint_prepared_tree(child_tree.as_ref(), cursor.applied_seq).await?;
-        child_tree.pin_generation(plan.transition_id, child_base.1)?;
+        child_tree
+            .pin_generation(plan.transition_id, child_base.1)
+            .await?;
         let frontier = SplitSourceFrontier {
             parent_id: plan.parent_id,
             parent_epoch: plan.parent_epoch,

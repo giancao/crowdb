@@ -8,6 +8,7 @@
 #include "crowdb-common/crc32c.h"
 
 #include <cstring>
+#include <utility>
 
 #if CROWDB_TREE_HAVE_LZ4
 // Use the real LZ4 header (vendored under third_party/lz4 or the system dev
@@ -58,7 +59,7 @@ void encode_durable_page(const uint8_t *frame, uint32_t page_bytes, compress_alg
         std::vector<uint8_t> tmp(static_cast<size_t>(bound));
         int n = LZ4_compress_default(reinterpret_cast<const char *>(frame), reinterpret_cast<char *>(tmp.data()),
                                      static_cast<int>(page_bytes), bound);
-        if (n > 0 && static_cast<uint32_t>(n) < page_bytes) {
+        if (n > 0 && std::cmp_less(n, page_bytes)) {
             tmp.resize(static_cast<size_t>(n));
             stored = std::move(tmp);
             algo   = compress_algo::kLz4;
@@ -99,38 +100,64 @@ uint32_t durable_blob_logical_len(const uint8_t *blob, size_t blob_len)
     return static_cast<uint32_t>(kDurableBlobHeader) + stored_len;
 }
 
-Status decode_durable_page(const uint8_t *blob, size_t blob_len, uint8_t *frame_out, uint32_t page_bytes)
+namespace
 {
-    if (blob_len < kDurableBlobHeader) {
+Status durable_payload(std::span<const uint8_t> blob, uint32_t page_bytes, std::span<const uint8_t> *stored)
+{
+    if (blob.size() < kDurableBlobHeader) {
         return Status::invalid_argument("blob too short");
     }
-    auto     algo       = static_cast<compress_algo>(blob[0]);
-    uint32_t raw_len    = get_u32(blob + 1);
-    uint32_t stored_len = get_u32(blob + 5);
-    uint32_t crc        = get_u32(blob + 9);
+    uint32_t raw_len    = get_u32(blob.data() + 1);
+    uint32_t stored_len = get_u32(blob.data() + 5);
+    uint32_t crc        = get_u32(blob.data() + 9);
     if (raw_len != page_bytes) {
         return Status::corruption("blob raw_len mismatch");
     }
-    if (kDurableBlobHeader + stored_len > blob_len) {
+    if (stored_len > blob.size() - kDurableBlobHeader) {
         return Status::corruption("blob stored_len");
     }
-    const uint8_t *stored = blob + kDurableBlobHeader;
-    if (crowdb::common::crc32c(stored, stored_len) != crc) {
+    *stored = blob.subspan(kDurableBlobHeader, stored_len);
+    if (crowdb::common::crc32c(stored->data(), stored->size()) != crc) {
         return Status::corruption("blob CRC mismatch");
     }
+    return Status::Ok();
+}
+} // namespace
 
+Status view_raw_durable_page(std::span<const uint8_t> blob, uint32_t page_bytes, std::span<const uint8_t> *frame)
+{
+    std::span<const uint8_t> stored;
+    auto                     status = durable_payload(blob, page_bytes, &stored);
+    if (!status.ok()) {
+        return status;
+    }
+    if (blob.front() != static_cast<uint8_t>(compress_algo::kNone) || stored.size() != page_bytes) {
+        return Status::corruption("raw stored size or codec");
+    }
+    *frame = stored;
+    return Status::Ok();
+}
+
+Status decode_durable_page(const uint8_t *blob, size_t blob_len, uint8_t *frame_out, uint32_t page_bytes)
+{
+    std::span<const uint8_t> stored;
+    auto                     status = durable_payload({blob, blob_len}, page_bytes, &stored);
+    if (!status.ok()) {
+        return status;
+    }
+    const auto algo = static_cast<compress_algo>(blob[0]);
     if (algo == compress_algo::kNone) {
-        if (stored_len != page_bytes) {
+        if (stored.size() != page_bytes) {
             return Status::corruption("raw stored size");
         }
-        std::memcpy(frame_out, stored, page_bytes);
+        std::memcpy(frame_out, stored.data(), page_bytes);
         return Status::Ok();
     }
     if (algo == compress_algo::kLz4) {
 #if CROWDB_TREE_HAVE_LZ4
-        int n = LZ4_decompress_safe(reinterpret_cast<const char *>(stored), reinterpret_cast<char *>(frame_out),
-                                    static_cast<int>(stored_len), static_cast<int>(page_bytes));
-        if (n < 0 || static_cast<uint32_t>(n) != page_bytes) {
+        int n = LZ4_decompress_safe(reinterpret_cast<const char *>(stored.data()), reinterpret_cast<char *>(frame_out),
+                                    static_cast<int>(stored.size()), static_cast<int>(page_bytes));
+        if (std::cmp_not_equal(n, page_bytes)) {
             return Status::corruption("LZ4 decompress");
         }
         return Status::Ok();

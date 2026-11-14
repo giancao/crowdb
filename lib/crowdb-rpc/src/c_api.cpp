@@ -10,6 +10,7 @@
 #include "crowdb-rpc/client/client.h"
 #include "crowdb-rpc/client/co_client.h"
 #include "crowdb-rpc/client/rpc_client_metrics.h"
+#include "crowdb-rpc/control_allocator_c_api.h"
 #include "crowdb-rpc/rpc_metrics.h"
 #include "crowdb-rpc/server/message.h"
 #include "crowdb-rpc/server/server.h"
@@ -75,6 +76,7 @@ void crowdb_rpc_buffer_write(crowdb_rpc_buffer_t buf, const uint8_t *data, uint3
         buf->buf->write(data, len);
     }
     catch (...) {
+        return;
     }
 }
 
@@ -185,9 +187,7 @@ crowdb_rpc_buffer_t crowdb_rpc_buffer_ref(crowdb_rpc_buffer_t buf)
         if (buf == nullptr || buf->buf == nullptr) {
             return nullptr;
         }
-        auto clone = std::make_unique<crowdb_rpc_buffer_s>();
-        clone->buf = buf->buf->ref_clone();
-        return clone->buf == nullptr ? nullptr : clone.release();
+        return crowdb::rpc::wrap_owned_buffer(buf->buf->ref_clone());
     }
     catch (...) {
         return nullptr;
@@ -202,11 +202,13 @@ void crowdb_rpc_buffer_release(crowdb_rpc_buffer_t buf)
         }
         // All buffers now have a refcount (pool-allocated or standalone).
         // release() decrements and frees on last reference.
-        buf->buf->release();
-        buf->buf = nullptr;
-        delete buf;
+        auto      *buffer    = buf->buf;
+        const auto allocator = buffer->control_allocator;
+        allocator.destroy(buf);
+        buffer->release();
     }
     catch (...) {
+        return;
     }
 }
 
@@ -243,23 +245,7 @@ crowdb_rpc_buffer_t crowdb_rpc_buffer_create(const uint8_t *data, uint32_t len)
 crowdb_rpc_buffer_t crowdb_rpc_buffer_create_external(const uint8_t *data, uint32_t len, void (*free_cb)(void *),
                                                       void *free_ctx)
 {
-    try {
-        if (data == nullptr || len == 0 || free_cb == nullptr) {
-            return nullptr;
-        }
-        auto *buf     = new crowdb::rpc::Buffer;
-        buf->data     = const_cast<uint8_t *>(data);
-        buf->len      = len;
-        buf->capacity = len;
-        buf->ref      = new std::atomic<int32_t>(1);
-        buf->pool     = nullptr;
-        buf->free_cb  = free_cb;
-        buf->free_ctx = free_ctx;
-        return new crowdb_rpc_buffer_s{buf};
-    }
-    catch (...) {
-        return nullptr;
-    }
+    return crowdb_rpc_buffer_create_external_accounted(data, len, free_cb, free_ctx, nullptr);
 }
 
 // ── Pool ──────────────────────────────────────────────────────────
@@ -287,6 +273,7 @@ void crowdb_rpc_pool_destroy(crowdb_rpc_pool_t pool)
         delete pool;
     }
     catch (...) {
+        return;
     }
 }
 
@@ -303,6 +290,7 @@ void crowdb_rpc_client_get_counters(crowdb_rpc_client_t /*client*/, crowdb_rpc_c
         out->reaped           = cumulative(crowdb::rpc::rpc_reaped());
     }
     catch (...) {
+        return;
     }
 }
 
@@ -329,6 +317,7 @@ void crowdb_rpc_client_destroy(crowdb_rpc_client_t client)
         delete client;
     }
     catch (...) {
+        return;
     }
 }
 
@@ -349,7 +338,6 @@ static crowdb_rpc_status rpc_error_to_status(RpcError err)
     case RpcError::SendQueueFull:
         return CROWDB_RPC_ERR_SEND_QUEUE;
     case RpcError::ConnectionError:
-        return CROWDB_RPC_ERR_CONN_ERROR;
     default:
         return CROWDB_RPC_ERR_CONN_ERROR;
     }
@@ -383,6 +371,7 @@ void crowdb_rpc_client_attach(crowdb_rpc_client_t client, crowdb_rpc_conn_t conn
         });
     }
     catch (...) {
+        return;
     }
 }
 
@@ -395,6 +384,7 @@ void crowdb_rpc_client_set_completion_pool_size(crowdb_rpc_client_t client, uint
         client->client->set_completion_pool_size(max_in_flight);
     }
     catch (...) {
+        return;
     }
 }
 
@@ -407,6 +397,7 @@ void crowdb_rpc_client_start_reaper(crowdb_rpc_client_t client, uint64_t timeout
         client->client->start_reaper(timeout_ns, scan_interval_ns);
     }
     catch (...) {
+        return;
     }
 }
 
@@ -419,6 +410,7 @@ void crowdb_rpc_client_stop_reaper(crowdb_rpc_client_t client)
         client->client->stop_reaper();
     }
     catch (...) {
+        return;
     }
 }
 
@@ -431,6 +423,7 @@ void crowdb_rpc_client_dump_pending(crowdb_rpc_client_t client)
         client->client->dump_pending();
     }
     catch (...) {
+        return;
     }
 }
 
@@ -480,6 +473,70 @@ crowdb_rpc_status crowdb_rpc_client_send(crowdb_rpc_client_t client, crowdb_rpc_
 uint8_t crowdb_rpc_max_data_views(void)
 {
     return crowdb::rpc::MAX_DATA_VIEWS;
+}
+
+crowdb_rpc_status crowdb_rpc_client_send_control_tail(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
+                                                      crowdb_rpc_conn_t conn, uint64_t request_id,
+                                                      crowdb_rpc_buffer_t prefix, crowdb_rpc_buffer_t tail,
+                                                      uint16_t msg_type, crowdb_rpc_on_complete on_complete,
+                                                      void *user_data)
+try {
+    std::unique_ptr<crowdb_rpc_buffer_s, decltype(&crowdb_rpc_buffer_release)> prefix_owner(prefix,
+                                                                                            crowdb_rpc_buffer_release);
+    std::unique_ptr<crowdb_rpc_buffer_s, decltype(&crowdb_rpc_buffer_release)> tail_owner(tail,
+                                                                                          crowdb_rpc_buffer_release);
+    if (client == nullptr || server == nullptr || conn == nullptr || prefix == nullptr || tail == nullptr ||
+        prefix->buf == nullptr || tail->buf == nullptr || on_complete == nullptr ||
+        uint64_t{prefix->buf->len} + tail->buf->len + crowdb::rpc::HEADER_SIZE > UINT32_MAX) {
+        return CROWDB_RPC_ERR_INVALID_ARG;
+    }
+    const auto connection = conn->conn;
+    const auto transport = server->server->shared_transport();
+    const auto caller    = client->client;
+    const bool ok = caller->send_control_tail(transport.get(), connection.get(), request_id, prefix->buf->ref_clone(),
+                                              tail->buf->ref_clone(), msg_type, on_complete, user_data);
+    return submit_status(ok, connection.get());
+}
+catch (...) {
+    return CROWDB_RPC_ERR_CONN_ERROR;
+}
+
+crowdb_rpc_status crowdb_rpc_client_send_control_chain(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
+                                                       crowdb_rpc_conn_t conn, uint64_t request_id,
+                                                       crowdb_rpc_buffer_t prefix, crowdb_rpc_buffer_t const *tails,
+                                                       uint8_t tail_count, uint16_t msg_type,
+                                                       crowdb_rpc_on_complete on_complete, void *user_data)
+try {
+    if (client == nullptr || server == nullptr || conn == nullptr || prefix == nullptr || prefix->buf == nullptr ||
+        tails == nullptr || tail_count == 0 || tail_count > crowdb::rpc::MAX_DATA_VIEWS || on_complete == nullptr) {
+        return CROWDB_RPC_ERR_INVALID_ARG;
+    }
+    const auto                                                     connection = conn->conn;
+    std::array<crowdb::rpc::Buffer *, crowdb::rpc::MAX_DATA_VIEWS> buffers;
+    uint64_t                                                       tail_len = 0;
+    for (uint8_t index = 0; index < tail_count; ++index) {
+        if (tails[index] == nullptr || tails[index]->buf == nullptr) {
+            return CROWDB_RPC_ERR_INVALID_ARG;
+        }
+        buffers[index] = tails[index]->buf;
+        tail_len += buffers[index]->len;
+    }
+    if (uint64_t{prefix->buf->len} + tail_len + crowdb::rpc::HEADER_SIZE > UINT32_MAX) {
+        return CROWDB_RPC_ERR_INVALID_ARG;
+    }
+
+    const auto transport = server->server->shared_transport();
+    const auto caller    = client->client;
+    for (uint8_t index = 0; index < tail_count; ++index) {
+        buffers[index]->ref_clone();
+    }
+    const bool ok = caller->send_control_chain(transport.get(), connection.get(), request_id, prefix->buf->ref_clone(),
+                                               buffers.data(), tail_count, static_cast<uint32_t>(tail_len), msg_type,
+                                               on_complete, user_data);
+    return submit_status(ok, connection.get());
+}
+catch (...) {
+    return CROWDB_RPC_ERR_CONN_ERROR;
 }
 
 crowdb_rpc_status crowdb_rpc_client_send_chain(crowdb_rpc_client_t client, crowdb_rpc_server_t server,
@@ -637,6 +694,7 @@ void crowdb_rpc_conn_destroy(crowdb_rpc_conn_t conn)
         delete conn;
     }
     catch (...) {
+        return;
     }
 }
 
@@ -668,6 +726,7 @@ void crowdb_rpc_conn_close(crowdb_rpc_conn_t conn)
         }
     }
     catch (...) {
+        return;
     }
 }
 
@@ -682,6 +741,7 @@ void crowdb_rpc_server_register_echo_handler(crowdb_rpc_server_t server, uint16_
         server->server->register_handler(msg_type, crowdb::rpc::handle_echo);
     }
     catch (...) {
+        return;
     }
 }
 
@@ -762,5 +822,6 @@ void crowdb_rpc_server_register_conn_count_gauge(crowdb_rpc_server_t server, con
             });
     }
     catch (...) {
+        return;
     }
 }

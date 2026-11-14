@@ -128,6 +128,52 @@ class SocketWriteProgressTest : public ::testing::TestWithParam<bool>
 {
 };
 
+TEST(SocketWriteProgress, ConcurrentPendingInspectionDuringPartialSendAndClose)
+{
+    int sockets[2]{};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets), 0);
+    ASSERT_NE(::fcntl(sockets[0], F_SETFL, ::fcntl(sockets[0], F_GETFL, 0) | O_NONBLOCK), -1);
+    const int send_bytes = 4096;
+    ASSERT_EQ(::setsockopt(sockets[0], SOL_SOCKET, SO_SNDBUF, &send_bytes, sizeof(send_bytes)), 0);
+    crowdb::rpc::SystemBufferPool pool;
+    crowdb::rpc::Connection       connection(1, "pending-inspection", &pool);
+    std::vector<uint8_t>          bytes(PAYLOAD_BYTES, 0x5a);
+    auto                         *data = pool.alloc(PAYLOAD_BYTES);
+    data->write(bytes.data(), PAYLOAD_BYTES);
+    auto *control                     = crowdb::rpc::build_ping_request(&pool, 42, 1);
+    auto *response                    = crowdb::rpc::build_out_frame(42, 42, control, data);
+    response->tcp_request_cache_bytes = 1024;
+    connection.add_request_cache_bytes(response->tcp_request_cache_bytes);
+    ASSERT_TRUE(connection.enqueue_send(response));
+
+    std::atomic<uint64_t> observations{0};
+    std::jthread          observer([&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            if (connection.has_pending_send()) {
+                observations.fetch_add(1, std::memory_order_relaxed);
+            }
+            std::this_thread::yield();
+        }
+    });
+    while (observations.load(std::memory_order_relaxed) == 0) {
+        std::this_thread::yield();
+    }
+    // The peer does not read: the first send is partial and later calls hit
+    // EAGAIN while the reader inspects the connection without send ownership.
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_FALSE(connection.try_send(sockets[0], nullptr));
+        EXPECT_TRUE(connection.has_pending_send());
+    }
+    EXPECT_NE(connection.status_json().find("\"request_cache_bytes\":1024"), std::string::npos);
+    connection.close();
+    EXPECT_FALSE(connection.has_pending_send());
+    EXPECT_NE(connection.status_json().find("\"request_cache_bytes\":0"), std::string::npos);
+    observer.request_stop();
+    observer.join();
+    ::close(sockets[0]);
+    ::close(sockets[1]);
+}
+
 TEST_P(SocketWriteProgressTest, ConcurrentRearmSurvivesAnEarlierEmptyWritableEvent)
 {
     int sockets[2]{};
@@ -152,8 +198,11 @@ TEST_P(SocketWriteProgressTest, ConcurrentRearmSurvivesAnEarlierEmptyWritableEve
         std::vector<uint8_t> bytes(PAYLOAD_BYTES, 0x5a);
         auto                *data = transport.pool()->alloc(static_cast<uint32_t>(bytes.size()));
         data->write(bytes.data(), static_cast<uint32_t>(bytes.size()));
-        auto *control = crowdb::rpc::build_ping_request(transport.pool(), 42, 1);
-        EXPECT_TRUE(connection->enqueue_send(crowdb::rpc::build_out_frame(42, 42, control, data)));
+        auto *control                     = crowdb::rpc::build_ping_request(transport.pool(), 42, 1);
+        auto *response                    = crowdb::rpc::build_out_frame(42, 42, control, data);
+        response->tcp_request_cache_bytes = 1024;
+        connection->add_request_cache_bytes(response->tcp_request_cache_bytes);
+        EXPECT_TRUE(connection->enqueue_send(response));
         EXPECT_FALSE(connection->try_send(connection->write_fd, &stats));
         engine.arm_write(connection->write_fd, connection.get());
         submitted.store(true, std::memory_order_release);
@@ -181,6 +230,10 @@ TEST_P(SocketWriteProgressTest, ConcurrentRearmSurvivesAnEarlierEmptyWritableEve
         }
     }
     EXPECT_TRUE(received);
+    while (connection->has_pending_send() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_NE(connection->status_json().find("\"request_cache_bytes\":0"), std::string::npos);
     worker.stop();
     ::close(sockets[1]);
 }

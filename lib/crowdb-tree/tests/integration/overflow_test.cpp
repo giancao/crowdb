@@ -90,7 +90,7 @@ TEST(Overflow, PutGetScanReopenMultiFrame)
             ASSERT_TRUE(t.flush().ok());
             oracle[make_key(i)] = "small" + std::to_string(i);
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         const auto summary = t.tree_summary();
         EXPECT_TRUE(summary.exact);
         uint64_t expected_value_bytes = 0;
@@ -150,7 +150,7 @@ TEST(Overflow, EvictionReload)
         ASSERT_TRUE(t.flush().ok());
         oracle[make_key(i)] = v;
     }
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
     (void)t.evict_clean_leaves(0); // drop all clean leaves; reads must reload them
     for (const auto &kv : oracle) {
@@ -174,7 +174,7 @@ TEST(Overflow, OverwriteAndDeleteRetiresChains)
         ++slot;
         ASSERT_TRUE(t.apply(slot, put_one(k, v1)).ok());
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
 
         // Overwrite large -> large (old overflow chain superseded + retired).
         std::string v2 = big_val(12000, 2);
@@ -207,7 +207,7 @@ TEST(Overflow, OverwriteAndDeleteRetiresChains)
         ++slot;
         ASSERT_TRUE(t.apply(slot, del_one(k)).ok());
         ASSERT_TRUE(t.flush().ok());
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         std::string v;
         uint64_t    s;
         EXPECT_FALSE(t.get(Slice(k), &s, &v));

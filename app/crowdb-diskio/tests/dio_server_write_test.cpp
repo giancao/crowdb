@@ -122,7 +122,7 @@ TEST_F(DiskioSynchronizedWrite, RejectedResponseStillReleasesOwners)
 TEST_F(DiskioSynchronizedWrite, InvalidControlPayloadAndZoneAreRejectedBeforeIo)
 {
     auto *malformed = request(true);
-    malformed->control.resize(3);
+    malformed->control.erase(malformed->control.begin() + 3, malformed->control.end());
     server.handle_write(malformed, connection.get());
     auto *short_payload          = request(true);
     short_payload->data_buf->len = 16;

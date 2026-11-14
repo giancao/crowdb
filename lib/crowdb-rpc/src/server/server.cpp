@@ -23,6 +23,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 
 namespace crowdb::rpc
@@ -186,7 +187,6 @@ void RpcServer::start()
         if (!transport_->listen_rdma_service(listen_addr_, listen_port_))
             CRB_LOG_WARN("rpc server: RDMA listener unavailable; TCP remains active");
     }
-    transport_->start();
     // Register the listen fd with the I/O worker's epoll loop instead of
     // a dedicated acceptor thread. The worker's epoll loop is already
     // woken by I/O events, so accept is not starved under CPU contention.
@@ -198,6 +198,9 @@ void RpcServer::start()
         transport_->set_accept_handler([this](int fd) { handle_accept(fd); });
         transport_->add_listen_fd(listen_fd_);
     }
+    // Publish handlers and listener registration before any worker can read
+    // them. They stay immutable until all workers have joined in stop().
+    transport_->start();
 }
 
 void RpcServer::stop()
@@ -209,10 +212,14 @@ void RpcServer::stop()
     if (was_running) {
         CRB_LOG_INFO("rpc server: stopping");
     }
-    // Clear the accept handler before closing the listen fd so the
-    // worker doesn't call accept() on a closed fd during shutdown.
+    // Join workers before destroying their accept callback or closing its fd.
+    // running_ already prevents an active accept loop from draining more work.
+    if (was_running) {
+        transport_->stop();
+    }
     transport_->set_accept_handler(nullptr);
     if (listen_fd_ >= 0) {
+        transport_->remove_listen_fd(listen_fd_);
         ::close(listen_fd_);
         listen_fd_ = -1;
     }
@@ -224,9 +231,6 @@ void RpcServer::stop()
     if (listener_lock_fd_ >= 0) {
         ::close(listener_lock_fd_);
         listener_lock_fd_ = -1;
-    }
-    if (was_running) {
-        transport_->stop();
     }
 }
 
@@ -283,6 +287,15 @@ void RpcServer::handle_accept(int listen_fd)
     }
 }
 
+void RpcServer::route_connection(Connection &connection)
+{
+    connection.set_on_rpc_close([this](Connection *conn) {
+        if (request_client_ != nullptr)
+            request_client_->fail_all(conn, RpcError::ConnectionClosed);
+    });
+    connection.set_on_frame([this](Frame *frame, Connection *conn) { dispatch(frame, conn); });
+}
+
 void RpcServer::dispatch(Frame *frame, Connection *conn)
 {
     uint16_t msg_type   = frame->header.msg_type;
@@ -312,14 +325,16 @@ void RpcServer::dispatch(Frame *frame, Connection *conn)
     // No handler for this msg_type — try response routing (ack to
     // a server-sent request). on_response consumes the frame if the
     // request_id is in the request client's pending map.
-    if ((frame->header.flags & FLAG_ONE_WAY) == 0 && request_client_ != nullptr &&
-        request_client_->on_response(frame->request_id, frame)) {
-        return; // ack routed, frame consumed
+    if (!is_one_way && request_client_ != nullptr) {
+        frame->release_admission_on_delivery = true;
+        if (request_client_->on_response(frame->request_id, frame))
+            return;
     }
 
-    // Unknown msg_type and not an ack — send UnknownMessage (if not
-    // one-way) or drop.
-    if (!is_one_way) {
+    // Unmatched replies can arrive after a timeout on a duplex connection.
+    // Replying to them with UnknownResponse would create a reply loop.
+    if (!is_one_way &&
+        !std::string_view(proto::EnumNameFBMsgType(static_cast<proto::FBMsgType>(msg_type))).ends_with("Response")) {
         OutFrame *response = handle_unknown(frame, conn);
         if (response != nullptr) {
             transport_->submit_inline(conn, response);

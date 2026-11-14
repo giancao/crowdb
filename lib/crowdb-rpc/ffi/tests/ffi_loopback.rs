@@ -8,8 +8,9 @@
 
 use bytes::Bytes;
 use crowdb_protocol::fb::{ConnectionPingRequest, ConnectionPingRequestArgs, FBMsgType};
-use crowdb_rpc_ffi::{init_test_logging, BufferChain, BufferPool, RpcClient, RpcServer};
+use crowdb_rpc_ffi::{init_test_logging, Buffer, BufferChain, BufferPool, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
+use std::sync::Arc;
 
 #[test]
 fn server_create_listen_start_stop() {
@@ -292,5 +293,57 @@ async fn echo_handler_joins_bounded_data_view_chain() {
 
     assert_eq!(response.request_id, 778);
     assert_eq!(response.data.expect("echo data").bytes(), expected);
+    server.stop();
+}
+
+#[tokio::test]
+async fn tcp_control_chain_preserves_wire_order_after_caller_releases_buffers() {
+    init_test_logging();
+    const MSG_TYPE: u16 = 102;
+    const REQUEST_ID: u64 = 779;
+    let server = Arc::new(RpcServer::new(None));
+    server.set_event_write(true);
+    server.listen("127.0.0.1", 0).unwrap();
+    server.register_owned_handler(MSG_TYPE, |mut request| {
+        let data = request.data().map(|bytes| Buffer::from_vec(bytes.to_vec()));
+        let control = request.take_control().unwrap();
+        request.reply(control, data, MSG_TYPE).unwrap();
+    });
+    server.start();
+    let conn = server.connect("127.0.0.1", server.port()).unwrap();
+    let client = RpcClient::new();
+    client.attach(&conn);
+
+    let mut builder = FlatBufferBuilder::new();
+    let request = ConnectionPingRequest::create(
+        &mut builder,
+        &ConnectionPingRequestArgs {
+            id: REQUEST_ID,
+            rpc_create_nano: 0,
+        },
+    );
+    builder.finish(request, None);
+    let prefix = Buffer::from_vec(builder.finished_data().to_vec());
+    let mut expected = builder.finished_data().to_vec();
+    let tails = BufferChain::from_owned_bytes((0..BufferChain::maximum_views()).map(|index| {
+        let mut bytes = vec![u8::try_from(index).unwrap(); 256 * 1024 + index + 3];
+        bytes[..3].fill(0xff);
+        let bytes = Bytes::from(bytes).slice(3..);
+        expected.extend_from_slice(&bytes);
+        bytes
+    }))
+    .unwrap();
+    let future = client
+        .call_control_chain(&server, &conn, REQUEST_ID, prefix, &tails, MSG_TYPE)
+        .unwrap();
+    drop(tails);
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), future)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.request_id, REQUEST_ID);
+    assert_eq!(response.control.unwrap().bytes(), expected);
+    assert!(response.data.is_none());
     server.stop();
 }

@@ -20,12 +20,12 @@ impl Partition {
     ///
     /// # Errors
     /// Returns a storage error or a changed-tree observation.
-    pub fn inspect_page(
+    pub async fn inspect_page(
         &self,
         path: &[u32],
         version: Option<u64>,
     ) -> Result<crowdb_tree_ffi::page::PageInspection> {
-        self.tree.inspect_page(path, version)
+        self.tree.inspect_page(path, version).await
     }
 
     /// Samples existing metadata and counters without flushing or reading pages.

@@ -4,6 +4,7 @@
 #include "crowdb-rpc/framing.h"
 
 #include "crowdb-rpc/buffer.h"
+#include "crowdb-rpc/connection.h"
 
 #include <cassert>
 #include <cstdlib>
@@ -11,6 +12,16 @@
 
 namespace crowdb::rpc
 {
+
+Frame::~Frame()
+{
+    if (release_callback != nullptr)
+        release_callback(release_context, data_buf);
+    if (data_buf != nullptr)
+        data_buf->release();
+    if (tcp_request_cache_bytes != 0)
+        connection_owner->release_request_cache_bytes(tcp_request_cache_bytes);
+}
 
 // extract_control_fields is implemented in message.cpp (needs flatbuffer
 // generated headers not available here).
@@ -58,20 +69,12 @@ FrameParser::FrameParser(uint32_t max_data_size) : max_data_size_(max_data_size)
 
 void FrameParser::reset()
 {
-    state_         = ParseState::ReadingHeader;
-    error_         = FramingError::None;
-    header_offset_ = 0;
-    control_buf_.clear();
+    state_          = ParseState::ReadingHeader;
+    error_          = FramingError::None;
+    header_offset_  = 0;
     control_offset_ = 0;
-    if (data_buf_ != nullptr) {
-        data_buf_->release();
-        data_buf_ = nullptr;
-    }
-    data_offset_ = 0;
-    if (frame_ != nullptr) {
-        delete frame_;
-        frame_ = nullptr;
-    }
+    data_offset_    = 0;
+    frame_.reset();
 }
 
 FramingError FrameParser::validate_header() const
@@ -95,24 +98,11 @@ Frame *FrameParser::yield_frame()
     frame_->request_id           = parsed_request_id_;
     frame_->rpc_create_nano      = parsed_rpc_create_nano_;
     frame_->response_create_nano = parsed_response_create_nano_;
-    frame_->data_buf             = data_buf_;
-
-    // Copy control bytes into the Frame for service-specific handlers.
-    // Common handlers (ping, unknown) ignore this field.
-    if (!control_buf_.empty()) {
-        frame_->control.assign(control_buf_.data(), control_buf_.data() + control_buf_.size());
-    }
-
-    // Transfer ownership to the caller — clear our pointers so reset()
-    // doesn't release them.
-    Frame *out = frame_;
-    frame_     = nullptr;
-    data_buf_  = nullptr;
+    Frame *out                   = frame_.release();
 
     // Reset for the next frame.
-    state_         = ParseState::ReadingHeader;
-    header_offset_ = 0;
-    control_buf_.clear();
+    state_                       = ParseState::ReadingHeader;
+    header_offset_               = 0;
     control_offset_              = 0;
     data_offset_                 = 0;
     parsed_request_id_           = 0;
@@ -128,13 +118,10 @@ FrameParser::ReadTarget FrameParser::next_read_target()
     case ParseState::ReadingHeader:
         return {.ptr = header_buf_ + header_offset_, .len = HEADER_SIZE - header_offset_};
     case ParseState::ReadingControl:
-        return {
-            .ptr = control_buf_.data() + control_offset_,
-            .len = static_cast<uint32_t>(control_buf_.size()) - control_offset_,
-        };
+        return {.ptr = frame_->control.data() + control_offset_, .len = header_.msg_size - control_offset_};
     case ParseState::ReadingData:
-        if (data_buf_ != nullptr) {
-            return {.ptr = data_buf_->data + data_offset_, .len = data_buf_->capacity - data_offset_};
+        if (auto *data = frame_->data_buf; data != nullptr) {
+            return {.ptr = data->data + data_offset_, .len = data->capacity - data_offset_};
         }
         return {.ptr = nullptr, .len = 0};
     }
@@ -159,6 +146,7 @@ Frame *FrameParser::advance(uint32_t bytes_read)
         if (error_ != FramingError::None) {
             return nullptr;
         }
+        frame_ = std::make_unique<Frame>();
         if (header_.msg_size == 0) {
             // No control message.
             parsed_request_id_           = 0;
@@ -166,22 +154,20 @@ Frame *FrameParser::advance(uint32_t bytes_read)
             parsed_response_create_nano_ = 0;
             if (header_.data_size == 0) {
                 // Control-only, data-less frame (e.g. one-way ping).
-                frame_ = new Frame;
                 return yield_frame();
             }
             // Data-only frame (no control message).
             if (pool_ != nullptr) {
-                data_buf_ = pool_->alloc(header_.data_size);
+                frame_->data_buf = pool_->alloc(header_.data_size);
             }
-            if (data_buf_ == nullptr) {
+            if (frame_->data_buf == nullptr) {
                 error_ = FramingError::DataTooLarge;
                 return nullptr;
             }
             state_ = ParseState::ReadingData;
         }
         else {
-            // Allocate control buffer (reused vector).
-            control_buf_.resize(header_.msg_size);
+            frame_->control.resize(header_.msg_size);
             control_offset_ = 0;
             state_          = ParseState::ReadingControl;
         }
@@ -190,22 +176,21 @@ Frame *FrameParser::advance(uint32_t bytes_read)
 
     case ParseState::ReadingControl: {
         control_offset_ += bytes_read;
-        if (control_offset_ < control_buf_.size()) {
+        if (control_offset_ < header_.msg_size) {
             return nullptr; // need more control bytes
         }
         // Control complete — extract fields.
-        extract_control_fields(control_buf_.data(), static_cast<uint32_t>(control_buf_.size()), parsed_request_id_,
-                               parsed_rpc_create_nano_, parsed_response_create_nano_);
+        extract_control_fields(frame_->control.data(), header_.msg_size, parsed_request_id_, parsed_rpc_create_nano_,
+                               parsed_response_create_nano_);
         if (header_.data_size == 0) {
             // Control-only frame.
-            frame_ = new Frame;
             return yield_frame();
         }
         // Allocate data buffer from pool.
         if (pool_ != nullptr) {
-            data_buf_ = pool_->alloc(header_.data_size);
+            frame_->data_buf = pool_->alloc(header_.data_size);
         }
-        if (data_buf_ == nullptr) {
+        if (frame_->data_buf == nullptr) {
             error_ = FramingError::DataTooLarge;
             return nullptr;
         }
@@ -215,15 +200,15 @@ Frame *FrameParser::advance(uint32_t bytes_read)
 
     case ParseState::ReadingData: {
         data_offset_ += bytes_read;
-        if (data_buf_ == nullptr) {
+        auto *data = frame_->data_buf;
+        if (data == nullptr) {
             return nullptr;
         }
-        if (data_offset_ < data_buf_->capacity) {
+        if (data_offset_ < data->capacity) {
             return nullptr; // need more data bytes
         }
         // Frame complete — set len so consumers know how much data is valid.
-        data_buf_->len = data_offset_;
-        frame_         = new Frame;
+        data->len = data_offset_;
         return yield_frame();
     }
     }

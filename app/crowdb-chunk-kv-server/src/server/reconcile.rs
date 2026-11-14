@@ -36,9 +36,9 @@ impl ChunkKvService {
     ///
     /// # Errors
     ///
-    /// Returns a catalog or partition reconciliation error without changing
-    /// either active snapshot.
-    pub fn install_catalog_and_reconcile(
+    /// Validation errors leave both active snapshots unchanged. Pin release
+    /// errors are reported after the new assignment is installed.
+    pub async fn install_catalog_and_reconcile(
         &self,
         head: &ChunkKvRangeCatalogHead,
         pages: &[ChunkKvRangeCatalogPage],
@@ -74,12 +74,26 @@ impl ChunkKvService {
         }
         self.partitions.store(next);
         self.finish_prepared_transfer_reconciliation(pages);
-        for (partition, transition_id) in released_pins {
-            partition.release_generation_pin(crowdb_chunk_kv::TransitionId {
-                high: transition_id.high,
-                low: transition_id.low,
-            })?;
+        if released_pins.is_empty() {
+            return Ok(());
         }
+        // Publication has already removed these dependencies. Keep cleanup
+        // live if the reconciliation caller drops its wait.
+        tokio::spawn(async move {
+            let mut result = Ok(());
+            for (partition, transition_id) in released_pins {
+                let released = partition
+                    .release_generation_pin(crowdb_chunk_kv::TransitionId {
+                        high: transition_id.high,
+                        low: transition_id.low,
+                    })
+                    .await;
+                result = result.and(released);
+            }
+            result
+        })
+        .await
+        .map_err(|error| ChunkKvError::Internal(format!("catalog pin release task failed: {error}")))??;
         Ok(())
     }
 
@@ -94,7 +108,7 @@ impl ChunkKvService {
         recovered: &[Partition],
     ) -> Result<(), ChunkKvRangeCatalogReconcileError> {
         let previous = self.partitions.load_full();
-        self.install_catalog_and_reconcile(head, pages, recovered)?;
+        self.install_catalog_and_reconcile(head, pages, recovered).await?;
         let mut first_error = None;
         for (id, partition) in previous.iter() {
             let epoch = partition.snapshot().ownership_epoch;

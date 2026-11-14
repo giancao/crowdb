@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use crowdb_chunk_kv::{Partition, PartitionConfig, SplitArtifact};
+use crowdb_chunk_kv::{Partition, SplitArtifact};
 use crowdb_protocol::chunk_kv::{
     AuthorityReleaseProof, ChunkKvRangeCatalogEntry, ChunkKvRangeCatalogPartitionState, PartitionArtifact,
     SplitPhase, SplitReadinessProof, SplitTransition, TailOverlayArtifact, TargetReadinessProof,
@@ -176,7 +176,7 @@ impl TransitionExecutor {
     ///
     /// Returns an error when the hosted partition cannot delete the durable
     /// pin.
-    pub fn release_transfer_generation_pin(
+    pub async fn release_transfer_generation_pin(
         &self,
         transition: &TransferTransition,
     ) -> Result<(), MonitorError> {
@@ -188,10 +188,11 @@ impl TransitionExecutor {
                 high: transition.transition_id.high,
                 low: transition.transition_id.low,
             })
+            .await
             .map_err(|error| plan_error(&error.to_string()))
     }
 
-    pub(crate) fn discard_prepared_transfer_target(
+    pub(crate) async fn discard_prepared_transfer_target(
         &self,
         transition: &TransferTransition,
     ) -> Result<(), MonitorError> {
@@ -200,7 +201,7 @@ impl TransitionExecutor {
             if snapshot.ownership_epoch == transition.target_epoch
                 && snapshot.lifecycle == crowdb_chunk_kv::PartitionLifecycle::Prepared
             {
-                self.release_transfer_generation_pin(transition)?;
+                self.release_transfer_generation_pin(transition).await?;
                 self.service
                     .discard_prepared_transfer_target(transition.partition_id, transition.target_epoch);
             }
@@ -214,7 +215,10 @@ impl TransitionExecutor {
     /// # Errors
     ///
     /// Returns an error when the hosted child cannot delete the durable pin.
-    pub fn release_split_generation_pin(&self, transition: &SplitTransition) -> Result<(), MonitorError> {
+    pub async fn release_split_generation_pin(
+        &self,
+        transition: &SplitTransition,
+    ) -> Result<(), MonitorError> {
         if transition.phase == SplitPhase::CatalogCommitted
             && !self.service.split_child_is_independent(transition)
         {
@@ -227,6 +231,7 @@ impl TransitionExecutor {
                         high: transition.transition_id.high,
                         low: transition.transition_id.low,
                     })
+                    .await
                     .map_err(|error| plan_error(&error.to_string()))?;
             }
         }
@@ -475,7 +480,7 @@ impl TransitionStorage for ChunkKvStorage {
         let artifact = prepared.artifact.clone();
         let child = prepared
             .child
-            .open_warmed(PartitionConfig::default())
+            .open_warmed(self.partition_config().clone())
             .map_err(|error| plan_error(&error.to_string()))?;
         let retained_parent = parent
             .split_ingress()

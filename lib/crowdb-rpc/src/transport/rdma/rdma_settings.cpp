@@ -65,6 +65,7 @@ bool SocketTransport::configure_rdma(RdmaConfig config, bool enabled, bool allow
     }
     rdma_transport_ = std::move(replacement);
     if (rdma_transport_ != nullptr) {
+        rdma_transport_->socket_transport_ = this;
         for (const auto &engine : engines_)
             rdma_transport_->register_events(engine.get());
         rdma_transport_->set_connection_handler([this](const std::shared_ptr<Connection> &connection) {

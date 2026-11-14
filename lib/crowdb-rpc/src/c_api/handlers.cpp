@@ -85,50 +85,43 @@ crowdb_rpc_status crowdb_rpc_server_submit_response(crowdb_rpc_server_t server, 
     }
 }
 
-// Submit a response using pre-filled buffer handles (zero-copy). The
-// server takes ownership of the buffers.
-crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t server, void *conn_handle,
-                                                           crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
-                                                           uint16_t msg_type, uint64_t request_id)
+static crowdb::rpc::Buffer *take_response_buffer(crowdb_rpc_buffer_t handle)
 {
+    if (handle == nullptr || handle->buf == nullptr)
+        return nullptr;
+
+    auto *buffer = handle->buf;
+    buffer->control_allocator.destroy(handle);
+    return buffer;
+}
+
+static crowdb_rpc_status submit_response_buffers(crowdb_rpc_server_t server, crowdb::rpc::Connection *connection,
+                                                 crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
+                                                 uint16_t msg_type, uint64_t request_id,
+                                                 crowdb::rpc::Frame *request = nullptr)
+{
+    const auto release_buffer = [](crowdb::rpc::Buffer *buffer) { buffer->release(); };
     try {
-        if (server == nullptr || conn_handle == nullptr) {
-            // Release any provided buffers to avoid leaks.
-            if (control != nullptr) {
-                crowdb_rpc_buffer_release(control);
-            }
-            if (data != nullptr) {
-                crowdb_rpc_buffer_release(data);
-            }
+        std::unique_ptr<crowdb::rpc::Buffer, decltype(release_buffer)> response_control(take_response_buffer(control),
+                                                                                        release_buffer);
+        std::unique_ptr<crowdb::rpc::Buffer, decltype(release_buffer)> response_data(take_response_buffer(data),
+                                                                                     release_buffer);
+        if (server == nullptr || connection == nullptr)
             return CROWDB_RPC_ERR_INVALID_ARG;
-        }
 
-        auto *conn = static_cast<crowdb::rpc::Connection *>(conn_handle);
-
-        // Extract Buffer* from handles (steal ownership — the handle's
-        // release is a no-op after this since we set buf = nullptr).
-        crowdb::rpc::Buffer *resp_ctrl = nullptr;
-        if (control != nullptr && control->buf != nullptr) {
-            resp_ctrl    = control->buf;
-            control->buf = nullptr;
-            delete control;
+        std::unique_ptr<crowdb::rpc::OutFrame> response(
+            crowdb::rpc::build_out_frame(request_id, msg_type, response_control.get(), response_data.get()));
+        if (request != nullptr) {
+            response->request_cache           = std::move(request->control_owner);
+            response->tcp_request_cache_bytes = request->tcp_request_cache_bytes;
         }
-        crowdb::rpc::Buffer *resp_data = nullptr;
-        if (data != nullptr && data->buf != nullptr) {
-            resp_data = data->buf;
-            data->buf = nullptr;
-            delete data;
-        }
-
-        auto *frame = crowdb::rpc::build_out_frame(request_id, msg_type, resp_ctrl, resp_data);
-        if (!server->server->transport()->submit(conn, frame)) {
-            if (frame->control != nullptr) {
-                frame->control->release();
-            }
-            frame->release_data();
-            delete frame;
+        if (!server->server->transport()->submit(connection, response.get()))
             return CROWDB_RPC_ERR_SEND_QUEUE;
-        }
+        if (request != nullptr)
+            request->tcp_request_cache_bytes = 0;
+        (void)response.release();
+        (void)response_control.release();
+        (void)response_data.release();
         return CROWDB_RPC_OK;
     }
     catch (...) {
@@ -136,7 +129,22 @@ crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t s
     }
 }
 
-// ── Client-side request handler dispatch ──────────────────
+crowdb_rpc_status crowdb_rpc_server_submit_response_buffer(crowdb_rpc_server_t server, void *conn_handle,
+                                                           crowdb_rpc_buffer_t control, crowdb_rpc_buffer_t data,
+                                                           uint16_t msg_type, uint64_t request_id)
+{
+    return submit_response_buffers(server, static_cast<crowdb::rpc::Connection *>(conn_handle), control, data, msg_type,
+                                   request_id);
+}
+
+crowdb_rpc_status crowdb_rpc_server_reply(crowdb_rpc_server_t server, void *frame_handle, crowdb_rpc_buffer_t control,
+                                          crowdb_rpc_buffer_t data, uint16_t msg_type)
+{
+    auto      *request    = static_cast<crowdb::rpc::Frame *>(frame_handle);
+    auto      *connection = request == nullptr ? nullptr : request->connection_owner.get();
+    const auto request_id = request == nullptr ? 0 : request->request_id;
+    return submit_response_buffers(server, connection, control, data, msg_type, request_id, request);
+}
 
 void crowdb_rpc_client_register_handler(crowdb_rpc_client_t client, uint16_t msg_type, crowdb_rpc_handler_fn callback,
                                         void *user_data, crowdb_rpc_handler_release_fn release)
@@ -184,7 +192,18 @@ void crowdb_rpc_server_set_request_client(crowdb_rpc_server_t server, crowdb_rpc
         if (server == nullptr || client == nullptr) {
             return;
         }
-        server->server->set_request_client(client->client.get());
+        server->server->set_request_client(client->client);
+    }
+    catch (...) {
+    }
+}
+
+void crowdb_rpc_server_route_connection(crowdb_rpc_server_t server, crowdb_rpc_conn_t conn)
+{
+    try {
+        if (server != nullptr && conn != nullptr && conn->conn != nullptr) {
+            server->server->route_connection(*conn->conn);
+        }
     }
     catch (...) {
     }

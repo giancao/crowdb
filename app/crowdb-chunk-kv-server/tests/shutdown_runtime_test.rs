@@ -16,12 +16,53 @@ use std::{
     time::Duration,
 };
 
-use crowdb_chunk_kv::{Partition, PartitionId, PartitionLifecycle, PartitionRange};
+use crowdb_chunk_kv::{CrowdbPartitionTree, Partition, PartitionId, PartitionLifecycle, PartitionRange};
 use crowdb_chunk_kv_server::ChunkKvService;
+use crowdb_tree_ffi::chunk::test_util::TestChunkBackend;
 use sampling_tree::TestSamplingTree;
 use split_storage::TestSplitStorage;
 
 const CHILD: &str = "CROWDB_TEST_SAMPLING_SHUTDOWN_CHILD";
+
+#[tokio::test(flavor = "current_thread")]
+async fn hosted_close_joins_both_workers_and_releases_their_shared_native_writer() {
+    let storage = TestSplitStorage::new();
+    let mut backend = TestChunkBackend::new(71, 1).unwrap();
+    let mut config = backend.config();
+    config.page_store = Some(backend.page_store(0).unwrap());
+    let tree = Arc::new(CrowdbPartitionTree::open(71, &config).unwrap());
+    let service = ChunkKvService::new(test_process::TestProcess::authority(1), 8).unwrap();
+    let mut held = None;
+    for id in [1, 2] {
+        let (partition, _) = storage
+            .partition(
+                PartitionId { high: 71, low: id },
+                PartitionRange::default(),
+                1,
+                tree.clone(),
+            )
+            .await;
+        service.install_partition(&partition).unwrap();
+        if id == 2 {
+            held = Some(partition);
+        }
+    }
+    drop(tree);
+    service.drain_writers().await.unwrap();
+    let mut closing = std::pin::pin!(service.release_hosted_trees());
+    assert!(tokio::time::timeout(Duration::from_millis(20), closing.as_mut())
+        .await
+        .is_err());
+    assert_eq!(backend.runtime.snapshot().unwrap().bindings, 1);
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(5), closing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(backend.runtime.snapshot().unwrap().bindings, 0);
+    drop(config);
+    backend.next_writer().unwrap();
+}
 
 #[test]
 fn service_drain_owns_sampling_until_runtime_shutdown() {

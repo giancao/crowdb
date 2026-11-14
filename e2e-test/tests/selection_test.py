@@ -93,10 +93,13 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(case_resources(case, 2), (1.5, count * 2048 + 512))
 
     def test_client_and_metadata_scopes_expose_their_named_flows(self):
-        for scope, count in (("kv.client", 6), ("kv.metadata", 14)):
+        for scope, count in (("kv.client", 6), ("kv.metadata", 15)):
             cases = json.loads(self.invoke("--list", "--scope", scope))
             self.assertEqual(len(cases), count)
             self.assertTrue(all(case["scope"] == scope for case in cases))
+            if scope == "kv.metadata":
+                self.assertIn("kv::slot_map_recovery::interrupted_large_bootstrap_resumes_after_crash",
+                              [case["case"] for case in cases])
 
     def test_layers_select_only_their_domains_and_count_dependencies(self):
         diskdb = json.loads(self.invoke("--list", "--layer", "diskdb"))
@@ -185,6 +188,8 @@ class CaseResourcesTest(unittest.TestCase):
         self.assertTrue(convergence.iceberg_gc)
         self.assertIsNone(convergence.iceberg_gc_page_items)
         self.assertIsNone(convergence.iceberg_gc_interval_ms)
+        self.assertEqual(convergence.chunk_kv_replay_budget_bytes, 1 << 30)
+        self.assertTrue(all(case.chunk_kv_replay_budget_bytes is None for case in ICEBERG_CASES if case != convergence))
         self.assertEqual(convergence.client_timeout, 3600)
         one_item = [case for case in ICEBERG_CASES
                     if "::gc::foreground::" in case.name or "::gc::notifications::" in case.name]

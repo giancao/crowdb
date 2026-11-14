@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <bit>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -163,8 +164,9 @@ DiskIOUring::DiskIOUring(Topology topo)
         for (size_t pi : pt->pipelines) {
             int rc = ::io_uring_register_eventfd(&pipelines_[pi]->ring, pt->wake_fd);
             if (rc < 0) {
-                CRB_LOG_ERROR("DiskIOUring: pipeline {} completion eventfd registration failed: {}", pi,
-                              std::strerror(-rc));
+                CRB_LOG_ERROR("DiskIOUring: pipeline {} completion eventfd "
+                              "registration failed: {}",
+                              pi, std::strerror(-rc));
                 poll_threads_.push_back(std::move(pt));
                 return;
             }
@@ -175,9 +177,35 @@ DiskIOUring::DiskIOUring(Topology topo)
     valid_ = true;
 
     // Start poll threads.
+    pollers_remaining_.store(poll_threads_.size(), std::memory_order_relaxed);
     for (auto &pt : poll_threads_) {
-        pt->thread = std::thread([this, ptp = pt.get()] { poll_thread_run(*ptp); });
+        pt->thread = std::thread([this, ptp = pt.get()] {
+            poll_thread_run(*ptp);
+            if (pollers_remaining_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                auto done = std::move(pollers_stopped_);
+                done.complete(0);
+            }
+        });
     }
+}
+
+void DiskIOUring::stop_pollers() noexcept
+{
+    for (auto &pt : poll_threads_) {
+        pt->stopped.store(true, std::memory_order_release);
+        wake_poll_thread(*pt);
+    }
+}
+
+void DiskIOUring::stop_after_drain(IOCompletion complete) noexcept
+{
+    assert(total_in_flight_.load(std::memory_order_acquire) == 0);
+    if (pollers_remaining_.load(std::memory_order_acquire) == 0) {
+        complete.complete(0);
+        return;
+    }
+    pollers_stopped_ = std::move(complete);
+    stop_pollers();
 }
 
 DiskIOUring::~DiskIOUring()
@@ -191,14 +219,7 @@ DiskIOUring::~DiskIOUring()
         }
         std::this_thread::yield();
     }
-    // Stop all poll threads.
-    for (auto &pt : poll_threads_) {
-        pt->stopped.store(true, std::memory_order_release);
-    }
-    // Wake any sleeping threads.
-    for (auto &pt : poll_threads_) {
-        wake_poll_thread(*pt);
-    }
+    stop_pollers();
     for (auto &pt : poll_threads_) {
         if (pt->thread.joinable()) {
             pt->thread.join();
@@ -219,7 +240,7 @@ DiskIOUring::~DiskIOUring()
         if (p->valid) {
             while (p->free_list != nullptr) {
                 CallbackEntry *next = p->free_list->next_free;
-                delete p->free_list;
+                delete_entry(p->free_list);
                 p->free_list = next;
             }
             ::io_uring_queue_exit(&p->ring);
@@ -315,7 +336,9 @@ void DiskIOUring::submit_read(int fd, void *buf, size_t len, off_t offset, std::
 {
     if (fd < 0 || fd >= fd_table_size_ || !fd_table_[fd].registered) {
         if (fd >= 0 && fd < fd_table_size_ && !fd_table_[fd].registered) {
-            CRB_LOG_WARN("DiskIOUring::submit_read: fd {} not registered, routing to pipeline 0", fd);
+            CRB_LOG_WARN("DiskIOUring::submit_read: fd {} not registered, routing to "
+                         "pipeline 0",
+                         fd);
             if (!pipelines_.empty() && pipelines_[0]->valid) {
                 submit_lockfree(
                     *pipelines_[0], fd, std::move(on_complete), [fd, buf, len, offset](struct io_uring_sqe *sqe) {
@@ -339,7 +362,9 @@ void DiskIOUring::submit_write(int fd, const void *buf, size_t len, off_t offset
 {
     if (fd < 0 || fd >= fd_table_size_ || !fd_table_[fd].registered) {
         if (fd >= 0 && fd < fd_table_size_ && !fd_table_[fd].registered) {
-            CRB_LOG_WARN("DiskIOUring::submit_write: fd {} not registered, routing to pipeline 0", fd);
+            CRB_LOG_WARN("DiskIOUring::submit_write: fd {} not registered, routing "
+                         "to pipeline 0",
+                         fd);
             if (!pipelines_.empty() && pipelines_[0]->valid) {
                 submit_lockfree(
                     *pipelines_[0], fd, std::move(on_complete), [fd, buf, len, offset](struct io_uring_sqe *sqe) {
@@ -424,7 +449,9 @@ void DiskIOUring::submit_fsync(int fd, bool data_only, std::function<void(int)> 
 {
     if (fd < 0 || fd >= fd_table_size_ || !fd_table_[fd].registered) {
         if (fd >= 0 && fd < fd_table_size_ && !fd_table_[fd].registered) {
-            CRB_LOG_WARN("DiskIOUring::submit_fsync: fd {} not registered, routing to pipeline 0", fd);
+            CRB_LOG_WARN("DiskIOUring::submit_fsync: fd {} not registered, routing "
+                         "to pipeline 0",
+                         fd);
             if (!pipelines_.empty() && pipelines_[0]->valid) {
                 submit_lockfree(*pipelines_[0], fd, std::move(on_complete), [fd, data_only](struct io_uring_sqe *sqe) {
                     ::io_uring_prep_fsync(sqe, fd, data_only ? IORING_FSYNC_DATASYNC : 0);
@@ -463,15 +490,24 @@ void DiskIOUring::submit_lockfree(Pipeline &p, int fd, std::function<void(int)> 
         return;
     }
 
+    // Allocation failure must leave both the queue and in-flight counts
+    // unchanged; callers may handle it as a rejected submission.
+    auto *entry =
+        new CallbackEntry{.cb = std::move(on_complete), .fd = fd, .next_free = {}, .queued_nanos = steady_nanos()};
+
+    submit_entry(p, fd, entry, &prep,
+                 [](const void *context, struct io_uring_sqe *sqe) { (*static_cast<const Prep *>(context))(sqe); });
+}
+
+void DiskIOUring::submit_entry(Pipeline &p, int fd, CallbackEntry *entry, const void *context,
+                               void (*prepare)(const void *, struct io_uring_sqe *))
+{
     // Increment in-flight count for this fd.
     if (fd >= 0 && fd < fd_table_size_) {
         fd_in_flight_[fd].fetch_add(1, std::memory_order_acq_rel);
     }
     total_in_flight_.fetch_add(1, std::memory_order_relaxed);
     uring_in_flight.fetch_add(1, std::memory_order_relaxed);
-
-    auto *entry =
-        new CallbackEntry{.cb = std::move(on_complete), .fd = fd, .next_free = {}, .queued_nanos = steady_nanos()};
 
     // CAS loop: check capacity BEFORE claiming a slot.
     bool observed_full = false;
@@ -495,7 +531,7 @@ void DiskIOUring::submit_lockfree(Pipeline &p, int fd, std::function<void(int)> 
             unsigned             idx = tail & p.ring.sq.ring_mask;
             struct io_uring_sqe *sqe = &p.ring.sq.sqes[idx << p.sq_shift];
             io_uring_initialize_sqe(sqe);
-            prep(sqe);
+            prepare(context, sqe);
             entry->opcode = sqe->opcode;
             io_uring_sqe_set_data(sqe, entry);
             p.sqe_ready[idx].store(true, std::memory_order_release);
@@ -505,15 +541,70 @@ void DiskIOUring::submit_lockfree(Pipeline &p, int fd, std::function<void(int)> 
     }
 
     // All retries failed (SQ persistently full).
-    if (entry->cb) {
-        entry->cb(-ENOMEM);
-    }
-    delete entry;
+    complete_entry(entry, -ENOMEM);
+    delete_entry(entry);
     if (fd >= 0 && fd < fd_table_size_) {
         fd_in_flight_[fd].fetch_sub(1, std::memory_order_acq_rel);
     }
     total_in_flight_.fetch_sub(1, std::memory_order_relaxed);
     uring_in_flight.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void DiskIOUring::enqueue_owned(Pipeline &pipeline, CallbackEntry *entry)
+{
+    if (entry->fd >= 0) {
+        fd_in_flight_[entry->fd].fetch_add(1, std::memory_order_acq_rel);
+    }
+    total_in_flight_.fetch_add(1, std::memory_order_relaxed);
+    uring_in_flight.fetch_add(1, std::memory_order_relaxed);
+    auto *head = pipeline.owned_incoming.load(std::memory_order_relaxed);
+    do {
+        entry->next_free = head;
+    } while (!pipeline.owned_incoming.compare_exchange_weak(head, entry, std::memory_order_release,
+                                                            std::memory_order_relaxed));
+    mark_pending(pipeline);
+}
+
+void DiskIOUring::submit_pending_owned(Pipeline &p)
+{
+    // One SQ-sized CPU window keeps other pipelines and completions moving.
+    for (unsigned prepared = 0; prepared < p.ring.sq.ring_entries; ++prepared) {
+        if (p.owned_pending == nullptr) {
+            auto *incoming = p.owned_incoming.exchange(nullptr, std::memory_order_acquire);
+            while (incoming != nullptr) {
+                auto *next          = incoming->next_free;
+                incoming->next_free = p.owned_pending;
+                p.owned_pending     = incoming;
+                incoming            = next;
+            }
+        }
+        auto *entry = p.owned_pending;
+        if (entry == nullptr) {
+            return;
+        }
+        unsigned tail = p.sq_tail.load(std::memory_order_acquire);
+        for (;;) {
+            if (tail - io_uring_load_sq_head(&p.ring) >= p.ring.sq.ring_entries) {
+                if (!entry->observed_full) {
+                    entry->observed_full = true;
+                    uring_sq_full_metric().inc();
+                    sq_full_count_.fetch_add(1, std::memory_order_relaxed);
+                }
+                return;
+            }
+            if (p.sq_tail.compare_exchange_weak(tail, tail + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                break;
+            }
+        }
+        const unsigned idx = tail & p.ring.sq.ring_mask;
+        auto          *sqe = &p.ring.sq.sqes[idx << p.sq_shift];
+        *sqe               = entry->command;
+        entry->opcode      = sqe->opcode;
+        p.owned_pending    = entry->next_free;
+        entry->next_free   = nullptr;
+        io_uring_sqe_set_data(sqe, entry);
+        p.sqe_ready[idx].store(true, std::memory_order_release);
+    }
 }
 
 void DiskIOUring::publish_ready_sqes(Pipeline &p)
@@ -569,13 +660,12 @@ void DiskIOUring::poll_thread_run(PollThread &pt)
             }
             while (p.free_list != nullptr) {
                 CallbackEntry *next = p.free_list->next_free;
-                delete p.free_list;
+                delete_entry(p.free_list);
                 p.free_list = next;
             }
-            // Publish contiguous filled SQE slots.
-            if (p.pending_submit.exchange(false, std::memory_order_acq_rel)) {
-                publish_ready_sqes(p);
-            }
+            p.pending_submit.exchange(false, std::memory_order_acq_rel);
+            submit_pending_owned(p);
+            publish_ready_sqes(p);
         }
 
         // Determine the minimum busy_poll_budget across assigned Hybrid pipelines.
@@ -612,8 +702,16 @@ void DiskIOUring::poll_thread_run(PollThread &pt)
             // The private wake fd receives both submissions and kernel CQ
             // completions. External reactors use separate completion fds.
             pt.thread_sleeping.store(true, std::memory_order_release);
+            bool pending_owned = false;
+            for (size_t pi : pt.pipelines) {
+                const auto &p = *pipelines_[pi];
+                pending_owned = pending_owned || p.owned_pending != nullptr ||
+                                p.owned_incoming.load(std::memory_order_acquire) != nullptr;
+            }
+            // SQPOLL can consume a slot without generating a CQE. While
+            // accepted commands remain, the I/O owner also polls SQ progress.
             struct epoll_event events[16];
-            int                n = ::epoll_wait(pt.epoll_fd, events, 16, 50); // 50ms timeout
+            int                n = ::epoll_wait(pt.epoll_fd, events, 16, pending_owned ? 0 : -1);
             pt.thread_sleeping.store(false, std::memory_order_release);
 
             if (n > 0) {
@@ -626,7 +724,9 @@ void DiskIOUring::poll_thread_run(PollThread &pt)
             // completions so it does not wait for the next iteration.
             for (size_t pi : pt.pipelines) {
                 auto &p = *pipelines_[pi];
-                if (p.valid && p.pending_submit.exchange(false, std::memory_order_acq_rel)) {
+                if (p.valid) {
+                    p.pending_submit.exchange(false, std::memory_order_acq_rel);
+                    submit_pending_owned(p);
                     publish_ready_sqes(p);
                 }
             }
@@ -679,11 +779,17 @@ bool DiskIOUring::drain_cqes(Pipeline &p)
             }
             total_in_flight_.fetch_sub(1, std::memory_order_relaxed);
             uring_in_flight.fetch_sub(1, std::memory_order_relaxed);
-            if (entry->cb) {
-                entry->cb(res);
+            const bool owned = entry->owned.callback != nullptr;
+            complete_entry(entry, res);
+            if (owned) {
+                // Returning paid storage cannot wait for an arbitrarily long
+                // batch of completions before the poll loop becomes idle.
+                delete_entry(entry);
             }
-            entry->next_free = p.free_list;
-            p.free_list      = entry;
+            else {
+                entry->next_free = p.free_list;
+                p.free_list      = entry;
+            }
         }
 
         cqe = nullptr;

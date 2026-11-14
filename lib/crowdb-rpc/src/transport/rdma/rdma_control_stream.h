@@ -39,7 +39,8 @@ class ControlStreamLease
 class ControlStreamBudget
 {
   public:
-    explicit ControlStreamBudget(uint64_t limit, std::function<void()> wake = {});
+    explicit ControlStreamBudget(uint64_t limit, std::function<void()> wake = {},
+                                 const ControlStreamBudget *totals = nullptr);
     [[nodiscard]] std::shared_ptr<ControlStreamLease> try_reserve(uint64_t bytes);
     [[nodiscard]] uint64_t                            used() const;
     [[nodiscard]] uint64_t                            high_water() const;
@@ -83,6 +84,11 @@ class ControlStreamReceiver
     [[nodiscard]] int   wait_ms(Clock::time_point now) const;
     void                reset();
 
+    [[nodiscard]] const ControlStreamBudget &budget() const
+    {
+        return budget_;
+    }
+
   private:
     struct Assembly
     {
@@ -91,7 +97,7 @@ class ControlStreamReceiver
         uint64_t                            offset        = 0;
         Clock::time_point                   deadline;
         std::shared_ptr<ControlStreamLease> lease;
-        std::vector<uint8_t>                bytes;
+        ControlBytes                        bytes;
     };
 
     [[nodiscard]] bool        valid(const ControlFragment &fragment, size_t bytes) const;

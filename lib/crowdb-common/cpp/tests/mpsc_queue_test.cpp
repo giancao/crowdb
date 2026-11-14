@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <barrier>
 #include <thread>
 #include <vector>
 
@@ -183,6 +184,45 @@ TEST(MpscQueueTest, MpscStress)
 
     EXPECT_EQ(drained_count.load(), TOTAL);
     EXPECT_FALSE(q.has_pending());
+}
+
+TEST(MpscQueueTest, ConcurrentDrainCannotReportFullBelowCapacity)
+{
+    constexpr int      PRODUCERS    = 4;
+    constexpr int      PER_PRODUCER = 60000;
+    constexpr int      TOTAL        = PRODUCERS * PER_PRODUCER;
+    constexpr uint32_t CAPACITY     = 1U << 18;
+    static_assert(TOTAL < CAPACITY);
+
+    MpscQueue<int>           q(CAPACITY);
+    std::barrier             start(PRODUCERS + 1);
+    std::atomic<int>         remaining{PRODUCERS};
+    std::atomic<int>         rejected{0};
+    std::vector<std::thread> producers;
+    producers.reserve(PRODUCERS);
+    for (int producer = 0; producer < PRODUCERS; ++producer) {
+        producers.emplace_back([&] {
+            start.arrive_and_wait();
+            for (int index = 0; index < PER_PRODUCER; ++index) {
+                if (!q.try_push(index)) {
+                    rejected.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            remaining.fetch_sub(1, std::memory_order_release);
+        });
+    }
+
+    int drained = 0;
+    int out[128];
+    start.arrive_and_wait();
+    while (remaining.load(std::memory_order_acquire) != 0 || q.has_pending()) {
+        drained += q.drain(out, 128);
+    }
+    for (auto &producer : producers) {
+        producer.join();
+    }
+    EXPECT_EQ(rejected.load(), 0);
+    EXPECT_EQ(drained, TOTAL);
 }
 
 // ── MPSC stress with backpressure (small queue) ───────────────────

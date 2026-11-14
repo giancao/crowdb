@@ -16,11 +16,9 @@ namespace crowdb::tree
 namespace
 {
 
-constexpr uint32_t kSegImageMagic        = 0x534D5443; // 'CTMS' little-endian byte order
-constexpr uint32_t kSegDirMagic          = 0x44535443; // 'CTSD' little-endian byte order
-constexpr uint16_t kLegacyFormatVersion  = 1;
-constexpr uint16_t kPageRefFormatVersion = 2;
-constexpr uint16_t kPageRefFlag          = 1;
+constexpr uint32_t kSegImageMagic = 0x534D5443; // 'CTMS' little-endian byte order
+constexpr uint32_t kSegDirMagic   = 0x44535443; // 'CTSD' little-endian byte order
+constexpr uint16_t kFormatVersion = 1;
 
 // Fixed header sizes (bytes), before the variable-length body.
 constexpr size_t kImageHeaderBytes = 4 + 2 + 2 + 4 + 8 + 4 + 4 + 4; // magic..live_count,header_crc
@@ -80,13 +78,10 @@ size_t segment_image_encoded_size(uint32_t slot_count)
 void encode_segment_image(const SegmentImageHeader &hdr, const std::vector<uint64_t> &words, std::vector<uint8_t> *out,
                           uint32_t *out_body_crc)
 {
-    const bool     has_page_refs = std::ranges::any_of(words, slot_word::is_page_ref);
-    const uint16_t version       = has_page_refs ? kPageRefFormatVersion : kLegacyFormatVersion;
-    const uint16_t flags         = has_page_refs ? kPageRefFlag : 0;
-    size_t         base          = out->size();
+    const size_t base = out->size();
     put_u32(out, kSegImageMagic);
-    put_u16(out, version);
-    put_u16(out, flags);
+    put_u16(out, kFormatVersion);
+    put_u16(out, 0);
     put_u32(out, hdr.seg_idx);
     put_u64(out, hdr.generation);
     put_u32(out, hdr.slot_count);
@@ -120,9 +115,7 @@ Status decode_segment_image(const uint8_t *buf, size_t len, SegmentImageHeader *
     }
     const uint16_t version = get_u16(buf + 4);
     const uint16_t flags   = get_u16(buf + 6);
-    if ((version != kLegacyFormatVersion && version != kPageRefFormatVersion) ||
-        (version == kLegacyFormatVersion && flags != 0) ||
-        (version == kPageRefFormatVersion && flags != kPageRefFlag)) {
+    if (version != kFormatVersion || flags != 0) {
         return Status::corruption("segment image: unsupported format_version");
     }
     uint32_t seg_idx    = get_u32(buf + 8);
@@ -151,8 +144,7 @@ Status decode_segment_image(const uint8_t *buf, size_t len, SegmentImageHeader *
     words_out->reserve(slot_count);
     for (uint32_t i = 0; i < slot_count; ++i) {
         const uint64_t word = get_u64(body + (static_cast<size_t>(i) * 8));
-        if (slot_word::is_resident(word) || (version == kLegacyFormatVersion && slot_word::is_page_ref(word)) ||
-            (!slot_word::is_empty(word) && !slot_word::is_unloaded(word))) {
+        if (!slot_word::is_empty(word) && !slot_word::is_unloaded(word)) {
             return Status::corruption("segment image: invalid durable mapping word");
         }
         words_out->push_back(word);
@@ -164,7 +156,7 @@ void encode_segment_directory(const std::vector<DirEntry> &entries, std::vector<
 {
     size_t base = out->size();
     put_u32(out, kSegDirMagic);
-    put_u16(out, kLegacyFormatVersion);
+    put_u16(out, kFormatVersion);
     put_u16(out, 0); // flags, reserved
     put_u32(out, static_cast<uint32_t>(entries.size()));
     uint32_t header_crc = crowdb::common::crc32c(out->data() + base, out->size() - base);
@@ -195,7 +187,7 @@ Status decode_segment_directory(const uint8_t *buf, size_t len, std::vector<DirE
     if (crowdb::common::crc32c(buf, kDirHeaderBytes - 4) != stored_header_crc) {
         return Status::corruption("segment directory: header CRC mismatch");
     }
-    if (get_u16(buf + 4) != kLegacyFormatVersion) {
+    if (get_u16(buf + 4) != kFormatVersion) {
         return Status::corruption("segment directory: unsupported format_version");
     }
     uint32_t entry_count = get_u32(buf + 8);

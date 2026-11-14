@@ -1,0 +1,127 @@
+// Copyright 2026-present Gian <crow.db@outlook.com>
+// Licensed under the Apache License, Version 2.0.
+
+use crate::paxos::PxNodeId;
+mod payload;
+pub use payload::ProposalPayload;
+pub(crate) use payload::MIN_PAYLOAD_VIEW_BYTES;
+
+pub trait Proposer {
+    fn propose(&self);
+}
+
+#[allow(async_fn_in_trait)]
+pub trait Acceptor {
+    #[allow(clippy::unused_async)]
+    async fn accept(&self, entry: &PxLogEntry) -> PxAcceptReply;
+    #[allow(clippy::unused_async)]
+    async fn prepare(&self, slot: SlotIndex, ballot: PxBallot) -> PxPrepareReply;
+
+    fn accepted_at(&self, slot: SlotIndex) -> Option<PxLogEntry>;
+    fn promised_at(&self, slot: SlotIndex) -> Option<PxBallot>;
+
+    fn reclaim(&self) -> usize;
+    fn trim(&self, before_slot: SlotIndex);
+    fn trim_slot(&self) -> SlotIndex;
+}
+
+/// One client request identity associated with a chosen slot. `client_id == 0`
+/// disables replay suppression. A coalesced multi-key batch carries one
+/// identity per client operation, all mapping
+/// to the same slot; a single-key propose carries one; repair/election
+/// entries carry none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestIdentity {
+    pub client_id: u64,
+    pub seq: u64,
+}
+
+/// Compatibility alias for existing integration tests.
+#[cfg(feature = "test-util")]
+pub type DedupTag = RequestIdentity;
+
+#[allow(async_fn_in_trait)]
+pub trait Learner {
+    /// Apply a chosen log entry to the state machine and cache each request
+    /// identity against the result slot. Identities are leader-local runtime
+    /// metadata (not persisted in WAL). An empty slice disables caching
+    /// (repair/election/restore catch-up).
+    async fn learn(&self, entry: PxLogEntry, request_identities: &[RequestIdentity]);
+}
+
+/// Paxos proposal number, ordered first by `round`, then by `leader_id`.
+///
+/// In steady state a leader uses `(0, leader_id)` for Phase-2-only writes.
+/// `round` is bumped only by classic-Paxos repair at a single slot, or by a
+/// new leader's bulk Phase-1 round (where `round = term`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct PxBallot {
+    pub round: u64,
+    pub leader_id: PxNodeId,
+}
+
+impl PxBallot {
+    #[must_use]
+    pub const fn new(round: u64, leader_id: PxNodeId) -> Self {
+        Self { round, leader_id }
+    }
+}
+
+pub type SlotIndex = u64;
+
+/// One durable consensus log record.
+///
+/// `payload` semantics: an empty payload is a `NoOp` (used to fill repair
+/// gaps); a non-empty payload is a serialized batch of `Operation` tuples.
+///
+/// Clones retain the same immutable bytes across Accept fanout and retries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PxLogEntry {
+    pub slot: SlotIndex,
+    pub ballot: PxBallot,
+    pub term: u64,
+    pub payload: ProposalPayload,
+}
+
+/// Reply to a Phase-1 `Prepare`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PxPrepareReply {
+    /// Promise accepted. If the acceptor previously accepted a value at this slot,
+    /// the proposer must adopt it (classic Paxos value-recovery rule).
+    Promised {
+        slot: SlotIndex,
+        accepted: Option<PxLogEntry>,
+    },
+    /// Promise rejected because the slot already promised at a higher-or-equal ballot.
+    /// The proposer should retry with a strictly higher ballot.
+    Rejected {
+        slot: SlotIndex,
+        current_promised: PxBallot,
+    },
+    /// The request's election term is lower than the responder's
+    /// `current_term`. The proposer (a stale leader) must step down and
+    /// adopt `new_term`. Two-fence rule: term fencing on both election
+    /// and Paxos ballot.
+    TermStale { slot: SlotIndex, new_term: u64 },
+    /// The proposer's `membership_epoch` does not exactly match the
+    /// responder's own. Distinct from `Rejected`: this is not a ballot
+    /// conflict, so the proposer must not bump its ballot/round in
+    /// response, only refresh its view of the group's membership.
+    EpochMismatch { responder_epoch: u64 },
+}
+
+/// Reply to a Phase-2 `Accept`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PxAcceptReply {
+    /// Value accepted at the entry's `(slot, ballot)`.
+    Accepted { slot: SlotIndex, ballot: PxBallot },
+    /// Rejected because the slot promised a higher ballot.
+    Rejected {
+        slot: SlotIndex,
+        current_promised: PxBallot,
+    },
+    /// Term-fence rejection. See [`PxPrepareReply::TermStale`].
+    TermStale { slot: SlotIndex, new_term: u64 },
+    /// Epoch-fence rejection. See [`PxPrepareReply::EpochMismatch`].
+    EpochMismatch { responder_epoch: u64 },
+}

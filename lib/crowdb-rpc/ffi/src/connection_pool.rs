@@ -74,6 +74,8 @@ impl std::ops::Deref for SelectedConnection {
 #[derive(Debug)]
 struct ConnectionPool {
     generation: u64,
+    // Duplex pools use (initiator priority, initiator sequence).
+    peer: Option<(u128, u64)>,
     connections: Vec<Connection>,
     cursor: AtomicU64,
 }
@@ -235,6 +237,7 @@ impl ConnectionPoolIndex {
             }
             let candidate = Arc::new(ConnectionPool {
                 generation: self.next_generation(),
+                peer: None,
                 connections,
                 cursor: AtomicU64::new(0),
             });
@@ -292,6 +295,7 @@ impl ConnectionPoolIndex {
         }
         let candidate = Arc::new(ConnectionPool {
             generation: self.next_generation(),
+            peer: None,
             connections,
             cursor: AtomicU64::new(0),
         });
@@ -330,6 +334,74 @@ impl ConnectionPoolIndex {
         }
         self.invalidate(endpoint, candidate.generation);
         Err(ConnectionPoolError::Closed)
+    }
+
+    /// Publish a newly dialed duplex pool or add one accepted connection.
+    /// Lower initiator priority wins a simultaneous dial. The sequence
+    /// identifies connections from the same dial and orders its reconnects.
+    /// Returns true if the supplied connection(s) were published.
+    pub fn publish_peer_connections(
+        &self,
+        endpoint: &str,
+        priority: u128,
+        sequence: u64,
+        connections: &[Connection],
+    ) -> bool {
+        let epoch = self.snapshot.load().clear_epoch;
+        loop {
+            let current = self.snapshot.load_full();
+            if current.clear_epoch != epoch {
+                return false;
+            }
+            let mut merged = Vec::new();
+            if let Some(pool) = current.pools.get(endpoint) {
+                if let Some((old_priority, old_sequence)) = pool.peer {
+                    merged.extend(pool.connections.iter().filter(|conn| conn.is_open()).cloned());
+                    if !merged.is_empty() {
+                        if old_priority < priority || (old_priority == priority && old_sequence > sequence) {
+                            return false;
+                        }
+                        if (old_priority, old_sequence) != (priority, sequence) {
+                            merged.clear();
+                        }
+                    }
+                }
+            } else if self.check_capacity::<()>(&current).is_err() {
+                return false;
+            }
+            let count = self.pool_size.saturating_sub(merged.len());
+            if count == 0 {
+                return false;
+            }
+            merged.extend(
+                connections
+                    .iter()
+                    .filter(|conn| conn.is_open())
+                    .take(count)
+                    .cloned(),
+            );
+            if merged.is_empty() {
+                return false;
+            }
+            let mut pools = current.pools.clone();
+            pools.insert(
+                endpoint.to_owned(),
+                Arc::new(ConnectionPool {
+                    generation: self.next_generation(),
+                    peer: Some((priority, sequence)),
+                    connections: merged,
+                    cursor: AtomicU64::new(0),
+                }),
+            );
+            let replacement = Arc::new(PoolSnapshot {
+                clear_epoch: epoch,
+                pools,
+            });
+            let previous = self.snapshot.compare_and_swap(&current, replacement);
+            if Arc::ptr_eq(&previous, &current) {
+                return true;
+            }
+        }
     }
 
     /// Remove an endpoint only when it is still the selected generation.

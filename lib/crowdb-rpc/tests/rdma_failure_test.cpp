@@ -79,6 +79,19 @@ bool test_send(RpcClient &client, SocketTransport &transport, Connection *connec
 }
 } // namespace
 
+TEST(RdmaConnectionTest, ActiveContextReportsBusyAndReusesContextOnRetry)
+{
+    RdmaTransport transport(test_config("127.0.0.1"));
+    EXPECT_TRUE(TestRdmaTransport::context_resumes_after_owner_releases_for_tests(transport));
+}
+
+TEST(RdmaConnectionTest, PublicationReportsBusyBeforeInstallingConnection)
+{
+    RdmaTransport transport(test_config("127.0.0.1"));
+    EXPECT_TRUE(TestRdmaTransport::publication_reports_busy_for_tests(transport, true));
+    EXPECT_TRUE(TestRdmaTransport::publication_reports_busy_for_tests(transport, false));
+}
+
 TEST(RdmaHardwareTest, ExpiredCmEndpointFallsBackOnlyBeforePayload)
 {
     const char *address = std::getenv("CROWDB_RDMA_E2E_LISTEN_ADDR");
@@ -111,6 +124,7 @@ TEST(RdmaHardwareTest, ExpiredCmEndpointFallsBackOnlyBeforePayload)
         ASSERT_NE(stats, nullptr);
         EXPECT_EQ(stats->preflight_attempts.load(), 1U);
         EXPECT_EQ(stats->cm_attempts.load(), 1U);
+        EXPECT_EQ(TestSocketTransport::rdma_for_tests(transport).cm_event_fd(), -1);
         EXPECT_EQ(stats->fallback_count.load(), allow ? 1U : 0U);
         EXPECT_EQ(stats->rpc_frames_sent.load(), 0U);
         if (allow) {

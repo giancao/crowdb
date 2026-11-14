@@ -59,6 +59,13 @@ async fn process_operations_and_failures_require_the_actual_pid_and_current_boun
         test.intent.operation_id
     );
     assert_eq!(observed["service_failures"]["chunkdb-1"]["exhausted"], false);
+    let mut pending = record.clone();
+    pending["complete"] = json!(false);
+    std::fs::write(&state, serde_json::to_vec(&pending).unwrap()).unwrap();
+    let observed = read(&mut test.manager);
+    assert_eq!(observed["processes"]["chunkdb-1"], pid);
+    assert!(observed["process_operations"]["chunkdb-1"].is_null());
+    assert_eq!(observed["service_failures"]["chunkdb-1"]["exhausted"], false);
     for fault in ["legacy", "bootstrap", "cluster", "node", "pid"] {
         let mut invalid = record.clone();
         match fault {

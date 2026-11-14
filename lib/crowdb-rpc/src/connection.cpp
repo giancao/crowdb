@@ -7,6 +7,7 @@
 #include "crowdb-rpc/rpc_metrics.h"
 #include "crowdb-rpc/transport/socket_transport.h" // TransportStats
 
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -78,16 +79,6 @@ inline ssize_t frame_total(OutFrame *frame)
     return total;
 }
 
-// Release an OutFrame's buffers and delete it.
-inline void release_frame(OutFrame *frame)
-{
-    if (frame->control != nullptr) {
-        frame->control->release();
-    }
-    frame->release_data();
-    delete frame;
-}
-
 // Restore pending frames to the frames array (cold path — partials
 // from a previous EAGAIN). Returns the number restored.
 int __attribute__((noinline)) restore_pending(OutFrame **pending, int pending_count, OutFrame **frames,
@@ -109,6 +100,16 @@ int __attribute__((noinline)) restore_pending(OutFrame **pending, int pending_co
 }
 
 } // namespace
+
+void Connection::release_frame(OutFrame *frame)
+{
+    if (frame->control != nullptr)
+        frame->control->release();
+    frame->release_data();
+    if (frame->tcp_request_cache_bytes != 0)
+        release_request_cache_bytes(frame->tcp_request_cache_bytes);
+    delete frame;
+}
 
 Connection::Connection(int64_t id, std::string name, BufferPool *pool, uint32_t max_data_size,
                        uint32_t send_queue_capacity)
@@ -262,12 +263,7 @@ retry:
                     stats->submit_to_writev.record(delta);
                 }
                 // Request payload bandwidth: data bytes per frame (no header).
-                uint64_t      payload    = 0;
-                const uint8_t data_views = batch[i]->data_views();
-                for (uint8_t index = 0; index < data_views; ++index) {
-                    payload += batch[i]->data_view(index)->len;
-                }
-                bw_request_payload().observe(payload);
+                bw_request_payload().observe(batch[i]->header.data_size);
             }
         }
         for (int i = 0; i < n; i++) {
@@ -281,7 +277,16 @@ retry:
             break;
         }
 
+        // A disconnected peer is a connection error, regardless of the host
+        // application's process-wide SIGPIPE disposition.
+#ifdef MSG_NOSIGNAL
+        msghdr message{};
+        message.msg_iov    = iovs;
+        message.msg_iovlen = static_cast<decltype(message.msg_iovlen)>(iov_count);
+        ssize_t written    = ::sendmsg(fd, &message, MSG_NOSIGNAL);
+#else
         ssize_t written = ::writev(fd, iovs, iov_count);
+#endif
         if (stats != nullptr)
             stats->writev_calls.fetch_add(1, std::memory_order_relaxed);
         if (written > 0) {
@@ -375,6 +380,7 @@ retry:
             discarded_count = drain_send_queue(discarded, BATCH_MAX);
         }
     }
+    has_partials_.store(pending_count_ != 0, std::memory_order_relaxed);
     in_send_.store(false, std::memory_order_release);
 
     // Race check: if more frames arrived while we were sending, retry.
@@ -403,6 +409,7 @@ void Connection::close()
             release_frame(pending_frames_[i]);
         }
         pending_count_ = 0;
+        has_partials_.store(false, std::memory_order_relaxed);
         OutFrame *discarded[BATCH_MAX];
         int       discarded_count = drain_overflow(discarded, BATCH_MAX);
         while (discarded_count > 0) {

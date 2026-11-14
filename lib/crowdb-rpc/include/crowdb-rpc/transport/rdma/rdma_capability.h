@@ -27,6 +27,7 @@ enum class RdmaWireLayout : uint32_t { Contiguous = 0, ControlData = 1 };
 
 [[nodiscard]] uint32_t rdma_data_slot_capacity(uint32_t wire_capacity, RdmaWireLayout layout);
 [[nodiscard]] bool     valid_rdma_wire_capacity(uint32_t wire_capacity, RdmaWireLayout layout);
+[[nodiscard]] bool     rdma_combined_control_data(uint32_t wire_capacity, RdmaWireLayout layout);
 
 struct RdmaEndpointCapability
 {

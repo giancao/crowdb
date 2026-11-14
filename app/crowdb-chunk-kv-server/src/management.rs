@@ -28,7 +28,7 @@ impl ManagementState {
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     instance_id: u64,
-    process_lease: crowdb_kv_client::StreamProcessLeaseStatus,
+    process_lease: crowdb_paxos_kv_client::StreamProcessLeaseStatus,
     lifecycle: &'static str,
     catalog_generation: u64,
     hosted_partitions: usize,
@@ -77,7 +77,7 @@ async fn partition_observation(
             .map_err(|_| failure(StatusCode::BAD_REQUEST, "invalid_partition_id"))?,
     };
     let service = state.service;
-    tokio::task::spawn_blocking(move || {
+    async {
         let mut observation = service.observe_partition(
             id,
             query.generation,
@@ -92,7 +92,7 @@ async fn partition_observation(
                 page_fingerprint: query.page_fingerprint,
                 entry_offset: query.entry_offset,
             };
-            observation["page"] = service.observe_page(id, &page)?;
+            observation["page"] = service.observe_page(id, &page).await?;
             observation["data_pages_read"] = serde_json::Value::Null;
             let current = service.observe_partition(
                 id,
@@ -106,9 +106,8 @@ async fn partition_observation(
             }
         }
         Ok(observation)
-    })
+    }
     .await
-    .map_err(|_| failure(StatusCode::INTERNAL_SERVER_ERROR, "observation_worker_failed"))?
     .map(Json)
     .map_err(|error| {
         failure(

@@ -55,7 +55,7 @@ TEST(Alignment, Iu4096CheckpointReopenEquals)
         Crowdbtree t(opt);
         fill_buf(&t, 200, &oracle);
         ASSERT_GT(t.height(), 1);
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         // Every durable extent is IU-aligned + IU-sized, so the file is a 4 KiB
         // multiple.
         EXPECT_EQ(store.size() % 4096U, 0U);
@@ -83,19 +83,19 @@ TEST(Alignment, Iu4096AllocatorReuseStaysAligned)
     std::map<std::string, std::string> oracle;
     Crowdbtree                         t(opt);
     fill_buf(&t, 80, &oracle);
-    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
     uint64_t early = store.size();
 
     // Rewrite the same keys repeatedly; aligned gaps are reused so the file stays
     // a 4 KiB multiple and roughly flat.
-    uint64_t slot = 100000;
+    uint64_t slot = 81;
     for (int round = 0; round < 30; ++round) {
         for (int i : {1, 2, 3, 4, 5}) {
             ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "r" + std::to_string(round))).ok());
             ASSERT_TRUE(t.flush().ok());
             ++slot;
         }
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         EXPECT_EQ(store.size() % 4096U, 0U);
     }
     EXPECT_LE(store.size(), early + (static_cast<uint64_t>(16) * 4096U));
@@ -129,7 +129,7 @@ TEST(Alignment, LargeIu16KCheckpointReopen)
         Crowdbtree t(opt);
         fill_buf(&t, 150, &oracle);
         ASSERT_GT(t.height(), 1);
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         EXPECT_EQ(store.size() % 16384U, 0U); // every extent IU-aligned + IU-sized
         // Two superblock slots of 16 KiB precede the page region.
         EXPECT_GE(store.size(), 2U * 16384U);
@@ -158,7 +158,7 @@ TEST(Alignment, NonPowerOfTwoIuRoundTrip)
     {
         Crowdbtree t(opt);
         fill_buf(&t, 80, &oracle);
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         EXPECT_EQ(store.size() % 5000U, 0U);
     }
     std::unique_ptr<Crowdbtree> t2;
@@ -185,7 +185,7 @@ TEST(Alignment, DebugStoreTransparentRoundTrip)
     {
         Crowdbtree t(opt);
         fill_buf(&t, 120, &oracle);
-        ASSERT_TRUE(t.snapshot(nullptr).ok());
+        ASSERT_TRUE(t.flush_with_persistent(nullptr).ok());
         EXPECT_GT(dbg.writes(), 0U);
     }
     std::unique_ptr<Crowdbtree> t2;

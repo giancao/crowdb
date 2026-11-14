@@ -6,6 +6,117 @@ use crowdb_rpc_ffi::{Buffer, RdmaConfig, RdmaWireLayout, RpcClient, RpcServer};
 use flatbuffers::FlatBufferBuilder;
 use serde_json::Value;
 
+#[tokio::test(flavor = "current_thread")]
+async fn native_route_yields_during_preflight_and_retires_a_canceled_probe() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{copy_bidirectional, AsyncReadExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::timeout;
+
+    if std::env::var_os("CROWDB_RDMA_E2E").is_none() {
+        return;
+    }
+    let endpoint = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = i32::from(endpoint.local_addr().unwrap().port());
+    let client = Arc::new(RpcServer::new(None));
+    client
+        .configure_rdma(&RdmaConfig {
+            enabled: true,
+            allow_tcp_fallback: true,
+            listen_enabled: false,
+            device: std::env::var("CROWDB_RDMA_DEVICE").unwrap_or_default(),
+            ..RdmaConfig::default()
+        })
+        .unwrap();
+    client.start();
+    let backend = RpcServer::new(None);
+    backend.configure_rdma(&RdmaConfig::default()).unwrap();
+    backend.listen("127.0.0.1", 0).unwrap();
+    backend.register_status_handler(101);
+    backend.start();
+
+    let open = || {
+        let client = Arc::clone(&client);
+        tokio::spawn(async move { client.connect_native_route("127.0.0.1", port).await })
+    };
+    let opening = open();
+    let (mut probe, _) = timeout(Duration::from_secs(1), endpoint.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut first_byte = [0];
+    assert_eq!(
+        timeout(Duration::from_secs(1), probe.peek(&mut first_byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        1
+    );
+    assert!(!opening.is_finished());
+    let mut upstream = TcpStream::connect(("127.0.0.1", u16::try_from(backend.port()).unwrap()))
+        .await
+        .unwrap();
+    let relay = tokio::spawn(async move { copy_bidirectional(&mut probe, &mut upstream).await });
+    let connection = timeout(Duration::from_secs(1), opening)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!connection.is_rdma());
+
+    let rpc = RpcClient::new();
+    rpc.attach(&connection);
+    let mut builder = FlatBufferBuilder::new();
+    let request = ConnectionPingRequest::create(
+        &mut builder,
+        &ConnectionPingRequestArgs {
+            id: 1,
+            rpc_create_nano: 0,
+        },
+    );
+    builder.finish(request, None);
+    let reply = rpc.call(
+        &client,
+        &connection,
+        1,
+        Buffer::from_bytes(builder.finished_data()),
+        None,
+        101,
+    );
+    let response = timeout(Duration::from_secs(1), reply.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.data.is_some());
+
+    let canceled = open();
+    let (mut probe, _) = timeout(Duration::from_secs(1), endpoint.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(1), probe.peek(&mut first_byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        1
+    );
+    canceled.abort();
+    assert!(canceled.await.unwrap_err().is_cancelled());
+    let mut request = Vec::new();
+    timeout(Duration::from_secs(1), probe.read_to_end(&mut request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!request.is_empty());
+    drop(connection);
+    relay.abort();
+    let _ = relay.await;
+    client.stop();
+    backend.stop();
+}
+
 #[test]
 fn explicit_tcp_configuration_is_typed_and_cold() {
     let server = RpcServer::new(None);

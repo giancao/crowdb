@@ -23,6 +23,8 @@ pub struct SplitWriterTarget {
     pub journal: Arc<dyn PartitionJournal>,
 }
 
+pub(super) mod inheritance;
+mod journal_proof;
 pub(super) mod preparation;
 mod recovery;
 pub(super) mod stable_session;
@@ -105,6 +107,7 @@ impl PreparedSplitWriter {
             super::RecoverySeed {
                 applied_seq: self.artifact.applied_seq,
                 applied_position: 0,
+                applied_end: 0,
                 retry_replay_offset: 0,
                 results: std::collections::HashMap::new(),
                 result_order: std::collections::VecDeque::new(),
@@ -116,7 +119,7 @@ impl PreparedSplitWriter {
         )
     }
 
-    async fn start_live(
+    fn prepare_live_cutover(
         &mut self,
         config: PartitionConfig,
         split: &SplitArtifact,
@@ -130,36 +133,27 @@ impl PreparedSplitWriter {
             self.parent_journal.as_ref(),
         )?;
         config.validate()?;
-        if self.tree.last_applied_seq() != self.artifact.applied_seq {
-            return Err(ChunkKvError::TreeCorruption(
-                "live split writer does not reach its cutover frontier".into(),
+        if self.journal.tail() != 0 {
+            return Err(ChunkKvError::SplitRetry(
+                "a child WAL tail requires recovered split activation".into(),
             ));
         }
-        let mut seed = super::replay_child_overlay(
-            self.artifact.partition_id,
-            self.artifact.ownership_epoch,
-            self.artifact.applied_seq,
-            config.retained_results,
-            self.tree.as_ref(),
-            self.journal.as_ref(),
-            seed,
-        )
-        .await?;
-        seed.retry_replay_offset = 0;
-        let partition = Partition::start(
+        let child = Partition::start(
             self.artifact.partition_id,
             self.artifact.range.clone(),
             self.artifact.ownership_epoch,
             config,
-            Arc::clone(&self.tree),
-            Arc::clone(&self.journal),
+            self.tree.clone(),
+            self.journal.clone(),
             seed,
             PartitionLifecycle::Prepared,
             Some(self.artifact.clone()),
         )?;
-        partition.activate_local_split_writer(split)?;
-        self.live = Some(partition.clone());
-        Ok(partition)
+        // This writer is still private. No route or external handle can send
+        // work until the prepared native prefix is committed below.
+        child.activate_local_split_writer(split)?;
+        self.live = Some(child.clone());
+        Ok(child)
     }
 }
 
@@ -310,10 +304,14 @@ impl Partition {
         // child checkpoint but before readiness became durable. No published
         // artifact can reference it in this phase, so replace that stale pin
         // with the exact generation produced by this retry.
-        child_state.child_tree.unpin_generation(plan.transition_id)?;
         child_state
             .child_tree
-            .pin_generation(plan.transition_id, child_state.child_base.1)?;
+            .unpin_generation(plan.transition_id)
+            .await?;
+        child_state
+            .child_tree
+            .pin_generation(plan.transition_id, child_state.child_base.1)
+            .await?;
         self.journal.checkpoint().await?;
         let source = SplitSourceFrontier {
             parent_id: plan.parent_id,
@@ -332,7 +330,7 @@ impl Partition {
         ) {
             Ok(child) => child,
             Err(error) => {
-                let _ = child_state.child_tree.unpin_generation(plan.transition_id);
+                let _ = child_state.child_tree.unpin_generation(plan.transition_id).await;
                 return Err(error);
             }
         };
@@ -349,7 +347,7 @@ impl Partition {
             child: child.artifact.clone(),
         };
         if let Err(error) = self.record_split_artifact(artifact.clone()).await {
-            let _ = child_state.child_tree.unpin_generation(plan.transition_id);
+            let _ = child_state.child_tree.unpin_generation(plan.transition_id).await;
             return Err(error);
         }
         self.metrics
@@ -374,7 +372,8 @@ impl Partition {
         let replay_offset = self.retry_replay_offset.load(Ordering::Acquire);
         self.journal.checkpoint().await?;
         let stream_generation = self.journal.record_generation();
-        let (tree_manifest, applied_seq, source) = self.tree.checkpoint_snapshot(replay_offset).await?;
+        let (tree_manifest, applied_seq, source) =
+            self.tree.flush_with_persistent_view(replay_offset).await?;
         let root_manifest_generation = self.tree.root_manifest_generation()?;
         if applied_seq > self.journal_durable_seq.load(Ordering::Acquire) {
             return Err(ChunkKvError::ApplyStateUnknown);
@@ -591,10 +590,24 @@ fn prepare_writer(
     writer: &SplitChild,
     target: SplitWriterTarget,
     tree: Arc<dyn PartitionTree>,
-    (tree_manifest, root_manifest_generation, base_applied_seq): (u64, u64, u64),
+    base: (u64, u64, u64),
     source: &SplitSourceFrontier,
 ) -> Result<PreparedSplitWriter> {
-    if tree.last_applied_seq() != source.cutover_seq || base_applied_seq > source.cutover_seq {
+    prepare_writer_at(writer, target, tree, base, source, source.cutover_seq)
+}
+
+fn prepare_writer_at(
+    writer: &SplitChild,
+    target: SplitWriterTarget,
+    tree: Arc<dyn PartitionTree>,
+    (tree_manifest, root_manifest_generation, base_applied_seq): (u64, u64, u64),
+    source: &SplitSourceFrontier,
+    replayed_prefix: u64,
+) -> Result<PreparedSplitWriter> {
+    if tree.last_applied_seq() != replayed_prefix
+        || base_applied_seq > replayed_prefix
+        || replayed_prefix > source.cutover_seq
+    {
         return Err(ChunkKvError::ApplyStateUnknown);
     }
     let artifact = PreparedSplitWriterArtifact {

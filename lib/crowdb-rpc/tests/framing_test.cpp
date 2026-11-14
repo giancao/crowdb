@@ -17,6 +17,7 @@ using crowdb::rpc::Header;
 using crowdb::rpc::HEADER_SIZE;
 using crowdb::rpc::MAGIC;
 using crowdb::rpc::parse_header;
+using crowdb::rpc::ParseState;
 using crowdb::rpc::serialize_header;
 using crowdb::rpc::SystemBufferPool;
 
@@ -82,6 +83,27 @@ TEST(FramingTest, HeaderRoundTrip)
     EXPECT_EQ(parsed.flags, 0x01U);
 }
 
+TEST(FramingTest, BufferedControlHandlesPartialAndFollowingFrames)
+{
+    const std::vector<uint8_t> first_control(16 * 1024, 0x42);
+    const std::vector<uint8_t> second_control(19, 0x93);
+    auto                       first  = build_frame(3, first_control.data(), first_control.size(), nullptr, 0);
+    auto                       second = build_frame(4, second_control.data(), second_control.size(), nullptr, 0);
+    first.insert(first.end(), second.begin(), second.end());
+
+    FrameParser                         parser;
+    std::vector<std::unique_ptr<Frame>> frames;
+    const auto                          receive = [&](Frame *frame) { frames.emplace_back(frame); };
+    constexpr uint32_t                  split   = HEADER_SIZE + 9;
+    EXPECT_EQ(parser.feed_data(first.data(), split, receive), split);
+    EXPECT_TRUE(frames.empty());
+    EXPECT_EQ(parser.feed_data(first.data() + split, first.size() - split, receive), first.size() - split);
+    ASSERT_EQ(frames.size(), 2U);
+    EXPECT_TRUE(std::ranges::equal(frames[0]->control, first_control));
+    EXPECT_TRUE(std::ranges::equal(frames[1]->control, second_control));
+    EXPECT_EQ(parser.state(), ParseState::ReadingHeader);
+}
+
 TEST(FramingTest, ControlOnlyFrame)
 {
     std::vector<uint8_t> ctrl(32, 0x42);
@@ -95,6 +117,43 @@ TEST(FramingTest, ControlOnlyFrame)
     EXPECT_EQ(frame->header.data_size, 0U);
     EXPECT_EQ(frame->data_buf, nullptr);
     delete frame;
+}
+
+TEST(FramingTest, DirectControlTailReusesFrameAndStopsBeforeFollowingBytes)
+{
+    const std::vector<uint8_t> control(16 * 1024, 0x7b);
+    const std::vector<uint8_t> data(17, 0x93);
+    const auto                 wire = build_frame(3, control.data(), control.size(), data.data(), data.size());
+    SystemBufferPool           pool(256);
+    FrameParser                parser;
+    parser.set_pool(&pool);
+    constexpr uint32_t prefix    = 31;
+    const auto         delivered = [](Frame *unexpected) {
+        ADD_FAILURE() << "partial control must not publish a frame";
+        delete unexpected;
+    };
+    EXPECT_EQ(parser.feed_data(wire.data(), HEADER_SIZE + prefix, delivered), HEADER_SIZE + prefix);
+    const auto target = parser.next_read_target();
+    ASSERT_EQ(target.len, control.size() - prefix);
+    const auto *const  destination = target.ptr;
+    constexpr uint32_t first       = 4096;
+    std::memcpy(target.ptr, wire.data() + HEADER_SIZE + prefix, first);
+    EXPECT_EQ(parser.advance(first), nullptr);
+    const auto remaining = parser.next_read_target();
+    EXPECT_EQ(remaining.ptr, destination + first);
+    EXPECT_EQ(remaining.len, target.len - first);
+    std::memcpy(remaining.ptr, wire.data() + HEADER_SIZE + prefix + first, remaining.len);
+    EXPECT_EQ(parser.advance(remaining.len), nullptr);
+    EXPECT_EQ(parser.state(), ParseState::ReadingData);
+    const auto data_target = parser.next_read_target();
+    ASSERT_EQ(data_target.len, data.size());
+    std::memcpy(data_target.ptr, data.data(), data_target.len);
+    const std::unique_ptr<Frame> frame(parser.advance(data_target.len));
+    ASSERT_NE(frame, nullptr);
+    EXPECT_EQ(frame->control.data() + prefix, destination);
+    EXPECT_TRUE(std::ranges::equal(frame->control, control));
+    EXPECT_EQ(std::memcmp(frame->data_buf->data, data.data(), data.size()), 0);
+    EXPECT_EQ(parser.state(), ParseState::ReadingHeader);
 }
 
 TEST(FramingTest, FullFrameWithData)

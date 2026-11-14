@@ -6,6 +6,7 @@
 //! [`tree`] (ordered storage).
 
 mod checkpoint;
+mod config;
 mod drain;
 mod frame;
 mod frontier;
@@ -19,8 +20,10 @@ mod scan;
 mod split;
 mod transfer;
 mod tree;
+mod worker_completion;
 mod worker_sender;
 
+pub use config::PartitionConfig;
 pub use frame::{decode_frame, encode_frame, DecodedFrame, FrameDecode, MAX_FRAME_BYTES};
 pub use frontier::JournalFrontier;
 pub use ingress::SplitIngress;
@@ -29,7 +32,9 @@ use native::native_storage_parts;
 pub use observation::TreeObservation;
 use replay::{replay_suffix, validate_replay_record, ReplayState};
 pub use split::{PreparedSplit, PreparedSplitWriter, SplitHandoffStore, SplitWriterTarget};
-pub use tree::{CrowdbPartitionTree, PartitionTree};
+pub use tree::{
+    CrowdbPartitionTree, InstalledSplit, PartitionTree, PreparedSplitOverlay, SplitOverlayLimits,
+};
 use worker_sender::WorkerSender;
 
 use std::collections::HashMap;
@@ -50,52 +55,6 @@ use crate::{
     PreparedSplitWriterArtifact, RequestId, Result, SplitAbortProof, SplitArtifact, SplitCommitProof,
     SplitPlan, TransitionId, ValueRevision, WalRecord,
 };
-
-#[derive(Clone, Debug)]
-pub struct PartitionConfig {
-    pub queue_requests: usize,
-    pub queue_bytes: u64,
-    pub batch_requests: usize,
-    pub batch_bytes: u64,
-    pub max_key_bytes: usize,
-    pub max_value_bytes: usize,
-    pub retained_results: usize,
-    pub metadata_reclaim_records_per_pass: usize,
-}
-
-impl Default for PartitionConfig {
-    fn default() -> Self {
-        Self {
-            queue_requests: 1_024,
-            queue_bytes: 64 * 1024 * 1024,
-            batch_requests: 64,
-            batch_bytes: 4 * 1024 * 1024,
-            max_key_bytes: 64 * 1024,
-            max_value_bytes: 16 * 1024 * 1024,
-            retained_results: 65_536,
-            metadata_reclaim_records_per_pass: 128,
-        }
-    }
-}
-
-impl PartitionConfig {
-    fn validate(&self) -> Result<()> {
-        if self.queue_requests == 0
-            || self.queue_bytes == 0
-            || self.batch_requests == 0
-            || self.batch_bytes == 0
-            || self.max_key_bytes == 0
-            || self.max_value_bytes == 0
-            || self.retained_results == 0
-            || self.metadata_reclaim_records_per_pass == 0
-        {
-            return Err(ChunkKvError::InvalidRequest(
-                "partition bounds must be nonzero".into(),
-            ));
-        }
-        Ok(())
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MutationResponse {
@@ -133,7 +92,6 @@ pub struct CheckpointReclaim {
     pub journal_bytes: u64,
     pub metadata_records: u64,
     pub tree_bytes: u64,
-    pub orphan_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -185,6 +143,7 @@ pub struct Partition {
     prepared_artifact: Arc<ArcSwapOption<PreparedSplitWriterArtifact>>,
     inherited_position: Arc<ArcSwapOption<JournalPosition>>,
     initialization: Shared<BoxFuture<'static, Result<()>>>,
+    worker_completion: worker_completion::WorkerCompletion,
     metrics: Arc<PartitionMetrics>,
     config: Arc<PartitionConfig>,
 }
@@ -200,6 +159,7 @@ struct WorkerState {
     journal_durable_seq: Arc<AtomicU64>,
     applied_seq: Arc<AtomicU64>,
     applied_position: Arc<AtomicU64>,
+    applied_end: u64,
     retry_replay_offset: Arc<AtomicU64>,
     applied_notify: Arc<Notify>,
     admission_notify: Arc<Notify>,
@@ -225,6 +185,7 @@ struct RetainedResult {
 struct RecoverySeed {
     applied_seq: u64,
     applied_position: u64,
+    applied_end: u64,
     retry_replay_offset: u64,
     results: HashMap<RequestId, RetainedResult>,
     result_order: std::collections::VecDeque<RequestId>,
@@ -235,6 +196,7 @@ struct RecoverySeed {
 struct SplitTransition {
     plan: SplitPlan,
     artifact: Option<SplitArtifact>,
+    inheritance: Option<split::inheritance::ChildInheritance>,
 }
 
 struct PreparedMutation {
@@ -278,6 +240,7 @@ impl Partition {
             RecoverySeed {
                 applied_seq: applied,
                 applied_position: 0,
+                applied_end: 0,
                 retry_replay_offset: 0,
                 results: HashMap::new(),
                 result_order: std::collections::VecDeque::new(),
@@ -309,6 +272,33 @@ impl Partition {
         range.validate()?;
         config.validate()?;
         let (tree, journal) = native_storage_parts(tree_id, &range, tree_config, page_store, stream)?;
+        Self::open(partition_id, range, ownership_epoch, config, tree, journal)
+    }
+
+    /// Opens a serving partition through the native runtime completion path.
+    ///
+    /// # Errors
+    /// Returns an invalid partition or native Tree open error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_native_async(
+        partition_id: PartitionId,
+        range: PartitionRange,
+        ownership_epoch: u64,
+        config: PartitionConfig,
+        tree_id: u64,
+        tree_config: crowdb_tree_ffi::Config,
+        page_store: Arc<crowdb_tree_ffi::PageStore>,
+        stream: ChunkStream,
+    ) -> Result<Self> {
+        range.validate()?;
+        config.validate()?;
+        if ownership_epoch == 0 || tree_id == 0 {
+            return Err(ChunkKvError::InvalidRequest(
+                "ownership epoch and tree identity must be nonzero".into(),
+            ));
+        }
+        let (tree, journal) =
+            native::open_storage(tree_id, range.clone(), tree_config, page_store, stream).await?;
         Self::open(partition_id, range, ownership_epoch, config, tree, journal)
     }
 
@@ -800,6 +790,7 @@ impl Partition {
             journal_durable_seq: Arc::clone(&journal_durable_seq),
             applied_seq: Arc::clone(&applied_seq),
             applied_position: Arc::clone(&applied_position),
+            applied_end: seed.applied_end,
             retry_replay_offset: Arc::clone(&retry_replay_offset),
             applied_notify: Arc::clone(&applied_notify),
             admission_notify: Arc::clone(&admission_notify),
@@ -814,7 +805,7 @@ impl Partition {
             result_order: seed.result_order,
             expired_floor: seed.expired_floor,
         };
-        tokio::spawn(run_worker(state, receiver));
+        let worker_completion = worker_completion::spawn(state, receiver);
         Ok(Self {
             id: partition_id,
             range: Arc::new(ArcSwap::from_pointee(range)),
@@ -841,6 +832,7 @@ impl Partition {
             prepared_artifact,
             inherited_position,
             initialization,
+            worker_completion,
             metrics,
             config,
         })
@@ -1182,7 +1174,11 @@ impl Partition {
                 Ordering::Acquire,
             )
             .map_err(|observed| write_state_error(lifecycle_from_code(observed)))?;
-        *transition = Some(SplitTransition { plan, artifact: None });
+        *transition = Some(SplitTransition {
+            plan,
+            artifact: None,
+            inheritance: None,
+        });
         self.metrics.split_begin();
         Ok(())
     }
@@ -1550,7 +1546,7 @@ impl Partition {
         if proof.catalog_revision == 0 {
             return Err(ChunkKvError::SplitRetry("split abort proof is absent".into()));
         }
-        let mut transition = self.split_transition.lock().await;
+        let mut transition = self.split_transition.clone().lock_owned().await;
         let active = transition
             .as_ref()
             .ok_or_else(|| ChunkKvError::SplitRetry("no split transition is active".into()))?;
@@ -1566,26 +1562,39 @@ impl Partition {
             PartitionLifecycle::SplitPreparing | PartitionLifecycle::SplitFinalizing => {}
             state => return Err(write_state_error(state)),
         }
-        self.discard_pending_child_preparation()?;
-        *transition = None;
-        self.split_ingress.store(None);
-        self.lifecycle
-            .store(lifecycle_code(PartitionLifecycle::Serving), Ordering::Release);
-        self.metrics.split_abort();
-        Ok(())
+        let partition = self.clone();
+        tokio::spawn(async move {
+            partition.discard_pending_child_preparation().await?;
+            *transition = None;
+            partition.split_ingress.store(None);
+            partition
+                .lifecycle
+                .store(lifecycle_code(PartitionLifecycle::Serving), Ordering::Release);
+            partition.metrics.split_abort();
+            Ok(())
+        })
+        .await
+        .map_err(|error| ChunkKvError::Internal(format!("split abort task failed: {error}")))?
     }
 
-    /// Returns native chunk page-store counters when this partition uses the
-    /// R140 backend.
+    /// Samples the actual physical backing ledger. Equal scope IDs identify the
+    /// same ledger and must be deduplicated when aggregating hosted partitions.
     ///
     /// # Errors
-    ///
-    /// Returns a typed storage error if the native counters are unavailable.
-    pub fn chunk_storage_stats(&self) -> Result<Option<crowdb_tree_ffi::ChunkPageStoreStats>> {
-        self.tree.chunk_stats()
+    /// Returns a typed Tree error when the backing ledger is unavailable.
+    pub fn backing_storage_stats(&self) -> Result<Option<crowdb_tree_ffi::BackingStatsSnapshot>> {
+        self.tree.backing_stats()
     }
 
-    /// Estimates current retained pack bytes without scanning data or storage metadata.
+    /// Samples the Tree admission ledger without resetting periodic windows.
+    /// # Errors
+    /// Returns a Tree diagnostic error when the ledger is unavailable.
+    pub fn tree_resource_usage(&self) -> Result<Option<crowdb_tree_ffi::runtime::ResourceUsageSnapshot>> {
+        self.tree.resource_usage()
+    }
+
+    /// Samples allocated physical bytes, including all mirrors and old or staged
+    /// output that has not yet been physically deleted.
     ///
     /// # Errors
     ///
@@ -1824,6 +1833,7 @@ async fn replay_parent_overlay(
                 .await?;
             buffered.advance(decoded.bytes_consumed);
             frame_offset += decoded.bytes_consumed as u64;
+            replay.seed.applied_end = frame_offset;
         }
         if buffered.len() > crate::MAX_FRAME_BYTES {
             return Err(ChunkKvError::JournalCorruption(
@@ -1842,6 +1852,7 @@ async fn replay_parent_overlay(
         ));
     }
     replay.seed.applied_position = 0;
+    replay.seed.applied_end = 0;
     Ok(replay.seed)
 }
 
@@ -1854,6 +1865,8 @@ async fn replay_child_overlay(
     journal: &dyn PartitionJournal,
     seed: RecoverySeed,
 ) -> Result<RecoverySeed> {
+    let mut seed = seed;
+    seed.applied_end = 0;
     let mut replay = ReplayState {
         seed,
         checkpoint_applied_seq: cutover_seq,
@@ -1880,6 +1893,7 @@ async fn replay_child_overlay(
             replay.process(tree, frame_offset, decoded.record, true).await?;
             buffered.advance(decoded.bytes_consumed);
             frame_offset += decoded.bytes_consumed as u64;
+            replay.seed.applied_end = frame_offset;
         }
         if buffered.len() > crate::MAX_FRAME_BYTES {
             return Err(ChunkKvError::JournalCorruption(
@@ -1954,7 +1968,7 @@ async fn run_worker(mut state: WorkerState, mut receiver: mpsc::Receiver<WorkerR
                 continue;
             }
             WorkerRequest::ChildSplitCutover(request) => {
-                split::stable_session::install_child_cutover(&mut state, *request).await;
+                split::stable_session::install_child_cutover(&mut state, *request);
                 continue;
             }
             WorkerRequest::TransferCatchUp(request) => {
@@ -2167,6 +2181,20 @@ async fn append_and_apply(state: &mut WorkerState, prepared: Vec<PreparedMutatio
             return;
         }
     };
+    let mut previous_end = None;
+    for (entry, position) in prepared.iter().zip(&positions) {
+        let end = position.offset.checked_add(entry.frame.len() as u64);
+        if position.stream_name != state.journal.stream_name()
+            || end.is_none()
+            || previous_end.is_some_and(|previous| previous != position.offset)
+        {
+            let error = ChunkKvError::JournalCorruption("appended WAL frame positions are invalid".into());
+            journal_append_failed(state, &error);
+            fail_prepared(state, prepared, &error);
+            return;
+        }
+        previous_end = end;
+    }
     if let Some(last) = prepared.last() {
         state
             .journal_durable_seq
@@ -2183,11 +2211,8 @@ async fn append_and_apply(state: &mut WorkerState, prepared: Vec<PreparedMutatio
         } else {
             state.tree.advance_noop(entry.record.mutation_seq).await
         };
-        if apply.is_err() {
-            state
-                .lifecycle
-                .store(lifecycle_code(PartitionLifecycle::Recovering), Ordering::Release);
-            state.metrics.apply_unknown();
+        if let Err(error) = apply {
+            tree_apply_failed(state, entry.record.mutation_seq, &error);
             finish_request(state, entry.request, Err(ChunkKvError::ApplyStateUnknown));
             for follower in entry.followers {
                 finish_request(state, follower, Err(ChunkKvError::ApplyStateUnknown));
@@ -2204,6 +2229,8 @@ async fn append_and_apply(state: &mut WorkerState, prepared: Vec<PreparedMutatio
             .applied_seq
             .store(entry.record.mutation_seq, Ordering::Release);
         state.applied_position.store(position.offset, Ordering::Release);
+        // Logical frame positions and encoded lengths were checked before applying.
+        state.applied_end = position.offset + entry.frame.len() as u64;
         state.applied_notify.notify_waiters();
         state.metrics.mutation_result(entry.response.result.applied());
         retain_result(
@@ -2217,6 +2244,20 @@ async fn append_and_apply(state: &mut WorkerState, prepared: Vec<PreparedMutatio
             finish_request(state, follower, Ok(entry.response.clone()));
         }
     }
+}
+
+fn tree_apply_failed(state: &WorkerState, mutation_seq: u64, error: &ChunkKvError) {
+    tracing::error!(
+        partition_id_high = state.partition_id.high,
+        partition_id_low = state.partition_id.low,
+        mutation_seq,
+        %error,
+        "durable chunk KV mutation could not apply to its Tree"
+    );
+    state
+        .lifecycle
+        .store(lifecycle_code(PartitionLifecycle::Recovering), Ordering::Release);
+    state.metrics.apply_unknown();
 }
 
 fn journal_append_failed(state: &WorkerState, error: &ChunkKvError) {
