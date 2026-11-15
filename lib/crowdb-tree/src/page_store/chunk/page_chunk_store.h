@@ -10,7 +10,7 @@ struct ChunkRuntimeOptions
     uint64_t tree            = 0;
     uint64_t owner_epoch     = 0;
     uint64_t open_generation = 0;
-    uint32_t iu_size         = 64 * 1024;
+    uint32_t iu_size         = 4096; // one chunk bitmap unit
     uint32_t mirrors         = 2;
     uint64_t max_chunk_bytes = 256 * 1024 * 1024;
 };

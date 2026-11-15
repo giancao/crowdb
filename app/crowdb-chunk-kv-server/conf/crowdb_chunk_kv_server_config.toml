@@ -235,7 +235,7 @@ max_inline_value = 0
 compression_lz4 = false
 # Local block allocation/reclamation unit; ignored by file/mem-block and injected Chunk storage.
 block_size = 67_108_864
-# 0 = backend default: block 4 KiB, mem-block 1 byte, Chunk 64 KiB. A nonzero value
+# 0 = backend default: block 4 KiB, mem-block 1 byte, Chunk 4 KiB. A nonzero value
 # must be a power of two that divides frame_bytes.
 iu_size = 0
 

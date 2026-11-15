@@ -118,7 +118,7 @@ struct Config
 
     // Fixed output frame geometry and the independent decoded-page cache
     // capacity. Overflow values use bounded chains of fixed-size frames.
-    uint32_t frame_bytes       = 64ULL * 1024;        // fixed arena frame size
+    uint32_t frame_bytes       = 64ULL * 1024;        // durable page size; the frame is this minus the blob header
     size_t   buffer_pool_bytes = 64ULL * 1024 * 1024; // arena capacity (frames * frame_bytes)
 
     // ── Page compression (PT10) ──

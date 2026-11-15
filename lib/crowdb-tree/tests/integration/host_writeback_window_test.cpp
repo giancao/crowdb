@@ -125,9 +125,9 @@ TEST(HostWritebackWindow, ImportedRawChildrenKeepTheirCapturedFenceProofWithoutB
     TestHostWriteback test;
     ASSERT_TRUE(test.open().ok());
     std::vector<NativeFrame> frames;
-    frames.push_back({.page_id = 0, .frame = std::vector<uint8_t>(4096)});
-    ASSERT_TRUE(inner_frame_build(frames[0].frame.data(), 4096, 0, {1, 2}, {"m"}));
-    frame_set_inner_fence_pages(frames[0].frame.data(), 4096, 1, 2);
+    frames.push_back({.page_id = 0, .frame = std::vector<uint8_t>(test_import::kFrameBytes)});
+    ASSERT_TRUE(inner_frame_build(frames[0].frame.data(), frames[0].frame.size(), 0, {1, 2}, {"m"}));
+    frame_set_inner_fence_pages(frames[0].frame.data(), frames[0].frame.size(), 1, 2);
     const auto left = encode_cell_buf(7, OpKind::kPut, "old-left");
     frames.push_back(test_import::leaf(1, "a", Slice(left), 2));
     frames.push_back(test_import::inline_leaf(2, "z", "old-right"));

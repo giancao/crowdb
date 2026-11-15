@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core.h"
 #include "btree/tree_core_access.h"
+#include "crowdb-tree/maptable/compressor.h"
 #include "local_checkpoint_test_support.h"
 #include "snapshot/checkpoint_operation.h"
 #include "snapshot/operation_wait.h"
@@ -106,7 +107,8 @@ TEST(TreeCoreCheckpoint, ActualWritebackCheckpointReuseAndColdReadKeepSeparateCa
     const auto written  = writeback->result().written_frames;
     auto       pressure = work->counters.snapshot()[static_cast<size_t>(TreeWorkCause::CachePressure)];
     EXPECT_EQ(pressure[static_cast<size_t>(TreeWorkCounter::WriteOperations)], written);
-    EXPECT_EQ(pressure[static_cast<size_t>(TreeWorkCounter::EncodedFrameBytes)], written * test.config.frame_bytes);
+    EXPECT_EQ(pressure[static_cast<size_t>(TreeWorkCounter::EncodedFrameBytes)],
+              written * (test.config.frame_bytes - kDurableBlobHeader));
     EXPECT_EQ(test.tree->durable_coverage(), 0U);
     writeback.reset();
     test.read(value, 1);

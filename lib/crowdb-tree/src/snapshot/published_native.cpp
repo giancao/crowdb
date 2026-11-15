@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/allocation_bound.h"
 #include "btree/tree_core.h"
+#include "btree/tree_core_geometry.h"
 #include "page_store/checkpoint_page_store.h"
 #include "page_store/local/local_page_store_state.h"
 #include "snapshot/native_frame_read.h"
@@ -97,7 +98,7 @@ try {
         return status;
     }
     CapturedFrameLimits frames;
-    frames.encode.frame_bytes  = core->config().frame_bytes;
+    frames.encode.frame_bytes  = static_cast<uint32_t>(page_frame_bytes(core->config()));
     frames.encode.work_metrics = core->publisher().work_metrics();
     frames.encode.cause        = TreeWorkCause::Snapshot;
     frames.encode.inline_value_bytes =

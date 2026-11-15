@@ -3,15 +3,19 @@
 #pragma once
 
 #include "btree/native_import.h"
+#include "crowdb-tree/maptable/compressor.h"
 #include "crowdb-tree/maptable/frame_page.h"
 
 #include <gtest/gtest.h>
 
 namespace crowdb::tree::test_import
 {
+// Page frame of a Tree configured with 4 KiB durable pages.
+inline constexpr size_t kFrameBytes = 4096 - kDurableBlobHeader;
+
 inline NativeFrame leaf(uint64_t pid, Slice key, Slice cell, uint64_t sibling = kInvalidPageId)
 {
-    NativeFrame      result{.page_id = pid, .frame = std::vector<uint8_t>(4096)};
+    NativeFrame      result{.page_id = pid, .frame = std::vector<uint8_t>(kFrameBytes)};
     LeafFrameBuilder builder(result.frame.data(), result.frame.size());
     EXPECT_TRUE(builder.try_append_sorted(key, cell));
     builder.finish(pid, sibling);
@@ -31,10 +35,10 @@ inline std::vector<NativeFrame> overflow_tree(Slice value, uint64_t slot = 7)
     result.push_back(leaf(0, "key", Slice(cell)));
     size_t written = 0;
     while (written != value.size()) {
-        const auto  count = std::min<size_t>(value.size() - written, overflow_chunk_cap(4096));
+        const auto  count = std::min<size_t>(value.size() - written, overflow_chunk_cap(kFrameBytes));
         const auto  pid   = result.size();
         const auto  next  = written + count == value.size() ? kInvalidPageId : pid + 1;
-        NativeFrame frame{.page_id = pid, .frame = std::vector<uint8_t>(4096)};
+        NativeFrame frame{.page_id = pid, .frame = std::vector<uint8_t>(kFrameBytes)};
         overflow_frame_build(frame.frame.data(), frame.frame.size(), pid, next,
                              reinterpret_cast<const uint8_t *>(value.data() + written), count);
         result.push_back(std::move(frame));

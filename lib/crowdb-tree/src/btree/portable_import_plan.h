@@ -3,6 +3,7 @@
 #pragma once
 
 #include "native_import.h"
+#include "tree_core_geometry.h"
 
 namespace crowdb::tree
 {
@@ -11,9 +12,12 @@ namespace crowdb::tree
 class PortableImportPlan
 {
   public:
-    PortableImportPlan(const Config &config, PageLoadLimits loads) : config_(config), loads_(loads)
+    PortableImportPlan(const Config &config, PageLoadLimits loads)
+        : config_(config),
+          loads_(loads),
+          frame_bytes_(page_frame_bytes(config))
     {
-        shape_.max_frame_bytes = config.frame_bytes;
+        shape_.max_frame_bytes = frame_bytes_;
         for (const auto *key : {&config.key_range.start(), &config.key_range.end()}) {
             if (*key) {
                 shape_.max_key_bytes = std::max(shape_.max_key_bytes, (*key)->size());
@@ -27,6 +31,7 @@ class PortableImportPlan
   private:
     const Config     &config_;
     PageLoadLimits    loads_;
+    size_t            frame_bytes_;
     NativeImportShape shape_;
     size_t            leaf_used_  = 0;
     size_t            leaf_keys_  = 0;

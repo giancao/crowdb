@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core.h"
+#include "crowdb-tree/maptable/compressor.h"
 #include "crowdb-tree/page_store/page_store.h"
 #include "snapshot/checkpoint_operation.h"
 #include "snapshot/operation_wait.h"
@@ -212,7 +213,7 @@ TEST(TreeCorePrimaryReuse, NativeExportStillReturnsActualFramesAfterCleanCheckpo
     if (!frame) {
         FAIL() << "native cursor omitted its frame";
     }
-    EXPECT_EQ(frame->bytes.size(), test.config.frame_bytes);
+    EXPECT_EQ(frame->bytes.size(), test.config.frame_bytes - kDurableBlobHeader);
     EXPECT_TRUE(frame_validate(frame->bytes.data(), frame->bytes.size()));
     EXPECT_TRUE(frame->owner);
 }

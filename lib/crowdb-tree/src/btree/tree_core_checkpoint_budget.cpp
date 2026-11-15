@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_checkpoint_internal.h"
+#include "btree/tree_core_geometry.h"
 #include "page_store/checkpoint_page_store.h"
 #include "page_store/local/block_account.h"
 
@@ -30,10 +31,10 @@ CheckpointOptions defaults(const TreeCore &core)
 {
     CheckpointOptions options;
     const auto       &config                = core.config();
-    options.write.frames.encode.frame_bytes = config.frame_bytes;
+    options.write.frames.encode.frame_bytes = static_cast<uint32_t>(page_frame_bytes(config));
     options.write.frames.encode.inline_value_bytes =
         config.max_inline_value != 0 ? config.max_inline_value : config.frame_bytes / 4;
-    options.write.write.max_frame_bytes = config.frame_bytes;
+    options.write.write.max_frame_bytes = page_frame_bytes(config);
     options.write.write.compression     = config.compression;
     if (core.local_page_store()) {
         options.write.write.iu_size          = core.local_page_store()->ledger->limits().iu_size;

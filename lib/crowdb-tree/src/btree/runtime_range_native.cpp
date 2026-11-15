@@ -1,5 +1,6 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
+#include "btree/tree_core_geometry.h"
 #include "native_import.h"
 #include "runtime_range_rebuild.h"
 #include "snapshot/published_native.h"
@@ -73,7 +74,7 @@ Status copy_native_range(Crowdbtree &source, TreeCore &destination, RuntimeRange
     if (!status.ok()) {
         return status;
     }
-    shape.max_frame_bytes = std::max<size_t>(shape.max_frame_bytes, destination.config().frame_bytes);
+    shape.max_frame_bytes = std::max<size_t>(shape.max_frame_bytes, page_frame_bytes(destination.config()));
     status                = reserve_range_shape(destination, shape, false, staging);
     if (!status.ok()) {
         return status;

@@ -24,7 +24,7 @@ impl Default for ChunkRuntimeOptions {
             tree_id: 0,
             owner_epoch: 0,
             open_generation: 0,
-            iu_size: 64 * 1024,
+            iu_size: 4096,
             mirror_copies: 2,
             max_chunk_bytes: 256 * 1024 * 1024,
         }

@@ -83,13 +83,13 @@ TEST(TreeCoreNativeCheckpoint, SharedResidentChainIsWrittenOnceWithoutPinningThe
     std::unique_ptr<Crowdbtree> tree;
     auto                        status = Crowdbtree::open(config, &tree);
     ASSERT_TRUE(status.ok()) << status.to_string();
-    NativeFrame index{.page_id = 0, .frame = std::vector<uint8_t>(4096)};
-    ASSERT_TRUE(inner_frame_build(index.frame.data(), 4096, 0, {1, 2}, {Slice("m")}));
-    frame_set_inner_fence_pages(index.frame.data(), 4096, 1, 2);
+    NativeFrame index{.page_id = 0, .frame = std::vector<uint8_t>(test_import::kFrameBytes)};
+    ASSERT_TRUE(inner_frame_build(index.frame.data(), index.frame.size(), 0, {1, 2}, {Slice("m")}));
+    frame_set_inner_fence_pages(index.frame.data(), index.frame.size(), 1, 2);
     const std::string value(1000, 's');
     const auto        cell = encode_overflow_cell_buf(7, 3, value.size());
-    NativeFrame       overflow{.page_id = 3, .frame = std::vector<uint8_t>(4096)};
-    overflow_frame_build(overflow.frame.data(), 4096, 3, kInvalidPageId,
+    NativeFrame       overflow{.page_id = 3, .frame = std::vector<uint8_t>(test_import::kFrameBytes)};
+    overflow_frame_build(overflow.frame.data(), overflow.frame.size(), 3, kInvalidPageId,
                          reinterpret_cast<const uint8_t *>(value.data()), value.size());
     std::vector<NativeFrame> frames;
     frames.push_back(std::move(index));

@@ -22,7 +22,11 @@ size_t final_frame_bytes(const PageEntry &page, size_t normal)
 {
     const auto required = std::max(page.metrics.page_size_known ? page.metrics.page_size_bytes : 0,
                                    page.primary ? size_t{page.primary->frame.frame_bytes} : 0);
-    return required > kMaxPhysicalPageBytes ? required : std::max(normal, std::bit_ceil(required));
+    if (required > kMaxPhysicalPageBytes) {
+        return required;
+    }
+    // An oversized page keeps header plus frame at a power of two, like the ordinary frame.
+    return required <= normal ? normal : std::bit_ceil(required + kDurableBlobHeader) - kDurableBlobHeader;
 }
 } // namespace
 

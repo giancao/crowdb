@@ -9,13 +9,15 @@ PortableImportBuilder::PortableImportBuilder(const Config &config, PageLoadLimit
     : loads_(loads),
       metadata_(std::move(metadata)),
       catalog_(detail::reserved_shared<ReadablePageCatalog>(metadata_, metadata_)),
-      leaf_frame_(config.frame_bytes, detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(metadata_)),
-      scratch_(config.frame_bytes, detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(metadata_)),
+      leaf_frame_(page_frame_bytes(config), detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(metadata_)),
+      scratch_(page_frame_bytes(config), detail::ReservationAllocator<uint8_t, AllocationKind::kScratch>(metadata_)),
       level_(detail::ReservationAllocator<Node>(metadata_))
 {
-    config_.frame_bytes      = config.frame_bytes;
-    config_.max_key_size     = config.max_key_size;
-    config_.max_inline_value = config.max_inline_value;
+    // The local copy holds the page frame size; key and inline limits keep
+    // deriving from the configured durable size, as the destination Tree does.
+    config_.frame_bytes      = static_cast<uint32_t>(page_frame_bytes(config));
+    config_.max_key_size     = config.max_key_size != 0 ? config.max_key_size : config.frame_bytes / 2;
+    config_.max_inline_value = config.max_inline_value != 0 ? config.max_inline_value : config.frame_bytes / 4;
     config_.inner_max_keys   = config.inner_max_keys;
     if (config.key_range.start()) {
         range_.lower = OwnedKey(Slice(*config.key_range.start()), metadata_);

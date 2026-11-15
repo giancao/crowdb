@@ -63,7 +63,7 @@ Status configure_maintenance(const Config &config, PageMaintenanceOperationOptio
     // continue in later steps without reserving a tree-sized merge window.
     pages.max_work_entries =
         std::min(pages.max_work_entries,
-                 (config.frame_bytes - kFrameHeaderSize - kFrameTrailerSize) / (kLeafSlotSize + kCellHeaderSize));
+                 (page_frame_bytes(config) - kFrameHeaderSize - kFrameTrailerSize) / (kLeafSlotSize + kCellHeaderSize));
     maintenance->publication.max_inner_children = config.inner_max_keys + 1ULL;
     maintenance->publication.max_inner_bytes    = pages.primary_page_bytes;
     maintenance->publication.inner_merge_keys =
@@ -280,7 +280,7 @@ Status TreeCore::State::initialize(TreeCoreBootstrap bootstrap)
         PublicationBootstrap{
             .metadata = publication_metadata, .initial = initial, .source_catalog = sources->catalog()});
     loads.max_frame_bytes     = physical_frame_capacity(config);
-    loads.max_blob_bytes      = loads.max_frame_bytes + 64;
+    loads.max_blob_bytes      = loads.max_frame_bytes + kDurableBlobHeader;
     loads.max_inner_children  = config.inner_max_keys + 1ULL;
     loads.max_inner_key_bytes = loads.max_frame_bytes;
     loads.max_leaf_key_bytes  = loads.max_frame_bytes;
@@ -377,6 +377,7 @@ Status TreeCore::create(Config config, std::shared_ptr<TreeRuntimeBinding> bindi
                         std::shared_ptr<TreeCore> *out, bool async_bootstrap)
 try {
     if (!binding || out == nullptr || *out || !config.runtime || config.frame_bytes < 512 ||
+        page_frame_bytes(config) <= kFrameHeaderSize + kFrameTrailerSize ||
         config.frame_bytes > kMaxPhysicalPageBytes || config.buffer_pool_bytes < config.frame_bytes ||
         config.inner_max_keys == 0 ||
         (config.memtable_flush_count != 0 && config.memtable_flush_count >= config.max_memtable_count)) {

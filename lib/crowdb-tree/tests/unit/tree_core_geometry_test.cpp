@@ -1,7 +1,9 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/page_maintenance.h"
+#include "btree/page_writeback.h"
 #include "btree/tree_core_geometry.h"
+#include "crowdb-tree/maptable/compressor.h"
 #include "crowdb-tree/maptable/frame_page.h"
 
 #include <gtest/gtest.h>
@@ -24,7 +26,7 @@ TEST(TreeCoreGeometry, SmallRecordThresholdsIncludeOneFrameOverhead)
         EXPECT_EQ(pages.target_page_bytes, target + kFrameHeaderSize + kFrameTrailerSize);
         EXPECT_EQ(pages.merge_trigger_bytes, (target / 4) + kFrameHeaderSize + kFrameTrailerSize);
         EXPECT_LT(pages.merge_target_bytes, pages.target_page_bytes);
-        EXPECT_EQ(pages.primary_page_bytes, 4096U);
+        EXPECT_EQ(pages.primary_page_bytes, 4096U - kDurableBlobHeader);
     }
 }
 
@@ -34,14 +36,14 @@ TEST(TreeCoreGeometry, ExplicitSplitCapsAtTreeFrameIndependentlyOfTransportFrame
     PageMaintenanceLimits pages;
     config.leaf_split_bytes = 65536;
     ASSERT_TRUE(configure_leaf_geometry(config, &pages).ok());
-    EXPECT_EQ(pages.target_page_bytes, config.frame_bytes);
+    EXPECT_EQ(pages.target_page_bytes, config.frame_bytes - kDurableBlobHeader);
     config.frame_bytes      = 128 * 1024;
     config.leaf_split_bytes = 128 * 1024;
     ASSERT_TRUE(configure_leaf_geometry(config, &pages).ok());
-    EXPECT_EQ(pages.target_page_bytes, config.frame_bytes);
+    EXPECT_EQ(pages.target_page_bytes, config.frame_bytes - kDurableBlobHeader);
     config.frame_bytes = 4096;
     ASSERT_TRUE(configure_leaf_geometry(config, &pages).ok());
-    EXPECT_EQ(pages.target_page_bytes, 4096U);
+    EXPECT_EQ(pages.target_page_bytes, 4096U - kDurableBlobHeader);
     config.leaf_merge_bytes = 0;
     ASSERT_TRUE(configure_leaf_geometry(config, &pages).ok());
     EXPECT_EQ(pages.merge_trigger_bytes, kFrameHeaderSize + kFrameTrailerSize);
@@ -51,14 +53,27 @@ TEST(TreeCoreGeometry, ExceptionalReadCapacityDoesNotChangeOrdinaryPageTargets)
 {
     Config config;
     config.frame_bytes = 4096;
-    EXPECT_EQ(physical_frame_capacity(config), 4096U);
+    EXPECT_EQ(physical_frame_capacity(config), 4096U - kDurableBlobHeader);
     config.max_key_size = 6000;
-    EXPECT_EQ(physical_frame_capacity(config), 8192U);
+    EXPECT_EQ(physical_frame_capacity(config), 8192U - kDurableBlobHeader);
     PageMaintenanceLimits pages;
     ASSERT_TRUE(configure_leaf_geometry(config, &pages).ok());
-    EXPECT_EQ(pages.primary_page_bytes, 4096U);
+    EXPECT_EQ(pages.primary_page_bytes, 4096U - kDurableBlobHeader);
     config.max_key_size = SIZE_MAX;
-    EXPECT_EQ(physical_frame_capacity(config), kMaxPhysicalPageBytes);
+    EXPECT_EQ(physical_frame_capacity(config), kMaxPhysicalPageBytes - kDurableBlobHeader);
+}
+
+TEST(TreeCoreGeometry, UncompressedPageOccupiesExactlyTheConfiguredDurableSize)
+{
+    for (const uint32_t configured : {4096U, 65536U}) {
+        Config config;
+        config.frame_bytes = configured;
+        EXPECT_EQ(page_frame_bytes(config) + kDurableBlobHeader, configured);
+        for (const uint32_t iu : {1U, 4096U, configured}) {
+            const PageWriteLimits limits{.max_frame_bytes = page_frame_bytes(config), .iu_size = iu};
+            EXPECT_EQ(limits.padded_blob_bytes(page_frame_bytes(config)), configured) << configured << "/" << iu;
+        }
+    }
 }
 
 TEST(TreeCoreGeometry, InvalidAndOverflowingGeometryFailsBeforePlanning)

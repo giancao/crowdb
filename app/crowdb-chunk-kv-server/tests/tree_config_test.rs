@@ -108,15 +108,18 @@ fn configured_chunk_tree_survives_range_rebuild() {
 #[test]
 fn chunk_backend_alignment_is_validated_before_open() {
     let mut config = load(CANONICAL).unwrap();
+    // The Chunk backend defaults to a 4 KiB IU, one chunk bitmap unit.
     config.tree.frame_bytes = 16 * 1024;
+    config.validate().unwrap();
+    config.tree.frame_bytes = 6 * 1024;
     assert!(config
         .validate()
         .unwrap_err()
         .to_string()
         .contains("Chunk backend IU"));
-    config.tree.iu_size = 4096;
+    config.tree.iu_size = 2048;
     config.validate().unwrap();
-    assert_eq!(config.native_tree_options().iu_size, 4096);
+    assert_eq!(config.native_tree_options().iu_size, 2048);
 }
 
 #[test]

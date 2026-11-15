@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 #include "btree/tree_core_access.h"
 #include "common/test_tree_core_chunk.h"
+#include "crowdb-tree/maptable/compressor.h"
 #include "page_store/chunk/page_chunk_store_state.h"
 #include "snapshot/chunk_root_recovery.h"
 #include "snapshot/operation_wait.h"
@@ -34,8 +35,8 @@ TEST(TreeCoreChunk, SingleIoCheckpointColdReadAndReopenKeepWalCoveragePair)
     status = test.open();
     ASSERT_TRUE(status.ok()) << status.to_string();
     const auto recovered_limits = TreeCoreAccess::get(*test.tree)->load_limits();
-    EXPECT_EQ(recovered_limits.max_frame_bytes, test.config.frame_bytes);
-    EXPECT_EQ(recovered_limits.max_blob_bytes, 8192U);
+    EXPECT_EQ(recovered_limits.max_frame_bytes, test.config.frame_bytes - kDurableBlobHeader);
+    EXPECT_EQ(recovered_limits.max_blob_bytes, test.config.frame_bytes);
     GetView reopened;
     status = TreeCoreAccess::get(*test.tree)->get("key", &reopened);
     ASSERT_TRUE(status.ok()) << status.to_string();

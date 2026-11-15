@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "btree/apply_dispatcher.h"
+#include "btree/tree_core_geometry.h"
 #include "native_import.h"
 #include "portable_import.h"
 #include "portable_import_plan.h"
@@ -48,9 +49,10 @@ Status prepare_readable_graph(TreeCore &core, const std::shared_ptr<const Readab
         all_resident =
             all_resident && frame.page_block && frame.page_block->storage == PageBlockStorage::kResidentFrame;
     }
-    auto loads  = all_resident ? resident_import_load_limits(
-                                     core.load_limits(), std::max<size_t>(max_frame_bytes, core.config().frame_bytes))
-                               : core.load_limits();
+    auto loads  = all_resident
+                    ? resident_import_load_limits(core.load_limits(),
+                                                  std::max<size_t>(max_frame_bytes, page_frame_bytes(core.config())))
+                    : core.load_limits();
     auto loader = detail::reserved_shared<AsyncStorePageLoader>(
         credit, ticket->page_store(core.async_page_store()), core.binding()->cpu(), core.binding()->lane(), loads,
         OverflowPageBlockResolver{}, PageLoadBudget{.bytes = credit, .io = io.credit});

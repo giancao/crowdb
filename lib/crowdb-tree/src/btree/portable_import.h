@@ -4,6 +4,7 @@
 
 #include "native_import.h"
 #include "owned_key.h"
+#include "tree_core_geometry.h"
 
 namespace crowdb::tree
 {

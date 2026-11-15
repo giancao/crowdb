@@ -6,11 +6,11 @@ namespace crowdb::tree
 {
 Status PortableImportPlan::append(size_t key_bytes, size_t value_bytes, bool tombstone)
 {
-    if (config_.frame_bytes <= kFrameHeaderSize + kFrameTrailerSize || key_bytes > loads_.max_leaf_key_bytes ||
+    if (frame_bytes_ <= kFrameHeaderSize + kFrameTrailerSize || key_bytes > loads_.max_leaf_key_bytes ||
         value_bytes > loads_.max_value_bytes) {
         return Status::resource_exhausted("range input exceeds import geometry");
     }
-    const auto cap          = config_.frame_bytes - kFrameHeaderSize - kFrameTrailerSize;
+    const auto cap          = frame_bytes_ - kFrameHeaderSize - kFrameTrailerSize;
     const auto inline_limit = config_.max_inline_value != 0 ? config_.max_inline_value : config_.frame_bytes / 4;
     auto       inline_bytes =
         detail::AllocationBound(kLeafSlotSize + kCellHeaderSize).add(key_bytes).add(value_bytes).value();
@@ -37,7 +37,7 @@ Status PortableImportPlan::append(size_t key_bytes, size_t value_bytes, bool tom
     shape_.max_key_bytes   = std::max(shape_.max_key_bytes, key_bytes);
     shape_.max_value_bytes = std::max(shape_.max_value_bytes, value_bytes);
     if (spill) {
-        const auto capacity = overflow_chunk_cap(config_.frame_bytes);
+        const auto capacity = overflow_chunk_cap(static_cast<uint32_t>(frame_bytes_));
         if (capacity == 0) {
             return Status::resource_exhausted("range import has no overflow capacity");
         }

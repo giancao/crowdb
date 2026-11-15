@@ -42,8 +42,10 @@ TEST(RuntimeBlockCompaction, PublicPassRelocatesSparseStorageAndReopens)
     std::shared_ptr<TreeCore> core;
     ASSERT_TRUE(TreeCore::open(config, &core).ok());
     core->local_page_store()->gc_active.store(true);
+    // Only blocks entirely below the allocation high-water mark are candidates.
+    // The value is sized so the rewritten leaf ends up in such a block.
     ASSERT_TRUE(
-        core->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = std::string(100000, 'a')}}}).ok());
+        core->apply(1, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = std::string(86000, 'a')}}}).ok());
     ASSERT_TRUE(core->checkpoint().ok());
     core->binding()->drain();
     ASSERT_TRUE(core->apply(2, Batch{.ops = {{.key = "a", .kind = OpKind::kPut, .value = "kept"}}}).ok());

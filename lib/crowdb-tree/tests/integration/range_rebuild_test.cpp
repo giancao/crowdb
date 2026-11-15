@@ -3,6 +3,7 @@
 
 #include "crowdb-tree/btree/range_rebuild.h"
 #include "crowdb-tree/c_api.h"
+#include "crowdb-tree/maptable/compressor.h"
 #include "crowdb-tree/page_store/page_store.h"
 #include "runtime_tree_access.h"
 
@@ -38,7 +39,7 @@ std::map<std::string, std::string> live_entries(Crowdbtree &tree)
 NativeFrame make_leaf_frame(uint64_t page_id, uint64_t right_sibling,
                             const std::vector<std::pair<std::string, std::string>> &entries)
 {
-    NativeFrame      frame{.page_id = page_id, .frame = std::vector<uint8_t>(4096)};
+    NativeFrame      frame{.page_id = page_id, .frame = std::vector<uint8_t>(4096 - kDurableBlobHeader)};
     LeafFrameBuilder builder(frame.frame.data(), static_cast<uint32_t>(frame.frame.size()));
     for (const auto &[key, value] : entries) {
         const std::string cell = encode_cell(1, OpKind::kPut, Slice(value));
@@ -51,7 +52,7 @@ NativeFrame make_leaf_frame(uint64_t page_id, uint64_t right_sibling,
 NativeFrame make_inner_frame(uint64_t page_id, const std::vector<uint64_t> &children,
                              const std::vector<std::string> &separators)
 {
-    NativeFrame        frame{.page_id = page_id, .frame = std::vector<uint8_t>(4096)};
+    NativeFrame        frame{.page_id = page_id, .frame = std::vector<uint8_t>(4096 - kDurableBlobHeader)};
     std::vector<Slice> separator_slices;
     separator_slices.reserve(separators.size());
     for (const std::string &separator : separators) {
@@ -171,7 +172,8 @@ TEST(RangeRebuild, OversizedSourceLeafSplitsIntoFixedDestinationFrames)
     std::vector<NativeFrame> source_frames;
     ASSERT_TRUE(source.collect_native_frames(&source_frames, nullptr, nullptr, nullptr).ok());
     ASSERT_TRUE(std::any_of(source_frames.begin(), source_frames.end(), [](const NativeFrame &frame) {
-        return frame_page_type(frame.frame.data()) == page_type::kLeafBase && frame.frame.size() > 4096;
+        return frame_page_type(frame.frame.data()) == page_type::kLeafBase &&
+               frame.frame.size() > 4096 - kDurableBlobHeader;
     }));
 
     PageMemStore destination_store(1);
@@ -190,7 +192,7 @@ TEST(RangeRebuild, OversizedSourceLeafSplitsIntoFixedDestinationFrames)
     std::vector<NativeFrame> destination_frames;
     ASSERT_TRUE(destination->collect_native_frames(&destination_frames, nullptr, nullptr, nullptr).ok());
     for (const NativeFrame &frame : destination_frames) {
-        EXPECT_EQ(frame.frame.size(), 4096U);
+        EXPECT_EQ(frame.frame.size(), 4096U - kDurableBlobHeader);
     }
 }
 

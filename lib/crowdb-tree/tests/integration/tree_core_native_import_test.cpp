@@ -86,7 +86,7 @@ TEST_F(TreeCoreNativeImport, InvalidFrameAndGraphLeaveTheOldRootAndWriterUsable)
             frames[0] = test_import::inline_leaf(0, "future", "value", 8);
         }
         else {
-            ASSERT_TRUE(inner_frame_build(frames[0].frame.data(), 4096, 0, {0}, {}));
+            ASSERT_TRUE(inner_frame_build(frames[0].frame.data(), frames[0].frame.size(), 0, {0}, {}));
         }
         const auto status = install(std::move(frames));
         EXPECT_EQ(status.code(), Code::kCorruption) << variant << ": " << status.to_string();

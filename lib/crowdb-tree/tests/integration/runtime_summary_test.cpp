@@ -1,6 +1,7 @@
 // Copyright 2026-present Gian <crow.db@outlook.com>
 // Licensed under the Apache License, Version 2.0.
 #include "common/test_tree_core_chunk.h"
+#include "crowdb-tree/maptable/compressor.h"
 #include "snapshot/chunk_root_codec.h"
 
 namespace crowdb::tree
@@ -29,7 +30,8 @@ void check_summary(const Crowdbtree &tree, uint64_t keys, uint64_t key_bytes, ui
     EXPECT_GT(summary.reachable_inner_pages, 0U);
     EXPECT_GT(summary.reachable_overflow_pages, 0U);
     EXPECT_EQ(summary.reachable_page_capacity_bytes,
-              4096 * (summary.reachable_leaf_pages + summary.reachable_inner_pages + summary.reachable_overflow_pages));
+              (4096 - kDurableBlobHeader) *
+                  (summary.reachable_leaf_pages + summary.reachable_inner_pages + summary.reachable_overflow_pages));
 }
 } // namespace
 

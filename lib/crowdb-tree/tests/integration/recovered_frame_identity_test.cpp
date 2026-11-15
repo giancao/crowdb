@@ -60,11 +60,11 @@ TEST(RecoveredFrameIdentity, NativeImportStillRejectsEveryConcreteFrameIdentityM
         auto       frames = test_import::overflow_tree(std::string(8000, 'v'));
         if (type == page_type::kInnerBase) {
             frames = {
-                NativeFrame{.page_id = 0, .frame = std::vector<uint8_t>(4096)},
+                NativeFrame{.page_id = 0, .frame = std::vector<uint8_t>(test_import::kFrameBytes)},
                 test_import::inline_leaf(1)
             };
-            ASSERT_TRUE(inner_frame_build(frames[0].frame.data(), 4096, 0, {1}, {}));
-            frame_set_inner_fence_pages(frames[0].frame.data(), 4096, 1, 1);
+            ASSERT_TRUE(inner_frame_build(frames[0].frame.data(), frames[0].frame.size(), 0, {1}, {}));
+            frame_set_inner_fence_pages(frames[0].frame.data(), frames[0].frame.size(), 1, 1);
         }
         const auto count  = frames.size();
         auto       status = tree.install_snapshot_native(frames, 0, 7, count);

@@ -192,13 +192,13 @@ impl ChunkKvServerConfig {
             .validate(&self.tree_runtime)
             .map_err(ConfigError::Invalid)?;
         let iu = if self.tree.iu_size == 0 {
-            64 * 1024
+            4096
         } else {
             self.tree.iu_size
         };
         if self.tree.frame_bytes % iu != 0 {
             return Err(ConfigError::Invalid(
-                "tree.frame_bytes must align to the Chunk backend IU (64 KiB when tree.iu_size is zero)"
+                "tree.frame_bytes must align to the Chunk backend IU (4 KiB when tree.iu_size is zero)"
                     .to_owned(),
             ));
         }
