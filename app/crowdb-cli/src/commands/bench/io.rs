@@ -63,7 +63,7 @@ fn large_policy(
             read_buffer_size: block_size,
             max_cached_buffer: block_size.saturating_mul(data_num),
             large_mirror_copies: mirror_copies,
-            ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+            ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated)
         }),
     }
 }
@@ -84,7 +84,7 @@ async fn run_large_write(cli: &Cli, args: ChunkioArgs) -> ExitCode {
     }
     let client = match connect(
         cli,
-        SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3),
+        SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared),
         args.diskio_connections,
         args.diskio_rpc_workers,
     )
@@ -148,7 +148,7 @@ async fn run_small_write(cli: &Cli, args: ChunkioSmallWriteArgs) -> ExitCode {
         scale_out_queue_objects: args.scale_out_queue_objects,
         max_batch_bytes: args.max_batch_bytes,
         max_batch_objects: args.max_batch_objects,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     };
     if let Err(error) = small_write.validate() {
         eprintln!("invalid chunkio small-write policy: {error}");
@@ -197,7 +197,7 @@ async fn run_read(cli: &Cli, args: ChunkioReadArgs, workload: ReadBenchmarkWorkl
     }
     let client = match connect(
         cli,
-        SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3),
+        SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared),
         args.diskio_connections,
         args.diskio_rpc_workers,
     )

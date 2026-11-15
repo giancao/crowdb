@@ -15,7 +15,7 @@ use crowdb_common::ec::{EcScheme, IncrementalParity};
 use crowdb_protocol::chunk_task::{
     ChunkTaskState, ChunkTaskValue, CHUNK_TASK_SCHEMA_VERSION, TASK_KIND_MIRROR_TO_EC,
 };
-use crowdb_protocol::chunkdb::rpc::{Chunk, ChunkState, ChunkStrip, EcState, Strip};
+use crowdb_protocol::chunkdb::rpc::{Chunk, ChunkState, ChunkStrip, ChunkType, EcState, Strip};
 use crowdb_protocol::common::ChunkId;
 use serde::{Deserialize, Serialize};
 
@@ -452,7 +452,10 @@ fn installed(chunk: &Chunk, payload: &MirrorToEcTaskV1) -> bool {
         chunk.strips.iter().any(|strip| {
             strip.chunk_offset == replacement.chunk_offset
                 && strip.strip_sequence == replacement.strip_sequence
-                && strip == replacement
+                && crowdb_protocol::chunk_bitmap::same_layout(
+                    std::slice::from_ref(strip),
+                    std::slice::from_ref(replacement),
+                )
         })
     })
 }
@@ -941,7 +944,7 @@ fn validate_source(
 ) -> Result<(), ConversionError> {
     let start = usize::try_from(start_index).unwrap_or(usize::MAX);
     let end = start.saturating_add(old_strips.len());
-    if !convertible_chunk_state(chunk.state)
+    if !convertible_chunk(chunk)
         || old_strips.is_empty()
         || chunk.modify_ts != expected_modify_ts
         || chunk.strips.get(start..end) != Some(old_strips)
@@ -968,7 +971,7 @@ fn candidate_group(
     min_age_ms: u64,
     now_ms: u64,
 ) -> bool {
-    if !convertible_chunk_state(chunk.state) {
+    if !convertible_chunk(chunk) {
         return false;
     }
     let Some(first) = strips.first() else {
@@ -995,8 +998,14 @@ fn candidate_group(
     geometry_matches && closed && old_enough
 }
 
-fn convertible_chunk_state(state: i32) -> bool {
-    state == ChunkState::Active as i32 || state == ChunkState::Sealed as i32
+/// Tree chunks are read through a Mirror-only transport, so every conversion
+/// entry skips them until Tree reads support EC.
+fn convertible_chunk(chunk: &Chunk) -> bool {
+    (chunk.state == ChunkState::Active as i32 || chunk.state == ChunkState::Sealed as i32)
+        && !matches!(
+            ChunkType::try_from(chunk.chunk_type),
+            Ok(ChunkType::BtreePage | ChunkType::PageIndex)
+        )
 }
 
 fn locate_source(chunk: &Chunk, old_strips: &[ChunkStrip]) -> Option<u32> {

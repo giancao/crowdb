@@ -50,7 +50,7 @@ impl TestNativeS3 {
                 conversion_enabled: false,
                 memory_budget: 64 << 20,
                 max_pipelines: 4,
-                ..SmallWritePolicy::new(ChunkType::S3)
+                ..SmallWritePolicy::new(ChunkType::S3Shared)
             },
             threshold_ratio: 0.5,
             disk_block_bytes: 1 << 20,

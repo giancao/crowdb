@@ -88,6 +88,8 @@ impl LifecycleHandler {
         chunk.state = ProtoChunkState::Sealed as i32;
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);
         chunk.sealed_length = seal_length;
+        let confirmed_from = chunk.acknowledged_cursor;
+        crowdb_protocol::chunk_bitmap::mark_written(&mut chunk, confirmed_from, seal_bytes);
         chunk.acknowledged_cursor = seal_bytes;
         chunk.sealed_ts_ms = now_ms;
         chunk.capacity = chunk.strips.iter().map(|strip| strip.capacity).sum();

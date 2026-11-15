@@ -103,7 +103,7 @@ impl TestWriteStorage {
                 chunks: Arc::new(ChunkIoClient::from_parts(
                     self.clone(),
                     self.clone(),
-                    ChunkType::S3,
+                    ChunkType::S3Shared,
                 )),
             },
             RuntimeLimits::default(),

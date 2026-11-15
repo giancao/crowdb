@@ -35,7 +35,7 @@ async fn framed_dataset_upload_and_s3_share_runtime_but_preserve_independent_aut
     let runtime = backend.runtime(metadata::client().await);
     let identity = DatasetIdentity::new(NamespacePath::root(), "payload").unwrap();
     let mut policy =
-        crowdb_chunk_client::SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::Dataset);
+        crowdb_chunk_client::SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::DatasetShared);
     policy.conversion_enabled = false;
     policy.max_pipelines = 1;
     let dataset = DatasetClient::with_writer_policy(&runtime, identity.clone(), &policy).unwrap();

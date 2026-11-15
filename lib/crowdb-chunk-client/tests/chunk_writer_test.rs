@@ -301,6 +301,7 @@ impl ChunkAllocator for MockChunkAllocator {
             cleanup_intents: vec![],
             last_strip_replacement: None,
             owner_key: req.owner_key,
+            bitmap_unit_bytes: 0,
         };
         st.chunks
             .insert((chunk_id.high, chunk_id.low), (strips, 0, false));
@@ -399,7 +400,7 @@ impl ChunkAllocator for MockChunkAllocator {
 
 fn test_config(max_chunk_size: u64) -> Arc<ChunkClientConfig> {
     Arc::new(ChunkClientConfig {
-        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
         large_mirror_copies: None,
         max_chunk_size,
         prefetch_strips_per_chunk: 2,
@@ -421,14 +422,14 @@ async fn large_chunk_prefetch_preserves_type_in_id_and_metadata() {
         Arc::new(MockChunkAllocator::new()),
         ec_4_1(),
         test_config(1024 * 1024),
-        crowdb_protocol::CHUNK_TYPE_S3,
+        crowdb_protocol::CHUNK_TYPE_S3_DEDICATED,
     );
     let chunk = prefetch.on_demand().await.unwrap();
     assert_eq!(
         chunk.id.unwrap().high >> 56,
-        u64::from(crowdb_protocol::CHUNK_TYPE_S3)
+        u64::from(crowdb_protocol::CHUNK_TYPE_S3_DEDICATED)
     );
-    assert_eq!(chunk.chunk_type, ChunkType::S3 as i32);
+    assert_eq!(chunk.chunk_type, ChunkType::S3Dedicated as i32);
 
     let (mut prepared, task) = prefetch.spawn(Some(2 * 1024 * 1024));
     let first = prepared.recv().await.unwrap().unwrap();
@@ -437,9 +438,9 @@ async fn large_chunk_prefetch_preserves_type_in_id_and_metadata() {
     for prepared_chunk in [first, second] {
         assert_eq!(
             prepared_chunk.id.unwrap().high >> 56,
-            u64::from(crowdb_protocol::CHUNK_TYPE_S3)
+            u64::from(crowdb_protocol::CHUNK_TYPE_S3_DEDICATED)
         );
-        assert_eq!(prepared_chunk.chunk_type, ChunkType::S3 as i32);
+        assert_eq!(prepared_chunk.chunk_type, ChunkType::S3Dedicated as i32);
     }
     task.await.unwrap();
 }
@@ -709,7 +710,7 @@ async fn chunk_writer_strip_rotation() {
             Arc::new(chunkdb.clone()),
             ec,
             test_config(1024 * 1024 * 1024),
-            crowdb_protocol::chunk_id::CHUNK_TYPE_S3,
+            crowdb_protocol::chunk_id::CHUNK_TYPE_S3_DEDICATED,
         );
         pf.on_demand().await.unwrap()
     };
@@ -743,7 +744,7 @@ async fn chunk_writer_on_demand_append() {
             Arc::new(chunkdb.clone()),
             ec,
             test_config(1024 * 1024 * 1024),
-            crowdb_protocol::chunk_id::CHUNK_TYPE_S3,
+            crowdb_protocol::chunk_id::CHUNK_TYPE_S3_DEDICATED,
         );
         pf.on_demand().await.unwrap()
     };
@@ -777,7 +778,7 @@ async fn chunk_writer_is_full_and_seal() {
             Arc::new(chunkdb.clone()),
             ec,
             test_config(DATA_NUM as u64 * UNIT_BYTES * 2),
-            crowdb_protocol::chunk_id::CHUNK_TYPE_S3,
+            crowdb_protocol::chunk_id::CHUNK_TYPE_S3_DEDICATED,
         );
         pf.on_demand().await.unwrap()
     };
@@ -813,7 +814,7 @@ async fn chunk_writer_abort() {
             Arc::new(chunkdb.clone()),
             ec,
             test_config(1024 * 1024 * 1024),
-            crowdb_protocol::chunk_id::CHUNK_TYPE_S3,
+            crowdb_protocol::chunk_id::CHUNK_TYPE_S3_DEDICATED,
         );
         pf.on_demand().await.unwrap()
     };
@@ -844,7 +845,7 @@ async fn chunk_writer_empty_seal() {
             Arc::new(chunkdb.clone()),
             ec,
             test_config(1024 * 1024 * 1024),
-            crowdb_protocol::chunk_id::CHUNK_TYPE_S3,
+            crowdb_protocol::chunk_id::CHUNK_TYPE_S3_DEDICATED,
         );
         pf.on_demand().await.unwrap()
     };
@@ -871,7 +872,7 @@ async fn chunk_writer_bounds_cross_strip_parity_tasks() {
         Arc::new(chunkdb),
         ec,
         test_config(1024 * 1024 * 1024),
-        crowdb_protocol::chunk_id::CHUNK_TYPE_S3,
+        crowdb_protocol::chunk_id::CHUNK_TYPE_S3_DEDICATED,
     );
     cw.open(pf.on_demand().await.unwrap(), None).unwrap();
 
@@ -898,7 +899,7 @@ async fn chunk_writer_submits_independent_data_writes_concurrently() {
         Arc::new(chunkdb),
         ec,
         test_config(1024 * 1024 * 1024),
-        crowdb_protocol::chunk_id::CHUNK_TYPE_S3,
+        crowdb_protocol::chunk_id::CHUNK_TYPE_S3_DEDICATED,
     );
     cw.open(pf.on_demand().await.unwrap(), None).unwrap();
 
@@ -926,7 +927,7 @@ async fn chunk_writer_abort_drains_submitted_parity_io() {
         Arc::new(chunkdb.clone()),
         ec,
         test_config(1024 * 1024 * 1024),
-        crowdb_protocol::chunk_id::CHUNK_TYPE_S3,
+        crowdb_protocol::chunk_id::CHUNK_TYPE_S3_DEDICATED,
     );
     cw.open(pf.on_demand().await.unwrap(), None).unwrap();
     for i in 0..=DATA_NUM as u8 {

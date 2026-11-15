@@ -4,7 +4,7 @@
 use crowdb_chunkdb::range_guard::RangeGuard;
 use crowdb_chunkdb_client::{ChunkdbClient, ChunkdbClientError};
 use crowdb_paxos_kv_client::PaxosKvClient;
-use crowdb_protocol::chunk_id::{ChunkIdParts, CHUNK_TYPE_S3};
+use crowdb_protocol::chunk_id::{ChunkIdParts, CHUNK_TYPE_S3_DEDICATED};
 use crowdb_rpc_ffi::RpcServer;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ pub async fn assert_storage_and_owner_failures(
     let mut key = b"/chunk/".to_vec();
     key.extend_from_slice(
         &ChunkIdParts {
-            high: u64::from(CHUNK_TYPE_S3) << 56,
+            high: u64::from(CHUNK_TYPE_S3_DEDICATED) << 56,
             low: 0,
         }
         .to_bytes(),

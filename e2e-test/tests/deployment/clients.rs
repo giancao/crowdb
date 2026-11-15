@@ -171,8 +171,8 @@ async fn verify_layout() {
             .unwrap();
         for chunk in listed.chunks {
             let index = match ChunkType::try_from(chunk.chunk_type) {
-                Ok(ChunkType::S3) => 0,
-                Ok(ChunkType::IcebergTable) => 1,
+                Ok(ChunkType::S3Dedicated | ChunkType::S3Shared) => 0,
+                Ok(ChunkType::IcebergTableDedicated | ChunkType::IcebergTableShared) => 1,
                 _ => continue,
             };
             seen[index] = true;

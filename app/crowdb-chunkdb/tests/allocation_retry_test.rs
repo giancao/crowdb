@@ -50,7 +50,7 @@ fn request() -> AllocateChunkRequest {
             high: 5 << 56,
             low: 123,
         }),
-        chunk_type: ChunkType::S3 as i32,
+        chunk_type: ChunkType::S3Dedicated as i32,
         ..Default::default()
     }
 }
@@ -74,7 +74,7 @@ async fn known_quorum_unavailability_retries_allocation_with_the_same_chunk_id()
                 &mut builder,
                 &FBChunkArgs {
                     id: Some(id),
-                    chunk_type: FBChunkType::S3,
+                    chunk_type: FBChunkType::S3Dedicated,
                     ..Default::default()
                 },
             )

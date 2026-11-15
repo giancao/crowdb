@@ -34,7 +34,7 @@ pub enum StorageConnectError {
 }
 
 pub fn own_large_write(policy: &mut LargeWritePolicy) {
-    Arc::make_mut(&mut policy.client).chunk_type = ChunkType::S3;
+    Arc::make_mut(&mut policy.client).chunk_type = ChunkType::S3Dedicated;
 }
 
 pub struct S3WriteSettings {
@@ -78,7 +78,7 @@ impl S3WriteSettings {
             return Err("S3 small-object threshold ratio is invalid".into());
         }
         let mut small = self.small;
-        small.chunk_type = ChunkType::S3;
+        small.chunk_type = ChunkType::S3Shared;
         small.conversion_data_num = self.ec_data;
         small.conversion_code_num = self.ec_code;
         small.validate().map_err(|error| error.to_string())?;
@@ -94,10 +94,10 @@ impl S3WriteSettings {
             return Err("S3 small-object threshold exceeds the shared writer limit".into());
         }
         let mut client = ChunkClientConfig {
-            chunk_type: ChunkType::S3,
+            chunk_type: ChunkType::S3Dedicated,
             large_mirror_copies: self.large.mirror_copies,
             read_buffer_size: self.disk_block_bytes,
-            ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+            ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated)
         };
         if let Some(value) = self.large.max_chunk_size {
             client.max_chunk_size = value;
@@ -184,7 +184,7 @@ impl S3StorageClients {
         read_policy: ChunkReadPolicy,
         chunk_kv_rpc: &ChunkKvRpcTransportConfig,
     ) -> Result<Self, StorageConnectError> {
-        small_write.chunk_type = ChunkType::S3;
+        small_write.chunk_type = ChunkType::S3Shared;
         let kv = Arc::new(PaxosKvClient::new(KvConfig::new(management_seeds.clone())));
         let config = ChunkKvConfig::default();
         let catalog = Arc::new(Group0ChunkKvRangeCatalogSource::from_shared(Arc::clone(&kv)));

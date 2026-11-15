@@ -193,7 +193,7 @@ impl ChunkAllocator for FailingChunkAllocator {
 
 fn test_config(max_chunk_size: u64) -> Arc<ChunkClientConfig> {
     Arc::new(ChunkClientConfig {
-        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
         large_mirror_copies: None,
         max_chunk_size,
         prefetch_strips_per_chunk: 2,
@@ -442,7 +442,7 @@ async fn chunk_client_metrics_cover_object_chunk_and_diskio_layers() {
     let client = ChunkIoClient::from_parts(
         Arc::new(chunkdb),
         Arc::new(diskio),
-        crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared,
     )
     .with_metrics(&metrics);
     let policy = LargeWritePolicy {
@@ -753,7 +753,7 @@ async fn push_mode_backpressure() {
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
-        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
         large_mirror_copies: None,
         max_chunk_size: 1024 * 1024,
         prefetch_strips_per_chunk: 2,
@@ -848,7 +848,7 @@ async fn write_stream_bounded_prealloc() {
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
-        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
         large_mirror_copies: None,
         max_chunk_size: 1024 * 1024 * 1024,
         prefetch_strips_per_chunk: 2,
@@ -910,7 +910,7 @@ async fn writer_pool_budget_rejects_over_budget() {
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
-        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
         large_mirror_copies: None,
         max_chunk_size: 1024 * 1024 * 1024,
         prefetch_strips_per_chunk: 2,
@@ -945,7 +945,7 @@ async fn writer_pool_per_writer_memory() {
     let diskio = LocalFileDiskWriter::new(tmp.path());
     let ec = ec_4_1();
     let config = Arc::new(ChunkClientConfig {
-        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
         large_mirror_copies: None,
         max_chunk_size: 1024 * 1024 * 1024,
         prefetch_strips_per_chunk: 2,
@@ -972,7 +972,7 @@ async fn benchmark_runner_aggregates_concurrent_large_writes() {
     let client = ChunkIoClient::from_parts(
         Arc::new(chunkdb.clone()),
         Arc::new(diskio),
-        crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared,
     );
     let result = run_large_write_benchmark(
         client,
@@ -1023,7 +1023,7 @@ async fn benchmark_direct_buffers_bypass_fetch_copy() {
     let client = ChunkIoClient::from_parts(
         Arc::new(chunkdb),
         Arc::new(diskio),
-        crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared,
     );
     let result = run_large_write_benchmark(
         client,

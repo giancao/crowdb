@@ -29,6 +29,9 @@ pub struct FrameScanConfig {
     pub required_end: u64,
     pub logical_start: u64,
     pub max_append_bytes: u64,
+    /// Bitmap unit of the chunk. In ordinary mode each object starts on a unit
+    /// boundary and zero padding fills the tail of its last unit; zero disables it.
+    pub align: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

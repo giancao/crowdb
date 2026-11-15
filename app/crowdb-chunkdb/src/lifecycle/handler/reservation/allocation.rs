@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::{
-    assign_strip_offsets, reservation_usage, validate_chunk_fence, validate_chunk_identity,
-    validate_existing_group, validate_reserve_spec, writer_lease_deadline, ChunkId, ChunkState, ChunkStrip,
-    LifecycleError, LifecycleHandler, PendingReservation, ReservationFence, ReservationMutation,
-    ReservationPermit, ReserveGroupSpec, Segment, StripAllocType, StripBatchSpec, StripReservationGroup,
-    StripReservationState,
+    assign_strip_offsets, init_strip_bitmaps, reservation_usage, validate_chunk_fence,
+    validate_chunk_identity, validate_existing_group, validate_reserve_spec, writer_lease_deadline, ChunkId,
+    ChunkState, ChunkStrip, LifecycleError, LifecycleHandler, PendingReservation, ReservationFence,
+    ReservationMutation, ReservationPermit, ReserveGroupSpec, Segment, StripAllocType, StripBatchSpec,
+    StripReservationGroup, StripReservationState,
 };
 
 impl LifecycleHandler {
@@ -168,6 +168,17 @@ impl LifecycleHandler {
         };
         let mut chunk = guard.chunk().expect("publication acquired a chunk").clone();
         assign_strip_offsets(&mut strips, offset);
+        if let Err(error) = init_strip_bitmaps(&mut strips, chunk.bitmap_unit_bytes) {
+            if let Err(cleanup) = self
+                .allocator
+                .rollback_conversion_group(&strips, &parity_segments)
+                .await
+            {
+                permit.retain();
+                return Err(cleanup.into());
+            }
+            return Err(error);
+        }
         let now_ms = super::super::unix_time_ms();
         let group = StripReservationGroup {
             group_id: Some(*group_id),

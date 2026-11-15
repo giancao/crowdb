@@ -49,12 +49,12 @@ async fn native_namespace_uses_shared_storage_without_a_listener_or_credentials(
 async fn writer_groups_keep_chunk_purposes_separate_and_share_admission() {
     let runtime = storage::runtime().await;
     let same = runtime
-        .with_writer_policy(&SmallWritePolicy::new(ChunkType::S3))
+        .with_writer_policy(&SmallWritePolicy::new(ChunkType::S3Shared))
         .unwrap();
     assert!(std::sync::Arc::ptr_eq(runtime.resources(), same.resources()));
     assert_eq!(runtime.writer_group_count(), 1);
     let dataset = runtime
-        .with_writer_policy(&SmallWritePolicy::new(ChunkType::Dataset))
+        .with_writer_policy(&SmallWritePolicy::new(ChunkType::DatasetShared))
         .unwrap();
     assert!(std::sync::Arc::ptr_eq(runtime.resources(), dataset.resources()));
     assert_eq!(runtime.writer_group_count(), 2);
@@ -70,7 +70,7 @@ async fn writer_groups_keep_chunk_purposes_separate_and_share_admission() {
     runtime.shutdown().await.unwrap();
     assert_eq!(view.catalog().generation(), 1);
     assert!(matches!(
-        same.with_writer_policy(&SmallWritePolicy::new(ChunkType::S3)),
+        same.with_writer_policy(&SmallWritePolicy::new(ChunkType::S3Shared)),
         Err(Error::Shutdown)
     ));
 }
@@ -79,7 +79,7 @@ async fn writer_groups_keep_chunk_purposes_separate_and_share_admission() {
 async fn read_flow_snapshot_is_local_and_preserves_resource_charges_and_writer_groups() {
     let runtime = storage::runtime().await;
     let dataset = runtime
-        .with_writer_policy(&SmallWritePolicy::new(ChunkType::Dataset))
+        .with_writer_policy(&SmallWritePolicy::new(ChunkType::DatasetShared))
         .unwrap();
     let held = runtime.resources().retain_vec(vec![7; 16], 1, 1, 0, 0).unwrap();
     let before = runtime.resources().status();

@@ -11,7 +11,8 @@ impl OwnedChunk {
         batch: &mut [PendingObject],
         metrics: &SmallWriteMetrics,
     ) -> Result<Vec<Location>> {
-        let (physical_bytes, logical_bytes, buffer_count) = batch_shape(batch)?;
+        let unit_bytes = self.unit_bytes();
+        let (physical_bytes, logical_bytes, buffer_count) = batch_shape(batch, unit_bytes)?;
         if physical_bytes as u64 > self.remaining_in_chunk() {
             return Err(IoError::Internal("assembled batch crosses chunk".into()));
         }
@@ -20,7 +21,7 @@ impl OwnedChunk {
             .chunk
             .id
             .ok_or_else(|| IoError::AllocationFailed("shared chunk missing id".into()))?;
-        let (locations, views) = pack_batch(batch, chunk_id, start)?;
+        let (locations, views) = pack_batch(batch, chunk_id, start, unit_bytes)?;
         for (object, location) in batch.iter_mut().zip(&locations) {
             if let Some(intent) = &object.intent {
                 intent.before_write(location).await?;
@@ -97,6 +98,8 @@ impl OwnedChunk {
             self.retained_views.truncate(retained_count);
         }
         result?;
+        // The owning writer records validity itself; callers never supply a bitmap.
+        crowdb_protocol::chunk_bitmap::mark_written(&mut self.chunk, self.cursor, end);
         self.cursor = end;
         let strip_end = u64::from(strip.chunk_offset.saturating_add(strip.capacity)) * 1024;
         if end == strip_end {
@@ -135,10 +138,14 @@ fn take_views(source: &mut VecDeque<Bytes>, mut length: usize) -> Vec<Bytes> {
     views
 }
 
+/// Zero bytes appended after an object's last frame to complete its bitmap unit.
+static PADDING: [u8; 4096] = [0; 4096];
+
 fn pack_batch(
     batch: &mut [PendingObject],
     chunk_id: super::ChunkId,
     start: u64,
+    unit_bytes: u32,
 ) -> Result<(Vec<Location>, Vec<Bytes>)> {
     let mut views = Vec::new();
     let mut copied = 0usize;
@@ -209,6 +216,14 @@ fn pack_batch(
             logical_length: object.len as u64,
         });
         copied += frame_length;
+        // Each object owns whole bitmap units: pad to the next unit boundary.
+        let mut padding = super::allocated_bytes(object.len, unit_bytes)? - frame_length;
+        copied += padding;
+        while padding > 0 {
+            let chunk = padding.min(PADDING.len());
+            views.push(Bytes::from_static(&PADDING[..chunk]));
+            padding -= chunk;
+        }
     }
     Ok((locations, views))
 }

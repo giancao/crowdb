@@ -37,7 +37,10 @@ pub(super) async fn degraded_chunks(addresses: &[String]) -> Vec<ChunkId> {
     }
     let degraded: Vec<_> = chunks
         .into_iter()
-        .filter(|chunk| chunk.chunk_type == ChunkType::S3 as i32)
+        .filter(|chunk| {
+            chunk.chunk_type == ChunkType::S3Dedicated as i32
+                || chunk.chunk_type == ChunkType::S3Shared as i32
+        })
         .filter(|chunk| {
             chunk.strips.iter().any(|strip| {
                 strip.strip_type == StripType::Ec as i32

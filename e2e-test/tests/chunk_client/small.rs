@@ -25,7 +25,7 @@ fn policy() -> SmallWritePolicy {
         chunk_capacity: 2 * MIB as u64,
         object_limit: MAX_FRAME_V2_PAYLOAD_BYTES,
         mirror_copies: 2,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     }
 }
 
@@ -110,7 +110,7 @@ async fn cancelled_shared_object_keeps_pipeline_available() {
 #[ignore = "requires the owned release storage containers"]
 async fn small_write_rotates_strips_and_chunks_without_splitting_objects() {
     let mut configured = policy();
-    configured.chunk_type = ChunkType::IcebergTable;
+    configured.chunk_type = ChunkType::IcebergTableShared;
     let stack = E2eStack::start(configured).await;
     let first_group = write_full_small_strip(&stack.client, 3).await;
     let second_group = write_full_small_strip(&stack.client, 5).await;
@@ -125,8 +125,11 @@ async fn small_write_rotates_strips_and_chunks_without_splitting_objects() {
     assert_ne!(second.chunk_id, third.chunk_id);
     assert_eq!(third.offset, 0);
     let first_chunk = stack.query_chunk(&first).await;
-    assert_eq!(first_chunk.chunk_type, ChunkType::IcebergTable as i32);
-    assert_eq!(first_chunk.id.unwrap().high >> 56, ChunkType::IcebergTable as u64);
+    assert_eq!(first_chunk.chunk_type, ChunkType::IcebergTableShared as i32);
+    assert_eq!(
+        first_chunk.id.unwrap().high >> 56,
+        ChunkType::IcebergTableShared as u64
+    );
     assert_eq!(first_chunk.state, ChunkState::Sealed as i32);
     assert_eq!(first_chunk.strips.len(), 2);
     assert_eq!(first_chunk.acknowledged_cursor, 2 * MIB as u64);
@@ -138,8 +141,11 @@ async fn small_write_rotates_strips_and_chunks_without_splitting_objects() {
         assert_mirror_data(&stack, &first_chunk, location, data).await;
     }
     let third_chunk = stack.query_chunk(&third).await;
-    assert_eq!(third_chunk.chunk_type, ChunkType::IcebergTable as i32);
-    assert_eq!(third_chunk.id.unwrap().high >> 56, ChunkType::IcebergTable as u64);
+    assert_eq!(third_chunk.chunk_type, ChunkType::IcebergTableShared as i32);
+    assert_eq!(
+        third_chunk.id.unwrap().high >> 56,
+        ChunkType::IcebergTableShared as u64
+    );
     for (data, location) in &third_group {
         assert_mirror_data(&stack, &third_chunk, location, data).await;
     }

@@ -12,7 +12,7 @@ use crowdb_chunk_client::{
 };
 use crowdb_chunkdb::{
     routing::{BindingCache, BindingTable},
-    storage::{range_retirement::RetiredByteRange, ChunkStore},
+    storage::ChunkStore,
 };
 use crowdb_common::ec::EcScheme;
 use crowdb_paxos_kv_client::{ChunkSlotMapClient, PaxosKvClient};
@@ -30,7 +30,7 @@ async fn connect(stack: &TestNativeStorage) -> ChunkIoClient {
         small_write: SmallWritePolicy {
             mirror_copies: 2,
             conversion_enabled: false,
-            ..SmallWritePolicy::new(ChunkType::IcebergTable)
+            ..SmallWritePolicy::new(ChunkType::IcebergTableShared)
         },
     })
     .await
@@ -44,7 +44,7 @@ fn large_policy() -> LargeWritePolicy {
             code_num: 1,
         },
         client: Arc::new(ChunkClientConfig {
-            chunk_type: ChunkType::IcebergTable,
+            chunk_type: ChunkType::IcebergTableDedicated,
             large_mirror_copies: Some(2),
             max_chunk_size: 64 * MIB as u64,
             prefetch_strips_per_chunk: 2,
@@ -132,16 +132,12 @@ impl TestLargeRange {
         let chunks = chunk_store(stack).await;
         let before = chunks.get_chunk(&location.chunk_id.unwrap()).await.unwrap();
         assert_eq!(before.id, location.chunk_id);
-        assert_eq!(before.chunk_type, ChunkType::IcebergTable as i32);
+        assert_eq!(before.chunk_type, ChunkType::IcebergTableDedicated as i32);
         assert_eq!(before.state, ChunkState::Sealed as i32);
         assert_eq!(before.writer_epoch, 0);
         assert_eq!(before.acknowledged_cursor, location.length);
         assert_eq!(u64::from(before.sealed_length), location.length.div_ceil(1024));
-        assert!(chunks
-            .get_chunk_range_retirement(&location.chunk_id.unwrap())
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(before.bitmap_unit_bytes, 0);
         println!(
             "gc_matrix_large_seed {}",
             serde_json::json!({"chunk":before.id,"location":location,"logical_bytes":logical_bytes,"seed_payload_verified":true,"sealed_extent":before.acknowledged_cursor,"writer_epoch":before.writer_epoch,"layout_modify_ts":before.modify_ts})
@@ -160,46 +156,16 @@ impl TestLargeRange {
             .get_chunk(&id)
             .await
             .map_err(|error| error.to_string())?;
-        if chunk != self.before {
-            return Err("range retirement changed the sealed chunk layout".into());
-        }
-        let record = self
-            .chunks
-            .get_chunk_range_retirement(&id)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or("large range retirement is missing")?;
-        if record.ranges()
-            != [RetiredByteRange {
-                start: self.location.offset,
-                end: self.location.offset + self.location.length,
-            }]
-        {
+        // A dedicated chunk has no bitmap: reclamation deletes the whole chunk.
+        if chunk.id != self.before.id || chunk.state != ChunkState::Deleted as i32 {
             return Err(format!(
-                "large range retirement is not the exact sealed extent: {record:?}"
+                "dedicated chunk was not deleted whole: state {}",
+                chunk.state
             ));
         }
-        if record.revision > chunk.modify_ts {
-            return Err("range retirement revision exceeds its sealed layout".into());
-        }
-        let value = serde_json::to_value(&record).map_err(|error| error.to_string())?;
-        for (field, expected) in [
-            ("version", serde_json::json!(2)),
-            ("chunk_id", serde_json::json!(chunk.id)),
-            ("writer_epoch", serde_json::json!(chunk.writer_epoch)),
-            ("create_ts_ms", serde_json::json!(chunk.create_ts_ms)),
-            ("sealed_ts_ms", serde_json::json!(chunk.sealed_ts_ms)),
-            (
-                "sealed_bytes",
-                serde_json::json!(u64::from(chunk.sealed_length) * 1024),
-            ),
-        ] {
-            if value[field] != expected {
-                return Err(format!("range retirement changed {field}: {value}"));
-            }
-        }
+        let value = serde_json::json!({"chunk_id": chunk.id, "state": chunk.state});
         Ok(
-            serde_json::json!({"retirement":value,"location":self.location,"scope":"exact accepted sealed range and unchanged layout; seed payload read verified; GC read/copy IO and physical free not measured"}),
+            serde_json::json!({"retirement":value,"location":self.location,"scope":"dedicated chunk deleted whole; seed payload read verified; GC read/copy IO and physical free not measured"}),
         )
     }
 }

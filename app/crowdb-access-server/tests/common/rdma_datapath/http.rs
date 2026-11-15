@@ -44,7 +44,7 @@ impl TestHttp {
             .unwrap()
             .parse()
             .unwrap();
-        let mut config = ChunkClientConfig::new(ChunkType::S3);
+        let mut config = ChunkClientConfig::new(ChunkType::S3Dedicated);
         config.large_mirror_copies = Some(2);
         config.max_chunk_size = 2 << 20;
         config.large_parallel_strip_writes = 2;

@@ -95,8 +95,8 @@ async fn allocate_owner(
         ChunkType::BtreePage,
         ChunkType::PageIndex,
         ChunkType::Stream,
-        ChunkType::S3,
-        ChunkType::IcebergTable,
+        ChunkType::S3Dedicated,
+        ChunkType::IcebergTableDedicated,
     ] {
         let owner_key = if matches!(purpose, ChunkType::Wal | ChunkType::Stream) {
             StreamName {

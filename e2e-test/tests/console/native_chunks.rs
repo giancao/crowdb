@@ -30,7 +30,7 @@ pub(super) async fn seed(context: &TestNativeContext) -> Value {
                 data_num: if ec { 8 } else { 0 },
                 code_num: if ec { 4 } else { 0 },
                 copy_count: if ec { 0 } else { 3 },
-                chunk_type: ChunkType::S3.into(),
+                chunk_type: ChunkType::S3Dedicated.into(),
                 ..Default::default()
             })
             .await

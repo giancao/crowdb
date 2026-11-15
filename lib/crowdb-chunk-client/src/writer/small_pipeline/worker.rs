@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::{
-    fail_one, frame_bytes, Arc, Duration, IoError, Ordering, OwnedChunk, PendingObject, PipelineWorker,
+    allocated_bytes, fail_one, Arc, Duration, IoError, Ordering, OwnedChunk, PendingObject, PipelineWorker,
     Result,
 };
 
@@ -43,7 +43,9 @@ impl PipelineWorker {
             if dequeued {
                 self.note_dequeue(&first);
             }
-            let fit = self.ensure_object_fits(frame_bytes(first.len)?).await;
+            let fit = self
+                .ensure_object_fits(allocated_bytes(first.len, self.chunk.unit_bytes())?)
+                .await;
             if let Err(error) = fit {
                 self.receiver.close();
                 fail_one(first, &error.to_string(), &self.runtime.metrics);
@@ -186,7 +188,8 @@ impl PipelineWorker {
     }
 
     fn collect_batch(&mut self, first: PendingObject) -> Vec<PendingObject> {
-        let mut bytes = frame_bytes(first.len).unwrap_or(usize::MAX);
+        let unit_bytes = self.chunk.unit_bytes();
+        let mut bytes = allocated_bytes(first.len, unit_bytes).unwrap_or(usize::MAX);
         let mut batch = vec![first];
         while batch.len() < self.runtime.policy.max_batch_objects
             && bytes < self.runtime.policy.max_batch_bytes
@@ -195,7 +198,8 @@ impl PipelineWorker {
                 break;
             };
             self.note_dequeue(&next);
-            let candidate_bytes = bytes.saturating_add(frame_bytes(next.len).unwrap_or(usize::MAX));
+            let candidate_bytes =
+                bytes.saturating_add(allocated_bytes(next.len, unit_bytes).unwrap_or(usize::MAX));
             let available = self.chunk.remaining_in_chunk();
             if candidate_bytes > self.runtime.policy.max_batch_bytes || candidate_bytes as u64 > available {
                 self.carry = Some(next);

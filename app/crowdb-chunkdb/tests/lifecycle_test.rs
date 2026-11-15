@@ -40,6 +40,7 @@ fn make_chunk(id: ChunkId, state: i32) -> Chunk {
         cleanup_intents: vec![],
         last_strip_replacement: None,
         owner_key: Vec::new(),
+        bitmap_unit_bytes: 0,
     }
 }
 

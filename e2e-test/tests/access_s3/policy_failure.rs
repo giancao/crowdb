@@ -18,10 +18,10 @@ async fn protected_two_copy_write_stops_after_repair_and_chunk_rotation_fail() {
         diskio_connections_per_endpoint: 2,
         diskio_rpc_workers: 1,
         small_write: SmallWritePolicy {
-            chunk_type: ChunkType::S3,
+            chunk_type: ChunkType::S3Shared,
             conversion_enabled: false,
             mirror_copies: 2,
-            ..SmallWritePolicy::new(ChunkType::S3)
+            ..SmallWritePolicy::new(ChunkType::S3Shared)
         },
     })
     .await

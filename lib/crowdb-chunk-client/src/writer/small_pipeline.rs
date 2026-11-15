@@ -593,6 +593,7 @@ impl OwnedChunk {
                 writer_epoch,
                 writer_lease_ms: lease_ms,
                 owner_key: Vec::new(),
+                bitmap_unit_bytes: runtime.policy.chunk_type.bitmap_unit_bytes(),
             })
             .await?;
         let chunk = response
@@ -654,6 +655,11 @@ impl OwnedChunk {
             owned.stage_reserved_strip()?;
         }
         Ok(owned)
+    }
+
+    /// Bitmap unit of the owned chunk; zero when the chunk has no bitmap.
+    fn unit_bytes(&self) -> u32 {
+        self.chunk.bitmap_unit_bytes
     }
 
     fn remaining_in_chunk(&self) -> u64 {
@@ -1446,13 +1452,13 @@ impl OwnedChunk {
     }
 }
 
-fn batch_shape(batch: &[PendingObject]) -> Result<(usize, usize, usize)> {
+fn batch_shape(batch: &[PendingObject], unit_bytes: u32) -> Result<(usize, usize, usize)> {
     let mut physical_bytes = 0usize;
     let mut logical_bytes = 0usize;
     let mut buffer_count = 0usize;
     for object in batch {
         physical_bytes = physical_bytes
-            .checked_add(frame_bytes(object.len)?)
+            .checked_add(allocated_bytes(object.len, unit_bytes)?)
             .ok_or_else(|| IoError::WriteFailed("small frame batch is too large".into()))?;
         logical_bytes = logical_bytes.saturating_add(object.len);
         buffer_count =
@@ -1466,6 +1472,14 @@ fn frame_bytes(payload_bytes: usize) -> Result<usize> {
         .physical_length(payload_bytes as u64)
         .map_err(|error| IoError::WriteFailed(error.to_string()))
         .and_then(|bytes| usize::try_from(bytes).map_err(|error| IoError::WriteFailed(error.to_string())))
+}
+
+/// Bytes one object occupies in a chunk: its encoded frames rounded up to the
+/// chunk's bitmap unit, so the next object starts on a unit boundary.
+fn allocated_bytes(payload_bytes: usize, unit_bytes: u32) -> Result<usize> {
+    let encoded = frame_bytes(payload_bytes)? as u64;
+    usize::try_from(crowdb_protocol::chunk_bitmap::align_up(encoded, unit_bytes))
+        .map_err(|error| IoError::WriteFailed(error.to_string()))
 }
 
 fn next_writer_epoch() -> u64 {

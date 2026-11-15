@@ -41,7 +41,7 @@ async fn initialize() {
     let small = SmallWritePolicy {
         conversion_enabled: false,
         mirror_copies: 2,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     };
     let (repository, _, chunks) = storage::connect(seeds, ChunkReadPolicy::default(), small, 2, 2)
         .await

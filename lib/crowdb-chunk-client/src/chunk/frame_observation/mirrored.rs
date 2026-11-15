@@ -110,6 +110,7 @@ impl MirroredFrameReaders {
             required_end,
             logical_start,
             max_append_bytes,
+            align: 0,
         })
     }
 }

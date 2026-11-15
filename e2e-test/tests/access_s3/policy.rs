@@ -30,7 +30,7 @@ fn production_policies() -> (S3WritePolicies, LargeWritePolicy, SmallWritePolicy
         conversion_enabled: false,
         mirror_copies: 2,
         memory_budget: 288 * MIB,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     };
     let s3 = S3WriteSettings {
         small: s3_small,
@@ -66,7 +66,7 @@ fn production_policies() -> (S3WritePolicies, LargeWritePolicy, SmallWritePolicy
         conversion_enabled: false,
         mirror_copies: 2,
         memory_budget: 384 * MIB,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     };
     (s3, iceberg_large, iceberg_small)
 }
@@ -86,10 +86,10 @@ async fn assert_chunk_layouts(
     let registry = ServiceRegistryClient::from_shared(Arc::clone(&kv));
     let chunkdb = ChunkdbClient::new(registry, Arc::new(ChunkdbRpcTransport::new()));
     for (location, expected_type, expected_ec) in [
-        (s3_small, ChunkType::S3, None),
-        (iceberg_small, ChunkType::IcebergTable, None),
-        (s3_large, ChunkType::S3, Some((2, 1))),
-        (iceberg_large, ChunkType::IcebergTable, Some((4, 2))),
+        (s3_small, ChunkType::S3Shared, None),
+        (iceberg_small, ChunkType::IcebergTableShared, None),
+        (s3_large, ChunkType::S3Dedicated, Some((2, 1))),
+        (iceberg_large, ChunkType::IcebergTableDedicated, Some((4, 2))),
     ] {
         let chunk = chunkdb
             .query_chunk(QueryChunkRequest {

@@ -4,12 +4,12 @@
 //! Chunk allocation and owner-aware initial placement.
 
 use super::{
-    assign_strip_offsets, info, unix_time_ms, writer_lease_deadline, AllocationMetricGuard, CacheHint, Chunk,
-    ChunkGuard, ChunkId, ChunkStrip, ChunkType, LifecycleError, LifecycleHandler, LockPolicy,
-    ProtoChunkState, ProtoStripType, StoreError, StripAllocType,
+    assign_strip_offsets, info, init_strip_bitmaps, unix_time_ms, writer_lease_deadline,
+    AllocationMetricGuard, CacheHint, Chunk, ChunkGuard, ChunkId, ChunkStrip, ChunkType, LifecycleError,
+    LifecycleHandler, LockPolicy, ProtoChunkState, ProtoStripType, StoreError, StripAllocType,
 };
 use crate::allocator::StripBatchSpec;
-use crowdb_protocol::{chunk_stream::chunk_owner_key_matches_type, generate_chunk_id};
+use crowdb_protocol::{chunk_bitmap, chunk_stream::chunk_owner_key_matches_type, generate_chunk_id};
 
 impl LifecycleHandler {
     /// Allocate a new chunk.
@@ -39,6 +39,7 @@ impl LifecycleHandler {
             writer_epoch,
             writer_lease_ms,
             Vec::new(),
+            chunk_type.bitmap_unit_bytes(),
         )
         .await
     }
@@ -58,8 +59,16 @@ impl LifecycleHandler {
         writer_epoch: u64,
         writer_lease_ms: u64,
         owner_key: Vec<u8>,
+        bitmap_unit_bytes: u32,
     ) -> Result<Chunk, LifecycleError> {
         self.validate_strip_layout(strip_type, data_num, code_num, copy_count, write_granularity_kb)?;
+        if chunk_type.uses_bitmap() != (bitmap_unit_bytes != 0)
+            || (bitmap_unit_bytes != 0 && !chunk_bitmap::is_supported_unit(bitmap_unit_bytes))
+        {
+            return Err(LifecycleError::InvalidRequest(
+                "bitmap unit does not match chunk type".into(),
+            ));
+        }
         if !chunk_owner_key_matches_type(chunk_type, &owner_key) {
             return Err(LifecycleError::InvalidRequest(
                 "chunk owner key does not match chunk type".into(),
@@ -78,7 +87,7 @@ impl LifecycleHandler {
         let mut allocation_guard = AllocationMetricGuard::new(self.metrics.clone());
 
         let mut guard = self.acquire_allocation_guard(&id, chunk_id.is_some()).await?;
-        let strips = self
+        let mut strips = self
             .allocate_initial_strips(
                 &id,
                 write_granularity_kb,
@@ -86,6 +95,10 @@ impl LifecycleHandler {
                 (strip_type, data_num, code_num, copy_count),
             )
             .await?;
+        if let Err(error) = init_strip_bitmaps(&mut strips, bitmap_unit_bytes) {
+            self.allocator.rollback_strips(&strips).await?;
+            return Err(error);
+        }
         let now_ms = unix_time_ms();
         if writer_epoch != 0 && writer_lease_ms == 0 {
             self.allocator.rollback_strips(&strips).await?;
@@ -112,6 +125,7 @@ impl LifecycleHandler {
             cleanup_intents: Vec::new(),
             last_strip_replacement: None,
             owner_key,
+            bitmap_unit_bytes,
         };
         self.create_chunk_with_liveness_task(&chunk).await?;
         self.liveness_renewed_at.insert(id, now_ms);

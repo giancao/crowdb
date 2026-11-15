@@ -28,7 +28,7 @@ async fn degraded_ec_recovers_protection_and_exact_bytes_after_node_returns() {
             strip_type: StripType::Ec as i32,
             data_num: 2,
             code_num: 1,
-            chunk_type: ChunkType::S3 as i32,
+            chunk_type: ChunkType::S3Dedicated as i32,
             ..Default::default()
         })
         .await

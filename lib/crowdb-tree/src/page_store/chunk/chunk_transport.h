@@ -28,6 +28,8 @@ namespace crowdb::tree::detail
 using common::AtomicSharedPtr;
 
 inline constexpr uint32_t kMaxMirrorCopies = 5;
+// Bitmap granularity selected for every BtreePage and PageIndex chunk.
+inline constexpr uint32_t kChunkBitmapUnitBytes = 4096;
 
 struct ChunkId
 {

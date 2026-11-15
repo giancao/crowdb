@@ -133,6 +133,8 @@ pub(crate) async fn allocate_new_chunk(
     mirror_copies: Option<u32>,
 ) -> Result<Chunk> {
     let chunk_id = crowdb_protocol::generate_chunk_id(chunk_type_byte).to_proto();
+    let chunk_type = ChunkType::try_from(i32::from(chunk_type_byte))
+        .map_err(|()| IoError::Internal("invalid chunk type".into()))?;
     let req = AllocateChunkRequest {
         chunk_id: Some(chunk_id),
         write_granularity: write_granularity_kb,
@@ -153,11 +155,11 @@ pub(crate) async fn allocate_new_chunk(
             ec_scheme.code_num as u32
         },
         copy_count: mirror_copies.unwrap_or(0),
-        chunk_type: ChunkType::try_from(i32::from(chunk_type_byte))
-            .map_err(|()| IoError::Internal("invalid chunk type".into()))? as i32,
+        chunk_type: chunk_type as i32,
         writer_epoch: 0,
         writer_lease_ms: 0,
         owner_key: Vec::new(),
+        bitmap_unit_bytes: chunk_type.bitmap_unit_bytes(),
     };
     let resp = chunkdb.allocate_chunk(req).await?;
     resp.chunk

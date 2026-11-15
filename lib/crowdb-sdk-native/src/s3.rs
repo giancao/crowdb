@@ -65,7 +65,7 @@ impl S3Client {
         if config
             .small_write
             .as_ref()
-            .is_some_and(|policy| policy.chunk_type != ChunkType::S3)
+            .is_some_and(|policy| policy.chunk_type != ChunkType::S3Shared)
         {
             return Err(Error::Configuration("S3 requires an S3 writer policy".into()));
         }
@@ -74,7 +74,7 @@ impl S3Client {
             None => runtime,
         };
         runtime.resources.check_open()?;
-        if runtime.storage.chunk_type != ChunkType::S3 {
+        if runtime.storage.chunk_type != ChunkType::S3Shared {
             return Err(Error::Configuration("S3 requires an S3 writer group".into()));
         }
         let write_policy = config.write_policy.unwrap_or_else(|| {
@@ -87,7 +87,7 @@ impl S3Client {
             )
         });
         if write_policy.small_object_limit > runtime.storage.policy.object_limit
-            || write_policy.large_write.client.chunk_type != ChunkType::S3
+            || write_policy.large_write.client.chunk_type != ChunkType::S3Dedicated
         {
             return Err(Error::Configuration(
                 "S3 write policy exceeds its writer group".into(),

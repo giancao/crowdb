@@ -28,7 +28,7 @@ async fn local_layout_allocates_one_or_two_distinct_physical_mirror_copies() {
                 0,
                 0,
                 copies,
-                ChunkType::S3,
+                ChunkType::S3Dedicated,
                 0,
                 0,
             )

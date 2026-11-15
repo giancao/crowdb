@@ -1,4 +1,4 @@
-use crowdb_protocol::chunkdb::rpc::{DeleteChunkRangeRequest, Location};
+use crowdb_protocol::chunkdb::rpc::{ChunkType, DeleteChunkRangeRequest, DeleteChunkRequest, Location};
 
 use crate::{ChunkAllocator, IoError, Result};
 
@@ -22,6 +22,22 @@ pub async fn reclaim_location(allocator: &dyn ChunkAllocator, location: &Locatio
         .filter(|_| location.length > 0)
         .ok_or_else(|| IoError::MetadataConflict("invalid reclamation range".into()))?;
     u32::try_from(end).map_err(|_| IoError::MetadataConflict("range end exceeds protocol".into()))?;
+    // A dedicated chunk holds one object and has no bitmap: it is deleted whole.
+    if matches!(
+        ChunkType::try_from(i32::from(chunk_id.high.to_be_bytes()[0])),
+        Ok(ChunkType::S3Dedicated | ChunkType::IcebergTableDedicated | ChunkType::DatasetDedicated)
+    ) {
+        return match allocator
+            .delete_chunk(DeleteChunkRequest {
+                chunk_id: Some(chunk_id),
+            })
+            .await
+        {
+            Ok(_) | Err(IoError::ChunkNotFound(_)) => Ok(ReclaimOutcome::Accepted),
+            Err(IoError::Unsupported(_) | IoError::MetadataConflict(_)) => Ok(ReclaimOutcome::Deferred),
+            Err(error) => Err(error),
+        };
+    }
     let request = DeleteChunkRangeRequest {
         chunk_id: Some(chunk_id),
         chunk_offset: u32::try_from(location.offset)

@@ -119,7 +119,10 @@ async fn a_different_owner_generation_cannot_finalize_the_chunk() {
 
 #[tokio::test]
 async fn missing_drain_proof_retains_empty_and_nonempty_layouts_before_any_scan() {
-    for (purpose, payload) in [(ChunkType::S3, b"".as_slice()), (ChunkType::Wal, b"durable")] {
+    for (purpose, payload) in [
+        (ChunkType::S3Dedicated, b"".as_slice()),
+        (ChunkType::Wal, b"durable"),
+    ] {
         let test = TestFinalization::start(purpose).await;
         let expected_end = if payload.is_empty() {
             0
@@ -185,7 +188,7 @@ async fn a_changed_metadata_snapshot_cannot_commit_an_observed_seal_boundary() {
 
 #[tokio::test]
 async fn finalization_resumes_empty_deletion_after_a_completed_seal() {
-    let test = TestFinalization::start(ChunkType::S3).await;
+    let test = TestFinalization::start(ChunkType::S3Dedicated).await;
     test.harness
         .handler
         .seal_observed_chunk(&test.chunk, 0)

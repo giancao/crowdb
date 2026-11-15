@@ -105,7 +105,7 @@ async fn assert_domain_scan(domain: ChunkDomain, foreign: u8, purposes: &[u8]) {
         );
     }
     let after_domain = ChunkId {
-        high: 8 << 56,
+        high: 11 << 56,
         low: 0,
     };
     let _ = test.kv.drain_window();
@@ -119,7 +119,12 @@ async fn assert_domain_scan(domain: ChunkDomain, foreign: u8, purposes: &[u8]) {
 
 #[tokio::test]
 async fn user_data_scans_exclude_system_pages_before_transfer() {
-    Box::pin(assert_domain_scan(ChunkDomain::UserData, 1, &[4, 5, 6, 7])).await;
+    Box::pin(assert_domain_scan(
+        ChunkDomain::UserData,
+        1,
+        &[4, 5, 6, 7, 8, 9, 10],
+    ))
+    .await;
 }
 
 #[tokio::test]

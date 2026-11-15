@@ -65,9 +65,12 @@ enum FBChunkType : int16 {
     BtreePage = 2,
     PageIndex = 3,
     Stream = 4,
-    S3 = 5,
-    IcebergTable = 6,
-    Dataset = 7,
+    S3Dedicated = 5,
+    S3Shared = 6,
+    IcebergTableDedicated = 7,
+    IcebergTableShared = 8,
+    DatasetDedicated = 9,
+    DatasetShared = 10,
 }
 
 // ── Strip types ──────────────────────────────────────────────────
@@ -142,6 +145,8 @@ table FBChunk {
     cleanup_intents:[FBStripCleanupIntent];
     last_strip_replacement:crowdb.rpc.proto.FBInt128;
     owner_key:[ubyte];
+    // Zero means the chunk has no bitmap.
+    bitmap_unit_bytes:uint32;
 }
 
 table FBStripCleanupIntent {
@@ -166,6 +171,7 @@ table FBAllocateChunkRequest {
     writer_epoch:uint64;
     writer_lease_ms:uint64;
     owner_key:[ubyte];
+    bitmap_unit_bytes:uint32;
 }
 
 table FBAllocateChunkResponse {

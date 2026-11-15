@@ -23,7 +23,7 @@ async fn relocation_journal_copies_publishes_then_frees_exact_source() {
             strip_count: 1,
             strip_type: StripType::Mirror as i32,
             copy_count: 3,
-            chunk_type: ChunkType::S3 as i32,
+            chunk_type: ChunkType::S3Dedicated as i32,
             writer_epoch: 17,
             writer_lease_ms: 60_000,
             ..Default::default()

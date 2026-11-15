@@ -137,7 +137,7 @@ mod tests {
         assert!(chunk_owner_key_matches_type(ChunkType::Stream, &key));
         assert!(chunk_owner_key_matches_type(ChunkType::Wal, &key));
         assert!(!chunk_owner_key_matches_type(ChunkType::Stream, &[]));
-        assert!(chunk_owner_key_matches_type(ChunkType::S3, &[]));
+        assert!(chunk_owner_key_matches_type(ChunkType::S3Shared, &[]));
     }
 }
 

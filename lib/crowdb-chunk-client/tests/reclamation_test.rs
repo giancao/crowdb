@@ -159,3 +159,117 @@ async fn invalid_identities_and_unrepresentable_ranges_never_send_a_notification
     }
     assert_eq!(allocator.calls.load(Ordering::Relaxed), 0);
 }
+
+struct DedicatedAllocator {
+    deletes: AtomicUsize,
+    missing: bool,
+}
+
+#[async_trait]
+impl ChunkAllocator for DedicatedAllocator {
+    async fn allocate_chunk(&self, _: AllocateChunkRequest) -> Result<AllocateChunkResponse> {
+        unreachable!()
+    }
+    async fn append_chunk(&self, _: AppendChunkRequest) -> Result<AppendChunkResponse> {
+        unreachable!()
+    }
+    async fn seal_chunk(&self, _: SealChunkRequest) -> Result<SealChunkResponse> {
+        unreachable!()
+    }
+    async fn query_chunk(&self, _: QueryChunkRequest) -> Result<QueryChunkResponse> {
+        panic!("dedicated reclamation must not query chunk metadata");
+    }
+    async fn delete_chunk(&self, request: DeleteChunkRequest) -> Result<DeleteChunkResponse> {
+        assert_eq!(request.chunk_id.unwrap().low, 7);
+        self.deletes.fetch_add(1, Ordering::Relaxed);
+        if self.missing {
+            return Err(IoError::ChunkNotFound("already deleted".into()));
+        }
+        Ok(DeleteChunkResponse { chunk: None })
+    }
+    async fn delete_chunk_range(&self, _: DeleteChunkRangeRequest) -> Result<DeleteChunkRangeResponse> {
+        panic!("dedicated chunks are never range-deleted");
+    }
+}
+
+#[tokio::test]
+async fn dedicated_chunks_are_deleted_whole_and_shared_chunks_use_range_deletion() {
+    use crowdb_protocol::chunkdb::rpc::ChunkType;
+    for kind in [
+        ChunkType::S3Dedicated,
+        ChunkType::IcebergTableDedicated,
+        ChunkType::DatasetDedicated,
+    ] {
+        for missing in [false, true] {
+            let allocator = DedicatedAllocator {
+                deletes: AtomicUsize::new(0),
+                missing,
+            };
+            let location = Location {
+                chunk_id: Some(ChunkId {
+                    high: (kind as u64) << 56,
+                    low: 7,
+                }),
+                offset: 0,
+                length: 5000,
+                logical_offset: 0,
+                logical_length: 4900,
+            };
+            assert_eq!(
+                reclaim_location(&allocator, &location).await.unwrap(),
+                ReclaimOutcome::Accepted
+            );
+            assert_eq!(allocator.deletes.load(Ordering::Relaxed), 1);
+        }
+    }
+    // A shared location keeps its exact offset and encoded length; ChunkDB derives the units.
+    for kind in [
+        ChunkType::S3Shared,
+        ChunkType::IcebergTableShared,
+        ChunkType::DatasetShared,
+    ] {
+        let allocator = TestAllocator::new(TestReply::Accepted(false), (4096, 5000));
+        let mut location = allocator.location();
+        location.chunk_id = Some(ChunkId {
+            high: (kind as u64) << 56,
+            low: 2,
+        });
+        assert_eq!(
+            reclaim_location(&SharedIdentity(&allocator, location.chunk_id), &location)
+                .await
+                .unwrap(),
+            ReclaimOutcome::Accepted
+        );
+        assert_eq!(allocator.calls.load(Ordering::Relaxed), 1);
+    }
+}
+
+/// Forwards range deletion to `TestAllocator` after checking the shared chunk identity.
+struct SharedIdentity<'a>(&'a TestAllocator, Option<ChunkId>);
+
+#[async_trait]
+impl ChunkAllocator for SharedIdentity<'_> {
+    async fn allocate_chunk(&self, _: AllocateChunkRequest) -> Result<AllocateChunkResponse> {
+        unreachable!()
+    }
+    async fn append_chunk(&self, _: AppendChunkRequest) -> Result<AppendChunkResponse> {
+        unreachable!()
+    }
+    async fn seal_chunk(&self, _: SealChunkRequest) -> Result<SealChunkResponse> {
+        unreachable!()
+    }
+    async fn query_chunk(&self, _: QueryChunkRequest) -> Result<QueryChunkResponse> {
+        panic!("range notifications must not query chunk metadata");
+    }
+    async fn delete_chunk(&self, _: DeleteChunkRequest) -> Result<DeleteChunkResponse> {
+        panic!("shared chunks are never deleted whole by one object");
+    }
+    async fn delete_chunk_range(
+        &self,
+        mut request: DeleteChunkRangeRequest,
+    ) -> Result<DeleteChunkRangeResponse> {
+        assert_eq!(request.chunk_id, self.1);
+        request.chunk_id = self.0.location().chunk_id;
+        self.0.delete_chunk_range(request).await
+    }
+}

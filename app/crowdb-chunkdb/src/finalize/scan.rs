@@ -37,8 +37,10 @@ pub(super) async fn complete_boundary(io: Arc<ConversionDiskIo>, chunk: Arc<Chun
             )
         })?;
     // Ordinary object publication already persists its exact physical cursor.
-    // Only grouped streams have acknowledged data newer than that checkpoint.
-    if !grouped && chunk.acknowledged_cursor == 0 {
+    // Grouped streams and bitmap chunks can hold complete writes newer than
+    // that checkpoint; their validity bits are restored when the seal commits.
+    let beyond_checkpoint = grouped || chunk.bitmap_unit_bytes != 0;
+    if !beyond_checkpoint && chunk.acknowledged_cursor == 0 {
         return Ok(0);
     }
     let config = FrameScanConfig {
@@ -49,7 +51,7 @@ pub(super) async fn complete_boundary(io: Arc<ConversionDiskIo>, chunk: Arc<Chun
             FrameScanMode::Ordinary
         },
         physical_start: 0,
-        physical_limit: if grouped {
+        physical_limit: if beyond_checkpoint {
             capacity
         } else {
             chunk.acknowledged_cursor
@@ -57,6 +59,7 @@ pub(super) async fn complete_boundary(io: Arc<ConversionDiskIo>, chunk: Arc<Chun
         required_end: chunk.acknowledged_cursor,
         logical_start: 0,
         max_append_bytes: capacity,
+        align: if grouped { 0 } else { chunk.bitmap_unit_bytes },
     };
     let readers: Vec<Arc<dyn FrameWindowReader>> = (0..replicas)
         .map(|replica| {

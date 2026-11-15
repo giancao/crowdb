@@ -116,7 +116,7 @@ async fn verify_range_notification(client: &ChunkdbClient) {
             strip_count: 1,
             strip_type: StripType::Mirror as i32,
             copy_count: 3,
-            chunk_type: ChunkType::S3 as i32,
+            chunk_type: ChunkType::S3Dedicated as i32,
             writer_epoch: 17,
             writer_lease_ms: 60_000,
             ..Default::default()
@@ -194,7 +194,7 @@ pub(super) async fn allocate_protected(client: &ChunkdbClient) -> crowdb_protoco
             strip_count: 3,
             strip_type: StripType::Mirror as i32,
             copy_count: 3,
-            chunk_type: ChunkType::S3 as i32,
+            chunk_type: ChunkType::S3Dedicated as i32,
             ..Default::default()
         })
         .await

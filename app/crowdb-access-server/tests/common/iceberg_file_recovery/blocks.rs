@@ -18,7 +18,7 @@ impl TestBlocks {
     }
 
     pub fn with_store(&self, store: Arc<dyn CatalogStore>) -> NativeFileBlocks {
-        let mut policy = SmallWritePolicy::new(ChunkType::IcebergTable);
+        let mut policy = SmallWritePolicy::new(ChunkType::IcebergTableShared);
         policy.conversion_enabled = false;
         let client =
             ChunkIoClient::from_parts_with_small_policy(self.allocator.clone(), self.disk.clone(), policy)

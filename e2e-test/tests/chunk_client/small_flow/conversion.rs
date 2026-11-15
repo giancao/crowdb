@@ -110,7 +110,7 @@ async fn manual_chunkdb_trigger_converts_closed_active_range_end_to_end() {
     let mut configured = policy();
     configured.chunk_capacity = 16 * MIB as u64;
     configured.conversion_enabled = false;
-    configured.chunk_type = ChunkType::S3;
+    configured.chunk_type = ChunkType::S3Shared;
     let stack = E2eStack::start(configured).await;
     let mut object_groups = Vec::new();
     for value in 11_u8..19 {
@@ -133,8 +133,8 @@ async fn manual_chunkdb_trigger_converts_closed_active_range_end_to_end() {
     .await
     .expect("background close checkpoint did not reach strip 7");
     assert_eq!(before.state, ChunkState::Active as i32);
-    assert_eq!(before.chunk_type, ChunkType::S3 as i32);
-    assert_eq!(before.id.unwrap().high >> 56, ChunkType::S3 as u64);
+    assert_eq!(before.chunk_type, ChunkType::S3Shared as i32);
+    assert_eq!(before.id.unwrap().high >> 56, ChunkType::S3Shared as u64);
     assert_eq!(before.closed_strip_sequence, Some(7));
     assert_eq!(before.strips.len(), 8);
     assert!(before
@@ -168,7 +168,7 @@ async fn manual_chunkdb_trigger_converts_closed_active_range_end_to_end() {
     .expect("manual conversion task did not finish");
     let strip = &converted.strips[0];
     assert_eq!(converted.id, before.id);
-    assert_eq!(converted.chunk_type, ChunkType::S3 as i32);
+    assert_eq!(converted.chunk_type, ChunkType::S3Shared as i32);
     let Some(Strip::EcStrip(ec)) = &strip.strip else {
         unreachable!();
     };

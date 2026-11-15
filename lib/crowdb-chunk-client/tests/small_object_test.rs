@@ -133,6 +133,7 @@ impl ChunkAllocator for MockAllocator {
             cleanup_intents: vec![],
             last_strip_replacement: None,
             owner_key: req.owner_key,
+            bitmap_unit_bytes: req.bitmap_unit_bytes,
         };
         let mut state = self.state.lock().unwrap();
         state.allocations += 1;
@@ -616,7 +617,7 @@ impl DiskWriter for SelectiveFailureDiskWriter {
 
 fn policy() -> SmallWritePolicy {
     SmallWritePolicy {
-        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared,
         object_limit: 1024 * 1024,
         memory_budget: 4 * 1024 * 1024,
         queue_capacity: 128,
@@ -644,7 +645,7 @@ fn policy() -> SmallWritePolicy {
 
 #[test]
 fn small_object_elasticity_defaults_start_at_one_and_cap_at_thirty_two() {
-    let policy = SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3);
+    let policy = SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared);
     assert_eq!(policy.min_pipelines, 1);
     assert_eq!(policy.max_pipelines, 32);
     assert_eq!(policy.scale_out_queue_bytes, 4 * 1024 * 1024);
@@ -674,7 +675,7 @@ async fn stopped_small_write_manager_reports_terminal_failure() {
 #[tokio::test]
 async fn small_object_uses_owning_chunk_type() {
     let mut iceberg_policy = policy();
-    iceberg_policy.chunk_type = ChunkType::IcebergTable;
+    iceberg_policy.chunk_type = ChunkType::IcebergTableShared;
     let (client, allocator, _) = client(iceberg_policy);
     let mut writer = client.prepare_small_write(32).await.unwrap();
     writer.on_data(Bytes::from_static(&[7; 32])).await.unwrap();
@@ -683,10 +684,10 @@ async fn small_object_uses_owning_chunk_type() {
     assert!(!chunks.is_empty());
     assert!(chunks
         .iter()
-        .all(|chunk| chunk.chunk_type == ChunkType::IcebergTable as i32));
+        .all(|chunk| chunk.chunk_type == ChunkType::IcebergTableShared as i32));
     assert!(chunks
         .iter()
-        .all(|chunk| chunk.id.unwrap().high >> 56 == ChunkType::IcebergTable as u64));
+        .all(|chunk| chunk.id.unwrap().high >> 56 == ChunkType::IcebergTableShared as u64));
     client.shutdown_small_writes().await.unwrap();
 }
 
@@ -888,15 +889,16 @@ async fn small_object_repairs_two_failed_replicas_from_the_same_shadow() {
             .collect()
     };
     assert_eq!(replacement_images.len(), 2);
-    assert_eq!(
-        replacement_images[0].len(),
-        usize::try_from(frame_bytes(12 * 1024)).unwrap()
-    );
+    // The object owns whole 4 KiB bitmap units: frames plus zero padding.
+    let encoded = usize::try_from(frame_bytes(12 * 1024)).unwrap();
+    let allocated = encoded.next_multiple_of(4096);
+    assert_eq!(replacement_images[0].len(), allocated);
     assert_eq!(replacement_images[0], replacement_images[1]);
-    let frame = parse_frame(&replacement_images[0], locations[0].chunk_id.unwrap()).unwrap();
+    assert!(replacement_images[0][encoded..].iter().all(|byte| *byte == 0));
+    let frame = parse_frame(&replacement_images[0][..encoded], locations[0].chunk_id.unwrap()).unwrap();
     assert_eq!(frame.payload, vec![0x5a; 12 * 1024]);
     assert_eq!(chunks[0].state, ChunkState::Active as i32);
-    assert_eq!(chunks[0].acknowledged_cursor, frame_bytes(12 * 1024));
+    assert_eq!(chunks[0].acknowledged_cursor, allocated as u64);
     assert_eq!(client.small_write_metrics().repaired_replicas, 2);
     assert_eq!(client.small_write_metrics().repairs_avoiding_rotation, 2);
     assert_eq!(client.small_write_metrics().active_repairs, 0);
@@ -955,13 +957,15 @@ async fn two_copy_small_write_crosses_mirror_block_boundary() {
     let mut first = client.prepare_small_write(4000).await.unwrap();
     first.on_data(Bytes::from(vec![0x31; 4000])).await.unwrap();
     let first = first.on_finish().await.unwrap().remove(0);
-    let mut second = client.prepare_small_write(100).await.unwrap();
-    second.on_data(Bytes::from(vec![0x32; 100])).await.unwrap();
+    let mut second = client.prepare_small_write(5000).await.unwrap();
+    second.on_data(Bytes::from(vec![0x32; 5000])).await.unwrap();
     let second = second.on_finish().await.unwrap().remove(0);
 
     assert_eq!(first.chunk_id, second.chunk_id);
-    assert_eq!(second.offset, frame_bytes(4000));
-    assert!(second.offset < 4096 && second.offset + second.length > 4096);
+    // Each object starts on a 4 KiB bitmap unit; the second one spans two units.
+    assert_eq!((first.offset, first.length), (0, frame_bytes(4000)));
+    assert_eq!(second.offset, 4096);
+    assert!(second.offset < 8192 && second.offset + second.length > 8192);
     let chunk_id = second.chunk_id.unwrap();
     let base = chunk_id.low * 4096 * 4096;
     let mut copies = HashMap::<u64, Vec<u8>>::new();
@@ -976,17 +980,19 @@ async fn two_copy_small_write_crosses_mirror_block_boundary() {
     }
     assert_eq!(copies.len(), 2);
     for copy in copies.values() {
-        let first_end = usize::try_from(second.offset).unwrap();
+        let first_end = usize::try_from(first.length).unwrap();
+        let second_start = usize::try_from(second.offset).unwrap();
         let second_end = usize::try_from(second.offset + second.length).unwrap();
         assert_eq!(
             parse_frame(&copy[..first_end], chunk_id).unwrap().payload,
             vec![0x31; 4000]
         );
+        assert!(copy[first_end..second_start].iter().all(|byte| *byte == 0));
         assert_eq!(
-            parse_frame(&copy[first_end..second_end], chunk_id)
+            parse_frame(&copy[second_start..second_end], chunk_id)
                 .unwrap()
                 .payload,
-            vec![0x32; 100]
+            vec![0x32; 5000]
         );
     }
     assert_eq!(allocator.snapshot().2, 2);
@@ -1268,7 +1274,7 @@ async fn small_object_manager_scales_out_by_queued_bytes_then_drains_idle_pipeli
 #[tokio::test]
 async fn protocol_small_write_pools_scale_independently() {
     let mut s3_policy = policy();
-    s3_policy.chunk_type = ChunkType::S3;
+    s3_policy.chunk_type = ChunkType::S3Shared;
     s3_policy.max_pipelines = 2;
     s3_policy.max_batch_bytes = 16 * 1024;
     s3_policy.max_batch_objects = 1;
@@ -1276,7 +1282,7 @@ async fn protocol_small_write_pools_scale_independently() {
     s3_policy.control_interval = Duration::from_millis(2);
     s3_policy.cooldown = Duration::from_millis(1);
     let mut iceberg_policy = s3_policy.clone();
-    iceberg_policy.chunk_type = ChunkType::IcebergTable;
+    iceberg_policy.chunk_type = ChunkType::IcebergTableShared;
     let (s3, _, s3_disk) = client(s3_policy);
     let (iceberg, _, iceberg_disk) = client(iceberg_policy);
     s3_disk.delay_ms.store(30, Ordering::Relaxed);

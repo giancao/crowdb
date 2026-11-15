@@ -98,7 +98,7 @@ impl TestDatasetTransport {
                 chunks: Arc::new(ChunkIoClient::from_parts(
                     backend.clone(),
                     Arc::new(RoutedDiskWriter::from_client(disk)),
-                    ChunkType::Dataset,
+                    ChunkType::DatasetShared,
                 )),
             },
             RuntimeLimits {

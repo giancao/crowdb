@@ -703,6 +703,7 @@ impl ChunkdbRpcService {
                         .owner_key()
                         .map(|value| value.iter().collect())
                         .unwrap_or_default(),
+                    fb_req.bitmap_unit_bytes(),
                 )
                 .await;
             if result.is_ok() {

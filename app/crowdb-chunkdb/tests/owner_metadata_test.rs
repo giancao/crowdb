@@ -11,6 +11,7 @@ fn attributed_chunk_persistence_round_trips_owner_key() {
         id: Some(ChunkId { high: 8, low: 9 }),
         chunk_type: ChunkType::Stream as i32,
         owner_key: crowdb_protocol::chunk_stream::StreamName { high: 10, low: 11 }.chunk_owner_key(),
+        bitmap_unit_bytes: 4096,
         strips: vec![ChunkStrip {
             placement_priority: PlacementPriority::NodeFirst as i32,
             placement_assessment: Some(PlacementAssessment {
@@ -25,11 +26,12 @@ fn attributed_chunk_persistence_round_trips_owner_key() {
                 usage_fresh: true,
             }),
             placement_repair_required: true,
+            usage_bitmap: vec![0b0000_0101, 0],
             ..ChunkStrip::default()
         }],
         ..Chunk::default()
     };
     let bytes = encode_chunk_for_tests(&chunk).unwrap();
-    assert_eq!(&bytes[..8], b"CCHK\x02\x00\x00\x00");
+    assert_eq!(&bytes[..8], b"CCHK\x03\x00\x00\x00");
     assert_eq!(decode_chunk_for_tests(&bytes).unwrap(), chunk);
 }

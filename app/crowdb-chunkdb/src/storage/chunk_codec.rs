@@ -8,7 +8,7 @@ use bincode::Options;
 use crowdb_protocol::chunkdb::rpc::Chunk;
 
 const MAGIC: &[u8; 4] = b"CCHK";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const HEADER: usize = 12;
 
 pub(super) fn encode_chunk(chunk: &Chunk) -> Result<Vec<u8>> {

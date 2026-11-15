@@ -67,7 +67,7 @@ pub fn runtime_with_limits(
             chunks: Arc::new(ChunkIoClient::from_parts(
                 Arc::new(TestNoPayload),
                 Arc::new(TestNoPayload),
-                ChunkType::S3,
+                ChunkType::S3Shared,
             )),
         },
         limits,

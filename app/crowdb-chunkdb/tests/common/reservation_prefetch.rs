@@ -20,7 +20,7 @@ async fn append_offset_prefetch_survives_cursor_progress_and_live_writer_protect
             0,
             0,
             3,
-            ChunkType::S3,
+            ChunkType::S3Shared,
             writer_epoch,
             30_000,
         )
@@ -177,7 +177,18 @@ async fn reservation_confirmation_conflict_reloads_durable_chunk() {
     let harness = ChunkdbHarness::start(&cluster).await;
     let chunk = harness
         .handler
-        .allocate_chunk(None, 1, 1, StripType::Mirror, 0, 0, 3, ChunkType::S3, 91, 30_000)
+        .allocate_chunk(
+            None,
+            1,
+            1,
+            StripType::Mirror,
+            0,
+            0,
+            3,
+            ChunkType::S3Shared,
+            91,
+            30_000,
+        )
         .await
         .unwrap();
     let chunk_id = chunk.id.unwrap();

@@ -109,7 +109,7 @@ fn small_policy(copies: u32) -> SmallWritePolicy {
     SmallWritePolicy {
         mirror_copies: copies,
         conversion_enabled: false,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     }
 }
 
@@ -118,7 +118,7 @@ fn large_policy() -> LargeWritePolicy {
         ec_scheme: EcScheme::new(4, 1),
         client: Arc::new(ChunkClientConfig {
             max_chunk_size: 64 * MIB as u64,
-            ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+            ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated)
         }),
     }
 }
@@ -161,7 +161,7 @@ async fn reader_with_failures(stack: &E2eStack, failed: Vec<DiskId>) -> (ChunkIo
     let reader = ChunkIoClient::from_parts(
         chunkdb,
         fault.clone(),
-        crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared,
     );
     (reader, fault)
 }
@@ -176,7 +176,7 @@ async fn reader_with_segment_failures(stack: &E2eStack, failed_segments: Vec<Seg
         corrupt: false,
         max_read: AtomicUsize::new(0),
     });
-    ChunkIoClient::from_parts(chunkdb, fault, crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+    ChunkIoClient::from_parts(chunkdb, fault, crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
 }
 
 async fn reader_with_transient_failure(stack: &E2eStack, failed: Vec<DiskId>) -> ChunkIoClient {
@@ -191,7 +191,7 @@ async fn reader_with_transient_failure(stack: &E2eStack, failed: Vec<DiskId>) ->
             corrupt: false,
             max_read: AtomicUsize::new(0),
         }),
-        crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+        crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared,
     )
 }
 
@@ -212,7 +212,7 @@ async fn reader_with_corruption(
         ChunkIoClient::from_parts(
             chunkdb,
             fault.clone(),
-            crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+            crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared,
         ),
         fault,
     )

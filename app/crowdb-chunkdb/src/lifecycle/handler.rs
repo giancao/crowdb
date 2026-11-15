@@ -528,6 +528,9 @@ impl LifecycleHandler {
             }
             chunk.closed_strip_sequence = Some(sequence);
         }
+        // Only the newly confirmed range is marked; earlier bits keep any clear.
+        let confirmed_from = chunk.acknowledged_cursor;
+        crowdb_protocol::chunk_bitmap::mark_written(&mut chunk, confirmed_from, acknowledged_cursor);
         chunk.acknowledged_cursor = acknowledged_cursor;
         chunk.writer_lease_deadline_ms = now_ms.saturating_add(writer_lease_ms);
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);
@@ -732,7 +735,9 @@ impl LifecycleHandler {
             && chunk
                 .strips
                 .get(start..start.saturating_add(replacement_strips.len()))
-                == Some(replacement_strips)
+                .is_some_and(|installed| {
+                    crowdb_protocol::chunk_bitmap::same_layout(installed, replacement_strips)
+                })
         {
             return Ok(chunk);
         }
@@ -774,9 +779,8 @@ impl LifecycleHandler {
             self.confirm_tentative_segments(new_only.clone()).await?;
         }
 
-        chunk
-            .strips
-            .splice(start..end, replacement_strips.iter().cloned());
+        let replacement = carry_replacement_bitmap(&chunk, start..end, replacement_strips)?;
+        chunk.strips.splice(start..end, replacement);
         chunk.capacity = chunk.strips.iter().map(|strip| strip.capacity).sum();
         chunk.next_strip_sequence = next_strip_sequence;
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);
@@ -1361,6 +1365,43 @@ fn assign_strip_offsets(strips: &mut [ChunkStrip], mut chunk_offset: u32) {
         strip.chunk_offset = chunk_offset;
         chunk_offset = chunk_offset.saturating_add(strip.capacity);
     }
+}
+
+/// A replacement keeps the logical range, so it inherits the current validity
+/// bits, including clears committed after the caller planned it.
+fn carry_replacement_bitmap(
+    chunk: &Chunk,
+    range: std::ops::Range<usize>,
+    replacement_strips: &[ChunkStrip],
+) -> Result<Vec<ChunkStrip>, LifecycleError> {
+    let mut replacement = replacement_strips.to_vec();
+    if chunk.bitmap_unit_bytes != 0
+        && !crowdb_protocol::chunk_bitmap::carry_over(
+            &chunk.strips[range],
+            &mut replacement,
+            chunk.bitmap_unit_bytes,
+        )
+    {
+        return Err(LifecycleError::InvalidRequest(
+            "replacement cannot carry the bitmap of the replaced range".into(),
+        ));
+    }
+    Ok(replacement)
+}
+
+/// Gives every new strip of a bitmap chunk an all-zero bitmap of the exact
+/// length its geometry requires. Chunks without a bitmap are left untouched.
+fn init_strip_bitmaps(strips: &mut [ChunkStrip], bitmap_unit_bytes: u32) -> Result<(), LifecycleError> {
+    if bitmap_unit_bytes == 0 {
+        return Ok(());
+    }
+    for strip in strips {
+        strip.usage_bitmap = crowdb_protocol::chunk_bitmap::zeroed(strip.capacity, bitmap_unit_bytes)
+            .ok_or_else(|| {
+                LifecycleError::InvalidRequest("strip capacity is not a whole number of bitmap units".into())
+            })?;
+    }
+    Ok(())
 }
 
 fn unix_time_ms() -> u64 {

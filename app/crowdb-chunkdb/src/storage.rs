@@ -7,7 +7,6 @@
 //! routed KV group. Chunk records have one explicit, strictly decoded envelope.
 
 mod chunk_codec;
-pub mod range_retirement;
 pub mod reservation;
 mod scope;
 use chunk_codec::{decode_chunk, encode_chunk};

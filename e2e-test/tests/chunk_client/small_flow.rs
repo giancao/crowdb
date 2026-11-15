@@ -140,7 +140,7 @@ fn policy() -> SmallWritePolicy {
         chunk_capacity: 2 * MIB as u64,
         object_limit: MAX_FRAME_V2_PAYLOAD_BYTES,
         mirror_copies: 2,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     }
 }
 

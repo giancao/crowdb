@@ -52,7 +52,18 @@ impl TestRepairTargets {
         let harness = ChunkdbHarness::start(&cluster).await;
         let chunk = harness
             .handler
-            .allocate_chunk(None, 1, 1, StripType::Mirror, 0, 0, 2, ChunkType::S3, 0, 0)
+            .allocate_chunk(
+                None,
+                1,
+                1,
+                StripType::Mirror,
+                0,
+                0,
+                2,
+                ChunkType::S3Dedicated,
+                0,
+                0,
+            )
             .await
             .unwrap();
         let Strip::MirrorStrip(mirror) = chunk.strips[0].strip.as_ref().unwrap() else {

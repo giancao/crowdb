@@ -101,7 +101,7 @@ async fn http_chunkio_round_trip_uses_selected_transport_and_exact_framed_bytes(
     let chunks = Arc::new(ChunkIoClient::from_parts(
         Arc::new(allocator::TestAllocator::default()),
         Arc::new(RoutedDiskWriter::from_client(Arc::clone(&client))),
-        ChunkType::S3,
+        ChunkType::S3Shared,
     ));
     let handler = Arc::new(http::TestHttp::new(Arc::clone(&chunks)));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -24,6 +24,7 @@ impl TestFramePrefix {
             required_end: 0,
             logical_start: 100,
             max_append_bytes: 64 * 1024 * 1024,
+            align: 0,
         }
     }
     pub fn group(offset: usize, length: usize) -> Vec<u8> {

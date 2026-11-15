@@ -51,7 +51,7 @@ impl FileBlockStore for TestBlocks {
         let index = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let root = ChunkRoot {
             chunk: crowdb_protocol::common::ChunkId {
-                high: (crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTable as u64) << 56,
+                high: (crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTableShared as u64) << 56,
                 low: index,
             },
             offset: 0,

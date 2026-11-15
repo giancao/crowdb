@@ -205,7 +205,7 @@ fn local_one_and_three_node_mirrors_are_explicit_and_never_relax_production() {
         assert_eq!(dataset.mirror_copies, copies);
         assert_eq!(
             dataset.chunk_type,
-            crowdb_protocol::chunkdb::rpc::ChunkType::Dataset
+            crowdb_protocol::chunkdb::rpc::ChunkType::DatasetShared
         );
         assert!(!dataset.conversion_enabled);
         config.small_write.conversion_enabled = true;

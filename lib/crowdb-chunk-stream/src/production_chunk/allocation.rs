@@ -42,6 +42,7 @@ impl ProductionStreamChunkStore {
                 writer_epoch,
                 writer_lease_ms: self.writer_lease_ms,
                 owner_key: stream_name.chunk_owner_key(),
+                bitmap_unit_bytes: 0,
             })
             .await
             .map_err(io_error)?;

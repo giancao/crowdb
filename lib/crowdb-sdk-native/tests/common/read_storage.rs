@@ -171,7 +171,11 @@ impl TestFixture {
                 metadata_transport: Arc::new(
                     ChunkKvRpcTransport::with_config(8, 1, 1, &ChunkKvRpcTransportConfig::default()).unwrap(),
                 ),
-                chunks: Arc::new(ChunkIoClient::from_parts(backend.clone(), disk, ChunkType::S3)),
+                chunks: Arc::new(ChunkIoClient::from_parts(
+                    backend.clone(),
+                    disk,
+                    ChunkType::S3Shared,
+                )),
             },
             RuntimeLimits {
                 held_bytes,

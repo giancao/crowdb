@@ -64,6 +64,7 @@ impl MemoryStreamStore {
             required_end: active.acknowledged_cursor.max(chunk.cursor),
             logical_start: active.logical_start,
             max_append_bytes: chunk.capacity,
+            align: 0,
         })
         .map_err(|error| frame_error(&error))?;
         let mut offset = usize::try_from(active.acknowledged_cursor)

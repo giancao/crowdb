@@ -113,7 +113,7 @@ async fn connect(stack: &TestNativeStorage) -> ChunkIoClient {
             chunk_capacity: 1024 * 1024 * 1024,
             mirror_copies: 2,
             conversion_enabled: false,
-            ..SmallWritePolicy::new(ChunkType::IcebergTable)
+            ..SmallWritePolicy::new(ChunkType::IcebergTableShared)
         },
     })
     .await

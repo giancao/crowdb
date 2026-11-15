@@ -86,9 +86,12 @@ pub enum ChunkType {
     BtreePage = 2,
     PageIndex = 3,
     Stream = 4,
-    S3 = 5,
-    IcebergTable = 6,
-    Dataset = 7,
+    S3Dedicated = 5,
+    S3Shared = 6,
+    IcebergTableDedicated = 7,
+    IcebergTableShared = 8,
+    DatasetDedicated = 9,
+    DatasetShared = 10,
 }
 impl_enum_conversions!(
     ChunkType,
@@ -96,10 +99,40 @@ impl_enum_conversions!(
     BtreePage = 2,
     PageIndex = 3,
     Stream = 4,
-    S3 = 5,
-    IcebergTable = 6,
-    Dataset = 7
+    S3Dedicated = 5,
+    S3Shared = 6,
+    IcebergTableDedicated = 7,
+    IcebergTableShared = 8,
+    DatasetDedicated = 9,
+    DatasetShared = 10
 );
+
+impl ChunkType {
+    /// Shared business chunks and both Tree purposes record logical-range
+    /// validity in bitmap strips; every other type uses ordinary strips.
+    #[must_use]
+    pub const fn uses_bitmap(self) -> bool {
+        matches!(
+            self,
+            Self::BtreePage
+                | Self::PageIndex
+                | Self::S3Shared
+                | Self::IcebergTableShared
+                | Self::DatasetShared
+        )
+    }
+
+    /// Granularity a writer selects when creating a chunk of this type;
+    /// zero for types without a bitmap.
+    #[must_use]
+    pub const fn bitmap_unit_bytes(self) -> u32 {
+        if self.uses_bitmap() {
+            crate::chunk_bitmap::BITMAP_UNIT_BYTES
+        } else {
+            0
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[repr(i32)]
@@ -224,6 +257,9 @@ pub struct Chunk {
     pub last_strip_replacement: Option<ChunkId>,
     /// Stream/Wal owner identity; other chunk types leave this empty.
     pub owner_key: Vec<u8>,
+    /// Immutable bitmap granularity inherited by every strip; zero means the
+    /// chunk has no bitmap.
+    pub bitmap_unit_bytes: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -269,6 +305,8 @@ pub struct AllocateChunkRequest {
     pub writer_lease_ms: u64,
     /// Stable logical owner identity for attributed shared chunks.
     pub owner_key: Vec<u8>,
+    /// Bitmap granularity fixed for the chunk; zero for types without a bitmap.
+    pub bitmap_unit_bytes: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]

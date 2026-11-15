@@ -50,7 +50,7 @@ impl TestRecovery {
                 0,
                 0,
                 3,
-                crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+                crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
                 0,
                 0,
             )

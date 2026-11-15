@@ -25,7 +25,7 @@ use crate::file::{FileBlockStore, NativeFileBlocks};
 pub type IcebergStorageError = Box<dyn std::error::Error + Send + Sync>;
 
 pub fn own_large_write(policy: &mut LargeWritePolicy) {
-    Arc::make_mut(&mut policy.client).chunk_type = ChunkType::IcebergTable;
+    Arc::make_mut(&mut policy.client).chunk_type = ChunkType::IcebergTableDedicated;
 }
 
 #[must_use]
@@ -33,7 +33,7 @@ pub fn default_large_write() -> LargeWritePolicy {
     let mut policy = LargeWritePolicy {
         ec_scheme: EcScheme::new(8, 4),
         client: Arc::new(ChunkClientConfig::new(
-            crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTable,
+            crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTableDedicated,
         )),
     };
     own_large_write(&mut policy);
@@ -190,10 +190,10 @@ impl IcebergLargeWriteSettings {
             return Err("Iceberg EC data and code counts are invalid".into());
         }
         let mut client = ChunkClientConfig {
-            chunk_type: ChunkType::IcebergTable,
+            chunk_type: ChunkType::IcebergTableDedicated,
             large_mirror_copies: self.mirror_copies,
             read_buffer_size: self.disk_block_bytes,
-            ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTable)
+            ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTableDedicated)
         };
         if let Some(value) = self.max_chunk_size {
             client.max_chunk_size = value;
@@ -258,7 +258,7 @@ pub async fn connect_with_chunk_kv_config(
     diskio_rpc_workers: u32,
     chunk_kv_rpc: &ChunkKvRpcTransportConfig,
 ) -> Result<(Arc<CatalogRepository>, Arc<RoutedCatalogStore>, ChunkIoClient), IcebergStorageError> {
-    small_write.chunk_type = ChunkType::IcebergTable;
+    small_write.chunk_type = ChunkType::IcebergTableShared;
     let control = Arc::new(PaxosKvClient::new(KvConfig::new(seeds.clone())));
     let client_config = ClientConfig::default();
     let source = Arc::new(Group0ChunkKvRangeCatalogSource::from_shared(Arc::clone(&control)));

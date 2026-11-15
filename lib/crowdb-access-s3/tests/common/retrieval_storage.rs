@@ -16,7 +16,7 @@ pub struct TestReadStorage {
 
 impl TestReadStorage {
     pub fn client(self: &Arc<Self>) -> ChunkIoClient {
-        ChunkIoClient::from_parts(self.clone(), self.clone(), ChunkType::S3)
+        ChunkIoClient::from_parts(self.clone(), self.clone(), ChunkType::S3Shared)
     }
 }
 

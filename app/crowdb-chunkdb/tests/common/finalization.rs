@@ -64,6 +64,7 @@ impl TestFinalization {
                 } else {
                     Vec::new()
                 },
+                chunk_type.bitmap_unit_bytes(),
             )
             .await
             .unwrap();

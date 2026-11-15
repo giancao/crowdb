@@ -126,7 +126,7 @@ impl ChunkStore {
         // namespaces. A short lower bound still includes its zero-valued ID.
         let (first, end) = match domain {
             ChunkDomain::System => (1, 4),
-            ChunkDomain::UserData => (4, 8),
+            ChunkDomain::UserData => (4, 11),
         };
         let mut lower = prefix.to_vec();
         lower.push(first);

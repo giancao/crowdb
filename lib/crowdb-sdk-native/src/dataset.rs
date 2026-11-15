@@ -37,7 +37,7 @@ impl DatasetClient {
     /// Returns invalid identity/policy, closed runtime or writer group capacity.
     pub fn new(runtime: &ClientRuntime, identity: DatasetIdentity) -> Result<Self> {
         identity.key()?;
-        let mut policy = SmallWritePolicy::new(ChunkType::Dataset);
+        let mut policy = SmallWritePolicy::new(ChunkType::DatasetShared);
         policy.object_limit = crowdb_access_dataset::MAX_UPLOAD_PART_BYTES;
         policy.max_batch_bytes = policy.object_limit;
         policy.max_pipelines = 8;
@@ -54,7 +54,7 @@ impl DatasetClient {
         policy: &SmallWritePolicy,
     ) -> Result<Self> {
         identity.key()?;
-        if policy.chunk_type != ChunkType::Dataset
+        if policy.chunk_type != ChunkType::DatasetShared
             || policy.object_limit < crowdb_access_dataset::MAX_UPLOAD_PART_BYTES
         {
             return Err(crate::Error::Configuration(

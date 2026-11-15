@@ -58,7 +58,7 @@ async fn finalized_empty_tail_recovers_without_reviving_the_deleted_chunk() {
             4 => descriptor.physical_start = 1,
             5 => descriptor.acknowledged_cursor = 1,
             6 => invalid.writer_epoch = 0,
-            7 => invalid.chunk_type = crowdb_protocol::chunkdb::rpc::ChunkType::S3 as i32,
+            7 => invalid.chunk_type = crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated as i32,
             8 => invalid
                 .cleanup_intents
                 .push(crowdb_protocol::chunkdb::rpc::StripCleanupIntent::default()),

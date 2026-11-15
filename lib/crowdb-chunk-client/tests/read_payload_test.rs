@@ -47,7 +47,8 @@ async fn metrics_preserve_payload_ownership_and_record_one_read() {
     let frame_length = storage.data.len();
     let mut registry = MetricsRegistry::new();
     let metrics = Arc::new(ChunkClientMetrics::register(&mut registry));
-    let client = ChunkIoClient::from_parts(storage.clone(), storage, ChunkType::S3).with_metrics(&metrics);
+    let client =
+        ChunkIoClient::from_parts(storage.clone(), storage, ChunkType::S3Shared).with_metrics(&metrics);
     assert_eq!(
         client.transport_status_json().unwrap(),
         br#"{"source":"original"}"#

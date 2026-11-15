@@ -4,7 +4,7 @@
 //! Read-only point observations whose work does not grow with catalog size.
 
 use crowdb_protocol::{
-    chunk_id::{CHUNK_TYPE_S3, CHUNK_TYPE_WAL},
+    chunk_id::{CHUNK_TYPE_S3_DEDICATED, CHUNK_TYPE_WAL},
     chunkdb::rpc::QueryChunkRequest,
     common::ChunkId,
 };
@@ -21,7 +21,7 @@ impl ChunkdbClient {
     pub async fn observe_readiness(&self) -> Result<()> {
         tokio::try_join!(
             self.observe_domain(CHUNK_TYPE_WAL),
-            self.observe_domain(CHUNK_TYPE_S3),
+            self.observe_domain(CHUNK_TYPE_S3_DEDICATED),
         )?;
         Ok(())
     }

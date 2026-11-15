@@ -45,7 +45,7 @@ async fn exercise(reply: TestProbeReply) -> (crowdb_chunk_client::Result<()>, us
             data: OwnedPayload::from(Vec::new()),
         }),
         Arc::new(RoutedDiskWriter::from_client(client.clone())),
-        ChunkType::S3,
+        ChunkType::S3Shared,
     )
     .with_metrics(&aggregate);
     let (_, writer) = io.storage_parts();

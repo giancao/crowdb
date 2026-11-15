@@ -43,7 +43,7 @@ impl TestFrameBatch {
     }
 
     pub(crate) fn writer(&self, chunk_bytes: u64) -> LargeAsyncObjectWriter {
-        let mut config = ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3);
+        let mut config = ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated);
         config.max_chunk_size = chunk_bytes;
         config.large_mirror_copies = None;
         config.read_buffer_size = 1 << 20;

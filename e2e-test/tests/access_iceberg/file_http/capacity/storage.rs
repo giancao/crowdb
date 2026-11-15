@@ -42,7 +42,7 @@ pub(super) async fn chunks(stack: &TestNativeStorage) -> ChunkIoClient {
             chunk_capacity: 1024 * 1024 * 1024,
             mirror_copies: 2,
             conversion_enabled: false,
-            ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTable)
+            ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTableShared)
         },
     })
     .await

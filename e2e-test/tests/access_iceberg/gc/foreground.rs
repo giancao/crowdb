@@ -46,7 +46,7 @@ async fn write_s3_until_stopped(
         SmallWritePolicy {
             conversion_enabled: false,
             mirror_copies: 2,
-            ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTable)
+            ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTableShared)
         },
         ChunkReadPolicy::default(),
     )

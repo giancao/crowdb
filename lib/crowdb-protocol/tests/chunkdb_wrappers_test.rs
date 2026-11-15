@@ -38,7 +38,7 @@ fn chunkdb_advance_write_response_exposes_fenced_cursor_metadata() {
             capacity: 1024,
             sealed_length: 0,
             strips: None,
-            chunk_type: FBChunkType::S3,
+            chunk_type: FBChunkType::S3Dedicated,
             writer_epoch: 77,
             acknowledged_cursor: 4096,
             closed_strip_sequence: 0,
@@ -47,6 +47,7 @@ fn chunkdb_advance_write_response_exposes_fenced_cursor_metadata() {
             cleanup_intents: None,
             last_strip_replacement: None,
             owner_key: Some(owner_key),
+            bitmap_unit_bytes: 0,
         },
     );
     let response = FBAdvanceChunkWriteResponse::create(
@@ -123,6 +124,7 @@ macro_rules! build_mirror_chunk {
                 cleanup_intents: None,
                 last_strip_replacement: None,
                 owner_key: None,
+                bitmap_unit_bytes: 0,
             },
         )
     }};
@@ -132,7 +134,7 @@ macro_rules! build_mirror_chunk {
 fn allocate_chunk_response_success() {
     let mut fbb = FlatBufferBuilder::new();
     let chunk_id = make_chunk_id(1, 42);
-    let chunk = build_mirror_chunk!(&mut fbb, chunk_id, FBChunkState::Active, FBChunkType::S3);
+    let chunk = build_mirror_chunk!(&mut fbb, chunk_id, FBChunkState::Active, FBChunkType::S3Dedicated);
     let resp = FBAllocateChunkResponse::create(
         &mut fbb,
         &FBAllocateChunkResponseArgs {
@@ -160,7 +162,7 @@ fn allocate_chunk_response_success() {
     assert_eq!(id.high(), 1);
     assert_eq!(id.low(), 42);
     assert_eq!(chunk.state(), FBChunkState::Active);
-    assert_eq!(chunk.chunk_type(), FBChunkType::S3);
+    assert_eq!(chunk.chunk_type(), FBChunkType::S3Dedicated);
     let strips = chunk.strips().expect("strips present");
     assert_eq!(strips.len(), 1);
     let strip = strips.get(0);
@@ -297,6 +299,7 @@ fn ec_strip_union_variant() {
             cleanup_intents: None,
             last_strip_replacement: None,
             owner_key: None,
+            bitmap_unit_bytes: 0,
         },
     );
     let resp = FBAllocateChunkResponse::create(
@@ -375,9 +378,19 @@ fn range_response_without_physical_completion_is_not_reclaimed() {
 fn list_chunks_response_with_next_token() {
     let mut fbb = FlatBufferBuilder::new();
     let chunk1_id = make_chunk_id(0, 1);
-    let chunk1 = build_mirror_chunk!(&mut fbb, chunk1_id, FBChunkState::Active, FBChunkType::S3);
+    let chunk1 = build_mirror_chunk!(
+        &mut fbb,
+        chunk1_id,
+        FBChunkState::Active,
+        FBChunkType::S3Dedicated
+    );
     let chunk2_id = make_chunk_id(0, 2);
-    let chunk2 = build_mirror_chunk!(&mut fbb, chunk2_id, FBChunkState::Active, FBChunkType::S3);
+    let chunk2 = build_mirror_chunk!(
+        &mut fbb,
+        chunk2_id,
+        FBChunkState::Active,
+        FBChunkType::S3Dedicated
+    );
     let chunk_vec = fbb.create_vector(&[chunk1, chunk2]);
     let next_tok = make_chunk_id(0, 3);
     let resp = FBListChunksResponse::create(

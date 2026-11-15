@@ -23,7 +23,7 @@ fn iceberg_large_policy_owns_type_and_capacity() {
     .unwrap();
 
     assert_eq!(policy.ec_scheme.data_num, 2);
-    assert_eq!(policy.client.chunk_type, ChunkType::IcebergTable);
+    assert_eq!(policy.client.chunk_type, ChunkType::IcebergTableDedicated);
     assert_eq!(policy.client.large_mirror_copies, Some(1));
     assert_eq!(policy.client.max_chunk_size, 32 * 1024 * 1024);
     assert_eq!(policy.client.prefetch_strips_per_chunk, 2);

@@ -99,8 +99,11 @@ async fn finalizer_seals_a_readable_acknowledged_tree_frame() {
     assert!(matches!(finalizer.execute(&task).await, TaskOutcome::Complete));
     let current = harness.handler.query_chunk(&id).await.unwrap();
     assert_eq!(current.state, ChunkState::Sealed as i32);
-    assert_eq!(current.acknowledged_cursor, cursor);
+    // The frame owns its whole 4 KiB bitmap unit; the seal covers the padding.
+    assert!(cursor < 4096);
+    assert_eq!(current.acknowledged_cursor, 4096);
     assert!(!current.strips.is_empty());
+    assert_eq!(current.strips[0].usage_bitmap[0], 0b0000_0001);
 }
 
 #[tokio::test]
@@ -161,4 +164,97 @@ async fn finalizer_retains_unreadable_acknowledged_frames() {
     assert_eq!(current.state, ChunkState::Active as i32);
     assert_eq!(current.acknowledged_cursor, 131_174);
     assert_eq!(current.strips, chunk.strips);
+}
+
+/// Writes complete objects that the writer never confirmed, then finalizes.
+#[tokio::test]
+async fn finalizer_recovers_padded_shared_objects_written_after_the_persisted_cursor() {
+    let cluster = KvCluster::start_pinned().await;
+    let hardware = cluster.make_hardware_client();
+    seed_hardware(&hardware).await;
+    let _diskdb = DiskdbServer::start(&cluster).await;
+    let service = cluster.make_service_registry_client();
+    let mut diskio = Vec::new();
+    for index in 0..4 {
+        diskio.push(
+            common::diskio_stub::TestDiskio::start(
+                &service,
+                9000 + index,
+                100 + index,
+                10 + index,
+                1000 + index,
+            )
+            .await,
+        );
+    }
+    let harness = ChunkdbHarness::start(&cluster).await;
+    let io = Arc::new(ConversionDiskIo::connect(&service, &hardware).await.unwrap());
+    let chunk = harness
+        .handler
+        .allocate_chunk(
+            None,
+            1,
+            1,
+            StripType::Mirror,
+            0,
+            0,
+            3,
+            ChunkType::S3Shared,
+            1,
+            60_000,
+        )
+        .await
+        .unwrap();
+    let id = chunk.id.unwrap();
+    // Object one fits in one unit; object two needs two. Each is zero-padded to 4 KiB.
+    let mut image = Vec::new();
+    for (payload, fill) in [(1000, 0x31_u8), (5000, 0x32)] {
+        let frame = crowdb_protocol::frame::encode_frame(
+            crowdb_protocol::frame::FrameMagic::RepoSmallV2,
+            id,
+            &vec![fill; payload],
+            1,
+        )
+        .unwrap();
+        image.extend_from_slice(&frame);
+        image.resize(image.len().next_multiple_of(4096), 0);
+    }
+    assert_eq!(image.len(), 3 * 4096);
+    let strip = &chunk.strips[0];
+    let Some(crowdb_protocol::chunkdb::rpc::Strip::MirrorStrip(mirrors)) = &strip.strip else {
+        panic!("expected mirrors");
+    };
+    for segment in &mirrors.segments {
+        io.write_segment(
+            segment,
+            u64::from(strip.unit_kb) * 1024,
+            bytes::Bytes::from(image.clone()),
+        )
+        .await
+        .unwrap();
+    }
+    // The first object was confirmed; the second was written but its info update was lost.
+    harness
+        .handler
+        .advance_chunk_write(&id, 1, chunk.modify_ts, 4096, None, 60_000)
+        .await
+        .unwrap();
+    let bindings = BindingCache::new();
+    bindings
+        .replace(default_binding_table(STORE_ID, DATA_GROUP_ID))
+        .unwrap();
+    let tasks = TaskStore::new(cluster.make_crowdb_client(), bindings);
+    let mut task = tasks
+        .get(&id, TASK_KIND_FINALIZE_CHUNK, &id)
+        .await
+        .unwrap()
+        .unwrap();
+    task.eligible_at_ms = 0;
+    let finalizer = FinalizeChunkTaskHandler::new(Arc::clone(&harness.handler), io);
+    assert!(matches!(finalizer.execute(&task).await, TaskOutcome::Complete));
+    let current = harness.handler.query_chunk(&id).await.unwrap();
+    assert_eq!(current.state, ChunkState::Sealed as i32);
+    assert_eq!(current.acknowledged_cursor, 3 * 4096);
+    assert_eq!(current.strips[0].usage_bitmap[0], 0b0000_0111);
+    assert!(current.strips[0].usage_bitmap[1..].iter().all(|byte| *byte == 0));
 }

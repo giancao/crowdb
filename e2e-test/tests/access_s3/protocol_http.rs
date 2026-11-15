@@ -89,7 +89,7 @@ async fn write_iceberg(iceberg_addr: SocketAddr, seeds: &[String]) {
         SmallWritePolicy {
             mirror_copies: 2,
             conversion_enabled: false,
-            ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+            ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
         },
         2,
         2,
@@ -158,8 +158,10 @@ async fn assert_chunk_layouts(chunkdb_ip: &str) {
             .await
             .unwrap();
         for chunk in listed.chunks {
-            let is_s3 = chunk.chunk_type == ChunkType::S3 as i32;
-            let is_iceberg = chunk.chunk_type == ChunkType::IcebergTable as i32;
+            let is_s3 = chunk.chunk_type == ChunkType::S3Dedicated as i32
+                || chunk.chunk_type == ChunkType::S3Shared as i32;
+            let is_iceberg = chunk.chunk_type == ChunkType::IcebergTableDedicated as i32
+                || chunk.chunk_type == ChunkType::IcebergTableShared as i32;
             if !is_s3 && !is_iceberg {
                 continue;
             }

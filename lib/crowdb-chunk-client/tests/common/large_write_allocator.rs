@@ -122,7 +122,7 @@ impl ChunkAllocator for TestChunkAllocator {
             capacity,
             sealed_length: 0,
             strips: vec![strip.clone()],
-            chunk_type: ChunkType::S3 as i32,
+            chunk_type: ChunkType::S3Dedicated as i32,
             writer_epoch: req.writer_epoch,
             acknowledged_cursor: 0,
             closed_strip_sequence: None,
@@ -131,6 +131,7 @@ impl ChunkAllocator for TestChunkAllocator {
             cleanup_intents: vec![],
             last_strip_replacement: None,
             owner_key: req.owner_key,
+            bitmap_unit_bytes: 0,
         };
 
         st.chunks

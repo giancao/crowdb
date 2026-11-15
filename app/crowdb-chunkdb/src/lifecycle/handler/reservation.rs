@@ -19,8 +19,8 @@ use super::admission::ReservationPermit;
 
 mod allocation;
 use super::{
-    assign_strip_offsets, writer_lease_deadline, CacheHint, ChunkState, LifecycleError, LifecycleHandler,
-    LockPolicy,
+    assign_strip_offsets, init_strip_bitmaps, writer_lease_deadline, CacheHint, ChunkState, LifecycleError,
+    LifecycleHandler, LockPolicy,
 };
 
 #[derive(Debug, Clone)]
@@ -494,7 +494,7 @@ impl LifecycleHandler {
             .await
             .map_err(LifecycleError::Commit)?;
         let first = &group.strips[0];
-        let replacement = ChunkStrip {
+        let mut replacement = ChunkStrip {
             chunk_offset: first.chunk_offset,
             strip_sequence: first.strip_sequence,
             unit_kb: first.unit_kb,
@@ -522,6 +522,17 @@ impl LifecycleHandler {
             .flat_map(mirror_segments)
             .filter(|segment| !selected_set.contains(segment))
             .collect::<Vec<_>>();
+        if chunk.bitmap_unit_bytes != 0
+            && !crowdb_protocol::chunk_bitmap::carry_over(
+                &chunk.strips[start..end],
+                std::slice::from_mut(&mut replacement),
+                chunk.bitmap_unit_bytes,
+            )
+        {
+            return Err(LifecycleError::InvalidRequest(
+                "conversion cannot carry the bitmap of the replaced range".into(),
+            ));
+        }
         chunk.strips.splice(start..end, [replacement]);
         chunk.capacity = chunk.strips.iter().map(|strip| strip.capacity).sum();
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);
@@ -610,6 +621,8 @@ impl LifecycleHandler {
         }
         chunk.strips.push(strip.clone());
         chunk.capacity = new_capacity;
+        let confirmed_from = chunk.acknowledged_cursor;
+        crowdb_protocol::chunk_bitmap::mark_written(chunk, confirmed_from, update.acknowledged_cursor);
         chunk.acknowledged_cursor = update.acknowledged_cursor;
         chunk.closed_strip_sequence = update.closed_strip_sequence;
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);

@@ -230,7 +230,7 @@ fn ec_4_1() -> EcScheme {
 fn small_policy() -> SmallWritePolicy {
     SmallWritePolicy {
         mirror_copies: 2,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     }
 }
 
@@ -238,7 +238,7 @@ fn policy(max_chunk_size: u64) -> LargeWritePolicy {
     LargeWritePolicy {
         ec_scheme: ec_4_1(),
         client: Arc::new(ChunkClientConfig {
-            chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+            chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
             large_mirror_copies: None,
             max_chunk_size,
             prefetch_strips_per_chunk: 2,

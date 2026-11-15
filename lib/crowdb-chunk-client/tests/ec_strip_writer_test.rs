@@ -85,7 +85,7 @@ fn make_chunk(unit_kb: u32, num_segments: usize) -> Arc<Chunk> {
         capacity: num_segments as u32,
         sealed_length: 0,
         strips: vec![strip],
-        chunk_type: ChunkType::S3 as i32,
+        chunk_type: ChunkType::S3Dedicated as i32,
         writer_epoch: 0,
         acknowledged_cursor: 0,
         closed_strip_sequence: None,
@@ -94,6 +94,7 @@ fn make_chunk(unit_kb: u32, num_segments: usize) -> Arc<Chunk> {
         cleanup_intents: vec![],
         last_strip_replacement: None,
         owner_key: Vec::new(),
+        bitmap_unit_bytes: 0,
     })
 }
 

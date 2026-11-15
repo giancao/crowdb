@@ -21,7 +21,7 @@ fn ec_4_1() -> EcScheme {
 fn small_policy() -> SmallWritePolicy {
     SmallWritePolicy {
         mirror_copies: 2,
-        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
     }
 }
 
@@ -29,7 +29,7 @@ fn policy(max_chunk_size: u64) -> LargeWritePolicy {
     LargeWritePolicy {
         ec_scheme: ec_4_1(),
         client: Arc::new(ChunkClientConfig {
-            chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+            chunk_type: crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
             large_mirror_copies: None,
             max_chunk_size,
             prefetch_strips_per_chunk: 2,
@@ -212,7 +212,7 @@ async fn large_write_rotates_chunks_without_losing_data() {
     let data = make_test_data(20 * MIB);
     let mut configured = policy(8 * MIB as u64);
     Arc::get_mut(&mut configured.client).unwrap().chunk_type =
-        crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTable;
+        crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTableDedicated;
     let result = stack
         .client
         .prepare_large_write(Some(data.len() as u64), configured)
@@ -239,11 +239,11 @@ async fn large_write_rotates_chunks_without_losing_data() {
         let chunk = stack.query_chunk(location).await;
         assert_eq!(
             chunk.chunk_type,
-            crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTable as i32
+            crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTableDedicated as i32
         );
         assert_eq!(
             chunk.id.unwrap().high >> 56,
-            crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTable as u64
+            crowdb_protocol::chunkdb::rpc::ChunkType::IcebergTableDedicated as u64
         );
         assert_eq!(chunk.state, ChunkState::Sealed as i32);
         assert_eq!(

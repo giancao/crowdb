@@ -13,7 +13,7 @@ use crowdb_access_iceberg::{
 };
 use crowdb_chunkdb::{
     routing::{BindingCache, BindingTable},
-    storage::{range_retirement::RetiredByteRange, ChunkStore},
+    storage::ChunkStore,
 };
 use crowdb_paxos_kv_client::{ChunkSlotMapClient, PaxosKvClient};
 use crowdb_protocol::chunkdb::rpc::{Chunk, ChunkState, ChunkType};
@@ -24,7 +24,7 @@ use crate::access_iceberg::native::TestNativeStorage;
 pub(super) struct TestRangeProof {
     chunks: ChunkStore,
     before: Chunk,
-    expected: Vec<RetiredByteRange>,
+    expected: Vec<(u64, u64)>,
 }
 
 impl TestRangeProof {
@@ -40,14 +40,10 @@ impl TestRangeProof {
         let chunks = ChunkStore::new(kv, bindings);
         let before = chunks.get_chunk(&data.chunk).await.unwrap();
         assert_eq!(before.id, Some(data.chunk));
-        assert_eq!(before.chunk_type, ChunkType::IcebergTable as i32);
+        assert_eq!(before.chunk_type, ChunkType::IcebergTableShared as i32);
         assert_eq!(before.state, ChunkState::Sealed as i32);
         assert_ne!(before.writer_epoch, 0);
-        assert!(chunks
-            .get_chunk_range_retirement(&data.chunk)
-            .await
-            .unwrap()
-            .is_none());
+        assert_ne!(before.bitmap_unit_bytes, 0);
         assert!(data
             .dead_ranges
             .iter()
@@ -56,7 +52,7 @@ impl TestRangeProof {
         let expected = union(&data.dead_ranges);
         assert!(expected
             .iter()
-            .all(|range| range.end <= data.live_range.0 || data.live_range.1 <= range.start));
+            .all(|(start, end)| *end <= data.live_range.0 || data.live_range.1 <= *start));
         Self {
             chunks,
             before,
@@ -66,43 +62,61 @@ impl TestRangeProof {
 
     pub(super) async fn verify(&self, data: &TestPayloads) -> serde_json::Value {
         let chunk = self.chunks.get_chunk(&data.chunk).await.unwrap();
+        // Range retirement only clears validity bits; the layout and seal length stay.
+        let mut layout = chunk.clone();
+        layout.modify_ts = self.before.modify_ts;
+        for (strip, before) in layout.strips.iter_mut().zip(&self.before.strips) {
+            strip.usage_bitmap.clone_from(&before.usage_bitmap);
+        }
         assert_eq!(
-            chunk, self.before,
+            layout, self.before,
             "logical retirement must not change recorded layout"
         );
-        let record = self
-            .chunks
-            .get_chunk_range_retirement(&data.chunk)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(record.ranges(), self.expected);
-        assert!(record.revision <= chunk.modify_ts);
-        let value = serde_json::to_value(&record).unwrap();
-        // validate(current_chunk) is private; observe the existing public Serialize
-        // fields without extending production visibility or interpreting strip offsets.
-        assert_eq!(value["version"], serde_json::json!(2));
-        assert_eq!(value["chunk_id"], serde_json::json!(chunk.id));
-        assert_eq!(value["writer_epoch"], serde_json::json!(chunk.writer_epoch));
-        assert_eq!(value["create_ts_ms"], serde_json::json!(chunk.create_ts_ms));
-        assert_eq!(value["sealed_ts_ms"], serde_json::json!(chunk.sealed_ts_ms));
-        assert_eq!(
-            value["sealed_bytes"],
-            serde_json::json!(chunk.acknowledged_cursor)
-        );
-        value
+        let unit = u64::from(chunk.bitmap_unit_bytes);
+        for (start, end) in &self.expected {
+            assert_eq!(start % unit, 0, "retired objects start on a bitmap unit");
+            let mut offset = *start;
+            while offset < *end {
+                assert!(!unit_is_set(&chunk, offset), "unit at {offset} must be cleared");
+                offset += unit;
+            }
+        }
+        let mut offset = data.live_range.0 / unit * unit;
+        while offset < data.live_range.1 {
+            assert!(unit_is_set(&chunk, offset), "live unit at {offset} must stay set");
+            offset += unit;
+        }
+        serde_json::json!({
+            "chunk_id": chunk.id,
+            "bitmap_unit_bytes": chunk.bitmap_unit_bytes,
+            "sealed_bytes": chunk.acknowledged_cursor,
+            "cleared_ranges": self.expected,
+        })
     }
 }
 
-fn union(input: &[(u64, u64)]) -> Vec<RetiredByteRange> {
+fn unit_is_set(chunk: &Chunk, offset: u64) -> bool {
+    let unit = u64::from(chunk.bitmap_unit_bytes);
+    chunk.strips.iter().any(|strip| {
+        let start = u64::from(strip.chunk_offset) * 1024;
+        let end = start + u64::from(strip.capacity) * 1024;
+        if offset < start || offset >= end {
+            return false;
+        }
+        let bit = usize::try_from((offset - start) / unit).unwrap();
+        strip.usage_bitmap[bit / 8] >> (bit % 8) & 1 == 1
+    })
+}
+
+fn union(input: &[(u64, u64)]) -> Vec<(u64, u64)> {
     let mut input = input.to_vec();
     input.sort_unstable();
-    let mut ranges: Vec<RetiredByteRange> = Vec::new();
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
     for (start, end) in input {
-        if let Some(last) = ranges.last_mut().filter(|last| last.end >= start) {
-            last.end = last.end.max(end);
+        if let Some(last) = ranges.last_mut().filter(|last| last.1 >= start) {
+            last.1 = last.1.max(end);
         } else {
-            ranges.push(RetiredByteRange { start, end });
+            ranges.push((start, end));
         }
     }
     ranges

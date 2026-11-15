@@ -7,7 +7,7 @@ use crowdb_chunk_client::ChunkClientConfig;
 fn large_mirror_copy_count_is_bounded_to_five() {
     let mut config = ChunkClientConfig {
         large_mirror_copies: Some(5),
-        ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+        ..ChunkClientConfig::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated)
     };
     assert!(config.validate().is_ok());
 

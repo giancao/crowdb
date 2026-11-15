@@ -4,8 +4,8 @@
 use tracing::info;
 
 use super::{
-    assign_strip_offsets, AppendChunkOutcome, CacheHint, ChunkId, ChunkState, LifecycleError,
-    LifecycleHandler, LockPolicy, ProtoStripType, StripAllocType, StripBatchSpec,
+    assign_strip_offsets, init_strip_bitmaps, AppendChunkOutcome, CacheHint, ChunkId, ChunkState,
+    LifecycleError, LifecycleHandler, LockPolicy, ProtoStripType, StripAllocType, StripBatchSpec,
 };
 
 impl LifecycleHandler {
@@ -143,6 +143,10 @@ impl LifecycleHandler {
         }
         chunk = current;
         assign_strip_offsets(&mut appended, chunk.capacity);
+        if let Err(error) = init_strip_bitmaps(&mut appended, chunk.bitmap_unit_bytes) {
+            self.allocator.rollback_strips(&appended).await?;
+            return Err(error);
+        }
 
         if let Err(error) = self.commit_strip_segments(&appended).await {
             self.allocator.rollback_strips(&appended).await?;

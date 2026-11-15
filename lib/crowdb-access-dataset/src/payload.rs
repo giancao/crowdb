@@ -162,7 +162,8 @@ impl PayloadStorage for ChunkPayloadStorage {
                 Err(error) => return Err(UploadError::Storage(error.to_string())),
             };
             if chunk.id != Some(id)
-                || chunk.chunk_type != ChunkType::Dataset as i32
+                || (chunk.chunk_type != ChunkType::DatasetDedicated as i32
+                    && chunk.chunk_type != ChunkType::DatasetShared as i32)
                 || chunk.writer_epoch == 0
             {
                 return Err(UploadError::Integrity);

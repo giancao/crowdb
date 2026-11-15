@@ -126,7 +126,7 @@ pub struct SmallWriteConfig {
 
 impl Default for SmallWriteConfig {
     fn default() -> Self {
-        let policy = SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3);
+        let policy = SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared);
         Self {
             threshold_ratio: 0.9,
             disk_block_bytes: 1024 * 1024,
@@ -161,9 +161,9 @@ impl SmallWriteConfig {
     pub fn policy(&self) -> SmallWritePolicy {
         SmallWritePolicy {
             conversion_enabled: self.conversion_enabled,
-            mirror_copies: self
-                .mirror_copies
-                .unwrap_or(SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3).mirror_copies),
+            mirror_copies: self.mirror_copies.unwrap_or(
+                SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared).mirror_copies,
+            ),
             conversion_data_num: self.ec_data,
             conversion_code_num: self.ec_code,
             memory_budget: self.memory_budget_bytes,
@@ -173,7 +173,7 @@ impl SmallWriteConfig {
             max_batch_bytes: self.max_batch_bytes,
             chunk_capacity: self.chunk_capacity_bytes,
             small_strip_prefetch_count: self.small_strip_prefetch_count,
-            ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3)
+            ..SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::S3Shared)
         }
     }
 }
@@ -271,7 +271,7 @@ impl AccessConfig {
     #[must_use]
     pub fn dataset_small_write(&self) -> SmallWritePolicy {
         let accepted = self.small_write.policy();
-        let mut policy = SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::Dataset);
+        let mut policy = SmallWritePolicy::new(crowdb_protocol::chunkdb::rpc::ChunkType::DatasetShared);
         policy.mirror_copies = accepted.mirror_copies;
         policy.conversion_enabled = accepted.conversion_enabled;
         policy.conversion_data_num = accepted.conversion_data_num;

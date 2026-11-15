@@ -25,7 +25,7 @@ impl S3WritePolicy {
             small_object_limit,
             large_write: LargeWritePolicy {
                 ec_scheme: EcScheme::new(8, 4),
-                client: Arc::new(ChunkClientConfig::new(ChunkType::S3)),
+                client: Arc::new(ChunkClientConfig::new(ChunkType::S3Dedicated)),
             },
         }
     }

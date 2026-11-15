@@ -262,9 +262,12 @@ pub(super) fn proto_chunk_type(fb: FBChunkType) -> Option<ProtoChunkType> {
         FBChunkType::BtreePage => Some(ProtoChunkType::BtreePage),
         FBChunkType::PageIndex => Some(ProtoChunkType::PageIndex),
         FBChunkType::Stream => Some(ProtoChunkType::Stream),
-        FBChunkType::S3 => Some(ProtoChunkType::S3),
-        FBChunkType::IcebergTable => Some(ProtoChunkType::IcebergTable),
-        FBChunkType::Dataset => Some(ProtoChunkType::Dataset),
+        FBChunkType::S3Dedicated => Some(ProtoChunkType::S3Dedicated),
+        FBChunkType::S3Shared => Some(ProtoChunkType::S3Shared),
+        FBChunkType::IcebergTableDedicated => Some(ProtoChunkType::IcebergTableDedicated),
+        FBChunkType::IcebergTableShared => Some(ProtoChunkType::IcebergTableShared),
+        FBChunkType::DatasetDedicated => Some(ProtoChunkType::DatasetDedicated),
+        FBChunkType::DatasetShared => Some(ProtoChunkType::DatasetShared),
         _ => None,
     }
 }
@@ -782,6 +785,7 @@ pub(super) fn build_chunk_offset<'a>(
             cleanup_intents,
             last_strip_replacement: last_strip_replacement.as_ref(),
             owner_key,
+            bitmap_unit_bytes: chunk.bitmap_unit_bytes,
         },
     )
 }
@@ -1022,9 +1026,12 @@ pub(super) fn fb_chunk_type(t: ProtoChunkType) -> FBChunkType {
         ProtoChunkType::BtreePage => FBChunkType::BtreePage,
         ProtoChunkType::PageIndex => FBChunkType::PageIndex,
         ProtoChunkType::Stream => FBChunkType::Stream,
-        ProtoChunkType::S3 => FBChunkType::S3,
-        ProtoChunkType::IcebergTable => FBChunkType::IcebergTable,
-        ProtoChunkType::Dataset => FBChunkType::Dataset,
+        ProtoChunkType::S3Dedicated => FBChunkType::S3Dedicated,
+        ProtoChunkType::S3Shared => FBChunkType::S3Shared,
+        ProtoChunkType::IcebergTableDedicated => FBChunkType::IcebergTableDedicated,
+        ProtoChunkType::IcebergTableShared => FBChunkType::IcebergTableShared,
+        ProtoChunkType::DatasetDedicated => FBChunkType::DatasetDedicated,
+        ProtoChunkType::DatasetShared => FBChunkType::DatasetShared,
     }
 }
 

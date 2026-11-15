@@ -175,6 +175,7 @@ impl ChunkdbRpcTransport {
             writer_epoch: req.writer_epoch,
             writer_lease_ms: req.writer_lease_ms,
             owner_key,
+            bitmap_unit_bytes: req.bitmap_unit_bytes,
         };
         let fb_req = FBAllocateChunkRequest::create(&mut builder, &args);
         builder.finish(fb_req, None);
@@ -1083,6 +1084,7 @@ fn parse_fb_chunk(fb: &crowdb_protocol::chunkdb_fb::FBChunk<'_>) -> Result<Chunk
             .owner_key()
             .map(|value| value.iter().collect())
             .unwrap_or_default(),
+        bitmap_unit_bytes: fb.bitmap_unit_bytes(),
     })
 }
 
@@ -1415,9 +1417,12 @@ fn chunk_type_to_fb(t: ProtoChunkType) -> FBChunkType {
         ProtoChunkType::BtreePage => FBChunkType::BtreePage,
         ProtoChunkType::PageIndex => FBChunkType::PageIndex,
         ProtoChunkType::Stream => FBChunkType::Stream,
-        ProtoChunkType::S3 => FBChunkType::S3,
-        ProtoChunkType::IcebergTable => FBChunkType::IcebergTable,
-        ProtoChunkType::Dataset => FBChunkType::Dataset,
+        ProtoChunkType::S3Dedicated => FBChunkType::S3Dedicated,
+        ProtoChunkType::S3Shared => FBChunkType::S3Shared,
+        ProtoChunkType::IcebergTableDedicated => FBChunkType::IcebergTableDedicated,
+        ProtoChunkType::IcebergTableShared => FBChunkType::IcebergTableShared,
+        ProtoChunkType::DatasetDedicated => FBChunkType::DatasetDedicated,
+        ProtoChunkType::DatasetShared => FBChunkType::DatasetShared,
     }
 }
 

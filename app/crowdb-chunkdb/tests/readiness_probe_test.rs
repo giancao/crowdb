@@ -13,7 +13,7 @@ use crowdb_paxos_kv::cluster::paxos_kv_server::PaxosKvServer;
 use crowdb_paxos_kv_client::{ChunkSlotMapClient, ClientConfig, PaxosKvClient, ServiceRegistryClient};
 use crowdb_protocol::{
     chunk_domain::ChunkDomain,
-    chunk_id::CHUNK_TYPE_S3,
+    chunk_id::CHUNK_TYPE_S3_DEDICATED,
     chunk_slot::{ChunkSlotBootstrap, ChunkStorageGroup},
     chunkdb::rpc::{Chunk, ChunkState},
     common::ChunkId,
@@ -110,7 +110,7 @@ async fn readiness_reads_both_domains_without_scanning_or_mutating_the_catalog()
 async fn seed_catalog(store: &ChunkStore, count: u64) {
     for low in 1..=count {
         let id = ChunkId {
-            high: u64::from(CHUNK_TYPE_S3) << 56,
+            high: u64::from(CHUNK_TYPE_S3_DEDICATED) << 56,
             low,
         };
         let mut task = slot_groups::finalize(id);
@@ -120,7 +120,7 @@ async fn seed_catalog(store: &ChunkStore, count: u64) {
                 &Chunk {
                     id: Some(id),
                     modify_ts: 1,
-                    chunk_type: i32::from(CHUNK_TYPE_S3),
+                    chunk_type: i32::from(CHUNK_TYPE_S3_DEDICATED),
                     state: ChunkState::Sealed as i32,
                     ..Default::default()
                 },

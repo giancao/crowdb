@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::{
-    frame_error, FramePrefixScanner, FrameScanBatch, FrameScanError, FrameScanStop, MAX_FRAME_SCAN_EXTENTS,
-    MAX_FRAME_SCAN_INPUT_BYTES,
+    frame_error, FramePrefixScanner, FrameScanBatch, FrameScanError, FrameScanMode, FrameScanStop,
+    MAX_FRAME_SCAN_EXTENTS, MAX_FRAME_SCAN_INPUT_BYTES,
 };
 use crate::frame::{frame_length, parse_header, FRAME_HEADER_PREFIX_BYTES};
 
@@ -56,6 +56,9 @@ impl FramePrefixScanner {
             && result.extents.len() < max_extents
             && self.stop == FrameScanStop::Running
         {
+            if self.skip_alignment_padding(input, &mut result.consumed)? {
+                continue;
+            }
             self.copy_scan_input(input, &mut result.consumed, FRAME_HEADER_PREFIX_BYTES);
             if self.buffer.len() < FRAME_HEADER_PREFIX_BYTES {
                 break;
@@ -90,6 +93,35 @@ impl FramePrefixScanner {
             }
         }
         Ok(result)
+    }
+
+    /// A frame never starts with a zero byte, so a zero byte at an unaligned
+    /// frame boundary is the padding that completes an object's last unit.
+    fn skip_alignment_padding(&mut self, input: &[u8], consumed: &mut usize) -> Result<bool, FrameScanError> {
+        let align = u64::from(self.config.align);
+        if align == 0
+            || self.config.mode != FrameScanMode::Ordinary
+            || !self.buffer.is_empty()
+            || self.input_end % align == 0
+            || input[*consumed] != 0
+        {
+            return Ok(false);
+        }
+        let to_boundary = align - self.input_end % align;
+        let count =
+            usize::try_from(to_boundary).map_or(usize::MAX, |bytes| bytes.min(input.len() - *consumed));
+        if input[*consumed..*consumed + count].iter().any(|byte| *byte != 0) {
+            return Err(frame_error(
+                self.input_end,
+                crate::frame::FrameError::InvalidRegionLength,
+            ));
+        }
+        *consumed += count;
+        self.input_end += count as u64;
+        if self.input_end % align == 0 {
+            self.physical_end = self.input_end;
+        }
+        Ok(true)
     }
 
     fn copy_scan_input(&mut self, input: &[u8], consumed: &mut usize, target: usize) {

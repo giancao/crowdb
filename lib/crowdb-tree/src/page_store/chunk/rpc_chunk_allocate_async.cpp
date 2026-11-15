@@ -20,7 +20,8 @@ try {
     builder.Finish(crowdb::chunkdb::proto::CreateFBAllocateChunkRequest(
         builder, request_id, monotonic_nanos(), &fixed, geometry.granularity_kb, geometry.strip_count,
         FBStripType_Mirror, 0, 0, impl_->options.mirror_copies == 0 ? 2 : impl_->options.mirror_copies,
-        static_cast<crowdb::chunkdb::proto::FBChunkType>(purpose), epoch, impl_->options.writer_lease_ms));
+        static_cast<crowdb::chunkdb::proto::FBChunkType>(purpose), epoch, impl_->options.writer_lease_ms,
+        flatbuffers::Offset<flatbuffers::Vector<uint8_t>>(), kChunkBitmapUnitBytes));
     impl_->submit_chunkdb<crowdb::chunkdb::proto::FBAllocateChunkResponse>(
         id, request_id, crowdb::rpc::proto::FBMsgType_EAllocateChunkRequest,
         {builder.GetBufferPointer(), builder.GetSize()}, completion.allocations,

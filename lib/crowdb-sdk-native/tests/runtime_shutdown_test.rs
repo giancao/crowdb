@@ -29,14 +29,14 @@ async fn borrowed_clients_are_not_stopped_when_the_sdk_closes_its_own_admission(
     let backend = TestWriteStorage::new();
     let runtime = backend.runtime_borrowed(metadata::client().await);
     let dataset = runtime
-        .with_writer_policy(&SmallWritePolicy::new(ChunkType::Dataset))
+        .with_writer_policy(&SmallWritePolicy::new(ChunkType::DatasetShared))
         .unwrap();
     runtime.shutdown().await.unwrap();
     dataset.shutdown().await.unwrap();
     assert!(runtime.resources().status().closed);
     assert_eq!(backend.shutdowns.load(Ordering::Acquire), 0);
     assert!(matches!(
-        runtime.with_writer_policy(&SmallWritePolicy::new(ChunkType::S3)),
+        runtime.with_writer_policy(&SmallWritePolicy::new(ChunkType::S3Shared)),
         Err(Error::Shutdown)
     ));
 }
@@ -48,7 +48,7 @@ async fn cancelled_shutdown_waiters_do_not_cancel_shared_owned_cleanup_or_releas
     let pause = TestPausedShutdown(backend.clone());
     let runtime = backend.runtime(metadata::client().await);
     let dataset = runtime
-        .with_writer_policy(&SmallWritePolicy::new(ChunkType::Dataset))
+        .with_writer_policy(&SmallWritePolicy::new(ChunkType::DatasetShared))
         .unwrap();
     let held = runtime
         .resources()

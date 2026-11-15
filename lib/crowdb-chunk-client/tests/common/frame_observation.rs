@@ -30,6 +30,7 @@ impl TestObservation {
             required_end: 0,
             logical_start: 0,
             max_append_bytes: 64 * 1024 * 1024,
+            align: 0,
         }
     }
     pub fn backing(prefix: &[u8], capacity: usize) -> Bytes {

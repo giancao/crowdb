@@ -6,8 +6,9 @@
 use std::collections::HashSet;
 
 use crowdb_protocol::chunk_id::{
-    generate, is_zero, ChunkIdParts, CHUNK_TYPE_BTREE_PAGE, CHUNK_TYPE_DATASET, CHUNK_TYPE_ICEBERG_TABLE,
-    CHUNK_TYPE_PAGE_INDEX, CHUNK_TYPE_S3, CHUNK_TYPE_STREAM, CHUNK_TYPE_WAL,
+    generate, is_zero, ChunkIdParts, CHUNK_TYPE_BTREE_PAGE, CHUNK_TYPE_DATASET_DEDICATED,
+    CHUNK_TYPE_DATASET_SHARED, CHUNK_TYPE_ICEBERG_TABLE_DEDICATED, CHUNK_TYPE_ICEBERG_TABLE_SHARED,
+    CHUNK_TYPE_PAGE_INDEX, CHUNK_TYPE_S3_DEDICATED, CHUNK_TYPE_S3_SHARED, CHUNK_TYPE_STREAM, CHUNK_TYPE_WAL,
 };
 use crowdb_protocol::common::ChunkId;
 
@@ -19,25 +20,30 @@ fn chunk_type_prefix_values_preserve_surviving_ids() {
             CHUNK_TYPE_BTREE_PAGE,
             CHUNK_TYPE_PAGE_INDEX,
             CHUNK_TYPE_STREAM,
-            CHUNK_TYPE_S3,
-            CHUNK_TYPE_ICEBERG_TABLE,
-            CHUNK_TYPE_DATASET,
+            CHUNK_TYPE_S3_DEDICATED,
+            CHUNK_TYPE_S3_SHARED,
+            CHUNK_TYPE_ICEBERG_TABLE_DEDICATED,
+            CHUNK_TYPE_ICEBERG_TABLE_SHARED,
+            CHUNK_TYPE_DATASET_DEDICATED,
+            CHUNK_TYPE_DATASET_SHARED,
         ],
-        [1, 2, 3, 4, 5, 6, 7]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
 }
 
 #[test]
 fn generate_sets_chunk_type() {
     for ct in [
-        CHUNK_TYPE_S3,
         CHUNK_TYPE_WAL,
         CHUNK_TYPE_BTREE_PAGE,
         CHUNK_TYPE_PAGE_INDEX,
         CHUNK_TYPE_STREAM,
-        CHUNK_TYPE_S3,
-        CHUNK_TYPE_ICEBERG_TABLE,
-        CHUNK_TYPE_DATASET,
+        CHUNK_TYPE_S3_DEDICATED,
+        CHUNK_TYPE_S3_SHARED,
+        CHUNK_TYPE_ICEBERG_TABLE_DEDICATED,
+        CHUNK_TYPE_ICEBERG_TABLE_SHARED,
+        CHUNK_TYPE_DATASET_DEDICATED,
+        CHUNK_TYPE_DATASET_SHARED,
     ] {
         let id = generate(ct);
         assert_eq!(id.chunk_type(), ct, "chunk type bits must match");
@@ -48,7 +54,7 @@ fn generate_sets_chunk_type() {
 fn generate_is_unique() {
     let mut ids = Vec::new();
     for _ in 0..1000 {
-        ids.push(generate(CHUNK_TYPE_S3));
+        ids.push(generate(CHUNK_TYPE_S3_DEDICATED));
     }
     let set: HashSet<_> = ids.iter().collect();
     assert_eq!(set.len(), 1000, "chunk IDs should be unique");
@@ -56,7 +62,7 @@ fn generate_is_unique() {
 
 #[test]
 fn hash_to_bucket_in_range() {
-    let id = generate(CHUNK_TYPE_S3);
+    let id = generate(CHUNK_TYPE_S3_DEDICATED);
     let bucket = id.hash_to_bucket();
     let _ = bucket;
 }
@@ -65,7 +71,7 @@ fn hash_to_bucket_in_range() {
 fn hash_distribution_is_reasonable() {
     let mut buckets = [0u32; 256];
     for _ in 0..10000 {
-        let id = generate(CHUNK_TYPE_S3);
+        let id = generate(CHUNK_TYPE_S3_DEDICATED);
         let bucket = id.hash_to_bucket();
         buckets[usize::from(bucket) >> 8] += 1;
     }
@@ -87,7 +93,7 @@ fn round_trip_bytes() {
 
 #[test]
 fn to_from_proto_round_trip() {
-    let id = generate(CHUNK_TYPE_S3);
+    let id = generate(CHUNK_TYPE_S3_DEDICATED);
     let proto: ChunkId = id.to_proto();
     let restored = ChunkIdParts::from_proto(&proto);
     assert_eq!(id, restored);

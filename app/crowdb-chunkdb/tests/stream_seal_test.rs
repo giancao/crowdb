@@ -34,6 +34,7 @@ async fn stream_and_wal_seal_cannot_shorten_a_persisted_byte_cursor() {
                     low: purpose as u64,
                 }
                 .chunk_owner_key(),
+                0,
             )
             .await
             .unwrap();
@@ -80,6 +81,7 @@ async fn stream_seal_can_publish_a_newer_synchronized_byte_boundary() {
             9,
             60_000,
             StreamName { high: 71, low: 73 }.chunk_owner_key(),
+            0,
         )
         .await
         .unwrap();
@@ -111,6 +113,7 @@ async fn exact_empty_seal_records_zero_bytes_and_zero_physical_capacity() {
             9,
             60_000,
             StreamName { high: 79, low: 83 }.chunk_owner_key(),
+            0,
         )
         .await
         .unwrap();
@@ -146,6 +149,7 @@ async fn exact_seal_resumes_cleanup_after_block_owner_discovery_failure() {
             9,
             60_000,
             StreamName { high: 89, low: 97 }.chunk_owner_key(),
+            0,
         )
         .await
         .unwrap();

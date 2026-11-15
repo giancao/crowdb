@@ -135,7 +135,7 @@ async fn cold_adapter_recovers_an_empty_sealed_tail_after_its_strips_are_reclaim
             4 => descriptor.acknowledged_cursor = 1,
             5 => descriptor.physical_start = 1,
             6 => invalid.writer_epoch = 0,
-            _ => invalid.chunk_type = crowdb_protocol::chunkdb::rpc::ChunkType::S3 as i32,
+            _ => invalid.chunk_type = crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated as i32,
         }
         *allocator.chunk.lock().unwrap() = Some(invalid);
         assert!(matches!(

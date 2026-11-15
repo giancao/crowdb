@@ -44,7 +44,7 @@ impl RuntimeConfig {
             management_seeds,
             diskio_connections_per_endpoint: 1,
             diskio_rpc_workers: 1,
-            small_write: SmallWritePolicy::new(ChunkType::S3),
+            small_write: SmallWritePolicy::new(ChunkType::S3Shared),
             read_policy: ChunkReadPolicy::default(),
             chunk_kv_transport: ChunkKvRpcTransportConfig::default(),
             data_rdma: None,

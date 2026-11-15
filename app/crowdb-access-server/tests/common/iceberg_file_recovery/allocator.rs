@@ -70,6 +70,7 @@ impl ChunkAllocator for TestAllocator {
             cleanup_intents: vec![],
             last_strip_replacement: None,
             owner_key: req.owner_key.clone(),
+            bitmap_unit_bytes: 0,
         };
         self.update(|state| {
             state.chunks.insert((chunk_id.high, chunk_id.low), chunk.clone());

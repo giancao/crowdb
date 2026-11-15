@@ -28,7 +28,7 @@ async fn mirror_and_ec_matrix_publish_protected_geometry() {
                 copy_count: copies,
                 data_num: data,
                 code_num: parity,
-                chunk_type: ChunkType::S3 as i32,
+                chunk_type: ChunkType::S3Dedicated as i32,
                 ..Default::default()
             })
             .await

@@ -65,7 +65,7 @@ pub(super) async fn prepare_partial(
             strip_count: 8,
             strip_type: StripType::Mirror as i32,
             copy_count: 3,
-            chunk_type: ChunkType::S3 as i32,
+            chunk_type: ChunkType::S3Dedicated as i32,
             ..Default::default()
         })
         .await

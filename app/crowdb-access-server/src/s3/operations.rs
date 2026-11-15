@@ -85,7 +85,7 @@ impl S3ServiceConfig {
             large_write: LargeWritePolicy {
                 ec_scheme: EcScheme::new(8, 4),
                 client: Arc::new(ChunkClientConfig::new(
-                    crowdb_protocol::chunkdb::rpc::ChunkType::S3,
+                    crowdb_protocol::chunkdb::rpc::ChunkType::S3Dedicated,
                 )),
             },
         }
