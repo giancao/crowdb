@@ -237,6 +237,7 @@ impl LargeAsyncObjectWriter {
                 self.locations.push(ProtoLocation {
                     logical_offset: self.logical_offset,
                     logical_length: self.logical_bytes_in_chunk,
+                    padding_length: 0,
                     ..location
                 });
                 self.logical_offset += self.logical_bytes_in_chunk;

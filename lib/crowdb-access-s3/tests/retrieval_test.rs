@@ -31,6 +31,7 @@ fn object(length: u64) -> ObjectRecord {
             length,
             logical_offset: 0,
             logical_length: length,
+            padding_length: 0,
         }])
         .unwrap(),
         data_length: length,

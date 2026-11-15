@@ -100,6 +100,7 @@ async fn chunk_io_budget_rejects_work_before_dispatch_and_resets_per_step() {
         physical_length: 16,
         logical_offset: 0,
         logical_length: 16,
+        padding_length: 0,
         height: 0,
         digest: [7; 32],
     };

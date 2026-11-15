@@ -558,6 +558,7 @@ impl StreamChunkStore for ProductionStreamChunkStore {
                     length,
                     logical_offset: 0,
                     logical_length: length,
+                    padding_length: 0,
                 }],
                 0,
                 length,

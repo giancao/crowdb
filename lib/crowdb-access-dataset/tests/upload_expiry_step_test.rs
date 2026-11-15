@@ -174,6 +174,7 @@ async fn multi_extent_parts_respect_the_notification_budget_before_completion() 
                 length: 4096,
                 logical_offset: offset,
                 logical_length: 1,
+                padding_length: 0,
             })
             .collect();
         let record = serde_json::json!({"version":1,"owner":OperationId::random(),"deadline":10,

@@ -126,6 +126,7 @@ impl TestUpload {
                         length: bytes.len() as u64 + 34,
                         logical_offset: 0,
                         logical_length: bytes.len() as u64,
+                        padding_length: 0,
                     }],
                     bytes.len() as u64,
                     format!("{:x}", Md5::digest(bytes)),

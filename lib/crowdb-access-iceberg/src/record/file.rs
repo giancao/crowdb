@@ -146,6 +146,7 @@ pub(super) fn encode_root<'buffer>(
             physical_length: root.physical_length,
             logical_offset: root.logical_offset,
             logical_length: root.logical_length,
+            padding_length: root.padding_length,
             height: root.height,
             digest: Some(digest),
         },
@@ -162,6 +163,7 @@ pub(super) fn decode_root(root: FBFileChunkRoot<'_>) -> Result<ChunkRoot, Valida
         physical_length: root.physical_length(),
         logical_offset: root.logical_offset(),
         logical_length: root.logical_length(),
+        padding_length: root.padding_length(),
         height: root.height(),
         digest: root
             .digest()

@@ -27,6 +27,7 @@ fn directory(count: usize) -> ChunkDirectory {
                     physical_length: 256,
                     logical_offset: 0,
                     logical_length: 100,
+                    padding_length: 3840,
                     height: 0,
                     digest: [3; 32],
                 },

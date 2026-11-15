@@ -436,6 +436,7 @@ async fn object_reader_discards_bytes_from_an_expired_layout() {
         chunk_id: Some(id),
         length: 4,
         logical_length: 4,
+        padding_length: 0,
         ..Location::default()
     };
     assert_eq!(
@@ -496,6 +497,7 @@ async fn framed_read_stream_keeps_whole_frame_under_small_window_setting() {
         chunk_id: Some(id),
         length: frame.len() as u64,
         logical_length: payload.len() as u64,
+        padding_length: 0,
         ..Location::default()
     };
     let mut stream = reader.read_stream(&[location]).unwrap();
@@ -524,6 +526,7 @@ async fn read_stream_selects_only_locations_overlapping_each_window() {
             length: frame.len() as u64,
             logical_offset: (index * 4) as u64,
             logical_length: 4,
+            padding_length: 0,
         });
         physical.extend_from_slice(&frame);
     }
@@ -594,6 +597,7 @@ async fn stream_waits_for_first_result_and_retains_three_slots_until_consumer_re
             length: frame.len() as u64,
             logical_offset: (index * 4) as u64,
             logical_length: 4,
+            padding_length: 0,
         });
         physical.extend_from_slice(&frame);
     }
@@ -732,6 +736,7 @@ async fn global_read_budget_remains_charged_while_http_keeps_frame_views() {
         chunk_id: Some(id),
         length: 32 * MAX_FRAME_BYTES as u64,
         logical_length: 32 * MAX_FRAME_V2_PAYLOAD_BYTES as u64,
+        padding_length: 0,
         ..Location::default()
     };
     let mut stream = reader.read_stream(&[location]).unwrap();
@@ -818,6 +823,7 @@ async fn frame_crossing_physical_parts_returns_two_original_payload_views() {
         offset: frame_offset as u64,
         length: frame.len() as u64,
         logical_length: payload.len() as u64,
+        padding_length: 0,
         ..Location::default()
     };
     let views = reader
@@ -883,6 +889,7 @@ async fn framed_mirror_crc_failure_uses_a_verified_fallback() {
         chunk_id: Some(id),
         length: valid.len() as u64,
         logical_length: payload.len() as u64,
+        padding_length: 0,
         ..Location::default()
     };
     assert_eq!(
@@ -957,6 +964,7 @@ async fn marked_ec_fragment_shares_one_full_recovery_future() {
         chunk_id: Some(id),
         length: SHARD as u64,
         logical_length: SHARD as u64,
+        padding_length: 0,
         ..Location::default()
     };
     let (first, second) = tokio::join!(

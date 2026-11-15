@@ -101,6 +101,23 @@ async fn range_delete_clears_whole_units_of_confirmed_ranges_and_is_idempotent()
     assert_eq!(sealed.acknowledged_cursor, 10 * 4096);
     assert_eq!(sealed.strips[0].usage_bitmap[0], 0b1111_0011);
     assert_eq!(harness.store.get_chunk(&id).await.unwrap(), sealed);
+
+    // A sealed chunk rejects a range beyond or straddling its boundary and
+    // stays unchanged; a range inside the boundary still clears.
+    for request in [range(id, 12 * 4096, 5000), range(id, 9 * 4096, 2 * 4096)] {
+        assert!(matches!(
+            handler.delete_chunk_range(&request).await,
+            Err(LifecycleError::StateConflict)
+        ));
+    }
+    assert_eq!(harness.store.get_chunk(&id).await.unwrap(), sealed);
+    handler
+        .delete_chunk_range(&range(id, 9 * 4096, 4096))
+        .await
+        .unwrap();
+    let cleared = harness.store.get_chunk(&id).await.unwrap();
+    assert_eq!(cleared.strips[0].usage_bitmap[1], 0b0000_0001);
+    assert_eq!(cleared.acknowledged_cursor, sealed.acknowledged_cursor);
 }
 
 #[tokio::test]

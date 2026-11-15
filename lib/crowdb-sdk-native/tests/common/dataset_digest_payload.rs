@@ -28,6 +28,7 @@ impl PayloadStorage for TestDigestPayload {
             length: data.len() as u64,
             logical_offset: 0,
             logical_length: data.len() as u64,
+            padding_length: 0,
         };
         intent
             .before_write(&location)

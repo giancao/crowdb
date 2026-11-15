@@ -8,7 +8,7 @@ use super::{ChunkRoot, TableLocation};
 
 pub const MAX_DIRECTORY_ENTRIES: usize = 256;
 const HEADER_BYTES: usize = 56;
-const ENTRY_BYTES: usize = 89;
+const ENTRY_BYTES: usize = 93;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileIdentity {
@@ -98,6 +98,7 @@ impl ChunkDirectory {
             ] {
                 bytes.extend_from_slice(&field.to_be_bytes());
             }
+            bytes.extend_from_slice(&entry.root.padding_length.to_be_bytes());
             bytes.push(entry.root.height);
             bytes.extend_from_slice(&entry.root.digest);
         }
@@ -166,6 +167,7 @@ impl ChunkDirectory {
                     physical_length: cursor.number()?,
                     logical_offset: cursor.number()?,
                     logical_length: cursor.number()?,
+                    padding_length: u32::from_be_bytes(cursor.take()?),
                     height: cursor.take::<1>()?[0],
                     digest: cursor.take()?,
                 },

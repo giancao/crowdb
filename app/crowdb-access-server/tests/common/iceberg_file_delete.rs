@@ -90,6 +90,7 @@ impl TestDeletion {
             physical_length: 80,
             logical_offset: 0,
             logical_length: 16,
+            padding_length: 0,
             height: 0,
             digest: [7; 32],
         };

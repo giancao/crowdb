@@ -172,6 +172,7 @@ impl FileBlockStore for NativeFileBlocks {
             length: root.physical_length,
             logical_offset: root.logical_offset,
             logical_length: root.logical_length,
+            padding_length: root.padding_length,
         };
         let (allocator, _) = self.client.storage_parts();
         Ok(crowdb_chunk_client::reclaim_location(allocator.as_ref(), &location).await?)
@@ -211,6 +212,7 @@ impl FileBlockStore for NativeFileBlocks {
             physical_length: location.length,
             logical_offset: location.logical_offset,
             logical_length: location.logical_length,
+            padding_length: location.padding_length,
             height,
             digest,
         };
@@ -229,6 +231,7 @@ impl FileBlockStore for NativeFileBlocks {
             length: root.physical_length,
             logical_offset: root.logical_offset,
             logical_length: root.logical_length,
+            padding_length: root.padding_length,
         };
         let bytes = self.client.read_object(&[location]).await?.concat();
         verify_block(root, &bytes)?;

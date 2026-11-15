@@ -208,17 +208,18 @@ fn pack_batch(
             }
             super::frame_bytes(object.len)?
         };
+        // Each object owns whole bitmap units: pad to the next unit boundary.
+        let mut padding = super::allocated_bytes(object.len, unit_bytes)? - frame_length;
         locations.push(Location {
             chunk_id: Some(chunk_id),
             offset: start + copied as u64,
             length: frame_length as u64,
             logical_offset: 0,
             logical_length: object.len as u64,
+            padding_length: u32::try_from(padding)
+                .map_err(|error| IoError::WriteFailed(error.to_string()))?,
         });
-        copied += frame_length;
-        // Each object owns whole bitmap units: pad to the next unit boundary.
-        let mut padding = super::allocated_bytes(object.len, unit_bytes)? - frame_length;
-        copied += padding;
+        copied += frame_length + padding;
         while padding > 0 {
             let chunk = padding.min(PADDING.len());
             views.push(Bytes::from_static(&PADDING[..chunk]));

@@ -50,6 +50,7 @@ impl PayloadStorage for TestExistingFrame {
             length: self.0 as u64,
             logical_offset: 0,
             logical_length: 8,
+            padding_length: 0,
         };
         intent
             .before_write(&location)

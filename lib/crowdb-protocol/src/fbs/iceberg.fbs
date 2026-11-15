@@ -172,6 +172,7 @@ table FBFileChunkRoot {
     physical_length:ulong;
     logical_offset:ulong;
     logical_length:ulong;
+    padding_length:uint;
     height:ubyte;
     digest:[ubyte] (required);
 }

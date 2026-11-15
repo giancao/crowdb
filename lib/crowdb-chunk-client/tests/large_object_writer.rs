@@ -30,6 +30,7 @@ fn location_proto_round_trip_single() {
         length: 50 * 1024 * 1024,
         logical_offset: 0,
         logical_length: 50 * 1024 * 1024,
+        padding_length: 0,
     };
     let bytes = bincode::serialize(&loc).unwrap();
     let back: ProtoLocation = bincode::deserialize(&bytes).unwrap();
@@ -48,6 +49,7 @@ fn location_proto_bytes_round_trip_3_entries() {
             length: 8 * 1024 * 1024,
             logical_offset: i * 8 * 1024 * 1024,
             logical_length: 8 * 1024 * 1024,
+            padding_length: 0,
         })
         .collect();
 

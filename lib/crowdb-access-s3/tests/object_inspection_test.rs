@@ -33,6 +33,7 @@ fn locations() -> Vec<Location> {
             length: 8,
             logical_offset: index * 8,
             logical_length: 8,
+            padding_length: 0,
         })
         .collect()
 }

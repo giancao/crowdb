@@ -31,6 +31,7 @@ impl TestFramedReader {
                 length: frame.len() as u64,
                 logical_offset,
                 logical_length: payload.len() as u64,
+                padding_length: 0,
             });
             logical_offset += payload.len() as u64;
             bytes.extend(frame);

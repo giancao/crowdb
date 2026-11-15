@@ -42,6 +42,7 @@ impl TestAllocator {
             length: u64::from(self.expected_range.1),
             logical_offset: 0,
             logical_length: u64::from(self.expected_range.1),
+            padding_length: 0,
         }
     }
 }
@@ -214,6 +215,7 @@ async fn dedicated_chunks_are_deleted_whole_and_shared_chunks_use_range_deletion
                 length: 5000,
                 logical_offset: 0,
                 logical_length: 4900,
+                padding_length: 0,
             };
             assert_eq!(
                 reclaim_location(&allocator, &location).await.unwrap(),

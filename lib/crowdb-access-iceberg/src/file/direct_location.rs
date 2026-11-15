@@ -8,7 +8,7 @@ use crate::{error::ValidationError, key::FileId};
 
 use super::{ChunkRoot, ContentFormat, FileContent, FileKind, FileLocation, FileRecord, TableLocation};
 
-const PAYLOAD_BYTES: usize = 142;
+const PAYLOAD_BYTES: usize = 146;
 const TOKEN_BYTES: usize = PAYLOAD_BYTES + 32;
 
 /// Persistent file locators use a key ring independent of expiring HTTP grants.
@@ -37,7 +37,7 @@ impl DirectFileLocations {
     /// # Errors
     /// Rejects stems which cannot fit the final authenticated object key.
     pub fn validate_stem(stem: &str) -> Result<(), ValidationError> {
-        const LOCATOR_KEY_BYTES: usize = 99 + 5 + 1 + 232 + 8;
+        const LOCATOR_KEY_BYTES: usize = 99 + 5 + 1 + (TOKEN_BYTES * 4).div_ceil(3) + 8;
         super::validate_relative_key(stem)?;
         if stem.contains('/') || stem.len() > super::MAX_OBJECT_KEY_BYTES - LOCATOR_KEY_BYTES {
             return Err(ValidationError::Key);
@@ -120,7 +120,7 @@ impl DirectFileLocations {
             .ok_or(ValidationError::Key)?;
         let name = name.strip_suffix(".parquet").ok_or(ValidationError::Key)?;
         let (stem, token) = name.rsplit_once('.').ok_or(ValidationError::Key)?;
-        if stem.contains('/') || token.len() != TOKEN_BYTES.div_ceil(3) * 4 {
+        if stem.contains('/') || token.len() != (TOKEN_BYTES * 4).div_ceil(3) {
             return Err(ValidationError::Key);
         }
         super::validate_relative_key(stem)?;
@@ -184,6 +184,7 @@ fn encode_root(bytes: &mut Vec<u8>, root: &ChunkRoot) {
     ] {
         bytes.extend_from_slice(&field.to_be_bytes());
     }
+    bytes.extend_from_slice(&root.padding_length.to_be_bytes());
     bytes.push(root.height);
     bytes.extend_from_slice(&root.digest);
 }
@@ -198,6 +199,7 @@ fn decode_root(fields: &mut Cursor<'_>) -> Result<ChunkRoot, ValidationError> {
         physical_length: fields.number()?,
         logical_offset: fields.number()?,
         logical_length: fields.number()?,
+        padding_length: u32::from_be_bytes(fields.take()?),
         height: fields.take::<1>()?[0],
         digest: fields.take()?,
     })

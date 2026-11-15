@@ -12,6 +12,7 @@ fn location(part: u64, logical_length: u64) -> Location {
         length: logical_length + 34,
         logical_offset: 0,
         logical_length,
+        padding_length: 0,
     }
 }
 
@@ -54,6 +55,7 @@ fn length_and_offset_overflow_are_rejected() {
         length: 1,
         logical_offset: 0,
         logical_length: u64::MAX - 1,
+        padding_length: 0,
     };
     composer.push(u64::MAX - 1, [0; 16], &[first]).unwrap();
     assert_eq!(

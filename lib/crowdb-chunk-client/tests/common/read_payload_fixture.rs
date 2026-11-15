@@ -45,6 +45,7 @@ pub fn storage() -> (Arc<TestPayloadStorage>, Location) {
         chunk_id: Some(id),
         length: frame_length as u64,
         logical_length: 7,
+        padding_length: 0,
         ..Location::default()
     };
     (storage, location)

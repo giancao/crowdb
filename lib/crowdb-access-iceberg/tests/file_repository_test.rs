@@ -66,6 +66,7 @@ async fn streamed_publication_replays_equal_etag_with_different_chunk_locations(
                 length: 36,
                 logical_offset: 0,
                 logical_length: 2,
+                padding_length: 0,
             }],
             2,
             etag.to_owned(),

@@ -89,6 +89,7 @@ impl FileBlockStore for TestUploadBlocks {
             physical_length: bytes.len() as u64 + 64,
             logical_offset: 0,
             logical_length: bytes.len() as u64,
+            padding_length: 0,
             height,
             digest: Sha256::digest(bytes).into(),
         })

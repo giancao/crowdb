@@ -159,6 +159,7 @@ async fn inspection_fixture() -> (Arc<TestTransport>, S3Dispatcher) {
             length: 8,
             logical_offset: index * 8,
             logical_length: 8,
+            padding_length: 0,
         })
         .collect();
     let object = ObjectRecord {

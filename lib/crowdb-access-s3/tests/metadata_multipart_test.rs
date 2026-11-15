@@ -53,6 +53,7 @@ fn part() -> MultipartPartRecord {
             length: 39,
             logical_offset: 0,
             logical_length: 5,
+            padding_length: 0,
         }],
     }
 }

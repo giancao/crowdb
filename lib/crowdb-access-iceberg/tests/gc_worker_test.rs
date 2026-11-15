@@ -263,6 +263,7 @@ async fn retired_streamed_file_reclaims_location_after_worker_restart() {
         length: 128,
         logical_offset: 0,
         logical_length: 64,
+        padding_length: 0,
     };
     blocks.blocks.values.rcu(|values| {
         let mut next = (**values).clone();

@@ -285,6 +285,9 @@ pub struct Location {
     pub length: u64,
     pub logical_offset: u64,
     pub logical_length: u64,
+    /// Bytes after the encoded `length` that the same allocation owns up to the
+    /// next bitmap unit boundary. Zero for chunks without a bitmap.
+    pub padding_length: u32,
 }
 
 // ── RPC request/response types ──────────────────────────────────

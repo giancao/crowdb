@@ -36,6 +36,7 @@ fn complete_chunk_locations_round_trip_without_a_file_sha256() {
             length: 65_536,
             logical_offset: 0,
             logical_length: 65_500,
+            padding_length: 0,
         },
         Location {
             chunk_id: Some(ChunkId { high: 3, low: 4 }),
@@ -43,6 +44,7 @@ fn complete_chunk_locations_round_trip_without_a_file_sha256() {
             length: 80,
             logical_offset: 65_500,
             logical_length: 44,
+            padding_length: 0,
         },
     ];
     let length = 65_544;
@@ -202,6 +204,7 @@ fn chunk_roots_are_fixed_size_and_invalid_hints_do_not_replace_canonical_bytes()
             physical_length: 8192,
             logical_offset: 0,
             logical_length: file.length,
+            padding_length: 1234,
             height: 0,
             digest: file.digest,
         }),

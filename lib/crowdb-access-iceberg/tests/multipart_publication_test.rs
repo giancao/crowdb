@@ -114,6 +114,7 @@ async fn replace_selected_part(fixture: &file::TestFile, first: &MultipartPart) 
             length: 41,
             logical_offset: 0,
             logical_length: 7,
+            padding_length: 0,
         }],
         7,
         "33333333333333333333333333333333".into(),
@@ -161,6 +162,7 @@ async fn streamed_parts_complete_by_composing_locations_and_saved_md5_only() {
             length: size + 34,
             logical_offset: 0,
             logical_length: size,
+            padding_length: 0,
         };
         let part = MultipartPart {
             upload: session.upload,

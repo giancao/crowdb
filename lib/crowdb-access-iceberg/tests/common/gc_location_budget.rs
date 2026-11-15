@@ -41,6 +41,7 @@ impl TestRangeBlocks {
             length: 16,
             logical_offset: 0,
             logical_length: 7,
+            padding_length: 0,
         }
     }
 
@@ -51,6 +52,7 @@ impl TestRangeBlocks {
             physical_length: 8,
             logical_offset: 0,
             logical_length: 8,
+            padding_length: 0,
             height: 0,
             digest: [7; 32],
         }

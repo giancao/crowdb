@@ -215,6 +215,7 @@ impl TestFixture {
                 chunk_id: Some(chunk_id(index)),
                 length: self.backend.data[index].len() as u64,
                 logical_length: payload.len() as u64,
+                padding_length: 0,
                 ..Location::default()
             }])
             .unwrap(),

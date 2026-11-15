@@ -43,6 +43,7 @@ impl TestFileBlocks {
                     physical_length: self.bytes.len() as u64 + 64,
                     logical_offset: 0,
                     logical_length: self.bytes.len() as u64,
+                    padding_length: 0,
                     height: 0,
                     digest,
                 }),

@@ -73,6 +73,7 @@ fn stream_part(session: &MultipartSession, number: u16, chunk_low: u64) -> Multi
                     length: 44,
                     logical_offset: 0,
                     logical_length: 10,
+                    padding_length: 0,
                 }],
                 10,
                 "0123456789abcdef0123456789abcdef".into(),

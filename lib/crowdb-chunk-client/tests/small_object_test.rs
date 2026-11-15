@@ -893,6 +893,7 @@ async fn small_object_repairs_two_failed_replicas_from_the_same_shadow() {
     let encoded = usize::try_from(frame_bytes(12 * 1024)).unwrap();
     let allocated = encoded.next_multiple_of(4096);
     assert_eq!(replacement_images[0].len(), allocated);
+    assert_eq!(locations[0].padding_length as usize, allocated - encoded);
     assert_eq!(replacement_images[0], replacement_images[1]);
     assert!(replacement_images[0][encoded..].iter().all(|byte| *byte == 0));
     let frame = parse_frame(&replacement_images[0][..encoded], locations[0].chunk_id.unwrap()).unwrap();
@@ -966,6 +967,9 @@ async fn two_copy_small_write_crosses_mirror_block_boundary() {
     assert_eq!((first.offset, first.length), (0, frame_bytes(4000)));
     assert_eq!(second.offset, 4096);
     assert!(second.offset < 8192 && second.offset + second.length > 8192);
+    // The location reports the padding that completes the object's last unit.
+    assert_eq!(u64::from(first.padding_length), 4096 - first.length);
+    assert_eq!(u64::from(second.padding_length), 8192 - second.length);
     let chunk_id = second.chunk_id.unwrap();
     let base = chunk_id.low * 4096 * 4096;
     let mut copies = HashMap::<u64, Vec<u8>>::new();

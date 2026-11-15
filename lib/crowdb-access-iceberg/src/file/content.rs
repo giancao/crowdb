@@ -24,6 +24,8 @@ pub struct ChunkRoot {
     pub physical_length: u64,
     pub logical_offset: u64,
     pub logical_length: u64,
+    /// Bytes after `physical_length` that the block's allocation owns in a shared chunk.
+    pub padding_length: u32,
     pub height: u8,
     pub digest: [u8; 32],
 }
@@ -35,7 +37,11 @@ impl ChunkRoot {
         if self.chunk == ChunkId::default()
             || self.physical_length == 0
             || self.logical_length == 0
-            || self.offset.checked_add(self.physical_length).is_none()
+            || self
+                .offset
+                .checked_add(self.physical_length)
+                .and_then(|end| end.checked_add(u64::from(self.padding_length)))
+                .is_none()
             || self.logical_offset.checked_add(self.logical_length).is_none()
             || self.height > MAX_CHUNK_TREE_HEIGHT
             || (self.height == 0 && self.logical_length > super::blocks::MAX_FILE_BLOCK_BYTES as u64)

@@ -67,6 +67,7 @@ impl SmallWriteIntent for BlockIntent {
                 physical_length: location.length,
                 logical_offset: location.logical_offset,
                 logical_length: location.logical_length,
+                padding_length: location.padding_length,
                 height: self.height,
                 digest: self.digest,
             },

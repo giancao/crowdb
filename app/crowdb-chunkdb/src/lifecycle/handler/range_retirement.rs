@@ -55,7 +55,8 @@ impl LifecycleHandler {
             ));
         }
         let end = chunk_bitmap::align_up(start + u64::from(request.chunk_size), unit);
-        // Only a confirmed range can be retired; a zero bit beyond it means unwritten.
+        // Only a confirmed range can be retired, on active and sealed chunks
+        // alike: a zero bit beyond the cursor means unwritten.
         if end > chunk_bitmap::align_up(chunk.acknowledged_cursor, unit) {
             return Err(LifecycleError::StateConflict);
         }

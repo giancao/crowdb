@@ -804,6 +804,7 @@ impl ChunkWriter {
                     length: bytes_in_chunk,
                     logical_offset: 0,
                     logical_length: bytes_in_chunk,
+                    padding_length: 0,
                 }
             }
             Some(cid) => {
@@ -818,6 +819,7 @@ impl ChunkWriter {
                     length: 0,
                     logical_offset: 0,
                     logical_length: 0,
+                    padding_length: 0,
                 }
             }
             None => {

@@ -109,6 +109,7 @@ async fn interrupted_framed_stream_preserves_type_without_layout_retry() {
             chunk_id: Some(id),
             length: frame_length,
             logical_length: 8,
+            padding_length: 0,
             ..Location::default()
         }])
         .unwrap();

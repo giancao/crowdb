@@ -42,6 +42,7 @@ fn completed_locations_become_the_object_data_reference() {
         length: 3,
         logical_offset: 0,
         logical_length: 3,
+        padding_length: 0,
         ..Location::default()
     }];
     attach_completed_locations(&mut object, &locations).expect("locations encode");
