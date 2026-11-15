@@ -85,9 +85,9 @@ async fn remote_status_reports_rpc_success_and_error_totals_by_exact_name() {
         ..PxElectionConfig::DEFAULT
     });
     let live = PxRemoteReplica::new(2, peer_endpoint);
-    live.set_rpc_transport(Arc::new(PxRpcTransport::new()));
+    live.set_rpc_transport(Arc::new(PxRpcTransport::with_peer_discovery_for_tests()));
     let dead = PxRemoteReplica::new(3, format!("127.0.0.1:{}", crate::common::net_lock::unique_port()));
-    dead.set_rpc_transport(Arc::new(PxRpcTransport::new()));
+    dead.set_rpc_transport(Arc::new(PxRpcTransport::with_peer_discovery_for_tests()));
     group.add_remote_replica(live);
     group.add_remote_replica(dead);
     store.add_group(group);
