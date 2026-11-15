@@ -19,7 +19,7 @@ use crowdb_paxos_kv::common::config::WalConfig;
 use crowdb_paxos_kv::paxos::roles::{PxBallot, PxLogEntry};
 use crowdb_paxos_kv::wal::record::{RecordType, WALRecord};
 use crowdb_paxos_kv::wal::replay::replay_group;
-use crowdb_paxos_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
+use crowdb_paxos_kv::wal::{IoBackend, WalEngine};
 
 const GROUP: u64 = 1;
 
@@ -47,16 +47,14 @@ fn accepted_write(slot: u64, term: u64, key: &[u8], value: &[u8]) -> PxLogEntry 
 
 async fn create_file_wal(wal_dir: PathBuf) -> Arc<WalEngine> {
     let backend = Arc::new(IoBackend::File);
-    let mut config = WalConfig::with_root(wal_dir);
-    config.wal_record_format = WalRecordFormat::Binary;
+    let config = WalConfig::with_root(wal_dir);
     WalEngine::create(backend, config, GROUP)
         .await
         .expect("create file-backed wal")
 }
 
 async fn create_wal(backend: Arc<IoBackend>, wal_dir: PathBuf) -> Arc<WalEngine> {
-    let mut config = WalConfig::with_root(wal_dir);
-    config.wal_record_format = WalRecordFormat::Binary;
+    let config = WalConfig::with_root(wal_dir);
     WalEngine::create(backend, config, GROUP)
         .await
         .expect("create wal")
@@ -168,8 +166,7 @@ async fn file_backed_wal_resumes_writing_after_reopen() {
         let backend = Arc::new(IoBackend::File);
         let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
         let next_seg = replay.max_segment_id.saturating_add(1).max(1);
-        let mut config = WalConfig::with_root(wal_dir.clone());
-        config.wal_record_format = WalRecordFormat::Binary;
+        let config = WalConfig::with_root(wal_dir.clone());
         let wal = WalEngine::create_with_next_segment_id(backend, config, GROUP, next_seg)
             .await
             .expect("create file-backed wal");

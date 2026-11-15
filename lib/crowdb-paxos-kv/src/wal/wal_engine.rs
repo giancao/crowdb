@@ -27,7 +27,7 @@ use super::pipeline_backend::{WalBlockAlignment, WalPipelineBackend};
 use super::pipeline_writer::{
     spawn_pipeline_writer, EncodedRecord, PendingWrite, WriteCompletion, WriteRequest, WriterCommand,
 };
-use super::record::{WALRecord, WalRecordFormat};
+use super::record::WALRecord;
 use super::IoBackend;
 
 /// Snapshot of WAL batch aggregation stats for observability/benchmarking.
@@ -227,7 +227,6 @@ impl WalEngine {
                     WalPipelineBackend::block(disk_path.to_string_lossy(), alignment)
                 }
             };
-            let record_format = select_record_format(config.wal_record_format);
 
             // macOS skips per-write fsync because APFS makes it prohibitively
             // expensive. The shutdown flush (flush_all) remains durable.
@@ -237,7 +236,6 @@ impl WalEngine {
                 idx,
                 backend.clone(),
                 group_dir.clone(),
-                record_format,
                 group_id,
                 next_segment_id.clone(),
                 segment_size,
@@ -258,7 +256,6 @@ impl WalEngine {
                 pipeline_path: group_dir,
                 backend: pipeline_backend,
                 writer_tx,
-                record_format,
             });
         }
 
@@ -311,7 +308,7 @@ impl WalEngine {
 
         // Encode the record using the format resolved for this pipeline. Binary
         // uses the zero-copy frame; text-line keeps the formatted line.
-        let encoded = EncodedRecord::encode(record, pipeline.record_format);
+        let encoded = EncodedRecord::encode(record);
 
         // Enqueue to the writer task and await the durable-flush ack.
         //
@@ -561,12 +558,5 @@ impl WalEngine {
     #[must_use]
     pub fn block_device_counter_handles(&self) -> Option<&BlockDeviceCounterHandles> {
         self.block_device_counters.get()
-    }
-}
-
-fn select_record_format(configured: WalRecordFormat) -> WalRecordFormat {
-    match configured {
-        WalRecordFormat::Auto => WalRecordFormat::Binary,
-        explicit => explicit,
     }
 }

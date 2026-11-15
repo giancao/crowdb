@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 use crowdb_common::config::BaseConfig;
 
 use crate::wal::pipeline_backend::WalBlockAlignment;
-use crate::wal::record::WalRecordFormat;
 
 /// Paxos retry configuration (all fields static — bind at group
 /// creation).
@@ -183,9 +182,6 @@ pub struct WalConfig {
     /// 4096 (default 4 KiB), 8192, 16384, 65536. Must be a power of
     /// two.
     pub wal_io_unit_bytes: usize,
-    /// static: record encoding format. `Auto` selects binary frames
-    /// (zero-copy) on all backends.
-    pub wal_record_format: WalRecordFormat,
     /// static: skip the durable `fdatasync` on every write batch.
     /// Records are still written to the segment file, but the flush is
     /// not durable. Unsafe for production — only for benchmark
@@ -233,7 +229,6 @@ impl Default for WalConfig {
             gc_tick_secs: 30,
             wal_aligned: false,
             wal_io_unit_bytes: WalBlockAlignment::DEFAULT_IO_UNIT_BYTES,
-            wal_record_format: WalRecordFormat::Auto,
             wal_skip_fsync: false,
         }
     }

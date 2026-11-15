@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use crowdb_paxos_kv::paxos::roles::{PxBallot, PxLogEntry};
 use crowdb_paxos_kv::wal::pipeline_backend::{WalBlockAlignment, WalPipelineBackend};
-use crowdb_paxos_kv::wal::record::{WALRecord, WalRecordFormat, WAL_MAGIC};
+use crowdb_paxos_kv::wal::record::{WALRecord, WAL_MAGIC};
 use crowdb_paxos_kv::wal::replay::replay_group;
 use crowdb_paxos_kv::wal::segment::SEG_HEADER_LEN;
 use crowdb_paxos_kv::wal::wal_engine::WalEngine;
@@ -42,7 +42,6 @@ fn wal_config_defaults_use_flush_names_and_wake_drain_flush() {
     let config = WalConfig::default();
     assert_eq!(config.wal_flush_batch_bytes, 64 * 1024);
     assert_eq!(config.wal_flush_watchdog_ms, 100);
-    assert_eq!(config.wal_record_format, WalRecordFormat::Auto);
 }
 
 /// W3: wake-drain-flush issues exactly one durable flush for a single record
@@ -206,7 +205,6 @@ async fn large_binary_batch_splits_across_iov_max_and_replays() {
         wal_disks: vec![PathBuf::from("/wal-vec-chunk")],
         wal_segment_size: 64 * 1024 * 1024,
         wal_flush_batch_bytes: 64 * 1024 * 1024,
-        wal_record_format: WalRecordFormat::Binary,
         ..Default::default()
     };
     let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
@@ -435,7 +433,6 @@ async fn memblock_rotates_before_the_batch_and_replays_oversized_records() {
     let backend = sim_backend();
     let disks = vec![PathBuf::from("/wal-rollover")];
     let mut config = test_config(disks.clone());
-    config.wal_record_format = WalRecordFormat::Binary;
     let records = [write_entry(1, 1), write_entry(1, 2), write_entry(1, 3)];
     let record_len = records[0].encode_frame().total_len() as u64;
     config.wal_segment_size = SEG_HEADER_LEN as u64 + 2 * record_len;

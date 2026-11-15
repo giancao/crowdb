@@ -23,15 +23,14 @@ use crowdb_paxos_kv::cluster::kv_store::KvStore;
 use crowdb_paxos_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crowdb_paxos_kv::common::config::WalConfig;
 use crowdb_paxos_kv::wal::replay::replay_group;
-use crowdb_paxos_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
+use crowdb_paxos_kv::wal::{IoBackend, WalEngine};
 
 const GROUP: u64 = 1;
 const REPLICA_ID: u64 = 1;
 
 async fn create_file_wal(wal_dir: PathBuf) -> Arc<WalEngine> {
     let backend = Arc::new(IoBackend::File);
-    let mut config = WalConfig::with_root(wal_dir);
-    config.wal_record_format = WalRecordFormat::Binary;
+    let config = WalConfig::with_root(wal_dir);
     WalEngine::create(backend, config, GROUP)
         .await
         .expect("create file-backed wal")
@@ -45,8 +44,7 @@ async fn reopen_group(wal_dir: &Path) -> PxGroup {
     let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
 
     let next_seg = replay.max_segment_id.saturating_add(1).max(1);
-    let mut config = WalConfig::with_root(wal_dir.to_path_buf());
-    config.wal_record_format = WalRecordFormat::Binary;
+    let config = WalConfig::with_root(wal_dir.to_path_buf());
     let wal = WalEngine::create_with_next_segment_id(backend, config, GROUP, next_seg)
         .await
         .expect("create file-backed wal");

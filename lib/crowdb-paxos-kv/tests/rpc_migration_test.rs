@@ -325,7 +325,6 @@ async fn verify_coalesced_put(cluster: CrowdbRpcCluster, coalesced_value_len: us
     let record = crowdb_paxos_kv::wal::record::WALRecord::from_accepted(1, &second);
     let canonical_record = crowdb_paxos_kv::wal::record::WALRecord::from_accepted(1, &follower_second);
     assert_eq!(record.encode(), canonical_record.encode());
-    assert_eq!(record.encode_text_line(), canonical_record.encode_text_line());
     let frame = record.encode_frame();
     let mut slices = Vec::new();
     frame.append_io_slices(&mut slices);

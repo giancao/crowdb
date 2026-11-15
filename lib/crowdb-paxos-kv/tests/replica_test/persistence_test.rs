@@ -22,7 +22,7 @@ use crowdb_paxos_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole
 use crowdb_paxos_kv::common::config::WalConfig;
 use crowdb_paxos_kv::paxos::roles::{PxBallot, PxLogEntry};
 use crowdb_paxos_kv::wal::replay::replay_group;
-use crowdb_paxos_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
+use crowdb_paxos_kv::wal::{IoBackend, WalEngine};
 
 const GROUP: u64 = 1;
 const REPLICA_ID: u64 = 7;
@@ -104,8 +104,7 @@ fn batch_entry(slot: u64, ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> PxLogEntry {
 
 async fn create_file_wal(wal_dir: PathBuf) -> Arc<WalEngine> {
     let backend = Arc::new(IoBackend::File);
-    let mut config = WalConfig::with_root(wal_dir);
-    config.wal_record_format = WalRecordFormat::Binary;
+    let config = WalConfig::with_root(wal_dir);
     WalEngine::create(backend, config, GROUP)
         .await
         .expect("create file-backed wal")

@@ -17,14 +17,10 @@ use tokio::sync::mpsc;
 
 use super::pipeline_backend::WalPipelineBackend;
 use super::pipeline_writer::WriterCommand;
-use super::record::WalRecordFormat;
 
 pub(crate) struct WalPipeline {
     pub(super) pipeline_path: PathBuf,
     pub(super) backend: WalPipelineBackend,
     /// Command channel to the dedicated writer task.
     pub(super) writer_tx: mpsc::UnboundedSender<WriterCommand>,
-    /// Resolved record format for this pipeline. `Auto` is translated to
-    /// `Binary` or `TextLine` at construction time.
-    pub(super) record_format: WalRecordFormat,
 }

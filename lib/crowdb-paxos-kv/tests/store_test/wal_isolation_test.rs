@@ -18,14 +18,13 @@ use crowdb_paxos_kv::cluster::kv_store::KvStore;
 use crowdb_paxos_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crowdb_paxos_kv::common::config::WalConfig;
 use crowdb_paxos_kv::wal::replay::replay_group;
-use crowdb_paxos_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
+use crowdb_paxos_kv::wal::{IoBackend, WalEngine};
 
 const REPLICA_ID: u64 = 1;
 
 async fn create_file_wal(wal_root: PathBuf, group_id: u64) -> Arc<WalEngine> {
     let backend = Arc::new(IoBackend::File);
-    let mut config = WalConfig::with_root(wal_root);
-    config.wal_record_format = WalRecordFormat::Binary;
+    let config = WalConfig::with_root(wal_root);
     WalEngine::create(backend, config, group_id)
         .await
         .expect("create file-backed wal")

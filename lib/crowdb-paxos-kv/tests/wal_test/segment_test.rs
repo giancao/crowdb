@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use crowdb_paxos_kv::paxos::roles::PxBallot;
 use crowdb_paxos_kv::wal::pipeline_backend::WalBlockAlignment;
-use crowdb_paxos_kv::wal::record::{RecordType, WALRecord, WalRecordFormat};
+use crowdb_paxos_kv::wal::record::{RecordType, WALRecord};
 use crowdb_paxos_kv::wal::segment::{SegmentReader, WalSegment, SEG_HEADER_LEN};
 use crowdb_paxos_kv::wal::{IoBackend, MemBlockDevice};
 use std::path::PathBuf;
@@ -105,36 +105,6 @@ async fn append_and_seal() {
 
     seg.seal().await.unwrap();
     assert!(seg.is_sealed());
-}
-
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn segment_reader_reads_text_line_records() {
-    let backend = sim_backend();
-    let dir = PathBuf::from("/wal/group-text");
-    let mut seg = WalSegment::create_with_format(&backend, &dir, 6, 201, WalRecordFormat::TextLine)
-        .await
-        .unwrap();
-
-    let r1 = WALRecord::from_promised(201, 1, 10, PxBallot::new(0, 1));
-    let r2 = accepted_record(201, 20, 7);
-    let off1 = seg.append(&r1).await.unwrap();
-    let off2 = seg.append(&r2).await.unwrap();
-    assert!(off2 > off1);
-    seg.seal().await.unwrap();
-
-    let mut reader = SegmentReader::open(&backend, seg.path()).await.unwrap();
-    let (decoded1, decoded_off1) = reader.next_record().await.unwrap().unwrap();
-    let (decoded2, decoded_off2) = reader.next_record().await.unwrap().unwrap();
-    assert_eq!(decoded_off1, off1);
-    assert_eq!(decoded_off2, off2);
-    assert_eq!(decoded1, r1);
-    assert_eq!(decoded2, r2);
-    assert!(reader.next_record().await.unwrap().is_none());
-
-    let footer = reader.read_footer().await.unwrap().unwrap();
-    assert_eq!(footer.min_slot, 10);
-    assert_eq!(footer.max_slot, 20);
-    assert_eq!(footer.record_count, 2);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

@@ -21,7 +21,7 @@ use bytes::Bytes;
 use crowdb_paxos_kv::common::config::WalConfig;
 use crowdb_paxos_kv::paxos::roles::{PxBallot, PxLogEntry};
 use crowdb_paxos_kv::wal::record::WALRecord;
-use crowdb_paxos_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
+use crowdb_paxos_kv::wal::{IoBackend, WalEngine};
 
 const GROUP: u64 = 1;
 
@@ -45,8 +45,7 @@ fn accepted_write(slot: u64, term: u64, key: &[u8], value: &[u8]) -> PxLogEntry 
 
 async fn create_file_wal(wal_dir: std::path::PathBuf) -> Arc<WalEngine> {
     let backend = Arc::new(IoBackend::File);
-    let mut config = WalConfig::with_root(wal_dir);
-    config.wal_record_format = WalRecordFormat::Binary;
+    let config = WalConfig::with_root(wal_dir);
     WalEngine::create(backend, config, GROUP)
         .await
         .expect("create file-backed wal")

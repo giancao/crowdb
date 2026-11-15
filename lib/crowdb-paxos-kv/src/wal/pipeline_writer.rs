@@ -39,49 +39,32 @@ use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
 use super::index::{SegmentMeta, ShardedSegmentIndex, SlotLocation};
-use super::record::{RecordFrame, WALRecord, WalRecordFormat};
+use super::record::{RecordFrame, WALRecord};
 use super::segment::WalSegment;
 use super::IoBackend;
 
-/// Encoded record ready for the writer. Binary records use a zero-copy frame
-/// that retains the original payload owners; text-line records keep the formatted
-/// line as bytes.
-pub(crate) enum EncodedRecord {
-    Binary(RecordFrame),
-    TextLine(Vec<u8>),
-}
+/// Encoded record ready for the writer: a zero-copy frame that retains the
+/// original payload owners.
+pub(crate) struct EncodedRecord(RecordFrame);
 
 impl EncodedRecord {
-    pub fn encode(record: &WALRecord, format: WalRecordFormat) -> Self {
-        match format {
-            WalRecordFormat::Binary => Self::Binary(record.encode_frame()),
-            WalRecordFormat::TextLine => Self::TextLine(record.encode_text_line().into_bytes()),
-            WalRecordFormat::Auto => unreachable!("Auto must be resolved at pipeline creation"),
-        }
+    pub fn encode(record: &WALRecord) -> Self {
+        Self(record.encode_frame())
     }
 
     /// Total on-disk byte length.
     #[must_use]
     pub fn total_len(&self) -> usize {
-        match self {
-            Self::Binary(frame) => frame.total_len(),
-            Self::TextLine(bytes) => bytes.len(),
-        }
+        self.0.total_len()
     }
 
     fn io_slice_count(&self) -> usize {
-        match self {
-            Self::Binary(frame) => frame.io_slice_count(),
-            Self::TextLine(_) => 1,
-        }
+        self.0.io_slice_count()
     }
 
     /// Append this record's slices to `slices` for a vectored write.
     pub fn append_io_slices<'a>(&'a self, slices: &mut Vec<std::io::IoSlice<'a>>) {
-        match self {
-            Self::Binary(frame) => frame.append_io_slices(slices),
-            Self::TextLine(bytes) => slices.push(std::io::IoSlice::new(bytes)),
-        }
+        self.0.append_io_slices(slices);
     }
 }
 
@@ -121,11 +104,11 @@ pub(crate) enum WriteRequest {
 }
 
 impl WriteRequest {
-    fn encode(self, format: WalRecordFormat) -> PendingWrite {
+    fn encode(self) -> PendingWrite {
         match self {
             Self::Encoded(write) => write,
             Self::EarlyAccepted { record, completion } => PendingWrite {
-                encoded: EncodedRecord::encode(&record, format),
+                encoded: EncodedRecord::encode(&record),
                 slot: record.slot,
                 term: record.term,
                 is_vote: false,
@@ -157,7 +140,6 @@ pub(crate) fn spawn_pipeline_writer(
     pipeline_idx: usize,
     backend: Arc<IoBackend>,
     pipeline_path: std::path::PathBuf,
-    record_format: WalRecordFormat,
     group_id: PxGroupId,
     next_segment_id: Arc<AtomicU64>,
     segment_size: u64,
@@ -178,7 +160,6 @@ pub(crate) fn spawn_pipeline_writer(
         pipeline_idx,
         backend,
         pipeline_path,
-        record_format,
         group_id,
         next_segment_id,
         segment_size,
@@ -202,7 +183,6 @@ async fn pipeline_writer_loop(
     pipeline_idx: usize,
     backend: Arc<IoBackend>,
     pipeline_path: std::path::PathBuf,
-    record_format: WalRecordFormat,
     group_id: PxGroupId,
     next_segment_id: Arc<AtomicU64>,
     segment_size: u64,
@@ -223,15 +203,7 @@ async fn pipeline_writer_loop(
     let mut offsets: Vec<u64> = Vec::new();
 
     // Create the initial active segment.
-    let mut segment = match create_segment(
-        &backend,
-        &pipeline_path,
-        &next_segment_id,
-        group_id,
-        record_format,
-    )
-    .await
-    {
+    let mut segment = match create_segment(&backend, &pipeline_path, &next_segment_id, group_id).await {
         Ok(seg) => seg,
         Err(e) => {
             failed.store(true, Ordering::Release);
@@ -265,7 +237,6 @@ async fn pipeline_writer_loop(
                     &pipeline_path,
                     &next_segment_id,
                     group_id,
-                    record_format,
                     &index,
                     pipeline_idx,
                     &failed,
@@ -277,14 +248,13 @@ async fn pipeline_writer_loop(
             }
             WriterCommand::Write(first) => {
                 if !handle_write_command(
-                    first.encode(record_format),
+                    first.encode(),
                     &mut batch,
                     &mut offsets,
                     &mut segment,
                     &mut rx,
                     &backend,
                     &pipeline_path,
-                    record_format,
                     group_id,
                     &next_segment_id,
                     segment_size,
@@ -328,7 +298,6 @@ async fn handle_write_command(
     rx: &mut mpsc::UnboundedReceiver<WriterCommand>,
     backend: &Arc<IoBackend>,
     pipeline_path: &std::path::Path,
-    record_format: WalRecordFormat,
     group_id: PxGroupId,
     next_segment_id: &Arc<AtomicU64>,
     segment_size: u64,
@@ -346,7 +315,7 @@ async fn handle_write_command(
     batch.push(first);
     let mut batch_bytes_acc = batch[0].encoded.total_len();
     let (mut pending_seal_acks, pending_flush_acks) =
-        drain_pending_commands(rx, batch, &mut batch_bytes_acc, batch_bytes, record_format);
+        drain_pending_commands(rx, batch, &mut batch_bytes_acc, batch_bytes);
 
     // A MemBlock segment already owns its normal capacity. Rotate before a
     // batch would grow it. An oversized batch can fill a fresh segment.
@@ -360,7 +329,6 @@ async fn handle_write_command(
             pipeline_path,
             next_segment_id,
             group_id,
-            record_format,
             index,
             pipeline_idx,
         )
@@ -399,7 +367,6 @@ async fn handle_write_command(
                     pipeline_path,
                     next_segment_id,
                     group_id,
-                    record_format,
                     index,
                     pipeline_idx,
                 )
@@ -422,7 +389,6 @@ async fn handle_write_command(
                 pipeline_path,
                 next_segment_id,
                 group_id,
-                record_format,
                 index,
                 pipeline_idx,
                 failed,
@@ -493,7 +459,6 @@ async fn handle_seal_command(
     pipeline_path: &std::path::Path,
     next_segment_id: &Arc<AtomicU64>,
     group_id: PxGroupId,
-    record_format: WalRecordFormat,
     index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
     failed: &Arc<AtomicBool>,
@@ -505,7 +470,7 @@ async fn handle_seal_command(
         register_sealed(index, segment, pipeline_idx);
     }
     if result.is_ok() {
-        match create_segment(backend, pipeline_path, next_segment_id, group_id, record_format).await {
+        match create_segment(backend, pipeline_path, next_segment_id, group_id).await {
             Ok(new_seg) => *segment = new_seg,
             Err(e) => {
                 failed.store(true, Ordering::Release);
@@ -529,14 +494,13 @@ fn drain_pending_commands(
     batch: &mut Vec<PendingWrite>,
     batch_bytes_acc: &mut usize,
     batch_bytes: usize,
-    record_format: WalRecordFormat,
 ) -> (Vec<WriterAck>, Vec<WriterAck>) {
     let mut pending_seal_acks: Vec<WriterAck> = Vec::new();
     let mut pending_flush_acks: Vec<WriterAck> = Vec::new();
     loop {
         match rx.try_recv() {
             Ok(WriterCommand::Write(req)) => {
-                let req = req.encode(record_format);
+                let req = req.encode();
                 *batch_bytes_acc += req.encoded.total_len();
                 batch.push(req);
                 if *batch_bytes_acc >= batch_bytes {
@@ -589,13 +553,12 @@ async fn rotate_segment(
     pipeline_path: &std::path::Path,
     next_segment_id: &Arc<AtomicU64>,
     group_id: PxGroupId,
-    record_format: WalRecordFormat,
     index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
 ) -> io::Result<()> {
     segment.seal().await?;
     register_sealed(index, segment, pipeline_idx);
-    *segment = create_segment(backend, pipeline_path, next_segment_id, group_id, record_format).await?;
+    *segment = create_segment(backend, pipeline_path, next_segment_id, group_id).await?;
     Ok(())
 }
 
@@ -631,7 +594,6 @@ async fn process_pending_seal_acks(
     pipeline_path: &std::path::Path,
     next_segment_id: &Arc<AtomicU64>,
     group_id: PxGroupId,
-    record_format: WalRecordFormat,
     index: &Arc<ShardedSegmentIndex>,
     pipeline_idx: usize,
     failed: &Arc<AtomicBool>,
@@ -644,7 +606,7 @@ async fn process_pending_seal_acks(
             register_sealed(index, segment, pipeline_idx);
         }
         if result.is_ok() {
-            match create_segment(backend, pipeline_path, next_segment_id, group_id, record_format).await {
+            match create_segment(backend, pipeline_path, next_segment_id, group_id).await {
                 Ok(new_seg) => *segment = new_seg,
                 Err(e) => {
                     failed.store(true, Ordering::Release);
@@ -756,10 +718,9 @@ async fn create_segment(
     path: &std::path::Path,
     next_segment_id: &AtomicU64,
     group_id: PxGroupId,
-    record_format: WalRecordFormat,
 ) -> io::Result<WalSegment> {
     let seg_id = next_segment_id.fetch_add(1, Ordering::Relaxed);
-    WalSegment::create_with_format(backend, path, seg_id, group_id, record_format).await
+    WalSegment::create(backend, path, seg_id, group_id).await
 }
 
 /// Register a sealed segment in the index.

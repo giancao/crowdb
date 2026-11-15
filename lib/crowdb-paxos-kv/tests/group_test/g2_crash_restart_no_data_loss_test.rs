@@ -28,7 +28,7 @@ use crowdb_paxos_kv::cluster::{PaxosKvServer, PxKvStore, PxLocalReplica, PxLocal
 use crowdb_paxos_kv::common::config::{PxElectionConfig, WalConfig};
 use crowdb_paxos_kv::rpc::{KvGetRequest, KvSetRequest};
 use crowdb_paxos_kv::wal::replay::replay_group;
-use crowdb_paxos_kv::wal::{IoBackend, WalEngine, WalRecordFormat};
+use crowdb_paxos_kv::wal::{IoBackend, WalEngine};
 use crowdb_paxos_kv_client::PaxosKvRpcTransport;
 
 use crate::common::test_client::TestKvClient;
@@ -65,8 +65,7 @@ async fn build_wal_group(
     cfg: PxElectionConfig,
 ) -> PxGroup {
     let backend = Arc::new(IoBackend::File);
-    let mut config = WalConfig::with_root(wal_dir.to_path_buf());
-    config.wal_record_format = WalRecordFormat::Binary;
+    let config = WalConfig::with_root(wal_dir.to_path_buf());
     let replay = replay_group(&backend, &config.wal_disks, GROUP)
         .await
         .expect("replay group");

@@ -239,9 +239,6 @@ pub async fn create_group_with_wal_on_runtime(
     // silently discard segment, flush, retention, and alignment settings.
     let mut wal_config = config.wal.clone();
     wal_config.set_root(store_wal_root(&config.wal_root, store_id));
-    if std::env::var("CROWDB_PAXOS_KV_WAL_TEXT").as_deref() == Ok("1") {
-        wal_config.wal_record_format = crowdb_paxos_kv::wal::WalRecordFormat::TextLine;
-    }
     wal_config.wal_skip_fsync = config.wal_skip_fsync;
     let mut replay = replay_group(&wal_backend, &wal_config.wal_disks, group_id).await?;
     let wal = WalEngine::create_from_replay(
