@@ -154,7 +154,9 @@ impl LifecycleHandler {
         }
         chunk.strips.extend(appended.iter().cloned());
         chunk.next_strip_sequence = next_strip_sequence;
-        chunk.capacity = chunk.strips.iter().map(|s| s.capacity).sum();
+        chunk.capacity = chunk
+            .capacity
+            .saturating_add(appended.iter().map(|strip| strip.capacity).sum());
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);
         if let Err(error) = self.store.put_chunk(&chunk).await {
             self.resolve_failed_append(chunk_id, &appended, &mut guard, &error)

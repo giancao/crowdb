@@ -83,7 +83,8 @@ impl LifecycleHandler {
         let reservations = self.cancel_seal_reservations(chunk_id).await?;
 
         let now_ms = unix_time_ms();
-        let (unused_segments, cleanup_operation) = trim_sealed_strips(&mut chunk, chunk_id, seal_length);
+        let (unused_segments, cleanup_operation, trimmed_capacity) =
+            trim_sealed_strips(&mut chunk, chunk_id, seal_length);
 
         chunk.state = ProtoChunkState::Sealed as i32;
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);
@@ -92,7 +93,7 @@ impl LifecycleHandler {
         crowdb_protocol::chunk_bitmap::mark_written(&mut chunk, confirmed_from, seal_bytes);
         chunk.acknowledged_cursor = seal_bytes;
         chunk.sealed_ts_ms = now_ms;
-        chunk.capacity = chunk.strips.iter().map(|strip| strip.capacity).sum();
+        chunk.capacity = chunk.capacity.saturating_sub(trimmed_capacity);
         if let Some(operation_id) = cleanup_operation {
             chunk.cleanup_intents.push(StripCleanupIntent {
                 operation_id: Some(operation_id),
@@ -196,7 +197,7 @@ fn trim_sealed_strips(
     chunk: &mut Chunk,
     chunk_id: &ChunkId,
     seal_length: u32,
-) -> (Vec<Segment>, Option<ChunkId>) {
+) -> (Vec<Segment>, Option<ChunkId>, u32) {
     let first_unused = chunk
         .strips
         .iter()
@@ -208,7 +209,8 @@ fn trim_sealed_strips(
         high: chunk_id.high ^ chunk.modify_ts,
         low: chunk_id.low ^ u64::from(seal_length),
     });
-    (unused_segments, operation)
+    let trimmed_capacity = unused_strips.iter().map(|strip| strip.capacity).sum();
+    (unused_segments, operation, trimmed_capacity)
 }
 
 fn validate_seal_bounds(chunk: &Chunk, seal_bytes: u64, seal_length: u32) -> Result<(), LifecycleError> {

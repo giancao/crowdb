@@ -781,7 +781,6 @@ impl LifecycleHandler {
 
         let replacement = carry_replacement_bitmap(&chunk, start..end, replacement_strips)?;
         chunk.strips.splice(start..end, replacement);
-        chunk.capacity = chunk.strips.iter().map(|strip| strip.capacity).sum();
         chunk.next_strip_sequence = next_strip_sequence;
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);
         chunk.last_strip_replacement = Some(operation_id);

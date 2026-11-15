@@ -534,7 +534,6 @@ impl LifecycleHandler {
             ));
         }
         chunk.strips.splice(start..end, [replacement]);
-        chunk.capacity = chunk.strips.iter().map(|strip| strip.capacity).sum();
         chunk.modify_ts = chunk.modify_ts.saturating_add(1);
         chunk.last_strip_replacement = group.group_id;
         if !retired_segments.is_empty() {
