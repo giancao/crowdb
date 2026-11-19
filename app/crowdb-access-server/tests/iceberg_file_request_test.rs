@@ -13,33 +13,11 @@ fn table() -> TableLocation {
 }
 
 #[test]
-fn native_injection_accepts_only_new_layout_parquet_put_and_uuidv7_identity() {
+fn put_rejects_the_removed_native_upload_query() {
     let mut table = table();
     table.storage_namespace = Some(crowdb_access_iceberg::key::NamespaceId::random());
     let identity = "0199aabc-0000-7000-8000-000000000001";
-    let uri = path(
-        table,
-        &format!("data/part.parquet?crowdb-native-upload={identity}"),
-    );
-    assert!(FileRequest::parse(&Method::PUT, &uri)
-        .unwrap()
-        .injection
-        .is_some());
-    assert!(FileRequest::parse(&Method::GET, &uri).is_err());
-    assert!(FileRequest::parse(
-        &Method::PUT,
-        &path(table, "data/part.parquet?crowdb-native-upload=bad")
-    )
-    .is_err());
-    assert!(FileRequest::parse(
-        &Method::PUT,
-        &path(
-            table,
-            &format!("metadata/v1.json?crowdb-native-upload={identity}")
-        )
-    )
-    .is_err());
-    table.storage_namespace = None;
+    assert!(FileRequest::parse(&Method::PUT, &path(table, "data/part.parquet")).is_ok());
     assert!(FileRequest::parse(
         &Method::PUT,
         &path(

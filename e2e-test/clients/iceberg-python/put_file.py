@@ -1,13 +1,9 @@
 # Copyright 2026-present Gian <crow.db@outlook.com>
 # Licensed under the Apache License, Version 2.0.
-"""Native injection followed by unmodified PyIceberg and Arrow reads."""
+"""A signed S3 PUT followed by unmodified PyIceberg and Arrow reads."""
 
 import hashlib
 import os
-from pathlib import Path
-import secrets
-import tempfile
-import time
 import uuid
 
 from botocore.auth import S3SigV4Auth
@@ -33,13 +29,8 @@ def file_request(properties, method, location, data=b"", query=""):
     return response
 
 
-def verify_file(table, location, stem, data):
-    prefix = table.location() + f"/f/v1/{stem}."
-    assert location.startswith(prefix) and location.endswith(".parquet"), location
-    locator = location[len(prefix):-len(".parquet")]
-    assert locator and locator.isascii(), location
-    assert all(character.isalnum() or character in "_-" for character in locator), location
-    digest = '"' + hashlib.sha256(data).hexdigest() + '"'
+def verify_file(table, location, data):
+    digest = '"' + hashlib.md5(data).hexdigest() + '"'
     head = file_request(table.io.properties, "HEAD", location)
     assert head.status_code == 200, head.status_code
     assert int(head.headers["Content-Length"]) == len(data), head.headers
@@ -55,35 +46,11 @@ def verify_file(table, location, stem, data):
 
 
 def upload(table, data):
-    locations = []
-    if os.environ.get("CROWDB_E2E_NATIVE_LOADER") == "1":
-        from crowdb_tpc_loader.native_upload import new_upload_id, upload as native_upload
-
-        stem = f"selected-{new_upload_id()}"
-        uri = table.location() + f"/data/{stem}.parquet"
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "selected.parquet"
-            path.write_bytes(data)
-            for _ in range(2):
-                result = native_upload(table.io.properties, uri, path, len(data), 4096, lambda _: None)
-                verify_file(table, result[0], stem, data)
-                locations.append(result[0])
-    else:
-        random = secrets.randbits(74)
-        identity = uuid.UUID(int=(int(time.time() * 1000) << 80) | (7 << 76)
-                             | ((random >> 62) << 64) | (2 << 62) | (random & ((1 << 62) - 1)))
-        stem = f"selected-{identity}"
-        uri = table.location() + f"/data/{stem}.parquet"
-        for _ in range(2):
-            response = file_request(table.io.properties, "PUT", uri, data,
-                                    f"?crowdb-native-upload={identity}")
-            location = response.json()["location"]
-            assert response.headers["ETag"] == '"' + hashlib.sha256(data).hexdigest() + '"', response.headers
-            verify_file(table, location, stem, data)
-            locations.append(location)
-    assert locations[0] != locations[1], locations
-    verify_file(table, locations[0], stem, data)
-    return locations[1]
+    location = table.location() + f"/data/selected-{uuid.uuid4()}.parquet"
+    response = file_request(table.io.properties, "PUT", location, data)
+    assert response.headers["ETag"] == '"' + hashlib.md5(data).hexdigest() + '"', response.headers
+    verify_file(table, location, data)
+    return location
 
 
 def verify(config):
@@ -114,7 +81,5 @@ def verify(config):
         with duckdb.connect() as connection:
             connection.register("selected", selected)
             assert connection.execute("SELECT count(*), sum(id) FROM selected").fetchone() == (3, 6)
-    assert "/f/v1/" in table.scan().plan_files()[0].file.file_path
-    # PyIceberg's Arrow FileIO opens the returned URL and performs Parquet footer
-    # range reads. No additional location field is supplied to either SDK.
-    print("Native injection: retry, manifest registration, Arrow query, move and retained URL passed")
+    # PyIceberg's Arrow FileIO opens the uploaded URL and performs Parquet footer range reads.
+    print("Signed PUT: manifest registration, Arrow query, move and retained URL passed")

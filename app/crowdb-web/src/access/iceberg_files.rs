@@ -126,12 +126,7 @@ fn file_query(request: &Request) -> Result<String, ApiError> {
     for (name, _) in file_query.query_pairs() {
         if !matches!(
             name.as_ref(),
-            "crowdb-native-upload"
-                | "uploads"
-                | "uploadId"
-                | "partNumber"
-                | "part-number-marker"
-                | "max-parts"
+            "uploads" | "uploadId" | "partNumber" | "part-number-marker" | "max-parts"
         ) || !names.insert(name.to_string())
         {
             return Err(err_400("Unsupported file query"));

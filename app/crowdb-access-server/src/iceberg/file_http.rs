@@ -31,7 +31,6 @@ mod bucket;
 mod delete;
 #[cfg(feature = "test-util")]
 pub use delete::mark_unreferenced_file_for_tests;
-mod injection;
 mod listing;
 mod metrics;
 mod multipart;
@@ -300,14 +299,6 @@ impl FileHttp {
                 .await
             }
             FileOperation::Put => {
-                if file_request.injection.is_some() {
-                    if streaming.is_some() {
-                        return Err(FileS3ErrorCode::InvalidRequest);
-                    }
-                    return self
-                        .inject(&file_request, request, &admission, now_ms, &locators.locations)
-                        .await;
-                }
                 self.put(
                     &file_request,
                     request,
