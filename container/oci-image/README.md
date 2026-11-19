@@ -137,10 +137,11 @@ The local storage policy accepts 1 MiB mirror strips with one or two copies. Use
 
 ## Direct Docker and Compose
 
-A direct single-container cluster needs a volume and four published ports:
+A direct single-container cluster needs a volume, four published ports and `--security-opt seccomp=unconfined`. The storage engine uses io_uring, which Docker's default seccomp profile blocks; without the option, cluster initialization fails with `CrowdbTreeEngine::open(...) failed: NotSupported`. The shortcuts, the CLI and the Compose files already pass it:
 
 ```bash
 pixi run docker run -d --name crowdb-one --cpus 1 --memory 1536m \
+  --security-opt seccomp=unconfined \
   -e CROWDB_S3_PUBLIC_URI=http://127.0.0.1:7135 \
   -e CROWDB_ICEBERG_PUBLIC_URI=http://127.0.0.1:8135 \
   -e CROWDB_DATASET_PUBLIC_URI=http://127.0.0.1:9135 \
@@ -155,6 +156,7 @@ For three nodes, create a dedicated bridge and execute these commands separately
 ```bash
 pixi run docker network create crowdb-demo
 pixi run docker run -d --name crowdb-demo-1 --network crowdb-demo --cpus 1 --memory 1536m \
+  --security-opt seccomp=unconfined \
   -e CROWDB_CLUSTER=demo -e CROWDB_INITIAL_VOTERS=3 \
   -e CROWDB_S3_PUBLIC_URI=http://127.0.0.1:7135 \
   -e CROWDB_ICEBERG_PUBLIC_URI=http://127.0.0.1:8135 \
@@ -163,6 +165,7 @@ pixi run docker run -d --name crowdb-demo-1 --network crowdb-demo --cpus 1 --mem
   -p 127.0.0.1:8135:8135 -p 127.0.0.1:9135:9135 \
   --mount type=volume,source=crowdb-demo-1-data,target=/opt/crowdb/data crowdb-node:dev
 pixi run docker run -d --name crowdb-demo-2 --network crowdb-demo --cpus 1 --memory 1536m \
+  --security-opt seccomp=unconfined \
   -e CROWDB_CLUSTER=demo -e CROWDB_INITIAL_VOTERS=3 \
   -e CROWDB_S3_PUBLIC_URI=http://127.0.0.1:7136 \
   -e CROWDB_ICEBERG_PUBLIC_URI=http://127.0.0.1:8136 \
@@ -171,6 +174,7 @@ pixi run docker run -d --name crowdb-demo-2 --network crowdb-demo --cpus 1 --mem
   -p 127.0.0.1:8136:8135 -p 127.0.0.1:9136:9135 \
   --mount type=volume,source=crowdb-demo-2-data,target=/opt/crowdb/data crowdb-node:dev
 pixi run docker run -d --name crowdb-demo-3 --network crowdb-demo --cpus 1 --memory 1536m \
+  --security-opt seccomp=unconfined \
   -e CROWDB_CLUSTER=demo -e CROWDB_INITIAL_VOTERS=3 \
   -e CROWDB_S3_PUBLIC_URI=http://127.0.0.1:7137 \
   -e CROWDB_ICEBERG_PUBLIC_URI=http://127.0.0.1:8137 \
