@@ -78,9 +78,10 @@ fn three_id_http_paths_and_list_prefixes_use_the_fixed_bucket() {
         )
         .is_err());
     }
-    let reserved = format!("/iceberg/{}f/v1/name.token.parquet", table.object_prefix());
-    assert!(FileRequest::parse(&Method::PUT, &reserved.parse().unwrap()).is_err());
-    assert!(FileRequest::parse(&Method::GET, &reserved.parse().unwrap()).is_ok());
+    // `f/` is an ordinary directory: engines write delete files beside the data file they reference.
+    let nested = format!("/iceberg/{}f/v1/name.token.parquet", table.object_prefix());
+    assert!(FileRequest::parse(&Method::PUT, &nested.parse().unwrap()).is_ok());
+    assert!(FileRequest::parse(&Method::GET, &nested.parse().unwrap()).is_ok());
 }
 
 #[test]

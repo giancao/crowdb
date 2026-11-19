@@ -165,18 +165,6 @@ impl GcWorker {
                     }
                     continue;
                 }
-                crate::key::TableStorageScope::Operation => {
-                    let StorageRecord::NativeInjection(receipt) = StorageRecord::decode_storage(
-                        &crate::key::StorageKey::NativeTable(key),
-                        &item.value,
-                    )?
-                    else {
-                        return Err(ValidationError::Record.into());
-                    };
-                    if receipt.retained(now_ms) {
-                        return Err(CatalogError::Busy.into());
-                    }
-                }
                 _ => return Err(CatalogError::Busy.into()),
             }
             self.delete_exact(&item.key, &item.value).await?;

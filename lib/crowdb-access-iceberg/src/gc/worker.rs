@@ -21,7 +21,6 @@ mod cleanup;
 mod inactive;
 mod live;
 mod multipart;
-mod native;
 mod retirement;
 mod sweep;
 mod system;
@@ -109,7 +108,6 @@ impl GcWorker {
             GcPhase::Roots if task.kind == GcTaskKind::LiveTable => self.live_roots(task, now_ms).await,
             GcPhase::Mark if task.kind == GcTaskKind::LiveTable => self.live_mark(task).await,
             GcPhase::Roots => self.inactive_roots(task, now_ms).await,
-            GcPhase::RootsNative => self.native_roots(task, now_ms).await,
             GcPhase::Fence if task.kind == GcTaskKind::LiveTable => self.live_fence(task, now_ms).await,
             GcPhase::Fence => self.fence(task, now_ms).await,
             GcPhase::Sweep => self.sweep(task, now_ms).await,

@@ -126,7 +126,8 @@ impl GcWorker {
             next.scan_after.clone_from(&last.key);
         } else {
             next.scan_after.clear();
-            next.phase = GcPhase::RootsNative;
+            next.proof.complete = false;
+            next.phase = GcPhase::Mark;
         }
         self.repository.update(task, &next).await?;
         Ok(next)

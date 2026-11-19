@@ -107,23 +107,6 @@ impl IcebergHttpService {
         Ok(self)
     }
 
-    /// Installs persistent locator keys, including retained older key versions.
-    /// # Errors
-    /// Rejects configuration after the file service has been shared.
-    pub fn with_direct_file_locations(
-        mut self,
-        locations: crowdb_access_iceberg::file::DirectFileLocations,
-    ) -> Result<Self, crowdb_access_iceberg::file::FileGrantError> {
-        Arc::get_mut(
-            self.files
-                .as_mut()
-                .ok_or(crowdb_access_iceberg::file::FileGrantError::Invalid)?,
-        )
-        .ok_or(crowdb_access_iceberg::file::FileGrantError::Invalid)?
-        .set_direct_locations(locations);
-        Ok(self)
-    }
-
     /// Applies the configured shared-chunk routing threshold to native file uploads.
     /// # Errors
     /// Rejects an unavailable file service or an invalid threshold.

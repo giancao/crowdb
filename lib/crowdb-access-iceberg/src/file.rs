@@ -7,9 +7,6 @@ mod content;
 mod credentials;
 mod deletion_vector;
 mod digest;
-mod direct_location;
-mod injection;
-pub use injection::NativeInjection;
 mod directory;
 mod format;
 mod json;
@@ -58,7 +55,6 @@ pub use deletion_vector::{
     DeletionVectorPositions, DeletionVectorReference, DeletionVectorStats,
 };
 pub use digest::FileDigest;
-pub use direct_location::DirectFileLocations;
 pub use directory::{ChunkDirectory, ChunkEntry, FileIdentity, MAX_DIRECTORY_ENTRIES};
 pub use format::{
     probe_orc_footer, probe_parquet_footer, probe_puffin_footer, FormatProbeError, OrcFooter, PuffinFooter,

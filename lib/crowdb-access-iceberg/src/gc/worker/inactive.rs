@@ -98,7 +98,7 @@ impl GcWorker {
             next.scan_after.clone_from(&last.key);
         } else {
             next.scan_after.clear();
-            next.phase = GcPhase::RootsNative;
+            next.phase = GcPhase::Rescan;
         }
         self.repository.update(task, &next).await?;
         Ok(next)

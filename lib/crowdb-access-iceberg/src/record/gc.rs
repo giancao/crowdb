@@ -155,7 +155,6 @@ fn decode_phase(value: u8) -> Result<GcPhase, ValidationError> {
         14 => GcPhase::VerifyCleanup,
         15 => GcPhase::CleanupGc,
         16 => GcPhase::CleanupNative,
-        17 => GcPhase::RootsNative,
         _ => return Err(ValidationError::Record),
     })
 }

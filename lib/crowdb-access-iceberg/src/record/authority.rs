@@ -1,9 +1,7 @@
 use crowdb_protocol::iceberg_fb::{FBCatalogAuthority, FBCatalogAuthorityArgs, FBCatalogLifecycle};
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 
-use crate::catalog::{
-    Capabilities, CatalogAuthority, CatalogLifecycle, CatalogLocatorKey, CatalogStorageLayout, ClearBounds,
-};
+use crate::catalog::{Capabilities, CatalogAuthority, CatalogLifecycle, CatalogStorageLayout, ClearBounds};
 use crate::error::ValidationError;
 use crate::key::CatalogId;
 
@@ -14,13 +12,9 @@ pub(super) fn encode<'buffer>(
     authority.validate()?;
     let catalog = builder.create_vector(authority.catalog.as_bytes());
     let display_name = builder.create_string(&authority.display_name);
-    let locator_key = authority
-        .locator_key
-        .map(|key| builder.create_vector(&key.bytes()));
     Ok(FBCatalogAuthority::create(
         builder,
         &FBCatalogAuthorityArgs {
-            locator_key,
             storage_layout: authority.storage_layout as u8,
             catalog: Some(catalog),
             display_name: Some(display_name),
@@ -49,10 +43,6 @@ pub(super) fn decode(value: FBCatalogAuthority<'_>) -> Result<CatalogAuthority, 
         return Err(ValidationError::Text);
     }
     let authority = CatalogAuthority {
-        locator_key: value
-            .locator_key()
-            .map(|key| CatalogLocatorKey::new(key.bytes().try_into().map_err(|_| ValidationError::Record)?))
-            .transpose()?,
         storage_layout: CatalogStorageLayout::from_version(value.storage_layout())?,
         catalog: CatalogId::from_bytes(value.catalog().bytes())?,
         display_name: value.display_name().to_owned(),

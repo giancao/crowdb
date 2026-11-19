@@ -70,12 +70,6 @@ impl FileRequest {
             None if method == Method::DELETE => FileOperation::DeleteObject,
             None => return Err(FileRequestError::Unsupported),
         };
-        if location.table().storage_namespace.is_some()
-            && matches!(operation, FileOperation::Put | FileOperation::CreateMultipart)
-            && (location.relative_key() == "f" || location.relative_key().starts_with("f/"))
-        {
-            return Err(FileRequestError::Invalid);
-        }
         Ok(Self {
             location,
             operation,
