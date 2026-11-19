@@ -28,17 +28,6 @@ impl StorageTablePath {
             relative_key: relative_key.to_owned(),
         })
     }
-
-    /// Admission for names chosen by ordinary SDK writers.
-    ///
-    /// # Errors
-    /// Rejects invalid keys and the server-owned direct locator directory.
-    pub fn logical_file(self, relative_key: &str) -> Result<NativeFileLocation, ValidationError> {
-        if relative_key == "f" || relative_key.starts_with("f/") {
-            return Err(ValidationError::Key);
-        }
-        self.file(relative_key)
-    }
 }
 
 impl NativeFileLocation {

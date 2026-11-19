@@ -11,7 +11,6 @@ pub enum TableStorageScope {
     Head,
     File,
     Projection,
-    Operation,
     Multipart,
     Gc,
 }
@@ -22,7 +21,6 @@ impl TableStorageScope {
             Self::Head => "head",
             Self::File => "file",
             Self::Projection => "projection",
-            Self::Operation => "operation",
             Self::Multipart => "multipart",
             Self::Gc => "gc",
         }
@@ -33,7 +31,6 @@ impl TableStorageScope {
             "head" => Ok(Self::Head),
             "file" => Ok(Self::File),
             "projection" => Ok(Self::Projection),
-            "operation" => Ok(Self::Operation),
             "multipart" => Ok(Self::Multipart),
             "gc" => Ok(Self::Gc),
             _ => Err(ValidationError::Key),
@@ -122,7 +119,7 @@ impl TableStorageKey {
                 }
                 Ok(())
             }
-            TableStorageScope::Operation | TableStorageScope::Multipart | TableStorageScope::Gc => {
+            TableStorageScope::Multipart | TableStorageScope::Gc => {
                 crate::file::validate_relative_key(&self.suffix)?;
                 let identity = self.suffix.split('/').next().ok_or(ValidationError::Key)?;
                 canonical_id::<OperationId>(identity).map(|_| ())

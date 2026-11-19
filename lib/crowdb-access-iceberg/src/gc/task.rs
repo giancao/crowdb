@@ -34,7 +34,6 @@ pub enum GcPhase {
     VerifyCleanup,
     CleanupGc,
     CleanupNative,
-    RootsNative,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

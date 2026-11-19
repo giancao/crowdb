@@ -6,8 +6,8 @@ use crowdb_access_iceberg::catalog::{
     CatalogError, CatalogLifecycle, CatalogRepository, CatalogStore, RootState,
 };
 use crowdb_access_iceberg::file::{
-    DirectFileLocations, FileBlockStore, FileGrantError, FileGrantIssuer, FileOperation, FileRecord,
-    FileRepository, FileSealer, MultipartLister, MultipartPartStore, MultipartRepository, RangeError,
+    FileBlockStore, FileGrantError, FileGrantIssuer, FileOperation, FileRecord, FileRepository, FileSealer,
+    MultipartLister, MultipartPartStore, MultipartRepository, RangeError,
 };
 use crowdb_access_iceberg::key::OperationId;
 use crowdb_access_iceberg::storage::{default_large_write, own_large_write};
@@ -31,7 +31,6 @@ mod bucket;
 mod delete;
 #[cfg(feature = "test-util")]
 pub use delete::mark_unreferenced_file_for_tests;
-mod injection;
 mod listing;
 mod metrics;
 mod multipart;
@@ -43,12 +42,6 @@ pub use stream::write_iceberg_fallback_body_for_tests;
 use metrics::UploadFlowMetrics;
 pub use metrics::UploadFlowSnapshot;
 
-struct CatalogLocators {
-    catalog: crowdb_access_iceberg::key::CatalogId,
-    key: Option<crowdb_access_iceberg::catalog::CatalogLocatorKey>,
-    locations: DirectFileLocations,
-}
-
 pub(super) struct FileHttp {
     repository: FileRepository,
     store: Arc<dyn CatalogStore>,
@@ -56,9 +49,6 @@ pub(super) struct FileHttp {
     lister: MultipartLister,
     blocks: Arc<dyn FileBlockStore>,
     issuer: FileGrantIssuer,
-    direct_locations: DirectFileLocations,
-    locator_cache: arc_swap::ArcSwapOption<CatalogLocators>,
-    locator_keys_configured: bool,
     responses: FileResponseBudget,
     uploads: FileUploadBudget,
     small_threshold_exclusive: usize,
@@ -71,36 +61,6 @@ pub(super) struct FileHttp {
 }
 
 impl FileHttp {
-    pub(super) fn set_direct_locations(&mut self, locations: DirectFileLocations) {
-        self.direct_locations = locations;
-        self.locator_keys_configured = true;
-        self.locator_cache.store(None);
-    }
-
-    fn catalog_locations(
-        &self,
-        authority: &crowdb_access_iceberg::catalog::CatalogAuthority,
-    ) -> Result<Arc<CatalogLocators>, FileS3ErrorCode> {
-        if let Some(cached) = self.locator_cache.load_full() {
-            if cached.catalog == authority.catalog && cached.key == authority.locator_key {
-                return Ok(cached);
-            }
-        }
-        let locations = if let Some(key) = authority.locator_key {
-            self.direct_locations
-                .for_catalog(key, self.locator_keys_configured)
-                .map_err(|_| FileS3ErrorCode::InternalError)?
-        } else {
-            self.direct_locations.clone()
-        };
-        let locators = Arc::new(CatalogLocators {
-            catalog: authority.catalog,
-            key: authority.locator_key,
-            locations,
-        });
-        self.locator_cache.store(Some(locators.clone()));
-        Ok(locators)
-    }
     pub(super) fn native_receive_metrics(
         &self,
     ) -> Option<crowdb_access_s3::native_buffer::NativeBufferMetricsSnapshot> {
@@ -138,10 +98,6 @@ impl FileHttp {
             return Err(FileGrantError::Invalid);
         }
         Ok(Self {
-            locator_cache: arc_swap::ArcSwapOption::empty(),
-            locator_keys_configured: false,
-            direct_locations: DirectFileLocations::new(1, std::collections::BTreeMap::from([(1, secret)]))
-                .map_err(|_| FileGrantError::Invalid)?,
             list_tokens: crowdb_access_iceberg::file::FileListTokens::new(secret)
                 .map_err(|_| FileGrantError::Invalid)?,
             repository: FileRepository::new(store.clone()),
@@ -288,27 +244,11 @@ impl FileHttp {
                 .map_err(admission_error)?;
         let native_receiver =
             self.receive_provider(&mut request, file_request.operation, streaming.is_some());
-        let locators = self.catalog_locations(&authority)?;
         match file_request.operation {
             FileOperation::Head | FileOperation::Get => {
-                self.read(
-                    &file_request,
-                    &request,
-                    root.context,
-                    &admission,
-                    &locators.locations,
-                )
-                .await
+                self.read(&file_request, &request, root.context, &admission).await
             }
             FileOperation::Put => {
-                if file_request.injection.is_some() {
-                    if streaming.is_some() {
-                        return Err(FileS3ErrorCode::InvalidRequest);
-                    }
-                    return self
-                        .inject(&file_request, request, &admission, now_ms, &locators.locations)
-                        .await;
-                }
                 self.put(
                     &file_request,
                     request,

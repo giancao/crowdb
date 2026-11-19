@@ -10,7 +10,7 @@ import pyarrow
 import pyarrow.fs as fs
 import pyiceberg
 from pyiceberg.io.pyarrow import PyArrowFile
-from injection import verify
+from put_file import verify
 
 
 def main():

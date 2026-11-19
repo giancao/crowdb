@@ -64,11 +64,6 @@ impl TableFileConfig {
         let mut properties =
             self.properties(target.namespace, target.name, target.table, endpoint.as_deref());
         if target.storage_namespace.is_some() {
-            properties.insert("crowdb.native-injection", "true".into());
-            properties.insert(
-                "crowdb.native-injection-max-bytes",
-                (1024_u64 * 1024 * 1024).to_string(),
-            );
             if let Some(namespace) = target.storage_namespace {
                 let endpoint = properties
                     .get_mut("client.refresh-credentials-endpoint")

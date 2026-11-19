@@ -18,32 +18,14 @@ impl FileHttp {
         request: &Request<Incoming>,
         context: crowdb_access_iceberg::catalog::CatalogContext,
         admission: &FileTransferAdmission,
-        locations: &crowdb_access_iceberg::file::DirectFileLocations,
     ) -> Result<Response<IcebergBody>, FileS3ErrorCode> {
-        let (record, direct) = match locations
-            .resolve(&file_request.location)
-            .map_err(|_| FileS3ErrorCode::AccessDenied)?
-        {
-            Some(record) => (record, true),
-            None => (
-                self.repository
-                    .load(context, &file_request.location)
-                    .await
-                    .map_err(catalog_error)?
-                    .ok_or(FileS3ErrorCode::NoSuchKey)?,
-                false,
-            ),
-        };
+        let record = self
+            .repository
+            .load(context, &file_request.location)
+            .await
+            .map_err(catalog_error)?
+            .ok_or(FileS3ErrorCode::NoSuchKey)?;
         admission.check_bytes(0, record.length).map_err(admission_error)?;
-        let root_directory = if direct {
-            Some(
-                crowdb_access_iceberg::file::FileReader::probe_root(self.blocks.as_ref(), &record)
-                    .await
-                    .map_err(|_| FileS3ErrorCode::NoSuchKey)?,
-            )
-        } else {
-            None
-        };
         let condition = file_read_condition(request.headers(), &etag(&record))?;
         let FileReadCondition::Read { use_range } = condition else {
             let mut response = Response::new(IcebergBody::new(Vec::new()));
@@ -60,12 +42,6 @@ impl FileHttp {
             let body = admission
                 .read_body(&self.responses, self.blocks.clone(), record.clone(), range)
                 .map_err(admission_error)?;
-            let body = if let Some(bytes) = root_directory {
-                body.with_root_directory(bytes)
-                    .map_err(|_| FileS3ErrorCode::NoSuchKey)?
-            } else {
-                body
-            };
             IcebergBody::file(body)
         };
         let mut response = Response::new(body);

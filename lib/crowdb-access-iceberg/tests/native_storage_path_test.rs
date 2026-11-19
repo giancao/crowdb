@@ -36,7 +36,7 @@ fn native_uri_preserves_immutable_identity_and_exact_filename() {
         "a/",
         "a b",
     ] {
-        let location = table.logical_file(filename).unwrap();
+        let location = table.file(filename).unwrap();
         assert_eq!(location.table(), table);
         assert_eq!(location.relative_key(), filename);
         assert_eq!(
@@ -49,8 +49,7 @@ fn native_uri_preserves_immutable_identity_and_exact_filename() {
         );
     }
     assert_ne!(table.file("a%2Fb").unwrap(), table.file("a/b").unwrap());
-    assert!(table.logical_file("f/v1/name.token.parquet").is_err());
-    assert!(table.file("f/v1/name.token.parquet").is_ok());
+    assert!(table.file("f/v1/name.parquet").is_ok());
 }
 
 #[test]
@@ -116,11 +115,6 @@ fn table_keys_are_version_isolated_and_round_trip() {
         (TableStorageScope::Head, "", "head"),
         (TableStorageScope::File, "metadata/v1.json", "file/"),
         (TableStorageScope::Projection, "1/receipt", "projection/"),
-        (
-            TableStorageScope::Operation,
-            "01010101010101010101010101010101/state",
-            "operation/",
-        ),
         (
             TableStorageScope::Multipart,
             "01010101010101010101010101010101/part/1",
@@ -211,8 +205,6 @@ fn malformed_keys_cannot_alias_head_or_filename() {
         (TableStorageScope::Head, "file"),
         (TableStorageScope::File, ""),
         (TableStorageScope::File, "../file"),
-        (TableStorageScope::Operation, "../operation"),
-        (TableStorageScope::Operation, "upload/state"),
         (TableStorageScope::Gc, "00000000000000000000000000000000/state"),
         (
             TableStorageScope::Multipart,

@@ -20,27 +20,6 @@ impl FileRepository {
         Self { store }
     }
 
-    /// Publishes one complete native upload. The caller retains its input and
-    /// retries the whole transfer after failure; no request selection is stored.
-    ///
-    /// # Errors
-    /// Rejects legacy scope, corrupt trees and conflicting filename publication.
-    pub async fn finalize_native_parquet(
-        &self,
-        context: CatalogContext,
-        owner: super::FileIdentity,
-        stem: &str,
-        tree: super::FileTree,
-        locations: &super::DirectFileLocations,
-    ) -> Result<FileRecord, CatalogError> {
-        if context.catalog != owner.table.catalog {
-            return Err(ValidationError::IdentityMismatch.into());
-        }
-        let root = tree.root.ok_or(ValidationError::Record)?;
-        let candidate = locations.parquet(owner.table, stem, owner.file, tree.length, tree.digest, root)?;
-        self.publish(context, &candidate).await
-    }
-
     /// # Errors
     /// Rejects retired contexts, corrupt bindings and missing published authorities.
     pub async fn load(

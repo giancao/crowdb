@@ -16,7 +16,6 @@ const SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StorageRecord {
-    NativeInjection(Box<crate::file::NativeInjection>),
     FileWriteIntent(Box<crate::file::FileWriteIntent>),
     GcNode(Box<crate::gc::GcNode>),
     GcTask(Box<crate::gc::GcTask>),
@@ -92,10 +91,6 @@ impl StorageRecord {
             return Ok(value);
         }
         Ok(match self {
-            Self::NativeInjection(receipt) => (
-                FBRecordValue::FBNativeInjection,
-                super::injection::encode(builder, receipt)?.as_union_value(),
-            ),
             Self::FileWriteIntent(intent) => (
                 FBRecordValue::FBFileWriteIntent,
                 super::write_intent::encode(builder, intent)?.as_union_value(),
@@ -273,7 +268,6 @@ impl StorageRecord {
             return self.validate_key(key);
         }
         let expected = match self {
-            Self::NativeInjection(receipt) => receipt.key()?,
             Self::File(file) => crate::file::canonical_file_key(&file.location),
             Self::DeletedFile(file) => crate::file::canonical_file_key(&file.file.location),
             Self::TableHead(head) => crate::table::storage_head_key(head.storage_location()),
@@ -316,13 +310,6 @@ impl StorageRecord {
                         .value_as_fbretired_namespace()
                         .ok_or(ValidationError::Record)?,
                 );
-            }
-            FBRecordValue::FBNativeInjection => {
-                return Ok(Self::NativeInjection(Box::new(super::injection::decode(
-                    envelope
-                        .value_as_fbnative_injection()
-                        .ok_or(ValidationError::Record)?,
-                )?)));
             }
             FBRecordValue::FBFileWriteIntent => {
                 return Ok(Self::FileWriteIntent(Box::new(super::write_intent::decode(

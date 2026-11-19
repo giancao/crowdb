@@ -41,14 +41,9 @@ fn native_catalog_authority_uses_a_version_legacy_servers_cannot_silently_relabe
             .activated(Capabilities::from_bits(0x3fff).unwrap())
             .unwrap();
         assert_eq!(activated.storage_layout, authority.storage_layout);
-        assert_eq!(activated.locator_key, authority.locator_key);
         assert_eq!(
             activated.renamed("renamed".into()).unwrap().storage_layout,
             authority.storage_layout
-        );
-        assert_eq!(
-            activated.renamed("renamed".into()).unwrap().locator_key,
-            authority.locator_key
         );
         assert_eq!(
             authority.storage_layout == CatalogStorageLayout::Native,
@@ -170,7 +165,6 @@ fn authority_codec_rejects_unknown_lifecycle_capabilities_and_invalid_generation
         let authority = FBCatalogAuthority::create(
             &mut builder,
             &FBCatalogAuthorityArgs {
-                locator_key: None,
                 storage_layout: 1,
                 catalog: Some(identity),
                 display_name: Some(name),
