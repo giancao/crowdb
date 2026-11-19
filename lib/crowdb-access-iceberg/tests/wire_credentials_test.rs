@@ -7,7 +7,7 @@ use crowdb_access_iceberg::wire::{
 
 fn limits() -> FileDelegationLimits {
     FileDelegationLimits {
-        ttl_ms: 900_000,
+        ttl_ms: 1_800_000,
         max_request_bytes: 100,
         max_file_bytes: 1000,
     }
@@ -26,7 +26,7 @@ fn authenticator() -> BearerAuthenticator {
 
 fn authority(context: CatalogContext) -> CatalogAuthority {
     let mut authority = CatalogAuthority::new(context.catalog, "catalog".into()).unwrap();
-    authority.admission_bounds.delegated_access_ms = 900_000;
+    authority.admission_bounds.delegated_access_ms = 1_800_000;
     authority.capabilities = Capabilities::from_bits(0x3fff).unwrap();
     authority
 }
@@ -43,7 +43,7 @@ fn target(table: TableId) -> FileDelegationTarget {
 #[test]
 fn only_independent_writer_receives_file_mutations() {
     let auth = authenticator();
-    let issuer = FileGrantIssuer::new([1; 32], 900_000).unwrap();
+    let issuer = FileGrantIssuer::new([1; 32], 1_800_000).unwrap();
     let context = context();
     let table = TableId::random();
     let location = TableLocation {
@@ -125,7 +125,7 @@ fn delegated_file_operations_follow_selected_version_and_draft_stage() {
     let principal = authenticator()
         .authenticate(&format!("Bearer {}", "w".repeat(32)))
         .unwrap();
-    let issuer = FileGrantIssuer::new([1; 32], 900_000).unwrap();
+    let issuer = FileGrantIssuer::new([1; 32], 1_800_000).unwrap();
     let table = TableId::random();
     let published = limits()
         .issue(&issuer, principal, context, &authority, target(table), 1000)
@@ -171,7 +171,7 @@ fn refresh_rotates_credentials_and_serializes_official_sdk_properties() {
     let principal = authenticator()
         .authenticate(&format!("Bearer {}", "w".repeat(32)))
         .unwrap();
-    let issuer = FileGrantIssuer::new([1; 32], 900_000).unwrap();
+    let issuer = FileGrantIssuer::new([1; 32], 1_800_000).unwrap();
     let context = context();
     let table = TableId::random();
     let initial = limits()
@@ -205,11 +205,11 @@ fn refresh_rotates_credentials_and_serializes_official_sdk_properties() {
             context,
             &authority(context),
             target(table),
-            299_999,
+            899_999,
         )
         .unwrap();
     assert_eq!(initial.session_token(), later.session_token());
-    assert_eq!(later.grant().expires_ms, 900_000);
+    assert_eq!(later.grant().expires_ms, 1_800_000);
     let refreshed = limits()
         .issue(
             &issuer,
@@ -217,7 +217,7 @@ fn refresh_rotates_credentials_and_serializes_official_sdk_properties() {
             context,
             &authority(context),
             target(table),
-            300_000,
+            900_000,
         )
         .unwrap();
     assert_ne!(initial.access_key_id(), refreshed.access_key_id());
@@ -242,11 +242,11 @@ fn refresh_rotates_credentials_and_serializes_official_sdk_properties() {
     let config = &credentials[0]["config"];
     assert_eq!(config["s3.access-key-id"], expected_key);
     assert_eq!(config["s3.secret-access-key"], expected_secret);
-    assert_eq!(config["s3.session-token-expires-at-ms"], "1200000");
+    assert_eq!(config["s3.session-token-expires-at-ms"], "2700000");
     let token = config["s3.session-token"].as_str().unwrap();
-    assert!(issuer.verify(&expected_key, token, context, 1_199_999).is_ok());
+    assert!(issuer.verify(&expected_key, token, context, 2_699_999).is_ok());
     assert!(matches!(
-        issuer.verify(&expected_key, token, context, 1_200_000),
+        issuer.verify(&expected_key, token, context, 2_700_000),
         Err(FileGrantError::Expired)
     ));
 }
@@ -256,10 +256,10 @@ fn delegation_rejects_invalid_limits_and_unrepresentable_sdk_expiry() {
     let principal = authenticator()
         .authenticate(&format!("Bearer {}", "r".repeat(32)))
         .unwrap();
-    let issuer = FileGrantIssuer::new([1; 32], 900_000).unwrap();
+    let issuer = FileGrantIssuer::new([1; 32], 1_800_000).unwrap();
     let context = context();
     let mut authority = authority(context);
-    authority.admission_bounds.delegated_access_ms = 1_000_000;
+    authority.admission_bounds.delegated_access_ms = 2_000_000;
     for invalid in 0..7 {
         let mut limits = limits();
         let mut now_ms = 1000;
@@ -291,17 +291,17 @@ fn persisted_delegation_bound_is_independent_of_issuer_configuration() {
     let principal = authenticator()
         .authenticate(&format!("Bearer {}", "w".repeat(32)))
         .unwrap();
-    let issuer = FileGrantIssuer::new([1; 32], 1_000_000).unwrap();
+    let issuer = FileGrantIssuer::new([1; 32], 2_000_000).unwrap();
     let context = context();
     let table = TableId::random();
-    for bound in [0, 1, 899_999, 900_000, 900_001] {
+    for bound in [0, 1, 1_799_999, 1_800_000, 1_800_001] {
         let mut authority = authority(context);
         authority.admission_bounds.delegated_access_ms = bound;
         let result = limits().issue(&issuer, principal, context, &authority, target(table), 1000);
-        if bound < 900_000 {
+        if bound < 1_800_000 {
             assert!(matches!(result, Err(FileGrantError::Bounds)));
         } else {
-            assert_eq!(result.unwrap().grant().expires_ms, 900_000);
+            assert_eq!(result.unwrap().grant().expires_ms, 1_800_000);
         }
     }
     let mut retired = authority(context);

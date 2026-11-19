@@ -82,7 +82,7 @@ async fn write_iceberg(iceberg_addr: SocketAddr, seeds: &[String]) {
         .unwrap();
     let authenticator =
         BearerAuthenticator::new(&"r".repeat(32), &"w".repeat(32), &"m".repeat(32), &"c".repeat(32)).unwrap();
-    let issuer = FileGrantIssuer::new(authenticator.namespace_token_key(), 900_000).unwrap();
+    let issuer = FileGrantIssuer::new(authenticator.namespace_token_key(), 1_800_000).unwrap();
     let (repository, _, chunks) = storage::connect(
         seeds.to_vec(),
         ChunkReadPolicy::default(),
