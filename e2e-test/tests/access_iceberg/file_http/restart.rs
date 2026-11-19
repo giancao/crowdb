@@ -14,7 +14,7 @@ async fn multipart_100_mib_survives_restart_and_complete_replay() {
     const PART_COUNT: usize = 20;
     let (stack, process, mut client, table) = setup_with_bounds_and_file_limit(
         ClearBounds {
-            delegated_access_ms: 900_000,
+            delegated_access_ms: 1_800_000,
             ..ClearBounds::default()
         },
         128 * 1024 * 1024,

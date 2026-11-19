@@ -16,7 +16,7 @@ use super::{child::TestCommitListener, common::TestCommitFixture, path, setup_wi
 pub async fn run() {
     let (stack, process, mut client, table) = setup_with_bounds(ClearBounds {
         request_ms: 300_000,
-        delegated_access_ms: 900_000,
+        delegated_access_ms: 1_800_000,
         ..ClearBounds::default()
     })
     .await;

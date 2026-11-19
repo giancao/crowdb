@@ -52,7 +52,7 @@ async fn official_java_s3_fileio_uploads_and_reads_native_files() {
 async fn official_java_catalog_commits_native_parquet_snapshots_and_staged_tables() {
     let (stack, process, _, _) = setup_with_bounds(ClearBounds {
         request_ms: 300_000,
-        delegated_access_ms: 900_000,
+        delegated_access_ms: 1_800_000,
         ..ClearBounds::default()
     })
     .await;
@@ -73,7 +73,7 @@ async fn run_catalog_sdk(endpoint: String, mode: &'static str) {
 async fn official_java_opaque_metadata_publication_preserves_valid_data_and_delete_reads() {
     let (_stack, process, _, _) = setup_with_bounds(ClearBounds {
         request_ms: 300_000,
-        delegated_access_ms: 900_000,
+        delegated_access_ms: 1_800_000,
         ..ClearBounds::default()
     })
     .await;

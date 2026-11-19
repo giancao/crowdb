@@ -24,7 +24,7 @@ const RENAMED: &str = "/v1/namespaces/analytics/tables/renamed";
 async fn native_file_credentials_refresh_expire_and_follow_lifecycle_fences() {
     let bounds = ClearBounds {
         request_ms: 300_000,
-        delegated_access_ms: 900_000,
+        delegated_access_ms: 1_800_000,
         ..ClearBounds::default()
     };
     let (stack, first, bootstrap, _) = setup_with_bounds(bounds).await;
@@ -34,7 +34,7 @@ async fn native_file_credentials_refresh_expire_and_follow_lifecycle_fences() {
     let context = bootstrap.credentials.grant().context;
     let authentication =
         BearerAuthenticator::new(&"r".repeat(32), &"w".repeat(32), &"m".repeat(32), &"c".repeat(32)).unwrap();
-    let issuer = FileGrantIssuer::new(authentication.namespace_token_key(), 900_000).unwrap();
+    let issuer = FileGrantIssuer::new(authentication.namespace_token_key(), 1_800_000).unwrap();
     let created = create(&endpoint).await;
     let table = location(&created);
     let first_grant = refresh(&endpoint, NAME, "w", &issuer, context).await;

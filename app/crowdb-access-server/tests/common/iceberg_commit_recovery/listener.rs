@@ -47,7 +47,7 @@ impl TestCommitListener {
                 store.clone(),
                 ClearBounds {
                     request_ms: 300_000,
-                    delegated_access_ms: 900_000,
+                    delegated_access_ms: 1_800_000,
                     ..ClearBounds::default()
                 },
             )

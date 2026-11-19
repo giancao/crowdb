@@ -13,7 +13,7 @@ async fn ordinary_put_size_matrix_streams_and_reads_ranges() {
     let (stack, _process, client, table) = setup_with_bounds_and_file_limit(
         ClearBounds {
             request_ms: 120_000,
-            delegated_access_ms: 900_000,
+            delegated_access_ms: 1_800_000,
             ..ClearBounds::default()
         },
         128 * 1024 * 1024,
@@ -104,7 +104,7 @@ async fn slow_socket_resumes_upload_after_writer_drains() {
     let (_stack, _process, client, table) = setup_with_bounds_and_file_limit(
         ClearBounds {
             request_ms: 120_000,
-            delegated_access_ms: 900_000,
+            delegated_access_ms: 1_800_000,
             ..ClearBounds::default()
         },
         16 * 1024 * 1024,
