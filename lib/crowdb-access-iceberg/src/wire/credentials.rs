@@ -52,7 +52,7 @@ impl From<FileCredentials> for LoadCredentialsResponse {
 }
 
 /// Issuance time is rounded down to this window; a grant keeps at least `ttl - window` to live.
-pub const STABLE_WINDOW_MS: u64 = 300_000;
+pub const STABLE_WINDOW_MS: u64 = 900_000;
 
 fn window_nonce(issued_ms: u64) -> Result<OperationId, FileGrantError> {
     let mut digest = Sha256::new();

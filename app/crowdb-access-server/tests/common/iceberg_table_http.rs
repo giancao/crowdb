@@ -67,7 +67,7 @@ impl TestTableHttp {
             CatalogRepository::new(
                 store.clone(),
                 ClearBounds {
-                    delegated_access_ms: if vending { 900_000 } else { 0 },
+                    delegated_access_ms: if vending { 1_800_000 } else { 0 },
                     ..ClearBounds::default()
                 },
             )

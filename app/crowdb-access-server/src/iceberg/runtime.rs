@@ -182,14 +182,14 @@ async fn start_listener(
         )?
         .with_small_object_threshold(access_config.iceberg_small_write().threshold_exclusive())?
         .with_large_write_policy(large_write)?;
-    if authority.admission_bounds.delegated_access_ms >= 900_000 {
+    if authority.admission_bounds.delegated_access_ms >= 1_800_000 {
         let endpoint =
             std::env::var("CROWDB_ICEBERG_PUBLIC_URI").unwrap_or_else(|_| format!("http://{address}"));
         service = service
             .with_tables(store.clone(), blocks.clone())?
             .with_table_credentials(store.clone(), endpoint)?;
     } else {
-        tracing::warn!("table routes disabled: persisted catalog delegation bound is below fifteen minutes");
+        tracing::warn!("table routes disabled: persisted catalog delegation bound is below thirty minutes");
     }
     let service = Arc::new(service);
     let listener = TcpListener::bind(&address).await?;
