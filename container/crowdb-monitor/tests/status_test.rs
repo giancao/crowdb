@@ -73,6 +73,68 @@ fn readiness_requires_fresh_ready_snapshot() {
     assert!(!command("readiness", &root));
 }
 
+fn readiness(run_root: &TestRunRoot, data_root: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_crowdb-monitor"))
+        .args(["readiness", "--run-root"])
+        .arg(&run_root.0)
+        .arg("--data-root")
+        .arg(data_root)
+        .output()
+        .unwrap()
+}
+
+fn record_initialization(data_root: &Path, value: &serde_json::Value, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = data_root.join("initialization-status.json");
+    fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn readiness_fails_after_cluster_initialization_failed() {
+    let root = TestRunRoot::new();
+    let data_root = root.0.join("data");
+    fs::create_dir(&data_root).unwrap();
+    let store = StatusStore::new(&root.0).unwrap();
+    let mut status = MonitorStatus::new(Uuid::new_v4(), MonitorPhase::Ready);
+    status.services.insert(
+        "kv".into(),
+        ServiceStatus {
+            operation_id: None,
+            pid: Some(123),
+            generation: 1,
+            healthy: true,
+            restart_attempts: 0,
+        },
+    );
+    store.publish(&mut status).unwrap();
+    // A node which has not been asked to initialize is ready once its services are.
+    assert!(readiness(&root, &data_root).status.success());
+    for phase in ["preparing", "active"] {
+        record_initialization(
+            &data_root,
+            &serde_json::json!({"phase": phase, "error": null}),
+            0o600,
+        );
+        assert!(readiness(&root, &data_root).status.success(), "{phase}");
+    }
+    record_initialization(
+        &data_root,
+        &serde_json::json!({"phase": "failed", "error": "store open failed: NotSupported"}),
+        0o600,
+    );
+    let failed = readiness(&root, &data_root);
+    assert!(!failed.status.success());
+    let error = String::from_utf8(failed.stderr).unwrap();
+    assert!(
+        error.contains("cluster initialization failed: store open failed: NotSupported"),
+        "{error}"
+    );
+    // An unreadable record cannot prove that initialization did not fail.
+    record_initialization(&data_root, &serde_json::json!({"phase": "active"}), 0o644);
+    assert!(!readiness(&root, &data_root).status.success());
+}
+
 #[test]
 fn corrupt_or_symlinked_status_fails_closed() {
     let root = TestRunRoot::new();

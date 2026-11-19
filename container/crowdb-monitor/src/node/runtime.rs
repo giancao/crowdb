@@ -43,6 +43,7 @@ mod file_preparation;
 #[cfg(feature = "test-util")]
 pub use file_preparation::resume_file_operations_for_tests;
 mod initialization;
+pub use initialization::initialization_failure;
 mod retained_storage;
 mod setup;
 mod storage_health;

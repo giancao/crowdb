@@ -38,7 +38,7 @@ pub use runtime::NodeSetupForTests;
 pub use runtime::{
     accept_member_trust_for_tests, check_member_trust_for_tests, member_trust_ready_for_tests,
 };
-pub use runtime::{control_node, run_node, run_node_with_inputs, NodeRuntimeConfig};
+pub use runtime::{control_node, initialization_failure, run_node, run_node_with_inputs, NodeRuntimeConfig};
 #[cfg(feature = "test-util")]
 pub use runtime::{
     member_recovery_destinations_for_tests, recovery_authority_work_for_tests,

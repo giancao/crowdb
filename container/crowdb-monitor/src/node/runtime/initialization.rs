@@ -21,6 +21,20 @@ struct Request {
     create_data_group: bool,
 }
 
+/// The recorded error of a cluster initialization that stopped and awaits an explicit retry.
+///
+/// # Errors
+/// Rejects an unreadable or corrupt initialization record.
+pub fn initialization_failure(root: &Path) -> std::io::Result<Option<String>> {
+    let status = durable::read::<Value>(&root.join("initialization-status.json"))?;
+    Ok(status.filter(|status| status["phase"] == "failed").map(|status| {
+        status["error"]
+            .as_str()
+            .unwrap_or("no error was recorded")
+            .to_owned()
+    }))
+}
+
 #[derive(Default)]
 pub(super) struct Initialization {
     task: Option<tokio::task::JoinHandle<()>>,

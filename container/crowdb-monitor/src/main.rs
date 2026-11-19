@@ -60,6 +60,8 @@ enum Command {
     Readiness {
         #[arg(long, default_value = "/opt/crowdb/run")]
         run_root: PathBuf,
+        #[arg(long, default_value = "/opt/crowdb/data")]
+        data_root: PathBuf,
     },
     Credentials {
         #[command(subcommand)]
@@ -164,8 +166,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Liveness { run_root } => {
             probe_liveness(&run_root).await?;
         }
-        Command::Readiness { run_root } => {
+        Command::Readiness { run_root, data_root } => {
             StatusStore::open(&run_root)?.readiness(Duration::from_secs(10))?;
+            // Healthy services do not make a node ready after its cluster initialization failed.
+            if let Some(error) = crowdb_monitor::initialization_failure(&data_root)? {
+                return Err(format!("cluster initialization failed: {error}").into());
+            }
         }
         Command::Credentials {
             command:
