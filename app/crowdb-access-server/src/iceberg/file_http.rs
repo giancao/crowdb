@@ -150,7 +150,8 @@ impl FileHttp {
             lister: MultipartLister::new(store),
             blocks,
             issuer: FileGrantIssuer::new(secret, 15 * 60 * 1000)?,
-            responses: FileResponseBudget::new(64).map_err(|_| FileGrantError::Invalid)?,
+            responses: FileResponseBudget::new(super::file_body::MAX_RESPONSES)
+                .map_err(|_| FileGrantError::Invalid)?,
             uploads: FileUploadBudget::new(64).map_err(|_| FileGrantError::Invalid)?,
             small_threshold_exclusive: crate::config::SmallWriteConfig::default().threshold_exclusive(),
             large_write: default_large_write(),

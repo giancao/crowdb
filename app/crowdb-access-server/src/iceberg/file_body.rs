@@ -19,6 +19,10 @@ pub enum FileBodyError {
     Busy,
 }
 
+/// Stream memory is bounded by the chunk reader's global budget, which waits; this only caps
+/// the number of open response bodies.
+pub const MAX_RESPONSES: usize = 4096;
+
 pub struct FileResponseBudget {
     active: Arc<AtomicUsize>,
     limit: usize,
@@ -28,7 +32,7 @@ impl FileResponseBudget {
     /// # Errors
     /// Rejects empty or unbounded response concurrency limits.
     pub fn new(limit: usize) -> Result<Self, FileIoError> {
-        if limit == 0 || limit > 64 {
+        if limit == 0 || limit > MAX_RESPONSES {
             return Err(FileIoError::Bounds);
         }
         Ok(Self {
