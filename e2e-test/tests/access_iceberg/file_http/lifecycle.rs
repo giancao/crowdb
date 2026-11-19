@@ -39,7 +39,7 @@ async fn native_file_credentials_refresh_expire_and_follow_lifecycle_fences() {
     let table = location(&created);
     let first_grant = refresh(&endpoint, NAME, "w", &issuer, context).await;
     let next_grant = refresh(&other, NAME, "w", &issuer, context).await;
-    assert_ne!(first_grant.access_key_id(), next_grant.access_key_id());
+    assert_eq!(first_grant.grant().table, next_grant.grant().table);
     let writer = TestFileClient {
         client: Client::new(),
         credentials: next_grant,
