@@ -23,7 +23,7 @@ async fn official_rust_client_rejects_retired_native_catalog_after_full_grace() 
         stack.store().await,
         ClearBounds {
             request_ms: 300_000,
-            delegated_access_ms: 900_000,
+            delegated_access_ms: 1_800_000,
             ..ClearBounds::default()
         },
     )

@@ -42,7 +42,7 @@ async fn read_only_format_profile_never_vends_file_mutation_permission() {
     let config = &body["storage-credentials"][0]["config"];
     let authentication =
         BearerAuthenticator::new(&"r".repeat(32), &"w".repeat(32), &"m".repeat(32), &"c".repeat(32)).unwrap();
-    let issuer = FileGrantIssuer::new(authentication.namespace_token_key(), 900_000).unwrap();
+    let issuer = FileGrantIssuer::new(authentication.namespace_token_key(), 1_800_000).unwrap();
     let now = u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -135,7 +135,7 @@ async fn client_prepared_tables_refresh_from_complete_identity_without_a_retaine
     let fixture = TestTableHttp::vending().await;
     let auth =
         BearerAuthenticator::new(&"r".repeat(32), &"w".repeat(32), &"m".repeat(32), &"c".repeat(32)).unwrap();
-    let issuer = FileGrantIssuer::new(auth.namespace_token_key(), 900_000).unwrap();
+    let issuer = FileGrantIssuer::new(auth.namespace_token_key(), 1_800_000).unwrap();
     let first = draft(&fixture).await;
     let second = draft(&fixture).await;
     assert_ne!(first["metadata"]["location"], second["metadata"]["location"]);
@@ -256,7 +256,7 @@ async fn published_table_credentials_preserve_read_only_roles() {
     let (head, _) = fixture.install("events").await;
     let auth =
         BearerAuthenticator::new(&"r".repeat(32), &"w".repeat(32), &"m".repeat(32), &"c".repeat(32)).unwrap();
-    let issuer = FileGrantIssuer::new(auth.namespace_token_key(), 900_000).unwrap();
+    let issuer = FileGrantIssuer::new(auth.namespace_token_key(), 1_800_000).unwrap();
     for role in ["r", "w", "m", "c"] {
         let response = fixture
             .request(

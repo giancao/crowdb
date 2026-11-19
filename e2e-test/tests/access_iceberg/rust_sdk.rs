@@ -21,7 +21,7 @@ async fn official_rust_client_lost_reply_survives_native_storage_restart() {
         stack.store().await,
         ClearBounds {
             request_ms: 300_000,
-            delegated_access_ms: 900_000,
+            delegated_access_ms: 1_800_000,
             ..ClearBounds::default()
         },
     )
@@ -103,7 +103,7 @@ async fn official_rust_client_namespace_and_table_lifecycle() {
         stack.store().await,
         ClearBounds {
             request_ms: 300_000,
-            delegated_access_ms: 900_000,
+            delegated_access_ms: 1_800_000,
             ..ClearBounds::default()
         },
     )

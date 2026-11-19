@@ -78,7 +78,7 @@ impl TableFileConfig {
             write!(endpoint, "&format-version={}", target.version).expect("string writes do not fail");
         }
         let credentials = FileDelegationLimits {
-            ttl_ms: 900_000,
+            ttl_ms: 1_800_000,
             max_request_bytes: 1024 * 1024 * 1024,
             max_file_bytes: 1024 * 1024 * 1024 * 1024,
         }
@@ -137,7 +137,7 @@ impl TableFileConfig {
         Ok(Self {
             endpoint,
             issuer: Arc::new(
-                FileGrantIssuer::new(secret, 900_000)
+                FileGrantIssuer::new(secret, 1_800_000)
                     .map_err(|_| crowdb_access_iceberg::error::ValidationError::Record)?,
             ),
         })
@@ -185,7 +185,7 @@ impl TableCredentials {
             store: store.clone(),
             namespaces: NamespaceRepository::new(store.clone()),
             tables: TableRepository::new(store),
-            issuer: FileGrantIssuer::new(secret, 900_000)?,
+            issuer: FileGrantIssuer::new(secret, 1_800_000)?,
         })
     }
 
@@ -207,7 +207,7 @@ impl TableCredentials {
         if let (Some(table), Some(namespace)) = (selector, storage_namespace) {
             if let Some(target) = self.native_target(context, table, namespace, cleanup).await? {
                 return self
-                    .issue_response(repository, context, principal, target, 900_000, now, cleanup)
+                    .issue_response(repository, context, principal, target, 1_800_000, now, cleanup)
                     .await;
             }
         }
@@ -222,7 +222,7 @@ impl TableCredentials {
             .select(context, parent.namespace, &name)
             .await
             .map_err(|_| service_unavailable())?;
-        let ttl_ms = 900_000;
+        let ttl_ms = 1_800_000;
         let (table, version, staged, storage_namespace) = if let Some(selected) =
             selected.filter(|selected| selector.map_or(true, |table| table == selected.head.table))
         {
