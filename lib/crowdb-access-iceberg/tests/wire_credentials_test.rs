@@ -194,7 +194,34 @@ fn refresh_rotates_credentials_and_serializes_official_sdk_properties() {
             1000,
         )
         .unwrap();
+    // One window returns one credential; the next window rotates all three values.
+    assert_eq!(initial.access_key_id(), refreshed.access_key_id());
+    assert_eq!(initial.secret_access_key(), refreshed.secret_access_key());
+    assert_eq!(initial.session_token(), refreshed.session_token());
+    let later = limits()
+        .issue(
+            &issuer,
+            principal,
+            context,
+            &authority(context),
+            target(table),
+            299_999,
+        )
+        .unwrap();
+    assert_eq!(initial.session_token(), later.session_token());
+    assert_eq!(later.grant().expires_ms, 900_000);
+    let refreshed = limits()
+        .issue(
+            &issuer,
+            principal,
+            context,
+            &authority(context),
+            target(table),
+            300_000,
+        )
+        .unwrap();
     assert_ne!(initial.access_key_id(), refreshed.access_key_id());
+    assert_ne!(initial.secret_access_key(), refreshed.secret_access_key());
     assert_ne!(initial.session_token(), refreshed.session_token());
     assert_eq!(initial.grant().principal, refreshed.grant().principal);
     let expected_key = refreshed.access_key_id().to_owned();
@@ -215,11 +242,11 @@ fn refresh_rotates_credentials_and_serializes_official_sdk_properties() {
     let config = &credentials[0]["config"];
     assert_eq!(config["s3.access-key-id"], expected_key);
     assert_eq!(config["s3.secret-access-key"], expected_secret);
-    assert_eq!(config["s3.session-token-expires-at-ms"], "901000");
+    assert_eq!(config["s3.session-token-expires-at-ms"], "1200000");
     let token = config["s3.session-token"].as_str().unwrap();
-    assert!(issuer.verify(&expected_key, token, context, 900_999).is_ok());
+    assert!(issuer.verify(&expected_key, token, context, 1_199_999).is_ok());
     assert!(matches!(
-        issuer.verify(&expected_key, token, context, 901_000),
+        issuer.verify(&expected_key, token, context, 1_200_000),
         Err(FileGrantError::Expired)
     ));
 }
@@ -274,7 +301,7 @@ fn persisted_delegation_bound_is_independent_of_issuer_configuration() {
         if bound < 900_000 {
             assert!(matches!(result, Err(FileGrantError::Bounds)));
         } else {
-            assert_eq!(result.unwrap().grant().expires_ms, 901_000);
+            assert_eq!(result.unwrap().grant().expires_ms, 900_000);
         }
     }
     let mut retired = authority(context);

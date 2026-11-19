@@ -51,6 +51,16 @@ impl From<FileCredentials> for LoadCredentialsResponse {
     }
 }
 
+/// Issuance time is rounded down to this window; a grant keeps at least `ttl - window` to live.
+pub const STABLE_WINDOW_MS: u64 = 300_000;
+
+fn window_nonce(issued_ms: u64) -> Result<OperationId, FileGrantError> {
+    let mut digest = Sha256::new();
+    digest.update(b"crowdb-iceberg-file-grant-window-v1");
+    digest.update(issued_ms.to_be_bytes());
+    OperationId::from_bytes(&digest.finalize()[..16]).map_err(|_| FileGrantError::Invalid)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FileDelegationLimits {
     pub ttl_ms: u64,
@@ -126,7 +136,14 @@ impl FileDelegationLimits {
         if self.ttl_ms > authority.admission_bounds.delegated_access_ms {
             return Err(FileGrantError::Bounds);
         }
-        let expires_ms = now_ms.checked_add(self.ttl_ms).ok_or(FileGrantError::Invalid)?;
+        // Requests in one window share a grant, so clients can reuse connections and caches.
+        let issued_ms = now_ms - now_ms % STABLE_WINDOW_MS;
+        let expires_ms = issued_ms
+            .checked_add(self.ttl_ms)
+            .ok_or(FileGrantError::Invalid)?;
+        if expires_ms <= now_ms {
+            return Err(FileGrantError::Invalid);
+        }
         if expires_ms > i64::MAX as u64 {
             return Err(FileGrantError::Invalid);
         }
@@ -165,8 +182,8 @@ impl FileDelegationLimits {
             context,
             table: target.table,
             principal: digest.finalize().into(),
-            nonce: OperationId::random(),
-            issued_ms: now_ms,
+            nonce: window_nonce(issued_ms)?,
+            issued_ms,
             expires_ms,
             operations,
             max_request_bytes: self.max_request_bytes,
