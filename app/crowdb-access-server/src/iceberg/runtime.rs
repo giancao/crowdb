@@ -5,6 +5,7 @@ use crowdb_access_iceberg::catalog::{
     Capabilities, CatalogError, CatalogLifecycle, CatalogRepository, ManagementPrivilege, RootState,
     RoutedCatalogStore,
 };
+use crowdb_access_iceberg::file::FILE_GRANT_TTL_MS;
 use crowdb_access_iceberg::operation::{ManagementAction, ManagementRequest, RequestIdentity};
 use crowdb_access_iceberg::storage::{
     connect_with_chunk_kv_config, foreground_blocks, IcebergLargeWriteSettings,
@@ -182,7 +183,7 @@ async fn start_listener(
         )?
         .with_small_object_threshold(access_config.iceberg_small_write().threshold_exclusive())?
         .with_large_write_policy(large_write)?;
-    if authority.admission_bounds.delegated_access_ms >= 1_800_000 {
+    if authority.admission_bounds.delegated_access_ms >= FILE_GRANT_TTL_MS {
         let endpoint =
             std::env::var("CROWDB_ICEBERG_PUBLIC_URI").unwrap_or_else(|_| format!("http://{address}"));
         service = service

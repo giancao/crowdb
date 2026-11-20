@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::semantic_views::{
     assert_independent_strip_writes_overlap, assert_large_view_range, assert_view_frames_are_ordered,
 };
-use crate::common::hardware::UNIT_SIZE_BYTES;
+use crate::common::hardware::{DG_ID, INSTANCE_ID, UNIT_SIZE_BYTES};
 use bytes::Bytes;
 use crowdb_diskio_client::{
     DiskId, DiskioClient, DiskioClientConfig, DiskioError, Durability, SegmentTarget,
@@ -20,6 +20,7 @@ async fn semantic_client_owns_route_transport_payload_and_durability() {
     let hardware = super::hardware_client();
     let (wire_server, wire_connection, wire_client) = super::connect_at(1);
     super::wait_for_disks(&wire_client, &wire_server, &wire_connection).await;
+    wait_for_disk_owner(1, "initial").await;
     let disk_id = DiskId::new(0, 1);
     let client = Arc::new(
         DiskioClient::connect_with_clients(
@@ -64,7 +65,7 @@ async fn semantic_client_owns_route_transport_payload_and_durability() {
         &replacement_connection,
     )
     .await;
-    wait_for_endpoint(2, "replacement").await;
+    wait_for_disk_owner(2, "replacement").await;
     client.refresh().await.expect("publish replacement endpoint");
     assert!(client.status().route_generation > old_generation);
     assert_eq!(client.status().normal_connections, 2);
@@ -85,7 +86,7 @@ async fn semantic_client_owns_route_transport_payload_and_durability() {
     crate::common::control::node("start", 3).await;
     let (fault_wire_server, fault_connection, fault_wire_client) = super::connect_at(3);
     super::wait_for_disk(&fault_wire_client, &fault_wire_server, &fault_connection, true).await;
-    wait_for_endpoint(3, "faulty").await;
+    wait_for_disk_owner(3, "faulty").await;
     let service = super::registry();
     let faulty =
         DiskioClient::connect_with_clients(service, super::hardware_client(), DiskioClientConfig::default())
@@ -250,22 +251,33 @@ async fn assert_independent_admission(client: &Arc<DiskioClient>, target: Segmen
         .expect("first normal request completes");
 }
 
-async fn wait_for_endpoint(index: usize, description: &str) {
+async fn wait_for_disk_owner(index: usize, description: &str) {
     let addresses: Vec<String> = serde_json::from_str(&std::env::var("CROWDB_E2E_RPC").unwrap()).unwrap();
     let expected = format!("{}:7200", addresses[index]);
     let registry = super::registry();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let instance = registry
-            .read_instance("diskio", crate::common::hardware::INSTANCE_ID)
+            .read_instance("diskio", INSTANCE_ID)
             .await
             .expect("read Diskio heartbeat");
-        if instance.is_some_and(|instance| instance.rpc_endpoint.ends_with(&expected)) {
+        // DiskIO registers its address before opening disks and publishing ownership.
+        if instance.is_some_and(|instance| {
+            instance
+                .rpc_endpoint
+                .strip_prefix("http://")
+                .unwrap_or(&instance.rpc_endpoint)
+                == expected
+                && instance
+                    .extra
+                    .and_then(|extra| extra.diskdb)
+                    .is_some_and(|diskio| diskio.owned_dg_ids.contains(&DG_ID))
+        }) {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "{description} Diskio did not publish {expected}"
+            "{description} Diskio at {expected} did not advertise ownership of disk group {DG_ID}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

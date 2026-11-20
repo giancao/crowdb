@@ -1,5 +1,8 @@
 //! Native immutable file identity and storage, independent of general S3 metadata.
 
+/// Lifetime of a table file grant, shared by catalog admission, issuance and file HTTP verification.
+pub const FILE_GRANT_TTL_MS: u64 = 30 * 60 * 1000;
+
 mod assembly;
 mod avro;
 mod blocks;

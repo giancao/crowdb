@@ -7,7 +7,7 @@ use crowdb_access_iceberg::catalog::{
 };
 use crowdb_access_iceberg::file::{
     FileBlockStore, FileGrantError, FileGrantIssuer, FileOperation, FileRecord, FileRepository, FileSealer,
-    MultipartLister, MultipartPartStore, MultipartRepository, RangeError,
+    MultipartLister, MultipartPartStore, MultipartRepository, RangeError, FILE_GRANT_TTL_MS,
 };
 use crowdb_access_iceberg::key::OperationId;
 use crowdb_access_iceberg::storage::{default_large_write, own_large_write};
@@ -105,7 +105,7 @@ impl FileHttp {
             multipart: MultipartRepository::new(store.clone()),
             lister: MultipartLister::new(store),
             blocks,
-            issuer: FileGrantIssuer::new(secret, 15 * 60 * 1000)?,
+            issuer: FileGrantIssuer::new(secret, FILE_GRANT_TTL_MS)?,
             responses: FileResponseBudget::new(super::file_body::MAX_RESPONSES)
                 .map_err(|_| FileGrantError::Invalid)?,
             uploads: FileUploadBudget::new(64).map_err(|_| FileGrantError::Invalid)?,

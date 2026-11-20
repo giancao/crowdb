@@ -327,6 +327,10 @@ struct ChunkOpen : std::enable_shared_from_this<ChunkOpen>
             outcome = Status::internal_error();
         }
         backend.reset();
+        // The host may drop its runtime once it observes the outcome. A worker
+        // left with the last reference would wait for its own pool to drain.
+        binding.reset();
+        config    = {};
         auto done = std::move(complete);
         done(std::move(outcome), std::move(opened));
     }

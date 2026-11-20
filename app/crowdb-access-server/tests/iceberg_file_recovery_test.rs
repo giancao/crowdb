@@ -22,7 +22,7 @@ mod store;
 
 use common::{now_ms, TestCommitFixture};
 use crowdb_access_iceberg::catalog::{CatalogRepository, ClearBounds, ManagementPrivilege};
-use crowdb_access_iceberg::file::{FileGrant, FileGrantIssuer, FileOperation, FileOperations, TableLocation};
+use crowdb_access_iceberg::file::{FileGrantIssuer, TableLocation, FILE_GRANT_TTL_MS};
 use crowdb_access_iceberg::key::OperationId;
 use crowdb_access_iceberg::operation::{ManagementAction, ManagementRequest, RequestIdentity};
 use crowdb_access_iceberg::wire::BearerAuthenticator;
@@ -39,19 +39,6 @@ async fn file_publication_recovers_across_listeners_at_every_durable_write() {
 
 async fn setup_with_bounds(
     bounds: ClearBounds,
-) -> (
-    TestCommitFixture,
-    child::TestCommitListener,
-    TestFileClient,
-    TableLocation,
-) {
-    setup_with_bounds_and_file_limit(bounds, 16 * 1024 * 1024, 64 * 1024 * 1024).await
-}
-
-async fn setup_with_bounds_and_file_limit(
-    bounds: ClearBounds,
-    max_request_bytes: u64,
-    max_file_bytes: u64,
 ) -> (
     TestCommitFixture,
     child::TestCommitListener,
@@ -108,33 +95,19 @@ async fn setup_with_bounds_and_file_limit(
         .unwrap();
     let authenticator =
         BearerAuthenticator::new(&"r".repeat(32), &"w".repeat(32), &"m".repeat(32), &"c".repeat(32)).unwrap();
-    let issuer = FileGrantIssuer::new(authenticator.namespace_token_key(), 15 * 60 * 1000).unwrap();
-    let started = now_ms();
+    let issuer = FileGrantIssuer::new(authenticator.namespace_token_key(), FILE_GRANT_TTL_MS).unwrap();
+    let config = &draft["config"];
     let credentials = issuer
-        .issue(FileGrant {
-            storage_namespace: table.storage_namespace,
+        .verify(
+            config["s3.access-key-id"].as_str().unwrap(),
+            config["s3.session-token"].as_str().unwrap(),
             context,
-            table: table.table,
-            principal: [7; 32],
-            nonce: OperationId::random(),
-            issued_ms: started - 1_000,
-            expires_ms: started + 10 * 60 * 1000,
-            operations: FileOperations::new(&[
-                FileOperation::Head,
-                FileOperation::Get,
-                FileOperation::ListObjects,
-                FileOperation::Put,
-                FileOperation::CreateMultipart,
-                FileOperation::UploadPart,
-                FileOperation::ListParts,
-                FileOperation::CompleteMultipart,
-                FileOperation::AbortMultipart,
-            ])
-            .unwrap(),
-            max_request_bytes,
-            max_file_bytes,
-        })
+            now_ms(),
+        )
         .unwrap();
+    assert!(config["s3.secret-access-key"]
+        .as_str()
+        .is_some_and(|secret| secret == credentials.secret_access_key()));
     let client = TestFileClient {
         client,
         credentials,

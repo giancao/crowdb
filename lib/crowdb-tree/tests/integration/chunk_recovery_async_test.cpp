@@ -157,4 +157,50 @@ TEST(ChunkRecoveryAsync, FailedBootstrapDrainsPrivateCacheOnOneWorker)
     EXPECT_GT(test.backend.catalog->queue->pump(64).completed, 0U);
     EXPECT_EQ(test.backend.catalog->writer_releases, 1U);
 }
+
+TEST(ChunkRecoveryAsync, FailedRecoveryReleasesTheHostRuntimeBeforeReportingTheFailure)
+{
+    test_chunk::TestCoreChunk test;
+    ASSERT_TRUE(test.open().ok());
+    ASSERT_TRUE(test.put(1, std::string(12000, 'x')).ok());
+    ASSERT_TRUE(test.tree->flush_with_persistent().ok());
+    test.tree.reset();
+    const auto &records = test.backend.catalog->records;
+    const auto  found   = std::find_if(records.begin(), records.end(), [](const auto &item) {
+        return item.second.purpose == static_cast<uint32_t>(PagePurpose::kBtreePage);
+    });
+    ASSERT_NE(found, records.end());
+    const auto physical = test.backend.transport->ids.at({found->second.chunk_high, found->second.chunk_low});
+    test.backend.transport->memory.corrupt_mirror(physical, 0, 64);
+    test.backend.transport->memory.corrupt_mirror(physical, 1, 64);
+    test.backend.catalog            = test.backend.catalog->next_owner();
+    test.backend.transport->catalog = test.backend.catalog;
+    test.configure_store(0);
+
+    // A host that drops its runtime on failure must hold the last reference:
+    // a worker destroying the runtime would wait for its own pool to drain.
+    struct Outcome
+    {
+        Code code;
+        bool opened;
+        long runtime_owners;
+    };
+
+    std::promise<void>    submitted;
+    auto                  returned = submitted.get_future();
+    std::promise<Outcome> finished;
+    auto                  ready   = finished.get_future();
+    const auto            factory = test.store->runtime_async_factory();
+    ASSERT_TRUE(factory(test.config, [&](Status status, std::shared_ptr<TreeCore> tree) {
+                    // The submitting host frame owns a binding until it returns.
+                    returned.wait();
+                    finished.set_value({status.code(), tree != nullptr, test.config.runtime.use_count()});
+                }).ok());
+    submitted.set_value();
+    ASSERT_EQ(ready.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    const auto outcome = ready.get();
+    EXPECT_EQ(outcome.code, Code::kCorruption);
+    EXPECT_FALSE(outcome.opened);
+    EXPECT_EQ(outcome.runtime_owners, 1);
+}
 } // namespace crowdb::tree
