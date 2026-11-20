@@ -236,6 +236,11 @@ jobs:
           sdk/target/sdist/release
     - name: Clean env
       run: pixi run clean --runtime-only
+    - name: Cache Iceberg Java dependencies
+      uses: actions/cache@v4
+      with: &iceberg-java-cache
+        path: ~/.m2/repository
+        key: iceberg-java-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('e2e-test/clients/iceberg-java/pom.xml', 'pixi.lock') }}
     - name: Run access component tests
       run: |
         pixi run test-access
@@ -380,6 +385,10 @@ jobs:
         path: target
     - name: Import shared release image
       run: pixi run --locked --manifest-path container/oci-image/pixi.toml -e image-import import "$PWD/target/crowdb.oci.tar" --image crowdb-node:dev
+    - name: Cache Iceberg Java dependencies
+      if: matrix.partition == 'iceberg-sdk'
+      uses: actions/cache@v4
+      with: *iceberg-java-cache
     - name: Run Iceberg acceptance
       env:
         E2E_PARTITION: ${{ matrix.partition }}
