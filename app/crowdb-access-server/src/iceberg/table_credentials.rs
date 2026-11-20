@@ -5,7 +5,7 @@ use crowdb_access_iceberg::{
         CatalogAuthority, CatalogContext, CatalogLifecycle, CatalogRepository, CatalogStore, FormatAction,
         RootState,
     },
-    file::FileGrantIssuer,
+    file::{FileGrantIssuer, FILE_GRANT_TTL_MS},
     key::{NamespaceId, TableId},
     namespace::{NamespaceIdentifier, NamespaceRepository, NamespaceStore},
     table::{storage_head_key, TableLifecycle, TableRepository},
@@ -78,7 +78,7 @@ impl TableFileConfig {
             write!(endpoint, "&format-version={}", target.version).expect("string writes do not fail");
         }
         let credentials = FileDelegationLimits {
-            ttl_ms: 1_800_000,
+            ttl_ms: FILE_GRANT_TTL_MS,
             max_request_bytes: 1024 * 1024 * 1024,
             max_file_bytes: 1024 * 1024 * 1024 * 1024,
         }
@@ -137,7 +137,7 @@ impl TableFileConfig {
         Ok(Self {
             endpoint,
             issuer: Arc::new(
-                FileGrantIssuer::new(secret, 1_800_000)
+                FileGrantIssuer::new(secret, FILE_GRANT_TTL_MS)
                     .map_err(|_| crowdb_access_iceberg::error::ValidationError::Record)?,
             ),
         })
@@ -185,7 +185,7 @@ impl TableCredentials {
             store: store.clone(),
             namespaces: NamespaceRepository::new(store.clone()),
             tables: TableRepository::new(store),
-            issuer: FileGrantIssuer::new(secret, 1_800_000)?,
+            issuer: FileGrantIssuer::new(secret, FILE_GRANT_TTL_MS)?,
         })
     }
 
@@ -207,7 +207,7 @@ impl TableCredentials {
         if let (Some(table), Some(namespace)) = (selector, storage_namespace) {
             if let Some(target) = self.native_target(context, table, namespace, cleanup).await? {
                 return self
-                    .issue_response(repository, context, principal, target, 1_800_000, now, cleanup)
+                    .issue_response(repository, context, principal, target, now, cleanup)
                     .await;
             }
         }
@@ -222,7 +222,6 @@ impl TableCredentials {
             .select(context, parent.namespace, &name)
             .await
             .map_err(|_| service_unavailable())?;
-        let ttl_ms = 1_800_000;
         let (table, version, staged, storage_namespace) = if let Some(selected) =
             selected.filter(|selected| selector.map_or(true, |table| table == selected.head.table))
         {
@@ -280,7 +279,6 @@ impl TableCredentials {
                 format_version: version,
                 staged,
             },
-            ttl_ms,
             now,
             cleanup,
         )
@@ -327,14 +325,12 @@ impl TableCredentials {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn issue_response(
         &self,
         repository: &CatalogRepository,
         context: CatalogContext,
         principal: Principal,
         target: FileDelegationTarget,
-        ttl_ms: u64,
         now: u64,
         cleanup: bool,
     ) -> Result<Response<IcebergBody>, IcebergErrorResponse> {
@@ -357,7 +353,7 @@ impl TableCredentials {
             return Err(unsupported());
         }
         let limits = FileDelegationLimits {
-            ttl_ms,
+            ttl_ms: FILE_GRANT_TTL_MS,
             max_request_bytes: 1024 * 1024 * 1024,
             max_file_bytes: 1024 * 1024 * 1024 * 1024,
         };

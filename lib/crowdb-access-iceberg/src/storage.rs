@@ -20,7 +20,7 @@ use crowdb_protocol::chunkdb::rpc::{ChunkType, Location};
 use crowdb_protocol::frame::MAX_FRAME_V2_PAYLOAD_BYTES;
 
 use crate::catalog::{CatalogRepository, ClearBounds, RoutedCatalogStore};
-use crate::file::{FileBlockStore, NativeFileBlocks};
+use crate::file::{FileBlockStore, NativeFileBlocks, FILE_GRANT_TTL_MS};
 
 pub type IcebergStorageError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -275,7 +275,7 @@ pub async fn connect_with_chunk_kv_config(
         store.clone(),
         ClearBounds {
             request_ms: 300_000,
-            delegated_access_ms: 1_800_000,
+            delegated_access_ms: FILE_GRANT_TTL_MS,
             ..ClearBounds::default()
         },
     )?);

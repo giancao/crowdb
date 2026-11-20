@@ -9,6 +9,7 @@ use super::{
 use crowdb_access_iceberg::catalog::CatalogError;
 use crowdb_access_iceberg::{
     catalog::{CatalogRepository, ClearBounds, ManagementPrivilege},
+    file::FILE_GRANT_TTL_MS,
     key::OperationId,
     operation::{ManagementAction, ManagementRequest, RequestIdentity},
 };
@@ -19,15 +20,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[ignore = "requires pinned Apache Iceberg Rust client and native retirement grace"]
 async fn official_rust_client_rejects_retired_native_catalog_after_full_grace() {
     let stack = TestNativeStorage::new();
-    let repository = CatalogRepository::new(
-        stack.store().await,
-        ClearBounds {
-            request_ms: 300_000,
-            delegated_access_ms: 1_800_000,
-            ..ClearBounds::default()
-        },
-    )
-    .unwrap();
+    let bounds = ClearBounds {
+        request_ms: 300_000,
+        delegated_access_ms: FILE_GRANT_TTL_MS,
+        ..ClearBounds::default()
+    };
+    let repository = CatalogRepository::new(stack.store().await, bounds).unwrap();
     repository
         .execute(
             ManagementRequest {
@@ -50,7 +48,9 @@ async fn official_rust_client_rejects_retired_native_catalog_after_full_grace() 
     activate(&repository).await;
     let first = TestFrontend::start(12).await;
     let second = TestFrontend::start(13).await;
-    run_client_across_clear(&first.origin.clone(), &second.origin.clone(), &repository, 1_500).await;
+    // Leave time for both SDK sessions on either side of the real Clear deadline.
+    let timeout_seconds = bounds.completion_deadline(0).unwrap().div_ceil(1_000) + 120;
+    run_client_across_clear(&first.origin, &second.origin, &repository, timeout_seconds).await;
 }
 
 async fn run_client_across_clear(

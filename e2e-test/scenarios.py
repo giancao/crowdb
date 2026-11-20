@@ -382,7 +382,8 @@ ICEBERG_CASES = (
     Case("iceberg.gc", "access_iceberg::gc::notifications::mixed_external_and_tree_notifications_complete_without_reclaiming_live_ranges", iceberg_gc=True, iceberg_gc_page_items=1, iceberg_gc_interval_ms=None, client_timeout=600),
     Case("iceberg.gc", "access_iceberg::gc::notifications::matrix::restarted_cleaners_finish_large_and_sparse_backlogs_beside_an_invalid_catalog", iceberg_gc=True, iceberg_gc_page_items=1, iceberg_gc_interval_ms=None, iceberg_gc_catalogs=("01010101010101010101010101010101",), client_timeout=900),
     Case("iceberg.sdk.rust", "access_iceberg::rust_sdk::official_rust_client_lost_reply_survives_native_storage_restart", iceberg_deferred_access=True, client_timeout=1200),
-    Case("iceberg.sdk.rust", "access_iceberg::rust_retired::official_rust_client_rejects_retired_native_catalog_after_full_grace", iceberg_deferred_access=True, client_timeout=1500),
+    # Covers the 35-minute Clear grace, the Rust SDK timeout margin and fixture setup.
+    Case("iceberg.sdk.rust", "access_iceberg::rust_retired::official_rust_client_rejects_retired_native_catalog_after_full_grace", iceberg_deferred_access=True, client_timeout=40 * 60),
     Case("iceberg.gc", "access_iceberg::gc::authenticated_gc_controls_survive_separate_processes", iceberg_gc=True),
     Case("iceberg.gc", "access_iceberg::gc::enabled_scheduler_admits_durable_purge_markers_once", iceberg_gc=True),
     Case("iceberg.gc", "access_iceberg::gc::enabled_scheduler_admits_and_advances_completed_clear", iceberg_gc=True, iceberg_gc_page_items=1),
